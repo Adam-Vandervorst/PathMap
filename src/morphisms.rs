@@ -396,7 +396,8 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>
 {
     //`stack` holds a "frame" at each forking point above the zipper position.  No frames exist for values
-    let mut stack = Vec::<StackFrame<W>>::with_capacity(12);
+    let mut stack = Vec::<StackFrame>::with_capacity(12);
+    let mut children = Vec::<W>::new();
     let mut frame_idx = 0;
 
     z.reset();
@@ -421,7 +422,8 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
         if is_leaf {
             //Ascend back to the last fork point from this leaf
             let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, &mut [])?;
-            stack[frame_idx].push_val(cur_w);
+            children.push(cur_w);
+            stack[frame_idx].child_idx += 1;
 
             //Keep ascending until we get to a branch that we haven't fully explored
             debug_assert!(stack[frame_idx].child_idx <= stack[frame_idx].child_cnt);
@@ -432,22 +434,26 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
                     let stack_frame = &mut stack[0];
                     let val = z.value();
                     let child_mask = ByteMask::from(z.child_mask());
-                    let w = if stack_frame.child_cnt > 1 || val.is_some() || !JUMPING {
-                        alg_f(&child_mask, &mut stack_frame.children, 0, val, z.origin_path().unwrap())?
+                    debug_assert_eq!(stack_frame.child_idx, stack_frame.child_cnt);
+                    debug_assert_eq!(stack_frame.child_cnt as usize, children.len());
+                    let w = if stack_frame.child_cnt != 1 || val.is_some() || !JUMPING {
+                        alg_f(&child_mask, &mut children, 0, val, z.origin_path().unwrap())?
                     } else {
-                        debug_assert_eq!(stack_frame.children.len(), 1);
-                        stack_frame.children.pop().unwrap()
+                        children.pop().unwrap()
                     };
                     return Ok(w)
                 } else {
-
-                    //Ascend the rest of the way back up to the branch
-                    let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, &mut stack[frame_idx].children)?;
-
+                    // Ascend the rest of the way back up to the branch
+                    debug_assert_eq!(stack[frame_idx].child_idx, stack[frame_idx].child_cnt);
+                    let child_start = children.len() - stack[frame_idx].child_cnt as usize;
+                    let children2 = &mut children[child_start..];
+                    let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, children2)?;
+                    children.truncate(child_start);
                     frame_idx -= 1;
 
                     //Merge the result into the stack frame
-                    stack[frame_idx].push_val(cur_w);
+                    children.push(cur_w);
+                    stack[frame_idx].child_idx += 1;
                 }
             }
 
@@ -508,7 +514,7 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
         //This loop runs at each byte step as we ascend
         loop {
             let origin_path = z.origin_path().unwrap();
-            let byte = *origin_path.last().unwrap_or(&0);
+            let byte = origin_path.last().copied().unwrap_or(0);
             let val = z.value();
             w = alg_f(&child_mask, children, 0, val, origin_path)?;
 
@@ -552,21 +558,19 @@ pub fn shared_addr<'a, V, Z>(zipper: &Z) -> Option<FocusAddr>
 }
 
 /// Internal structure to hold temporary info used inside morphism apply methods
-struct StackFrame<W> {
+struct StackFrame {
     child_idx: u16,
     child_cnt: u16,
     child_addr: Option<usize>,
-    children: Vec<W>,
 }
 
-impl<W> StackFrame<W> {
+impl StackFrame {
     /// Allocates a new StackFrame
     fn from<'a, V, Z>(zipper: &Z) -> Self
         where V: 'a, Z: Zipper + zipper_priv::ZipperReadOnlyPriv<'a, V>,
     {
         let mut stack_frame = StackFrame {
             child_cnt: 0,
-            children: Vec::new(),
             child_idx: 0,
             child_addr: None,
         };
@@ -580,15 +584,14 @@ impl<W> StackFrame<W> {
     {
         self.child_cnt = zipper.child_count() as u16;
         self.child_idx = 0;
-        self.children.clear();
     }
 
-    fn push_val(&mut self, w: W) {
-        debug_assert!(self.child_idx < self.child_cnt,
-            "we're trying to push a value for a non-existent child");
-        self.children.push(w);
-        self.child_idx += 1;
-    }
+    // fn push_val(&mut self, w: W) {
+    //     debug_assert!(self.child_idx < self.child_cnt,
+    //         "we're trying to push a value for a non-existent child");
+    //     self.children.push(w);
+    //     self.child_idx += 1;
+    // }
     //GOAT, unused for the time being.
     // fn push_none(&mut self) {
     //     self.child_idx += 1;
@@ -600,12 +603,12 @@ impl<W> StackFrame<W> {
     // }
 }
 
-struct Stack<W> {
-    stack: Vec<StackFrame<W>>,
+struct Stack {
+    stack: Vec<StackFrame>,
     position: usize,
 }
 
-impl<W> Stack<W> {
+impl Stack {
     pub fn new() -> Self {
         Self {
             stack: Vec::with_capacity(12),
@@ -614,7 +617,7 @@ impl<W> Stack<W> {
     }
     /// Return the reference to the top stack frame
     #[inline]
-    pub fn last_mut(&mut self) -> Option<&mut StackFrame<W>> {
+    pub fn last_mut(&mut self) -> Option<&mut StackFrame> {
         let idx = self.position;
         self.stack.get_mut(idx)
     }
@@ -622,7 +625,7 @@ impl<W> Stack<W> {
     /// Return the reference to the top stack frame
     /// and decrease stack pointer. Doesn't free the stack frame.
     #[inline]
-    pub fn pop_mut(&mut self) -> Option<&mut StackFrame<W>> {
+    pub fn pop_mut(&mut self) -> Option<&mut StackFrame> {
         if self.position == !0 {
             return None;
         }
@@ -642,7 +645,7 @@ impl<W> Stack<W> {
     }
 
     pub fn push_state_raw<'a, V: 'a, Z>(
-        stack: &mut Vec<StackFrame<W>>,
+        stack: &mut Vec<StackFrame>,
         position: &mut usize,
         zipper: &Z)
         where Z: Zipper + zipper_priv::ZipperReadOnlyPriv<'a, V>,
@@ -658,14 +661,14 @@ impl<W> Stack<W> {
     }
 }
 
-pub(crate) fn new_map_from_ana_jumping<'a, V, WZ : ZipperWriting<V> + zipper::ZipperMoving, W, CoAlgF, I>(wz: &mut WZ, w: W, mut coalg_f: CoAlgF)
+pub(crate) fn new_map_from_ana_jumping<'a, V, WZ, W, CoAlgF, I>(wz: &mut WZ, w: W, mut coalg_f: CoAlgF)
 where
     V: 'static + Clone + Send + Sync + Unpin,
     W: Default,
     I: IntoIterator<Item=W>,
-    CoAlgF: Copy + FnMut(W, &[u8]) -> (&'a [u8], ByteMask, I, Option<V>)
+    WZ: ZipperWriting<V> + zipper::ZipperMoving,
+    CoAlgF: Copy + FnMut(W, &[u8]) -> (&'a [u8], ByteMask, I, Option<V>),
 {
-
     let (prefix, bm, ws, mv) = coalg_f(w, wz.path());
     let prefix_len = prefix.len();
 
@@ -748,6 +751,7 @@ fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>(
     zipper.prepare_buffers();
 
     let mut stack = Stack::new();
+    let mut children = Vec::<W>::new();
     let mut cache = HashMap::<FocusAddr, W>::new();
     stack.push_state(&zipper);
     'outer: loop {
@@ -762,7 +766,7 @@ fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>(
             // Read and reuse value from cache, if exists
             if let Some(cache) = Cache::get(&cache, frame_mut.child_addr) {
                 // DO NOT modify the W from cache
-                frame_mut.children.push(cache);
+                children.push(cache);
                 zipper.ascend_byte();
                 continue 'outer;
             }
@@ -783,7 +787,7 @@ fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>(
                     &mut zipper, &mut alg_f, &mut [])?;
                 // Put value to cache (1)
                 Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
-                frame_mut.children.push(cur_w);
+                children.push(cur_w);
                 continue 'outer;
             }
 
@@ -794,30 +798,33 @@ fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>(
 
         // This branch represents the rest of the function after the loop
         let frame_idx = stack.position;
-        let StackFrame { children, .. } = stack.pop_mut()
+        let StackFrame { child_cnt, .. } = stack.pop_mut()
             .expect("we just checked that stack is not empty, pop must return Some");
+        let child_start = children.len() - *child_cnt as usize;
+        let children2 = &mut children[child_start..];
 
         if frame_idx == 0 {
             // Final branch
             debug_assert!(zipper.at_root(), "must be at root when cata is done");
             let value = zipper.value();
             let child_mask = ByteMask::from(zipper.child_mask());
-            return if JUMPING && children.len() == 1 && value.is_none() {
+            return if JUMPING && *child_cnt == 1 && value.is_none() {
                 Ok(children.pop().unwrap())
             } else {
-                alg_f(&child_mask, children, 0, value, zipper.path())
+                alg_f(&child_mask, children2, 0, value, zipper.path())
             };
         }
 
         let cur_w = ascend_to_fork::<Z, V, W, E, AlgF, JUMPING>(
-            &mut zipper, &mut alg_f, children)?;
+            &mut zipper, &mut alg_f, children2)?;
+        children.truncate(child_start);
 
         // Exit one recursion step
         let frame_mut = stack.last_mut()
             .expect("when we're not at root, expect parent stack");
         // Put value to cache (2) after recursion
         Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
-        frame_mut.children.push(cur_w);
+        children.push(cur_w);
     }
 }
 
