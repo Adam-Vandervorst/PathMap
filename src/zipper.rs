@@ -30,6 +30,7 @@ use maybe_dangling::MaybeDangling;
 use crate::utils::{ByteMask, find_prefix_overlap};
 use crate::trie_node::*;
 use crate::trie_map::BytesTrieMap;
+use crate::timed_span::timed_span;
 
 pub use crate::write_zipper::*;
 pub use crate::trie_ref::*;
@@ -121,6 +122,7 @@ pub trait ZipperMoving: Zipper {
 
     /// Resets the zipper's focus back to its root
     fn reset(&mut self) {
+        timed_span!(Reset);
         while !self.at_root() {
             self.ascend_byte();
         }
@@ -139,6 +141,7 @@ pub trait ZipperMoving: Zipper {
     ///
     /// Returns the number of bytes shared between the old and new location and whether the new location exists in the trie
     fn move_to_path<K: AsRef<[u8]>>(&mut self, path: K) -> (usize, bool) {
+        timed_span!(MoveToPath);
         let path = path.as_ref();
         let p = self.path();
         let overlap = find_prefix_overlap(path, p);
@@ -165,6 +168,7 @@ pub trait ZipperMoving: Zipper {
     /// existing path after this method returns, unless the method was called with the focus on a
     /// non-existent path.
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
+        timed_span!(DescendToExisting);
         let k = k.as_ref();
         let mut i = 0;
         while i < k.len() {
@@ -186,6 +190,7 @@ pub trait ZipperMoving: Zipper {
     /// the path.
     //GOAT. this default implementation could certainly be optimized
     fn descend_to_value<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
+        timed_span!(DescendToValue);
         let k = k.as_ref();
         let mut i = 0;
         while i < k.len() {
@@ -204,6 +209,7 @@ pub trait ZipperMoving: Zipper {
     /// Moves the zipper one byte deeper into the trie.  Identical in effect to [descend_to](Self::descend_to)
     /// with a 1-byte key argument
     fn descend_to_byte(&mut self, k: u8) -> bool {
+        timed_span!(DescendToByte);
         self.descend_to(&[k])
     }
 
@@ -216,6 +222,7 @@ pub trait ZipperMoving: Zipper {
     /// to the trie.  This method should only be used as part of a directed traversal operation, but
     /// index-based paths may not be stored as locations within the trie.
     fn descend_indexed_branch(&mut self, idx: usize) -> bool {
+        timed_span!(DescendIndexedBranch);
         let mask = self.child_mask();
         let child_byte = match mask.indexed_bit::<true>(idx) {
             Some(byte) => byte,
@@ -233,12 +240,14 @@ pub trait ZipperMoving: Zipper {
     /// NOTE: This method should have identical behavior to passing `0` to [descend_indexed_branch](ZipperMoving::descend_indexed_branch),
     /// although with less overhead
     fn descend_first_byte(&mut self) -> bool {
+        timed_span!(DescendFirstByte);
         self.descend_indexed_branch(0)
     }
 
     /// Descends the zipper's focus until a branch or a value is encountered.  Returns `true` if the focus
     /// moved otherwise returns `false`
     fn descend_until(&mut self) -> bool {
+        timed_span!(DescendUntil);
         let mut descended = false;
         while self.child_count() < 2 {
             if self.descend_first_byte() {
@@ -258,6 +267,7 @@ pub trait ZipperMoving: Zipper {
 
     /// Ascends the zipper up a single byte.  Equivalent to passing `1` to [ascend](Self::ascend)
     fn ascend_byte(&mut self) -> bool {
+        timed_span!(AscendByte);
         self.ascend(1)
     }
 
@@ -316,6 +326,7 @@ pub trait ZipperMoving: Zipper {
     /// This method is equivalent to calling [ZipperMoving::ascend] with `1`, followed by [ZipperMoving::descend_indexed_branch]
     /// where the index passed is 1 more than the index of the current focus position.
     fn to_next_sibling_byte(&mut self) -> bool {
+        timed_span!(ToNextSiblingByte);
         let cur_byte = match self.path().last() {
             Some(byte) => *byte,
             None => return false
@@ -346,6 +357,7 @@ pub trait ZipperMoving: Zipper {
     /// This method is equivalent to calling [Self::ascend] with `1`, followed by [Self::descend_indexed_branch]
     /// where the index passed is 1 less than the index of the current focus position.
     fn to_prev_sibling_byte(&mut self) -> bool {
+        timed_span!(ToPrevSiblingByte);
         let cur_byte = match self.path().last() {
             Some(byte) => *byte,
             None => return false
@@ -373,6 +385,7 @@ pub trait ZipperMoving: Zipper {
     /// Returns `true` if the position of the zipper has moved, or `false` if the zipper has returned
     /// to the root
     fn to_next_step(&mut self) -> bool {
+        timed_span!(ToNextStep);
 
         //If we're at a leaf ascend until we're not and jump to the next sibling
         if self.child_count() == 0 {
@@ -1234,6 +1247,7 @@ pub(crate) mod read_zipper_core {
     impl<V: Clone + Send + Sync + Unpin> ZipperForking<V> for ReadZipperCore<'_, '_, V> {
         type ReadZipperT<'a> = ReadZipperCore<'a, 'a, V> where Self: 'a;
         fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+            timed_span!(ForkReadZipper);
             let new_root_val = self.get_value();
             let new_root_path = self.origin_path();
             let new_root_key_offset = new_root_path.len() - self.node_key().len();
@@ -1263,6 +1277,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn reset(&mut self) {
+            timed_span!(Reset);
             self.ancestors.truncate(1);
             match self.ancestors.pop() {
                 Some((node, _tok, _prefix_len)) => {
@@ -1284,6 +1299,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn val_count(&self) -> usize {
+            timed_span!(ValueCount);
             if self.node_key().len() == 0 {
                 val_count_below_root(self.focus_node.borrow()) + (self.is_value() as usize)
             } else {
@@ -1296,6 +1312,7 @@ pub(crate) mod read_zipper_core {
             }
         }
         fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) -> bool {
+            timed_span!(DescendTo);
             let k = k.as_ref();
             if k.len() == 0 {
                 return self.path_exists() //Zero-length path is a no-op
@@ -1313,6 +1330,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_to_byte(&mut self, k: u8) -> bool {
+            timed_span!(DescendToByte);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -1328,6 +1346,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_indexed_branch(&mut self, child_idx: usize) -> bool {
+            timed_span!(DescendIndexedBranch);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -1349,6 +1368,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_first_byte(&mut self) -> bool {
+            timed_span!(DescendFirstByte);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
             let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
@@ -1385,6 +1405,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_until(&mut self) -> bool {
+            timed_span!(DescendUntil);
             debug_assert!(self.is_regularized());
             let mut moved = false;
             while self.child_count() == 1 {
@@ -1398,6 +1419,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
+            timed_span!(DescendToExisting);
             let mut k = k.as_ref();
             if k.len() == 0 {
                 return 0 //Zero-length path is a no-op
@@ -1463,6 +1485,7 @@ pub(crate) mod read_zipper_core {
         // }
 
         fn to_next_sibling_byte(&mut self) -> bool {
+            timed_span!(ToNextSiblingByte);
             self.prepare_buffers();
             if self.prefix_buf.len() == 0 {
                 return false
@@ -1518,10 +1541,12 @@ pub(crate) mod read_zipper_core {
         }
 
         fn to_prev_sibling_byte(&mut self) -> bool {
+            timed_span!(ToPrevSiblingByte);
             self.to_sibling(false)
         }
 
         fn ascend(&mut self, mut steps: usize) -> bool {
+            timed_span!(Ascend);
             debug_assert!(self.is_regularized());
             while steps > 0 {
                 if self.excess_key_len() == 0 {
@@ -1545,6 +1570,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend_byte(&mut self) -> bool {
+            timed_span!(AscendByte);
             debug_assert!(self.is_regularized());
             if self.excess_key_len() == 0 {
                 match self.ancestors.pop() {
@@ -1564,6 +1590,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend_until(&mut self) -> bool {
+            timed_span!(AscendUntil);
             debug_assert!(self.is_regularized());
             if self.at_root() {
                 return false;
@@ -1580,6 +1607,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend_until_branch(&mut self) -> bool {
+            timed_span!(AscendUntilBranch);
             debug_assert!(self.is_regularized());
             if self.at_root() {
                 return false;
@@ -1737,9 +1765,11 @@ pub(crate) mod read_zipper_core {
 
     impl<V: Clone + Send + Sync + Unpin> ZipperIteration for ReadZipperCore<'_, '_, V> {
         fn to_next_val(&mut self) -> bool {
+            timed_span!(ToNextVal);
             self.to_next_get_value().is_some()
         }
         fn descend_first_k_path(&mut self, k: usize) -> bool {
+            timed_span!(DescendFirstKPath);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -1749,6 +1779,7 @@ pub(crate) mod read_zipper_core {
             self.k_path_internal(k, self.prefix_buf.len())
         }
         fn to_next_k_path(&mut self, k: usize) -> bool {
+            timed_span!(ToNextKPath);
             let base_idx = if self.path_len() > k {
                 self.prefix_buf.len() - k
             } else {
@@ -1763,6 +1794,7 @@ pub(crate) mod read_zipper_core {
 
     impl<'a, V: Clone + Send + Sync + Unpin> ZipperReadOnlyIteration<'a, V> for ReadZipperCore<'a, '_, V> {
         fn to_next_get_value(&mut self) -> Option<&'a V> {
+            timed_span!(ToNextGetValue);
             self.prepare_buffers();
             loop {
                 if self.focus_iter_token == NODE_ITER_INVALID {

@@ -29,6 +29,8 @@ fn arena_create() -> Result<(), std::io::Error> {
     println!("len {:.2?}", tree.get_data().len());
     // pathmap::alloc_tracking::read().print();
     // pathmap::alloc_tracking::reset();
+    pathmap::timed_span::print_counters();
+    pathmap::timed_span::reset_counters();
 
     let start = Instant::now();
     let mut zipper = tree.read_zipper();
@@ -38,6 +40,8 @@ fn arena_create() -> Result<(), std::io::Error> {
         assert!(zipper.descend_to_existing(path) == path.len());
         // assert_eq!(zipper.path(), path);
     }
+    pathmap::timed_span::print_counters();
+
     println!("checked act in {:.2?}", start.elapsed());
     let start = Instant::now();
     let tree2 = ArenaCompactTree::from_zipper(tree.read_zipper(), |_v| 0);
@@ -78,6 +82,7 @@ fn arena_dump() -> Result<(), std::io::Error> {
         assert!(zipper.descend_to_existing(path) == path.len());
         // assert_eq!(zipper.path(), path);
     }
+    pathmap::timed_span::print_counters();
     println!("checked act in {:.2?}", start.elapsed());
     let start = Instant::now();
     let tree2 = ArenaCompactTree::from_zipper(tree.read_zipper(), |_v| 0);
