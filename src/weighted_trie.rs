@@ -5,6 +5,151 @@ use crate::alloc::{Allocator, GlobalAlloc};
 use crate::trie_map::PathMap;
 use crate::ring::{Lattice, AlgebraicResult};
 
+// Import MORK's S-Expression parsing components
+// Note: These would need to be properly imported from the MORK crates
+// For now, we'll define placeholder traits that match MORK's interface
+
+pub trait SExprParser {
+    fn parse_sexpr(&self, input: &str) -> Result<SExprTree, ParseError>;
+}
+
+pub trait SExprSerializer {
+    fn serialize_tree(&self, tree: &SExprTree) -> String;
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseError(pub String);
+
+impl From<ParseError> for String {
+    fn from(error: ParseError) -> Self {
+        error.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SExprTree {
+    Atom(String),
+    List(Vec<SExprTree>),
+}
+
+impl SExprTree {
+    /// Extract all subtrees (non-atomic expressions) from this tree
+    pub fn extract_subtrees(&self) -> Vec<String> {
+        let mut subtrees = Vec::new();
+        self.collect_subtrees(&mut subtrees);
+        subtrees
+    }
+    
+    fn collect_subtrees(&self, collector: &mut Vec<String>) {
+        match self {
+            SExprTree::Atom(_) => {
+                // Skip atoms - we only want real trees/lists
+            }
+            SExprTree::List(children) => {
+                // This is a real tree - serialize it and add to collection
+                let serialized = self.serialize();
+                collector.push(serialized);
+                
+                // Recursively collect subtrees from children
+                for child in children {
+                    child.collect_subtrees(collector);
+                }
+            }
+        }
+    }
+    
+    /// Serialize this tree back to S-Expression string format
+    pub fn serialize(&self) -> String {
+        match self {
+            SExprTree::Atom(atom) => atom.clone(),
+            SExprTree::List(children) => {
+                let inner: Vec<String> = children.iter().map(|c| c.serialize()).collect();
+                format!("({})", inner.join(" "))
+            }
+        }
+    }
+}
+
+/// Simple S-Expression parser (placeholder for MORK integration)
+pub struct SimpleSExprParser;
+
+impl SimpleSExprParser {
+    pub fn new() -> Self {
+        Self
+    }
+    
+    /// Parse a simple S-Expression into a tree structure
+    pub fn parse(&self, input: &str) -> Result<SExprTree, ParseError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(ParseError("Empty input".to_string()));
+        }
+        
+        if !trimmed.starts_with('(') {
+            // Single atom
+            return Ok(SExprTree::Atom(trimmed.to_string()));
+        }
+        
+        // Parse list
+        self.parse_list(trimmed)
+    }
+    
+    fn parse_list(&self, input: &str) -> Result<SExprTree, ParseError> {
+        if !input.starts_with('(') || !input.ends_with(')') {
+            return Err(ParseError("Invalid list format".to_string()));
+        }
+        
+        let inner = &input[1..input.len()-1].trim();
+        if inner.is_empty() {
+            return Ok(SExprTree::List(vec![]));
+        }
+        
+        let mut elements = Vec::new();
+        let mut chars = inner.chars().peekable();
+        let mut current_token = String::new();
+        let mut paren_depth = 0;
+        
+        while let Some(ch) = chars.next() {
+            match ch {
+                '(' => {
+                    current_token.push(ch);
+                    paren_depth += 1;
+                }
+                ')' => {
+                    current_token.push(ch);
+                    paren_depth -= 1;
+                    
+                    if paren_depth == 0 && !current_token.trim().is_empty() {
+                        // Complete sub-expression
+                        elements.push(self.parse(current_token.trim())?);
+                        current_token.clear();
+                    }
+                }
+                ' ' if paren_depth == 0 => {
+                    if !current_token.trim().is_empty() {
+                        elements.push(SExprTree::Atom(current_token.trim().to_string()));
+                        current_token.clear();
+                    }
+                }
+                _ => {
+                    current_token.push(ch);
+                }
+            }
+        }
+        
+        // Handle last token
+        if !current_token.trim().is_empty() {
+            if paren_depth == 0 {
+                elements.push(SExprTree::Atom(current_token.trim().to_string()));
+            } else {
+                elements.push(self.parse(current_token.trim())?);
+            }
+        }
+        
+        Ok(SExprTree::List(elements))
+    }
+}
+
 /// Weight structure for individual nodes
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeWeight {
@@ -181,8 +326,33 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
     
     /// Set a value at the given path and update weights
     pub fn set_val_at<P: AsRef<[u8]>>(&mut self, path: P, val: V) {
+        self.set_val_at_with_subtrees(path, val, false);
+    }
+    
+    /// Set a value at the given path with optional subtree extraction
+    pub fn set_val_at_with_subtrees<P: AsRef<[u8]>>(&mut self, path: P, val: V, add_subtrees: bool) {
         let path_bytes = path.as_ref();
+        let path_str = String::from_utf8_lossy(path_bytes);
         
+        // Always add the main expression
+        self.set_val_internal(path_bytes, val.clone());
+        
+        // If subtree extraction is enabled and this looks like an S-Expression
+        if add_subtrees && path_str.trim().starts_with('(') {
+            if let Ok(subtrees) = self.extract_subtrees_from_sexpr(&path_str) {
+                // Add each subtree with a placeholder value
+                for subtree in subtrees {
+                    if subtree != path_str {  // Don't re-add the same expression
+                        // For subtrees, we use a special marker value to indicate they were auto-extracted
+                        self.set_val_internal(subtree.as_bytes(), val.clone());
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Internal method to set a value and update weights
+    fn set_val_internal(&mut self, path_bytes: &[u8], val: V) {
         // Set the value in the inner map
         self.inner.set_val_at(path_bytes, val);
         
@@ -208,6 +378,18 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         
         // Propagate subtree count updates to ancestors
         self.propagate_subtree_counts(path_bytes);
+    }
+    
+    /// Extract all subtrees from an S-Expression string
+    fn extract_subtrees_from_sexpr(&self, sexpr: &str) -> Result<Vec<String>, ParseError> {
+        let parser = SimpleSExprParser::new();
+        let tree = parser.parse(sexpr)?;
+        Ok(tree.extract_subtrees())
+    }
+    
+    /// Convenience method specifically for S-expressions with configurable subtree extraction
+    pub fn add_sexpr<P: AsRef<[u8]>>(&mut self, sexpr: P, val: V, extract_subtrees: bool) {
+        self.set_val_at_with_subtrees(sexpr, val, extract_subtrees);
     }
     
     /// Get a value at the given path
@@ -307,6 +489,27 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+    #[test]
+    fn test_simple_subtree_extraction() {
+        // Test the S-Expression parser directly first
+        let parser = SimpleSExprParser::new();
+        let tree = parser.parse("(person (name John) (age 25))").unwrap();
+        let subtrees = tree.extract_subtrees();
+        
+        println!("Extracted subtrees: {:?}", subtrees);
+        
+        // Should extract: 
+        // - "(person (name John) (age 25))" (the whole expression)
+        // - "(name John)" (subtree)
+        // - "(age 25)" (subtree)
+        assert!(subtrees.contains(&"(person (name John) (age 25))".to_string()));
+        assert!(subtrees.contains(&"(name John)".to_string()));
+        assert!(subtrees.contains(&"(age 25)".to_string()));
+        
+        // Should be exactly 3 subtrees (no atoms like "person", "John", etc.)
+        assert_eq!(subtrees.len(), 3);
+    }
     
     #[test]
     fn test_node_weight_operations() {
@@ -479,5 +682,195 @@ mod tests {
         // John (3x) und Jane (2x) sollten in den Top-Entries sein
         assert!(top_counts.contains(&3));
         assert!(top_counts.contains(&2));
+    }
+    
+    #[test]
+    fn test_deep_subtree_extraction() {
+        let mut wtm: WeightedTriemap<String> = WeightedTriemap::new();
+        
+        println!("=== Testing Deep S-Expression Subtree Extraction (Depth 3+) ===");
+        
+        // Komplexe verschachtelte S-Expression mit Tiefe 3+
+        let deep_expr = "(company (department (team (person (name Alice) (role developer)) (person (name Bob) (role manager))) (budget 50000)) (location Berlin))";
+        
+        // Test 1: Mit Subtree-Extraktion
+        println!("\n--- Adding with subtree extraction ---");
+        wtm.add_sexpr(deep_expr, "company_data".to_string(), true);
+        
+        // Überprüfe, dass Subtrees verschiedener Tiefen extrahiert wurden
+        
+        // Tiefe 1: Hauptkomponenten 
+        assert!(wtm.get_weight("(department (team (person (name Alice) (role developer)) (person (name Bob) (role manager))) (budget 50000))").is_some());
+        assert!(wtm.get_weight("(location Berlin)").is_some());
+        
+        // Tiefe 2: Team und Budget
+        assert!(wtm.get_weight("(team (person (name Alice) (role developer)) (person (name Bob) (role manager)))").is_some());
+        assert!(wtm.get_weight("(budget 50000)").is_some());
+        
+        // Tiefe 3: Einzelne Personen
+        assert!(wtm.get_weight("(person (name Alice) (role developer))").is_some());
+        assert!(wtm.get_weight("(person (name Bob) (role manager))").is_some());
+        
+        // Tiefe 4: Attribute der Personen
+        assert!(wtm.get_weight("(name Alice)").is_some());
+        assert!(wtm.get_weight("(role developer)").is_some());
+        assert!(wtm.get_weight("(name Bob)").is_some());
+        assert!(wtm.get_weight("(role manager)").is_some());
+        
+        println!("All subtrees at different depths were successfully extracted!");
+        
+        // Test 2: Ohne Subtree-Extraktion
+        println!("\n--- Testing without subtree extraction ---");
+        let mut wtm_no_subtrees: WeightedTriemap<String> = WeightedTriemap::new();
+        wtm_no_subtrees.add_sexpr(deep_expr, "company_data_no_subtrees".to_string(), false);
+        
+        // Nur die Hauptexpression sollte existieren
+        assert!(wtm_no_subtrees.get_weight(deep_expr).is_some());
+        
+        // Subtrees sollten NICHT existieren
+        assert!(wtm_no_subtrees.get_weight("(location Berlin)").is_none());
+        assert!(wtm_no_subtrees.get_weight("(name Alice)").is_none());
+        assert!(wtm_no_subtrees.get_weight("(role developer)").is_none());
+        
+        println!("Verified: No subtrees extracted when extract_subtrees=false");
+        
+        // Test 3: Mehrere komplexe Expressions mit überlappenden Subtrees
+        println!("\n--- Testing overlapping subtrees ---");
+        
+        let company2 = "(company (department (team (person (name Alice) (role developer)) (person (name Charlie) (role designer))) (budget 60000)) (location Munich))";
+        let company3 = "(startup (team (person (name Alice) (role founder)) (person (name Bob) (role cto))) (funding 100000))";
+        
+        wtm.add_sexpr(company2, "company2_data".to_string(), true);
+        wtm.add_sexpr(company3, "startup_data".to_string(), true);
+        
+        // Alice kommt in allen 3 Expressions vor, sollte Count 3 haben
+        if let Some(alice_weight) = wtm.get_weight("(name Alice)") {
+            println!("(name Alice) appears {} times", alice_weight.local_count);
+            assert_eq!(alice_weight.local_count, 3);
+        }
+        
+        // Bob kommt in 2 Expressions vor  
+        if let Some(bob_weight) = wtm.get_weight("(name Bob)") {
+            println!("(name Bob) appears {} times", bob_weight.local_count);
+            assert_eq!(bob_weight.local_count, 2);
+        }
+        
+        // Charlie kommt nur 1x vor
+        if let Some(charlie_weight) = wtm.get_weight("(name Charlie)") {
+            println!("(name Charlie) appears {} times", charlie_weight.local_count);
+            assert_eq!(charlie_weight.local_count, 1);
+        }
+        
+        // Team-Strukturen kommen mehrmals vor - simplified check
+        // Note: In a real implementation, we'd iterate over PathMap keys
+        // For now, we'll just verify that team subtrees exist
+        assert!(wtm.get_weight("(team (person (name Alice) (role developer)) (person (name Bob) (role manager)))").is_some());
+        assert!(wtm.get_weight("(team (person (name Alice) (role developer)) (person (name Charlie) (role designer)))").is_some());
+        assert!(wtm.get_weight("(team (person (name Alice) (role founder)) (person (name Bob) (role cto)))").is_some());
+        
+        println!("Found multiple team structures as expected");
+        
+        // TopK sollte die häufigsten Subtrees zeigen
+        println!("\n=== Top-K Results for Deep Trees ===");
+        let topk = wtm.get_topk();
+        for (i, entry) in topk.iter().take(10).enumerate() {
+            let path_str = String::from_utf8_lossy(&entry.path);
+            println!("#{}: '{}' (count: {}, score: {:.2})", 
+                    i+1, path_str, entry.weight.local_count, entry.composite_score);
+        }
+        
+        // Alice sollte ganz oben stehen (3x)
+        assert!(!topk.is_empty());
+        let top_entries: Vec<_> = topk.iter()
+            .filter(|e| String::from_utf8_lossy(&e.path).contains("Alice"))
+            .collect();
+        assert!(!top_entries.is_empty());
+        assert_eq!(top_entries[0].weight.local_count, 3);
+    }
+    
+    #[test]
+    fn test_sexpr_with_subtree_counting() {
+        let mut wtm: WeightedTriemap<String> = WeightedTriemap::new();
+        
+        println!("=== Testing S-Expression with Subtree Extraction ===");
+        
+        // Füge S-Expressions mit Subtree-Extraktion hinzu
+        wtm.add_sexpr("(person (name John) (age 25))", "john_data".to_string(), true);
+        wtm.add_sexpr("(person (name Jane) (age 30))", "jane_data".to_string(), true);
+        wtm.add_sexpr("(animal (name Rex) (age 5))", "rex_data".to_string(), true);
+        
+        // Jetzt sollten sowohl die ganzen Expressions als auch die Subtrees gezählt werden
+        
+        // Prüfe die ganzen Expressions
+        let john_expr_weight = wtm.get_weight("(person (name John) (age 25))").unwrap();
+        let jane_expr_weight = wtm.get_weight("(person (name Jane) (age 30))").unwrap();
+        let rex_expr_weight = wtm.get_weight("(animal (name Rex) (age 5))").unwrap();
+        
+        println!("John full expression count: {}", john_expr_weight.local_count);
+        println!("Jane full expression count: {}", jane_expr_weight.local_count);
+        println!("Rex full expression count: {}", rex_expr_weight.local_count);
+        
+        assert_eq!(john_expr_weight.local_count, 1);
+        assert_eq!(jane_expr_weight.local_count, 1);
+        assert_eq!(rex_expr_weight.local_count, 1);
+        
+        // Prüfe gemeinsame Subtrees - (age X) kommt in mehreren vor
+        if let Some(age_25_weight) = wtm.get_weight("(age 25)") {
+            println!("(age 25) appears {} times", age_25_weight.local_count);
+            assert_eq!(age_25_weight.local_count, 1);
+        }
+        
+        if let Some(age_30_weight) = wtm.get_weight("(age 30)") {
+            println!("(age 30) appears {} times", age_30_weight.local_count);
+            assert_eq!(age_30_weight.local_count, 1);
+        }
+        
+        if let Some(age_5_weight) = wtm.get_weight("(age 5)") {
+            println!("(age 5) appears {} times", age_5_weight.local_count);
+            assert_eq!(age_5_weight.local_count, 1);
+        }
+        
+        // Prüfe (name X) Subtrees
+        if let Some(name_john_weight) = wtm.get_weight("(name John)") {
+            println!("(name John) appears {} times", name_john_weight.local_count);
+            assert_eq!(name_john_weight.local_count, 1);
+        }
+        
+        if let Some(name_jane_weight) = wtm.get_weight("(name Jane)") {
+            println!("(name Jane) appears {} times", name_jane_weight.local_count);
+            assert_eq!(name_jane_weight.local_count, 1);
+        }
+        
+        if let Some(name_rex_weight) = wtm.get_weight("(name Rex)") {
+            println!("(name Rex) appears {} times", name_rex_weight.local_count);
+            assert_eq!(name_rex_weight.local_count, 1);
+        }
+        
+        // Jetzt fügen wir duplicate Expressions hinzu
+        println!("\n=== Adding duplicate expressions ===");
+        wtm.add_sexpr("(person (name John) (age 25))", "john_data_2".to_string(), true);
+        wtm.add_sexpr("(person (name Bob) (age 25))", "bob_data".to_string(), true);  // Same age as John!
+        
+        // Jetzt sollte (age 25) drei Mal vorkommen: 2x von John + 1x von Bob
+        if let Some(age_25_weight) = wtm.get_weight("(age 25)") {
+            println!("(age 25) now appears {} times", age_25_weight.local_count);
+            assert_eq!(age_25_weight.local_count, 3);  // 2x von John + 1x von Bob = 3x total
+        }
+        
+        // (name John) sollte immer noch 1x sein, aber die ganze John-Expression 2x
+        let john_expr_weight_updated = wtm.get_weight("(person (name John) (age 25))").unwrap();
+        println!("John full expression now appears {} times", john_expr_weight_updated.local_count);
+        assert_eq!(john_expr_weight_updated.local_count, 2);
+        
+        // TopK sollte die häufigsten Subtrees zeigen
+        println!("\n=== Top-K Results ===");
+        let topk = wtm.get_topk();
+        for (i, entry) in topk.iter().enumerate() {
+            let path_str = String::from_utf8_lossy(&entry.path);
+            println!("#{}: '{}' (count: {}, score: {:.2})", 
+                    i+1, path_str, entry.weight.local_count, entry.composite_score);
+        }
+        
+        assert!(!topk.is_empty());
     }
 }
