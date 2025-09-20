@@ -83,6 +83,10 @@ pub mod utils;
 /// Extensions to the API that may or may not become permanant
 pub mod experimental;
 
+/// Weighted triemap with node-level weight tracking and top-k support
+pub mod weighted_trie;
+pub use weighted_trie::{WeightedTriemap, NodeWeight, TopKEntry, TopKTracker};
+
 /// Compact representation of the trie
 #[cfg(feature = "arena_compact")]
 pub mod arena_compact;
