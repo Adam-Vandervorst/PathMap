@@ -436,6 +436,35 @@ impl TopKTracker {
         }
     }
     
+    /// Update an existing entry or add a new one if the path doesn't exist
+    pub fn update_or_add_entry(&mut self, entry: TopKEntry) {
+        // Convert heap to vector for easier manipulation
+        let mut entries: Vec<TopKEntry> = self.heap.drain().map(|r| r.0).collect();
+        
+        // Check if an entry with the same path already exists
+        let mut updated = false;
+        for existing in entries.iter_mut() {
+            if existing.path == entry.path {
+                // Update the existing entry
+                *existing = entry.clone();
+                updated = true;
+                break;
+            }
+        }
+        
+        // If no existing entry was found, add the new one
+        if !updated {
+            entries.push(entry);
+        }
+        
+        // Sort by composite score (descending) and keep only top k
+        entries.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(std::cmp::Ordering::Equal));
+        entries.truncate(self.k);
+        
+        // Rebuild the heap
+        self.heap = entries.into_iter().map(Reverse).collect();
+    }
+    
     /// Get the current top-k entries (heaviest first)
     pub fn get_topk(&self) -> Vec<TopKEntry> {
         let mut entries: Vec<_> = self.heap.iter().map(|r| r.0.clone()).collect();
@@ -554,7 +583,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         };
         
         unsafe {
-            (*self.topk.get()).add_entry(entry);
+            (*self.topk.get()).update_or_add_entry(entry);
         }
         
         // Propagate subtree count updates to ancestors
@@ -605,6 +634,17 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         // Convert text expression to MORK bytecode format
         let mork_bytecode = self.text_to_mork_bytecode(expr_text)?;
         self.add_mork_bytecode_raw(&mork_bytecode, val, extract_subtrees)
+    }
+    
+    /// Enhanced method: Add MORK expression with both value and compression gain
+    pub fn add_mork_expr_with_gain(&mut self, expr_text: &str, val: V, gain: f64, extract_subtrees: bool) -> Result<(), ParseError> {
+        // Convert text expression to MORK bytecode format
+        let mork_bytecode = self.text_to_mork_bytecode(expr_text)?;
+        self.add_mork_bytecode_raw(&mork_bytecode, val, extract_subtrees)?;
+        
+        // Add compression gain
+        self.add_compression_gain(&mork_bytecode, gain);
+        Ok(())
     }
     
     /// Convert text expressions to MORK bytecode format
@@ -658,6 +698,17 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         self.set_val_at_with_subtrees(sexpr, val, extract_subtrees);
     }
     
+    /// Enhanced method: Add S-expression with both value and compression gain
+    pub fn add_sexpr_with_gain<P: AsRef<[u8]>>(&mut self, sexpr: P, val: V, gain: f64, extract_subtrees: bool) {
+        let path_bytes = sexpr.as_ref();
+        
+        // First, add the value normally
+        self.set_val_at_with_subtrees(path_bytes, val, extract_subtrees);
+        
+        // Then, add the compression gain
+        self.add_compression_gain(path_bytes, gain);
+    }
+    
 
     /// Get a value at the given path
     pub fn get<P: AsRef<[u8]>>(&self, path: P) -> Option<&V> {
@@ -703,16 +754,15 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         };
         self.weights.set_val_at(path_bytes, new_weight.clone());
         
-        // Update top-k if this path would still be included
-        let composite_score = new_weight.composite_weight();
-        let topk_ref = unsafe { &mut *self.topk.get() };
-        if topk_ref.would_be_included(composite_score) {
-            let entry = TopKEntry {
-                path: path_bytes.to_vec(),
-                weight: new_weight,
-                composite_score,
-            };
-            topk_ref.add_entry(entry);
+        // Update top-k tracker with the updated entry
+        let entry = TopKEntry {
+            path: path_bytes.to_vec(),
+            weight: new_weight.clone(),
+            composite_score: new_weight.composite_weight(),
+        };
+        
+        unsafe {
+            (*self.topk.get()).update_or_add_entry(entry);
         }
     }
 }
