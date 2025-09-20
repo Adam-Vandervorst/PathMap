@@ -5,9 +5,136 @@ use crate::alloc::{Allocator, GlobalAlloc};
 use crate::trie_map::PathMap;
 use crate::ring::{Lattice, AlgebraicResult};
 
-// MORK Integration - Start with a small step: Real imports
-// TODO: Enable these when MORK bytestring is accessible as a dependency
-// For now, we'll build our integration step by step
+// MORK Integration - Real MORK bytestring integration
+// Import MORK's actual Tag system and expression structures
+
+// TODO: When MORK bytestring becomes a proper crate dependency:
+// use mork_bytestring::{Tag, Expr, ExprZipper, parse};
+
+// For now, we replicate the essential MORK structures for integration:
+
+/// MORK's Tag enum (copied from MORK bytestring)
+#[derive(PartialEq, Copy, Clone, Debug)]
+pub enum MorkTag {
+    NewVar,        // $
+    VarRef(u8),    // _1 .. _63
+    SymbolSize(u8), // "" "." ".." .. "... x63" (< 64 bytes)
+    Arity(u8),     // [0] ... [63]
+}
+
+impl MorkTag {
+    /// Encode MORK tag as byte (following MORK's protocol)
+    pub const fn encode_as_byte(self) -> Result<u8, ()> {
+        match self {
+            MorkTag::NewVar => Ok(0b1100_0000 | 0),
+            MorkTag::SymbolSize(s) => if s > 0 && s < 64 {
+                Ok(0b1100_0000 | s)
+            } else {
+                Err(())
+            },
+            MorkTag::VarRef(i) => if i < 64 {
+                Ok(0b1000_0000 | i)
+            } else {
+                Err(())
+            },
+            MorkTag::Arity(a) => if a < 64 {
+                Ok(0b0000_0000 | a)
+            } else {
+                Err(())
+            }
+        }
+    }
+    
+    /// Decode MORK tag from byte
+    pub const fn decode_from_byte(byte: u8) -> Result<MorkTag, ()> {
+        let tag_type = byte & 0b1100_0000;
+        let value = byte & 0b0011_1111;
+        
+        match tag_type {
+            0b1100_0000 => {
+                if value == 0 {
+                    Ok(MorkTag::NewVar)
+                } else if value < 64 {
+                    Ok(MorkTag::SymbolSize(value))
+                } else {
+                    Err(())
+                }
+            }
+            0b1000_0000 => Ok(MorkTag::VarRef(value)),
+            0b0000_0000 => Ok(MorkTag::Arity(value)),
+            _ => Err(())
+        }
+    }
+}
+
+/// MORK Expression representation (simplified for integration)
+#[derive(Debug, Clone)]
+pub struct MorkExpr {
+    pub bytes: Vec<u8>,
+}
+
+impl MorkExpr {
+    /// Parse MORK bytecode from raw bytes
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ParseError> {
+        // Validate that this looks like valid MORK bytecode
+        if bytes.is_empty() {
+            return Err(ParseError("Empty MORK bytecode".to_string()));
+        }
+        
+        // Quick validation: first byte should be a valid tag
+        if let Err(_) = MorkTag::decode_from_byte(bytes[0]) {
+            return Err(ParseError("Invalid MORK tag at start of bytecode".to_string()));
+        }
+        
+        Ok(MorkExpr { bytes })
+    }
+    
+    /// Convert MORK bytecode to S-Expression for PathMap integration
+    pub fn to_sexpr(&self) -> Result<String, ParseError> {
+        self.parse_mork_bytecode_to_sexpr(&self.bytes, 0).map(|(result, _)| result)
+    }
+    
+    fn parse_mork_bytecode_to_sexpr(&self, bytes: &[u8], mut pos: usize) -> Result<(String, usize), ParseError> {
+        if pos >= bytes.len() {
+            return Err(ParseError("Unexpected end of MORK bytecode".to_string()));
+        }
+        
+        let tag = MorkTag::decode_from_byte(bytes[pos])
+            .map_err(|_| ParseError(format!("Invalid MORK tag at position {}", pos)))?;
+        pos += 1;
+        
+        match tag {
+            MorkTag::NewVar => {
+                Ok(("$".to_string(), pos))
+            }
+            MorkTag::VarRef(i) => {
+                Ok((format!("_{}", i), pos))
+            }
+            MorkTag::SymbolSize(size) => {
+                if pos + size as usize > bytes.len() {
+                    return Err(ParseError("Symbol extends beyond bytecode".to_string()));
+                }
+                let symbol = String::from_utf8_lossy(&bytes[pos..pos + size as usize]);
+                pos += size as usize;
+                Ok((symbol.to_string(), pos))
+            }
+            MorkTag::Arity(arity) => {
+                let mut children = Vec::new();
+                for _ in 0..arity {
+                    let (child, new_pos) = self.parse_mork_bytecode_to_sexpr(bytes, pos)?;
+                    children.push(child);
+                    pos = new_pos;
+                }
+                
+                if children.is_empty() {
+                    Ok(("()".to_string(), pos))
+                } else {
+                    Ok((format!("({})", children.join(" ")), pos))
+                }
+            }
+        }
+    }
+}
 
 pub trait SExprParser {
     fn parse_sexpr(&self, input: &str) -> Result<SExprTree, ParseError>;
@@ -447,30 +574,82 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         Ok(tree.extract_subtrees())
     }
     
-    /// REAL MORK Integration: Add expressions in MORK bytecode format
-    /// This actually processes MORK-style expressions, not just comments!
-    pub fn add_mork_bytecode<P: AsRef<[u8]>>(&mut self, bytecode_expr: P, val: V, extract_subtrees: bool) {
-        let expr_str = String::from_utf8_lossy(bytecode_expr.as_ref());
+    /// REAL MORK Integration: Add expressions directly from MORK bytecode
+    /// This processes raw MORK bytecode bytes, not just text format!
+    pub fn add_mork_bytecode_raw(&mut self, mork_bytes: &[u8], val: V, extract_subtrees: bool) -> Result<(), ParseError> {
+        // Parse real MORK bytecode
+        let mork_expr = MorkExpr::from_bytes(mork_bytes.to_vec())?;
+        let sexpr = mork_expr.to_sexpr()?;
         
-        // Try to parse as MORK bytecode first
-        let parser = SimpleSExprParser::new();
-        if let Ok(tree) = parser.parse_mork_bytecode(&expr_str) {
-            // Successfully parsed MORK bytecode - add it
-            let serialized = tree.serialize();
-            self.set_val_internal(serialized.as_bytes(), val.clone());
-            
-            if extract_subtrees {
-                let subtrees = tree.extract_subtrees();
+        // Add the main expression
+        self.set_val_internal(sexpr.as_bytes(), val.clone());
+        
+        if extract_subtrees {
+            // Extract subtrees from the S-expression representation
+            if let Ok(subtrees) = self.extract_subtrees_from_sexpr(&sexpr) {
                 for subtree in subtrees {
-                    if subtree != serialized {
+                    if subtree != sexpr {
                         self.set_val_internal(subtree.as_bytes(), val.clone());
                     }
                 }
             }
-        } else {
-            // Fall back to regular S-expression handling
-            self.set_val_at_with_subtrees(bytecode_expr, val, extract_subtrees);
         }
+        
+        Ok(())
+    }
+    
+    /// Enhanced MORK Integration: Convert text format to MORK bytecode
+    /// This demonstrates how to create real MORK bytecode from expressions
+    pub fn add_mork_expr_from_text(&mut self, expr_text: &str, val: V, extract_subtrees: bool) -> Result<(), ParseError> {
+        // Convert text expression to MORK bytecode format
+        let mork_bytecode = self.text_to_mork_bytecode(expr_text)?;
+        self.add_mork_bytecode_raw(&mork_bytecode, val, extract_subtrees)
+    }
+    
+    /// Convert text expressions to MORK bytecode format
+    /// This shows how real MORK integration would encode expressions
+    fn text_to_mork_bytecode(&self, text: &str) -> Result<Vec<u8>, ParseError> {
+        // Parse the text as S-expression first
+        let parser = SimpleSExprParser::new();
+        let tree = parser.parse(text)?;
+        
+        // Convert SExprTree to MORK bytecode
+        self.sexpr_tree_to_mork_bytecode(&tree)
+    }
+    
+    fn sexpr_tree_to_mork_bytecode(&self, tree: &SExprTree) -> Result<Vec<u8>, ParseError> {
+        let mut bytes = Vec::new();
+        
+        match tree {
+            SExprTree::Atom(atom) => {
+                // Encode as symbol
+                let atom_bytes = atom.as_bytes();
+                if atom_bytes.len() >= 64 {
+                    return Err(ParseError("Symbol too long for MORK encoding".to_string()));
+                }
+                
+                let tag = MorkTag::SymbolSize(atom_bytes.len() as u8);
+                bytes.push(tag.encode_as_byte().map_err(|_| ParseError("Invalid symbol size".to_string()))?);
+                bytes.extend_from_slice(atom_bytes);
+            }
+            SExprTree::List(children) => {
+                // Encode as arity + children
+                if children.len() >= 64 {
+                    return Err(ParseError("Too many children for MORK encoding".to_string()));
+                }
+                
+                let tag = MorkTag::Arity(children.len() as u8);
+                bytes.push(tag.encode_as_byte().map_err(|_| ParseError("Invalid arity".to_string()))?);
+                
+                // Recursively encode children
+                for child in children {
+                    let child_bytes = self.sexpr_tree_to_mork_bytecode(child)?;
+                    bytes.extend_from_slice(&child_bytes);
+                }
+            }
+        }
+        
+        Ok(bytes)
     }
     
     /// Convenience method specifically for S-expressions with configurable subtree extraction
@@ -685,33 +864,120 @@ mod tests {
         assert_eq!(valid_tree.serialize(), "(person name John)");
     }
     
-    #[test] 
-    fn test_real_mork_bytecode_integration() {
-        // REAL MORK Integration Test: Handle MORK bytecode format
+    #[test]
+    fn test_real_mork_bytecode_raw_integration() {
+        // REAL MORK Integration Test: Handle actual MORK bytecode bytes
         let mut wtm: WeightedTriemap<String> = WeightedTriemap::new();
         
-        println!("=== Testing REAL MORK Bytecode Integration ===");
+        println!("=== Testing REAL MORK Raw Bytecode Integration ===");
         
-        // Test MORK-style bytecode expressions
-        wtm.add_mork_bytecode("[3] person name John", "mork_data1".to_string(), true);
-        wtm.add_mork_bytecode("[2] age 25", "mork_data2".to_string(), true);
+        // Create real MORK bytecode manually
+        // Example: [2] person name -> Arity(2) + SymbolSize(6)+"person" + SymbolSize(4)+"name"
+        let mut mork_bytes = Vec::new();
         
-        // Also test regular S-expressions for comparison
-        wtm.add_sexpr("(person (name John) (age 25))", "regular_data".to_string(), true);
+        // [2] - Arity of 2
+        mork_bytes.push(MorkTag::Arity(2).encode_as_byte().unwrap());
         
-        // The MORK bytecode should have been parsed and stored
-        if let Some(weight) = wtm.get_weight("(person name John)") {
-            println!("MORK bytecode expression found with count: {}", weight.local_count);
+        // "person" - Symbol of size 6
+        mork_bytes.push(MorkTag::SymbolSize(6).encode_as_byte().unwrap());
+        mork_bytes.extend_from_slice(b"person");
+        
+        // "name" - Symbol of size 4  
+        mork_bytes.push(MorkTag::SymbolSize(4).encode_as_byte().unwrap());
+        mork_bytes.extend_from_slice(b"name");
+        
+        println!("MORK bytecode: {:?}", mork_bytes);
+        
+        // Add the raw MORK bytecode
+        wtm.add_mork_bytecode_raw(&mork_bytes, "mork_raw_data".to_string(), true).unwrap();
+        
+        // The bytecode should have been parsed to "(person name)"
+        if let Some(weight) = wtm.get_weight("(person name)") {
+            println!("MORK raw bytecode expression found with count: {}", weight.local_count);
             assert_eq!(weight.local_count, 1);
         }
         
+        // Test text-to-bytecode conversion
+        println!("\n--- Testing text-to-MORK-bytecode conversion ---");
+        wtm.add_mork_expr_from_text("(age 25)", "mork_text_data".to_string(), true).unwrap();
+        
         if let Some(weight) = wtm.get_weight("(age 25)") {
-            println!("Age expression found with count: {}", weight.local_count);
-            // Should appear twice: once from MORK bytecode, once from regular S-expr
-            assert_eq!(weight.local_count, 2);
+            println!("Text-to-MORK expression found with count: {}", weight.local_count);
+            assert_eq!(weight.local_count, 1);
         }
         
-        println!("MORK bytecode integration successful!");
+        // Test complex nested expression
+        println!("\n--- Testing complex MORK expression ---");
+        wtm.add_mork_expr_from_text("(person (name Alice) (age 30))", "complex_mork".to_string(), true).unwrap();
+        
+        // Should extract subtrees
+        assert!(wtm.get_weight("(person (name Alice) (age 30))").is_some());
+        assert!(wtm.get_weight("(name Alice)").is_some());
+        assert!(wtm.get_weight("(age 30)").is_some());
+        
+        println!("MORK raw bytecode integration successful!");
+    }
+    
+    #[test]
+    fn test_mork_tag_encoding_decoding() {
+        println!("=== Testing MORK Tag Encoding/Decoding ===");
+        
+        // Test various MORK tags
+        let tags = vec![
+            MorkTag::NewVar,
+            MorkTag::VarRef(5),
+            MorkTag::SymbolSize(10),
+            MorkTag::Arity(3),
+        ];
+        
+        for tag in tags {
+            let encoded = tag.encode_as_byte().unwrap();
+            let decoded = MorkTag::decode_from_byte(encoded).unwrap();
+            
+            println!("Tag: {:?} -> Byte: 0b{:08b} -> Decoded: {:?}", tag, encoded, decoded);
+            assert_eq!(tag, decoded);
+        }
+        
+        // Test edge cases
+        assert!(MorkTag::SymbolSize(64).encode_as_byte().is_err()); // Too large
+        assert!(MorkTag::VarRef(64).encode_as_byte().is_err()); // Too large
+        assert!(MorkTag::Arity(64).encode_as_byte().is_err()); // Too large
+        
+        println!("MORK tag encoding/decoding tests passed!");
+    }
+    
+    #[test]
+    fn test_mork_expr_conversion() {
+        println!("=== Testing MORK Expression Conversion ===");
+        
+        // Test simple expression
+        let simple_bytes = vec![
+            MorkTag::SymbolSize(4).encode_as_byte().unwrap(),
+            b'n', b'a', b'm', b'e'
+        ];
+        
+        let mork_expr = MorkExpr::from_bytes(simple_bytes).unwrap();
+        let sexpr = mork_expr.to_sexpr().unwrap();
+        
+        println!("Simple MORK: {:?} -> S-expr: {}", mork_expr.bytes, sexpr);
+        assert_eq!(sexpr, "name");
+        
+        // Test compound expression [2] hello world
+        let compound_bytes = vec![
+            MorkTag::Arity(2).encode_as_byte().unwrap(),
+            MorkTag::SymbolSize(5).encode_as_byte().unwrap(),
+            b'h', b'e', b'l', b'l', b'o',
+            MorkTag::SymbolSize(5).encode_as_byte().unwrap(),
+            b'w', b'o', b'r', b'l', b'd'
+        ];
+        
+        let compound_expr = MorkExpr::from_bytes(compound_bytes).unwrap();
+        let compound_sexpr = compound_expr.to_sexpr().unwrap();
+        
+        println!("Compound MORK -> S-expr: {}", compound_sexpr);
+        assert_eq!(compound_sexpr, "(hello world)");
+        
+        println!("MORK expression conversion tests passed!");
     }
     
     #[test]
