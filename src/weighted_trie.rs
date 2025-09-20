@@ -469,7 +469,8 @@ pub struct WeightedTriemap<
     pub(crate) weights: PathMap<NodeWeight, A>,
     /// Top-k tracker for heaviest children
     pub(crate) topk: UnsafeCell<TopKTracker>,
-    /// Allocator
+    /// Allocator (kept for generic API compatibility)
+    #[allow(dead_code)]
     pub(crate) alloc: A,
 }
 
@@ -657,66 +658,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         self.set_val_at_with_subtrees(sexpr, val, extract_subtrees);
     }
     
-    /// Demonstration of how real MORK integration would work
-    /// This shows the interface for production MORK systems
-    #[allow(dead_code)]
-    fn add_mork_expr_demo(&mut self, _expr_bytes: &[u8], _val: V, _extract_subtrees: bool) {
-        // Real MORK integration would look like this:
-        /*
-        // 1. Create MORK Expr from bytecode
-        let expr = Expr { ptr: expr_bytes.as_ptr() as *mut u8 };
-        
-        // 2. Add the main expression
-        let serialized = unsafe { serialize(expr.span().as_ref().unwrap()) };
-        self.set_val_internal(serialized.as_bytes(), val.clone());
-        
-        // 3. Extract subtrees if requested
-        if extract_subtrees {
-            let mut ez = ExprZipper::new(expr);
-            let subtrees = self.extract_mork_subtrees(&mut ez);
-            
-            for subtree_bytes in subtrees {
-                let subtree_serialized = serialize(&subtree_bytes);
-                self.set_val_internal(subtree_serialized.as_bytes(), val.clone());
-            }
-        }
-        */
-        
-        // For now, this is just a demonstration of the interface
-        unimplemented!("This demonstrates MORK integration interface - use add_sexpr() for working implementation")
-    }
-    
-    #[allow(dead_code)]
-    fn extract_mork_subtrees(&self, _ez: &mut ()) -> Vec<Vec<u8>> {
-        // Real implementation would traverse MORK Expr using ExprZipper:
-        /*
-        let mut subtrees = Vec::new();
-        
-        loop {
-            match ez.tag() {
-                Tag::Arity(arity) => {
-                    // This is a compound expression - add it as subtree
-                    subtrees.push(ez.subexpr().span().as_ref().unwrap().to_vec());
-                    
-                    // Descend into children
-                    if !ez.next() { break; }
-                }
-                Tag::SymbolSize(_) => {
-                    // Skip symbols (atoms)
-                    if !ez.next() { break; }
-                }
-                Tag::NewVar | Tag::VarRef(_) => {
-                    // Skip variables
-                    if !ez.next() { break; }
-                }
-            }
-        }
-        
-        subtrees
-        */
-        Vec::new()
-    }
-    
+
     /// Get a value at the given path
     pub fn get<P: AsRef<[u8]>>(&self, path: P) -> Option<&V> {
         self.inner.get_val_at(path)
