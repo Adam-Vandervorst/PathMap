@@ -353,6 +353,15 @@ impl Default for NodeWeight {
 
 /// Weight semiring operations
 impl NodeWeight {
+    /// Create new NodeWeight with specified local count
+    pub fn new_with_local_count(local_count: u64) -> Self {
+        Self {
+            local_count,
+            subtree_count: 0,
+            compress_gain_sum: 0.0,
+        }
+    }
+
     /// Union operation: w = w1 + w2
     pub fn union(&self, other: &Self) -> Self {
         Self {
@@ -409,6 +418,16 @@ impl Ord for TopKEntry {
         self.composite_score.partial_cmp(&other.composite_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     }
+}
+
+/// Pattern Matching Result for WeightedTriemap queries
+#[derive(Debug, Clone)]
+pub struct QueryMatch {
+    pub expression: String,
+    pub total_weight: f64,
+    pub local_count: f64,
+    pub subtree_count: f64,
+    pub compression_gain: f64,
 }
 
 /// Top-K tracker with fixed size
@@ -800,6 +819,35 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
     pub fn intersection_with(&mut self, _other: &Self) {
         // Similar to union, this would use PathMap's intersection operations
         todo!("Implement intersection operation using PathMap's ring operations")
+    }
+    
+}
+
+// Specialized methods for NodeWeight WeightedTriemap
+impl WeightedTriemap<NodeWeight> {
+    /// Get top-k results by local count (highest first)
+    pub fn get_topk_by_local_count(&self, k: usize) -> Vec<QueryMatch> {
+        let mut candidates: Vec<_> = self.inner.iter()
+            .filter_map(|(path_bytes, node_weight)| {
+                if let Ok(expr_str) = String::from_utf8(path_bytes.clone()) {
+                    Some(QueryMatch {
+                        expression: expr_str,
+                        total_weight: node_weight.composite_weight(),
+                        local_count: node_weight.local_count as f64,
+                        subtree_count: node_weight.subtree_count as f64,
+                        compression_gain: node_weight.compress_gain_sum,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        // Sort by local count (descending) - as requested by user
+        candidates.sort_by(|a, b| b.local_count.partial_cmp(&a.local_count).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(k);
+        
+        candidates
     }
 }
 
