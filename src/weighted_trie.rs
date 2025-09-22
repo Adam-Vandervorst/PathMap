@@ -849,6 +849,77 @@ impl WeightedTriemap<NodeWeight> {
         
         candidates
     }
+
+    /// Get weight for a specific path (returns owned copy)
+    pub fn get_weight_copy(&self, path: &[u8]) -> Option<NodeWeight> {
+        self.weights.get(path).cloned()
+    }
+
+    /// Increment count for a path
+    pub fn increment_count(&mut self, path: &[u8], count: u64) -> Result<(), String> {
+        // Get or create existing weight
+        let current_weight = self.weights.get(path).cloned().unwrap_or_default();
+        
+        // Create new weight with incremented count
+        let new_weight = NodeWeight {
+            local_count: current_weight.local_count + count,
+            subtree_count: current_weight.subtree_count,
+            compress_gain_sum: current_weight.compress_gain_sum,
+        };
+
+        // Update both maps
+        self.inner.set_val_at(path, new_weight.clone());
+        self.weights.set_val_at(path, new_weight);
+        
+        Ok(())
+    }
+
+    /// Get top-k paths with their weights
+    pub fn get_top_k_paths(&self, k: usize) -> Vec<(Vec<u8>, NodeWeight)> {
+        let mut candidates: Vec<_> = self.weights.iter()
+            .map(|(path_bytes, weight)| (path_bytes, weight.clone()))
+            .collect();
+        
+        // Sort by total weight (local + subtree) descending
+        candidates.sort_by(|a, b| {
+            let weight_a = a.1.local_count + a.1.subtree_count;
+            let weight_b = b.1.local_count + b.1.subtree_count;
+            weight_b.cmp(&weight_a)
+        });
+        
+        candidates.truncate(k);
+        candidates
+    }
+
+    /// Check if the triemap is empty
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty() && self.weights.is_empty()
+    }
+
+    /// Recompute subtree counts for all nodes
+    pub fn recompute_subtree_counts(&mut self) -> Result<(), String> {
+        // This is a simplified version - a full implementation would need
+        // to traverse the trie structure and aggregate counts bottom-up
+        
+        // For now, just ensure subtree_count >= local_count for each node
+        let mut updates = Vec::new();
+        
+        for (path, weight) in self.weights.iter() {
+            if weight.subtree_count < weight.local_count {
+                let mut updated_weight = weight.clone();
+                updated_weight.subtree_count = weight.local_count;
+                updates.push((path, updated_weight));
+            }
+        }
+        
+        // Apply updates
+        for (path, weight) in updates {
+            self.weights.set_val_at(&path, weight.clone());
+            self.inner.set_val_at(&path, weight);
+        }
+        
+        Ok(())
+    }
 }
 
 #[cfg(test)]
