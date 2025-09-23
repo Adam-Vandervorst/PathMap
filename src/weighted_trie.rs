@@ -335,18 +335,12 @@ impl SimpleSExprParser {
 pub struct NodeWeight {
     /// Number of times this exact node/pattern occurred
     pub local_count: u64,
-    /// Aggregate occurrences below this node (sum of descendants)
-    pub subtree_count: u64,
-    /// Running sum of achieved compression gains when a feature rooted here was accepted
-    pub compress_gain_sum: f64,
 }
 
 impl Default for NodeWeight {
     fn default() -> Self {
         Self {
             local_count: 0,
-            subtree_count: 0,
-            compress_gain_sum: 0.0,
         }
     }
 }
@@ -357,8 +351,6 @@ impl NodeWeight {
     pub fn new_with_local_count(local_count: u64) -> Self {
         Self {
             local_count,
-            subtree_count: 0,
-            compress_gain_sum: 0.0,
         }
     }
 
@@ -366,8 +358,6 @@ impl NodeWeight {
     pub fn union(&self, other: &Self) -> Self {
         Self {
             local_count: self.local_count + other.local_count,
-            subtree_count: self.subtree_count + other.subtree_count,
-            compress_gain_sum: self.compress_gain_sum + other.compress_gain_sum,
         }
     }
     
@@ -375,8 +365,6 @@ impl NodeWeight {
     pub fn intersection_min(&self, other: &Self) -> Self {
         Self {
             local_count: self.local_count.min(other.local_count),
-            subtree_count: self.subtree_count.min(other.subtree_count),
-            compress_gain_sum: self.compress_gain_sum.min(other.compress_gain_sum),
         }
     }
     
@@ -384,14 +372,12 @@ impl NodeWeight {
     pub fn intersection_mult(&self, other: &Self) -> Self {
         Self {
             local_count: self.local_count * other.local_count,
-            subtree_count: self.subtree_count * other.subtree_count,
-            compress_gain_sum: self.compress_gain_sum * other.compress_gain_sum,
         }
     }
     
     /// Calculate composite weight (can be customized based on use case)
     pub fn composite_weight(&self) -> f64 {
-        (self.subtree_count as f64) + self.compress_gain_sum
+        self.local_count as f64
     }
 }
 
@@ -426,8 +412,6 @@ pub struct QueryMatch {
     pub expression: String,
     pub total_weight: f64,
     pub local_count: f64,
-    pub subtree_count: f64,
-    pub compression_gain: f64,
 }
 
 /// Top-K tracker with fixed size
@@ -589,8 +573,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         let current_weight = self.weights.get_val_at(path_bytes).cloned().unwrap_or_default();
         let new_weight = NodeWeight {
             local_count: current_weight.local_count + 1,
-            subtree_count: current_weight.subtree_count + 1, // Will be updated by propagate_subtree_counts
-            compress_gain_sum: current_weight.compress_gain_sum,
         };
         self.weights.set_val_at(path_bytes, new_weight.clone());
         
@@ -604,9 +586,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         unsafe {
             (*self.topk.get()).update_or_add_entry(entry);
         }
-        
-        // Propagate subtree count updates to ancestors
-        self.propagate_subtree_counts(path_bytes);
     }
     
     /// Extract all subtrees from an S-Expression string
@@ -746,43 +725,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> WeightedTriemap<V, A> {
         }
     }
     
-    /// Propagate subtree count changes up the tree
-    fn propagate_subtree_counts(&mut self, path: &[u8]) {
-        // Update all ancestor paths
-        for prefix_len in (0..path.len()).rev() {
-            let prefix = &path[..prefix_len];
-            
-            let current_weight = self.weights.get_val_at(prefix).cloned().unwrap_or_default();
-            let new_weight = NodeWeight {
-                local_count: current_weight.local_count,
-                subtree_count: current_weight.subtree_count + 1,
-                compress_gain_sum: current_weight.compress_gain_sum,
-            };
-            self.weights.set_val_at(prefix, new_weight);
-        }
-    }
-    
-    /// Add compression gain to a specific path
+    /// Add compression gain to a specific path (simplified without subtree tracking)
     pub fn add_compression_gain<P: AsRef<[u8]>>(&mut self, path: P, gain: f64) {
-        let path_bytes = path.as_ref();
-        let current_weight = self.weights.get_val_at(path_bytes).cloned().unwrap_or_default();
-        let new_weight = NodeWeight {
-            local_count: current_weight.local_count,
-            subtree_count: current_weight.subtree_count,
-            compress_gain_sum: current_weight.compress_gain_sum + gain,
-        };
-        self.weights.set_val_at(path_bytes, new_weight.clone());
-        
-        // Update top-k tracker with the updated entry
-        let entry = TopKEntry {
-            path: path_bytes.to_vec(),
-            weight: new_weight.clone(),
-            composite_score: new_weight.composite_weight(),
-        };
-        
-        unsafe {
-            (*self.topk.get()).update_or_add_entry(entry);
-        }
+        // For now, compression gain is not tracked since we only use local_count
+        // This method is kept for API compatibility but does nothing
     }
 }
 
@@ -834,8 +780,6 @@ impl WeightedTriemap<NodeWeight> {
                         expression: expr_str,
                         total_weight: node_weight.composite_weight(),
                         local_count: node_weight.local_count as f64,
-                        subtree_count: node_weight.subtree_count as f64,
-                        compression_gain: node_weight.compress_gain_sum,
                     })
                 } else {
                     None
@@ -863,8 +807,6 @@ impl WeightedTriemap<NodeWeight> {
         // Create new weight with incremented count
         let new_weight = NodeWeight {
             local_count: current_weight.local_count + count,
-            subtree_count: current_weight.subtree_count,
-            compress_gain_sum: current_weight.compress_gain_sum,
         };
 
         // Update both maps
@@ -880,10 +822,10 @@ impl WeightedTriemap<NodeWeight> {
             .map(|(path_bytes, weight)| (path_bytes, weight.clone()))
             .collect();
         
-        // Sort by total weight (local + subtree) descending
+        // Sort by local_count descending
         candidates.sort_by(|a, b| {
-            let weight_a = a.1.local_count + a.1.subtree_count;
-            let weight_b = b.1.local_count + b.1.subtree_count;
+            let weight_a = a.1.local_count;
+            let weight_b = b.1.local_count;
             weight_b.cmp(&weight_a)
         });
         
@@ -894,31 +836,6 @@ impl WeightedTriemap<NodeWeight> {
     /// Check if the triemap is empty
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty() && self.weights.is_empty()
-    }
-
-    /// Recompute subtree counts for all nodes
-    pub fn recompute_subtree_counts(&mut self) -> Result<(), String> {
-        // This is a simplified version - a full implementation would need
-        // to traverse the trie structure and aggregate counts bottom-up
-        
-        // For now, just ensure subtree_count >= local_count for each node
-        let mut updates = Vec::new();
-        
-        for (path, weight) in self.weights.iter() {
-            if weight.subtree_count < weight.local_count {
-                let mut updated_weight = weight.clone();
-                updated_weight.subtree_count = weight.local_count;
-                updates.push((path, updated_weight));
-            }
-        }
-        
-        // Apply updates
-        for (path, weight) in updates {
-            self.weights.set_val_at(&path, weight.clone());
-            self.inner.set_val_at(&path, weight);
-        }
-        
-        Ok(())
     }
 }
 
@@ -1095,25 +1012,17 @@ mod tests {
     fn test_node_weight_operations() {
         let w1 = NodeWeight {
             local_count: 5,
-            subtree_count: 15,
-            compress_gain_sum: 2.5,
         };
         
         let w2 = NodeWeight {
             local_count: 3,
-            subtree_count: 10,
-            compress_gain_sum: 1.8,
         };
         
         let union = w1.union(&w2);
         assert_eq!(union.local_count, 8);
-        assert_eq!(union.subtree_count, 25);
-        assert_eq!(union.compress_gain_sum, 4.3);
         
         let intersection = w1.intersection_min(&w2);
         assert_eq!(intersection.local_count, 3);
-        assert_eq!(intersection.subtree_count, 10);
-        assert_eq!(intersection.compress_gain_sum, 1.8);
     }
     
     #[test]
@@ -1125,7 +1034,6 @@ mod tests {
         
         let weight = wtm.get_weight("test").unwrap();
         assert_eq!(weight.local_count, 2);
-        assert_eq!(weight.subtree_count, 2);
         
         let topk = wtm.get_topk();
         assert!(!topk.is_empty());
@@ -1189,12 +1097,12 @@ mod tests {
         let weight2 = wtm.get_weight(expr2).unwrap();
         let weight3 = wtm.get_weight(expr3).unwrap();
         
-        println!("Weight for '{}': local_count={}, subtree_count={}", 
-                expr1, weight1.local_count, weight1.subtree_count);
-        println!("Weight for '{}': local_count={}, subtree_count={}", 
-                expr2, weight2.local_count, weight2.subtree_count);
-        println!("Weight for '{}': local_count={}, subtree_count={}", 
-                expr3, weight3.local_count, weight3.subtree_count);
+        println!("Weight for '{}': local_count={}", 
+                expr1, weight1.local_count);
+        println!("Weight for '{}': local_count={}", 
+                expr2, weight2.local_count);
+        println!("Weight for '{}': local_count={}", 
+                expr3, weight3.local_count);
         
         // "(first_name John)" wurde 3x hinzugefügt
         assert_eq!(weight1.local_count, 3);
