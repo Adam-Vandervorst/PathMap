@@ -42,44 +42,6 @@ impl<V: Clone + Send + Sync + Unpin> WeightedTriemap<V> {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
-
-    pub fn extract_subtrees(input: &str) -> Vec<String> {
-        let mut subtrees = Vec::new();
-        let mut depth = 0;
-        let mut start = 0;
-        let mut in_string = false;
-        let mut escape_next = false;
-        
-        let chars: Vec<char> = input.chars().collect();
-        
-        for (i, &c) in chars.iter().enumerate() {
-            if escape_next {
-                escape_next = false;
-                continue;
-            }
-            
-            match c {
-                '\\' if in_string => escape_next = true,
-                '"' => in_string = !in_string,
-                '(' if !in_string => {
-                    if depth == 0 {
-                        start = i;
-                    }
-                    depth += 1;
-                }
-                ')' if !in_string => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let subtree = chars[start..=i].iter().collect::<String>();
-                        subtrees.push(subtree);
-                    }
-                }
-                _ => {}
-            }
-        }
-        
-        subtrees
-    }
 }
 
 impl<V: Clone + Send + Sync + Unpin> Default for WeightedTriemap<V> {
