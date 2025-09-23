@@ -19,10 +19,6 @@ impl<V: Clone + Send + Sync + Unpin> WeightedTriemap<V> {
         }
     }
 
-    pub fn new_with_k(_k: usize) -> Self {
-        Self::new()
-    }
-
     pub fn increment_count(&mut self, path: &[u8]) {
         let current_weight = self.inner.get_val_at(path)
             .map(|w| w.clone())
@@ -35,7 +31,7 @@ impl<V: Clone + Send + Sync + Unpin> WeightedTriemap<V> {
         self.inner.set_val_at(path, new_weight);
     }
 
-    pub fn get_weight_copy(&self, path: &[u8]) -> Option<NodeWeight> {
+    pub fn get_weight(&self, path: &[u8]) -> Option<NodeWeight> {
         self.inner.get_val_at(path).cloned()
     }
 
