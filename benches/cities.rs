@@ -168,6 +168,25 @@ fn cities_val_count(bencher: Bencher) {
     assert_eq!(sink, unique_count);
 }
 
+#[divan::bench()]
+fn cities_goat_val_count(bencher: Bencher) {
+
+    let pairs = read_data();
+    let mut map = PathMap::new();
+    let mut unique_count = 0;
+    for (k, v) in pairs.iter() {
+        if map.set_val_at(k, *v).is_none() {
+            unique_count += 1;
+        }
+    }
+
+    let mut sink = 0;
+    bencher.bench_local(|| {
+        *black_box(&mut sink) = map.goat_val_count();
+    });
+    assert_eq!(sink, unique_count);
+}
+
 #[cfg(feature="arena_compact")]
 #[divan::bench()]
 fn cities_val_count_act(bencher: Bencher) {

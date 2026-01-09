@@ -253,6 +253,21 @@ fn superdense_val_count_bench(bencher: Bencher, n: u64) {
     assert_eq!(sink, n as usize);
 }
 
+#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000])]
+fn superdense_goat_val_count_bench(bencher: Bencher, n: u64) {
+
+    let mut map: PathMap<u64> = PathMap::new();
+    for i in 0..n { map.set_val_at(prefix_key(&i), i); }
+
+    //Benchmark the time taken to count the number of values in the map
+    let mut sink = 0;
+    bencher.bench_local(|| {
+        *black_box(&mut sink) = map.goat_val_count()
+    });
+    assert_eq!(sink, n as usize);
+}
+
+
 #[cfg(feature="arena_compact")]
 #[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000])]
 fn superdense_val_count_bench_act(bencher: Bencher, n: u64) {

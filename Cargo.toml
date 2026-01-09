@@ -114,6 +114,7 @@ harness = false
 [[bench]]
 name = "sla"
 harness = false
+required-features = ["viz"]
 
 [workspace]
 members = ["pathmap-derive"]

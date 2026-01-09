@@ -29,7 +29,7 @@ pub struct ByteNode<Cf, A: Allocator> {
     #[cfg(feature = "nightly")]
     values: Vec<Cf, A>,
     #[cfg(not(feature = "nightly"))]
-    values: Vec<Cf>,
+    pub(crate) values: Vec<Cf>,
     alloc: A,
 }
 
@@ -991,10 +991,18 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             t + cf.has_val() as usize + cf.rec().map(|r| val_count_below_node(r, cache)).unwrap_or(0)
         });
     }
-    fn node_goat_val_count(&self) -> usize {
+/*    fn node_goat_val_count(&self) -> usize {
         return self.values.iter().rfold(0, |t, cf| {
-            t + cf.has_val() as usize
+            t + cf.has_val() as usize + cf.rec().map(|r| r.as_tagged().node_goat_val_count()).unwrap_or(0)
         });
+    }*/
+    #[inline]
+    fn node_goat_val_count(&self) -> usize {
+        let mut result = 0;
+        for cf in self.values.iter() {
+            result += cf.has_val() as usize
+        }
+        result
     }
     fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
         for (pos, cf) in self.values.iter().enumerate() {

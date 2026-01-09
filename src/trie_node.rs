@@ -7,7 +7,7 @@ use dyn_clone::*;
 use local_or_heap::LocalOrHeap;
 use arrayvec::ArrayVec;
 
-use crate::utils::ByteMask;
+use crate::utils::{BitMask, ByteMask};
 use crate::alloc::Allocator;
 use crate::dense_byte_node::*;
 use crate::ring::*;
@@ -2422,14 +2422,145 @@ fn traverse_physical_children_internal<Ctx, NodeF, FoldF, V, A>(node: TaggedNode
 {
     let mut ctx = Ctx::default();
 
-    let (mut tok, mut child) = node.node_child_iter_start();
-    while let Some(child_node) = child {
-        let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
-        ctx = fold_f(ctx, child_ctx);
-        (tok, child) = node.node_child_iter_next(tok);
+    match node {
+        TaggedNodeRef::DenseByteNode(n) => {
+            for cf in n.values.iter() {
+                if let Some(rec) = cf.rec() {
+                    let child_ctx = traverse_physical_internal(rec, node_f, fold_f, cache);
+                    ctx = fold_f(ctx, child_ctx);
+                }
+            }
+        }
+        TaggedNodeRef::LineListNode(n) => {
+            if n.is_used_child_0() {
+                let child_node = unsafe{ n.child_in_slot::<0>() };
+                let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
+                ctx = fold_f(ctx, child_ctx);
+            }
+            if n.is_used_child_1() {
+                let child_node = unsafe{ n.child_in_slot::<1>() };
+                let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
+                ctx = fold_f(ctx, child_ctx);
+            }
+        }
+        TaggedNodeRef::CellByteNode(_) => { todo!() }
+        TaggedNodeRef::TinyRefNode(_) => { todo!() }
+        TaggedNodeRef::EmptyNode => { todo!() }
     }
 
     node_f(node, ctx)
+}
+
+// This experiment is still OK, but the `&mut [W]` is awkward to instantiate if you don't actually have
+/*pub fn traverse_split_cata<'a, A : Allocator, V : TrieValue, W, MapF, CollapseF, AlgF>(node: &TrieNodeODRc<V, A>, mut map_f: MapF, mut collapse_f: CollapseF, alg_f: AlgF) -> W
+where
+    MapF: Copy + FnMut(&V, &[u8]) -> W + 'a,
+    CollapseF: Copy + FnMut(&V, W, &[u8]) -> W + 'a,
+    AlgF: Copy + Fn(&ByteMask, &mut [W], &[u8]) -> W + 'a,
+{
+    match node.as_tagged() {
+        TaggedNodeRef::DenseByteNode(n) => {
+            let mut ws = [const { std::mem::MaybeUninit::<W>::uninit() }; 256];
+            // let mut ws: Vec<std::mem::MaybeUninit::<W>> = Vec::with_capacity(n.mask.count_bits());
+            // unsafe { ws.set_len(n.mask.count_bits()) };
+            let mut c = 0;
+            for cf in n.values.iter() {
+                if let Some(rec) = cf.rec() {
+                    let w = traverse_split_cata(rec, map_f, collapse_f, alg_f);
+                    if let Some(v) = cf.val() {
+                        ws[c].write(collapse_f(v, w, &[]));
+                    } else {
+                        ws[c].write(w);
+                    }
+                } else if let Some(v) = cf.val() {
+                    ws[c].write(map_f(v, &[]));
+                }
+                c += 1;
+            }
+            alg_f(&n.mask, unsafe { std::mem::transmute(&mut ws[..c]) }, &[])
+        }
+        TaggedNodeRef::LineListNode(n) => {
+            // let mut ws = vec![];
+            // if n.is_used_value_0() {
+            //     ws.append(map_f(unsafe { n.val_in_slot::<0>() }, &[]));
+            // }
+            // if n.is_used_value_1() {
+            //     ws.append(map_f(unsafe { n.val_in_slot::<1>() }, &[]));
+            // }
+            // if n.is_used_child_0() {
+            //     let child_node = unsafe{ n.child_in_slot::<0>() };
+            //     let child_ctx = traverse_split_cata(child_node, map_f, collapse_f, alg_f);
+            //
+            // }
+            // if n.is_used_child_1() {
+            //     let child_node = unsafe{ n.child_in_slot::<1>() };
+            //     let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
+            //     ctx = fold_f(ctx, child_ctx);
+            // }
+            alg_f(&ByteMask::new(), &mut [], &[])
+        }
+        TaggedNodeRef::CellByteNode(_) => { todo!() }
+        TaggedNodeRef::TinyRefNode(_) => { todo!() }
+        TaggedNodeRef::EmptyNode => { todo!() }
+    }
+}
+*/
+
+// Adam: This seems to be a winner, though it needs some work, the split alg gives us the opportunity to nicely compose the different calls for the different node types without introducing overhead
+pub fn traverse_osplit_cata<'a, A : Allocator, V : TrieValue, Alg : Default, W, MapF, CollapseF, InAlgF, OutAlgF>(node: &TrieNodeODRc<V, A>, mut map_f: MapF, mut collapse_f: CollapseF, in_alg_f: InAlgF, out_alg_f: OutAlgF) -> W
+where
+    MapF: Copy + FnMut(&V, &[u8]) -> W + 'a,
+    CollapseF: Copy + FnMut(&V, W, &[u8]) -> W + 'a,
+    InAlgF: Copy + Fn(&ByteMask, W, &[u8], &mut Alg),
+    OutAlgF: Copy + Fn(&ByteMask, Alg, &[u8]) -> W + 'a,
+{
+    match node.as_tagged() {
+        TaggedNodeRef::DenseByteNode(n) => {
+            let mut ws = Some(Alg::default());
+            for cf in n.values.iter() {
+                if let Some(rec) = cf.rec() {
+                    let w = traverse_osplit_cata(rec, map_f, collapse_f, in_alg_f, out_alg_f);
+                    if let Some(v) = cf.val() {
+                        in_alg_f(&n.mask, collapse_f(v, w, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
+                    } else {
+                        in_alg_f(&n.mask, w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
+                    }
+                } else if let Some(v) = cf.val() {
+                    in_alg_f(&n.mask, map_f(v, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
+                }
+            }
+            out_alg_f(&n.mask, unsafe { std::mem::take(&mut ws).unwrap_unchecked() }, &[])
+        }
+        TaggedNodeRef::LineListNode(n) => {
+            // Adam: I skimped out on the collapse logic here, I assume there are some built-in LineListNode functions I can use for prefixes, or another way to organize the branching based on the mask directly
+            let mut ws = Some(Alg::default());
+
+            if n.is_used_value_0() {
+                in_alg_f(&ByteMask::new(), map_f(unsafe { n.val_in_slot::<0>() }, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
+            }
+            if n.is_used_value_1() {
+                in_alg_f(&ByteMask::new(), map_f(unsafe { n.val_in_slot::<1>() }, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
+            }
+            if n.is_used_child_0() {
+                let child_node = unsafe{ n.child_in_slot::<0>() };
+                let w = traverse_osplit_cata(child_node, map_f, collapse_f, in_alg_f, out_alg_f);
+                in_alg_f(&ByteMask::new(), w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
+
+            }
+            if n.is_used_child_1() {
+                let child_node = unsafe{ n.child_in_slot::<1>() };
+                let w = traverse_osplit_cata(child_node, map_f, collapse_f, in_alg_f, out_alg_f);
+                in_alg_f(&ByteMask::new(), w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
+            }
+
+            out_alg_f(&ByteMask::new(), unsafe { std::mem::take(&mut ws).unwrap_unchecked() }, &[])
+        }
+        TaggedNodeRef::CellByteNode(_) => { todo!() }
+        TaggedNodeRef::TinyRefNode(_) => { todo!() }
+        TaggedNodeRef::EmptyNode => {
+            out_alg_f(&ByteMask::new(), Alg::default(), &[])
+        }
+    }
 }
 
 /// Internal function to walk a mut TrieNodeODRc<V> ref along a path
@@ -2483,6 +2614,9 @@ pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut Tr
 //  module come from the visibility of the trait it is derived on.  In this case, `TrieNode`
 //Credit to QuineDot for his ideas on this pattern here: https://users.rust-lang.org/t/inferred-lifetime-for-dyn-trait/112116/7
 pub(crate) use opaque_dyn_rc_trie_node::TrieNodeODRc;
+use crate::morphisms::SplitCata;
+use crate::TrieValue;
+
 #[cfg(not(feature = "slim_ptrs"))]
 mod opaque_dyn_rc_trie_node {
     use std::sync::Arc;

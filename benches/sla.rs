@@ -388,7 +388,7 @@ fn tipover_attention_weave() {
     // let res = rtq.vF_mut().merkleize();
     // println!("{:?}", res.hash);
     let t0 = Instant::now();
-    println!("{:?} {:?}", rtq.vF().read_zipper().into_cata_cached(morphisms::alg::hash), t0.elapsed().as_micros());
+    // println!("{:?} {:?}", rtq.vF().read_zipper().into_cata_cached(morphisms::alg::hash), t0.elapsed().as_micros());
     return;
 
     // rtk.vF_mut().merkleize();
