@@ -2752,28 +2752,33 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     {
         let mut ws = Some(Acc::default());
 
-//GOAT, should we remove the path from out_alg??  I can't see when it's ever used...
-// A: Either the path doesn't belong on the out_alg or on the in_alg.
-
-//GOAT, check out whether in_alg should get the path on the ByteNode
-
-//Cases:
-// * There is only one val.  Run map_f only
-// * There is only one child.  Recurse, then Run the in_alg -> out_alg combo
-// * Both slots are filled
-// GOAT, there is a problem where we have to care about whether it's a Val or child!
-//    - Is the first byte the same?
-//      N:
-//        - Call map_f on slot0 with the whole path
-//        - Call map_f on slot1 with the whole path
-//        - Call in_alg (branch_f) on each of the Ws
-//        - Call out_alg (fold_f) on the context with a composed mask from the first bytes
-//      Y:
-//        - Call map_f on slot0 with everything after first byte
-//        - Call map_f on slot1 with everything after first byte
-//        - Call in_alg (branch_f) on each of the Ws
-//        - Call out_alg (fold_f) on the context with a composed mask from the second bytes
-
+//Pair node can have the following permutations: (Slot0, Slot1)
+//
+// - (Empty, Empty)
+//   Run only `finalize_f` on default `Acc`
+// - (Child, Empty)
+//   Recursively call on child, then run only `collapse_f` on the result, specifying the path
+// - (Child, Val), 1-byte key, same key byte
+//   Recursively call on child, then run only `collapse_f` on the result, specifying the value and the 1-byte path
+// - (Child, Val), different key bytes
+//   Recursively call on child, run `branch_f(collapse_f())` on the result. Then run `branch_f(collapse_f())` again
+//   with the value's path.  And finally, run `finalize_f()`
+// - (Child, Child)
+//   Recursively call on child0, run `branch_f(collapse_f())` on the result.  Do the same for child1.  Finally, run
+//   `finalize_f()`
+// - (Val, Empty)
+//   Run only `collapse_f` on the val
+// - (Val, Val), common first byte (meaning slot0 is a 1-byte path)
+//   run `collapse_f` on the slot1 val, specifying the path, then run `collapse_f` again on the slot0 val, specifying
+//   the common prefix byte
+// - (Val, Val), different first bytes
+//   Run `branch_f(collapse_f())` on each val, then `finalize_f` at the end
+// - (Val, Child), 1-byte key, same key byte (We could eliminate this case by requiring a canonical ordering for identical one-byte keys, but currently we don't)
+//   See "(Child, Val), 1-byte key, same key byte"
+// - (Val, Child), different key bytes
+//   See (Child, Val), different key bytes
+//
+//GOAT, It would be nice to refactor the pair_node in order to express each of these permutations as a unique value for the 4 header bits, so we could take the appropriate code path without looking at any path bytes
 
 
         if self.is_used_value_0() {
