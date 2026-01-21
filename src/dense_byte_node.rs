@@ -310,6 +310,10 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     /// Iterates the entries in `self`, calling `func` for each entry
     /// The arguments to `func` are: `func(self, key_byte, n)`, where `n` is the number of times
     /// `func` has been called prior.  This corresponds to index of the `CoFree` in the `values` vec
+    ///
+    /// PERF GOAT: this method is useful if you know you need the corresponding path byte.  If, however, the
+    /// byte might be unneeded, it's better to let self.values govern the loop, because using the mask
+    /// in the loop means the bitwise ops to manipulate the mask are always required.
     #[inline]
     fn for_each_item<F: FnMut(&Self, u8, usize)>(&self, mut func: F) {
         let mut n = 0;
@@ -325,6 +329,51 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 lm ^= 1u64 << index;
             }
         }
+    }
+
+    #[inline(always)]
+    pub fn node_recursive_cata<Acc, W, MapF, CollapseF, InAlgF, OutAlgF, const COMPUTE_PATH: bool>(&self, map_f: MapF, collapse_f: CollapseF, in_alg_f: InAlgF, out_alg_f: OutAlgF) -> W
+    where
+        Acc: Default,
+        MapF: Copy + Fn(&V, &[u8]) -> W,
+        CollapseF: Copy + Fn(&V, W, &[u8]) -> W,
+        InAlgF: Copy + Fn(&ByteMask, W, &[u8], &mut Acc),
+        OutAlgF: Copy + Fn(&ByteMask, Acc, &[u8]) -> W,
+    {
+        let mut mask_idx = 0;
+        let mut lm = unsafe{ *self.mask.0.get_unchecked(0) };
+        let mut ws = Some(Acc::default());
+        for cf in self.values.iter() {
+            //Compute the key byte.  Hopefully this will all be stripped away by the compiler if the path isn't used
+            //UPDATE: alas, my hopes were dashed.  No amount of reorganizing this code, eliminating all traps,
+            // unrolling the loop, etc., could convince LLVM to elide it.  So we have to hit it with the const hammer.
+            let key_byte;
+            let path = if COMPUTE_PATH {
+                while lm == 0 {
+                    mask_idx += 1;
+                    lm = unsafe{ *self.mask.0.get_unchecked(mask_idx) };
+                }
+                let byte_index = lm.trailing_zeros();
+                lm ^= 1u64 << byte_index;
+                key_byte = 64*(mask_idx as u8) + (byte_index as u8);
+                core::slice::from_ref(&key_byte)
+            } else {
+                &[]
+            };
+
+            //Do the recursive calling
+            if let Some(rec) = cf.rec() {
+                let w = recursive_cata::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(rec, map_f, collapse_f, in_alg_f, out_alg_f);
+                if let Some(v) = cf.val() {
+                    in_alg_f(&self.mask, collapse_f(v, w, path), path, unsafe { ws.as_mut().unwrap_unchecked() });
+                } else {
+                    in_alg_f(&self.mask, w, path, unsafe { ws.as_mut().unwrap_unchecked() });
+                }
+            } else if let Some(v) = cf.val() {
+                in_alg_f(&self.mask, map_f(v, path), path, unsafe { ws.as_mut().unwrap_unchecked() });
+            }
+        }
+        out_alg_f(&self.mask, unsafe { std::mem::take(&mut ws).unwrap_unchecked() }, &[])
     }
 }
 

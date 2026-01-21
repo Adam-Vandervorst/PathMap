@@ -61,7 +61,7 @@ fn binary_get(bencher: Bencher, n: u64) {
     });
 }
 
-#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000])]
+#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000, 100000])]
 fn binary_val_count_bench(bencher: Bencher, n: u64) {
 
     let keys = make_keys(n as usize, 1);
@@ -77,7 +77,7 @@ fn binary_val_count_bench(bencher: Bencher, n: u64) {
     assert_eq!(sink, n as usize);
 }
 
-#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000])]
+#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000, 100000])]
 fn binary_goat_val_count_bench(bencher: Bencher, n: u64) {
 
     let keys = make_keys(n as usize, 1);

@@ -2741,6 +2741,74 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             }
         }
     }
+
+    #[inline(always)]
+    pub fn node_recursive_cata<Acc, W, MapF, CollapseF, InAlgF, OutAlgF, const COMPUTE_PATH: bool>(&self, map_f: MapF, collapse_f: CollapseF, in_alg_f: InAlgF, out_alg_f: OutAlgF) -> W
+    where
+        Acc: Default,
+        MapF: Copy + Fn(&V, &[u8]) -> W,
+        CollapseF: Copy + Fn(&V, W, &[u8]) -> W,
+        InAlgF: Copy + Fn(&ByteMask, W, &[u8], &mut Acc),
+        OutAlgF: Copy + Fn(&ByteMask, Acc, &[u8]) -> W,
+    {
+        let mut ws = Some(Acc::default());
+
+//GOAT, should we remove the path from out_alg??  I can't see when it's ever used...
+// A: Either the path doesn't belong on the out_alg or on the in_alg.
+
+//GOAT, check out whether in_alg should get the path on the ByteNode
+
+//Cases:
+// * There is only one val.  Run map_f only
+// * There is only one child.  Recurse, then Run the in_alg -> out_alg combo
+// * Both slots are filled
+// GOAT, there is a problem where we have to care about whether it's a Val or child!
+//    - Is the first byte the same?
+//      N:
+//        - Call map_f on slot0 with the whole path
+//        - Call map_f on slot1 with the whole path
+//        - Call in_alg (branch_f) on each of the Ws
+//        - Call out_alg (fold_f) on the context with a composed mask from the first bytes
+//      Y:
+//        - Call map_f on slot0 with everything after first byte
+//        - Call map_f on slot1 with everything after first byte
+//        - Call in_alg (branch_f) on each of the Ws
+//        - Call out_alg (fold_f) on the context with a composed mask from the second bytes
+
+
+
+//New plan for API.
+// 3 closures.
+// - closure to deal with straight paths and values.  Fn(Option<&V>, Option<W>, &[u8]) -> W
+// - closure to deal with one downstream branch from a logical node.  Fn(&ByteMask, W, &mut Acc)
+// - closure to fold accumulator back into a W for the logical node.  Fn(&ByteMask, Acc) -> W
+//
+//Then, the non-jumping API would take:
+// 2 closures.
+// - closure to deal with one downstream branch from a logical node.  Fn(&ByteMask, W, &mut Acc)
+// - closure to deal with each path byte / logical node.  Fn(&ByteMask, Option<&V>, Acc) -> W
+
+
+        if self.is_used_value_0() {
+            in_alg_f(&ByteMask::new(), map_f(unsafe { self.val_in_slot::<0>() }, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
+        }
+        if self.is_used_value_1() {
+            in_alg_f(&ByteMask::new(), map_f(unsafe { self.val_in_slot::<1>() }, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
+        }
+        if self.is_used_child_0() {
+            let child_node = unsafe{ self.child_in_slot::<0>() };
+            let w = recursive_cata::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, map_f, collapse_f, in_alg_f, out_alg_f);
+            in_alg_f(&ByteMask::new(), w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
+
+        }
+        if self.is_used_child_1() {
+            let child_node = unsafe{ self.child_in_slot::<1>() };
+            let w = recursive_cata::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, map_f, collapse_f, in_alg_f, out_alg_f);
+            in_alg_f(&ByteMask::new(), w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
+        }
+
+        out_alg_f(&ByteMask::new(), unsafe { std::mem::take(&mut ws).unwrap_unchecked() }, &[])
+    }
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for LineListNode<V, A> {

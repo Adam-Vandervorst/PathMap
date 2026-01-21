@@ -2507,59 +2507,60 @@ where
 */
 
 // Adam: This seems to be a winner, though it needs some work, the split alg gives us the opportunity to nicely compose the different calls for the different node types without introducing overhead
-pub fn traverse_osplit_cata<'a, A : Allocator, V : TrieValue, Alg : Default, W, MapF, CollapseF, InAlgF, OutAlgF>(node: &TrieNodeODRc<V, A>, mut map_f: MapF, mut collapse_f: CollapseF, in_alg_f: InAlgF, out_alg_f: OutAlgF) -> W
+/// Traverse a trie with a split catamorphism and caller-provided aggregation.
+///
+/// Closure argument meanings:
+/// - `map_f(&V, &[u8]) -> W`: map a leaf value to a result. Args are the value and
+///   a path slice (currently always `&[]` in this implementation).
+/// - `collapse_f(&V, W, &[u8]) -> W`: combine a value stored along a path with a
+///   child result. Args are the value, the child result, and a path slice
+///   (currently always `&[]`).
+/// - `in_alg_f(&ByteMask, W, &[u8], &mut Alg)`: fold a single slot's result into
+///   the node accumulator. Args are the node's mask, the slot result, a path
+///   slice (currently always `&[]`), and the mutable accumulator.
+/// - `out_alg_f(&ByteMask, Alg, &[u8]) -> W`: finalize a node accumulator into the
+///   node's result. Args are the node's mask, the accumulator, and a path slice
+///   (currently always `&[]`).
+
+//GOAT issues
+// - The reason it's faster than the other abstraction because it branches on node type once, rather than twice per node.
+//
+// There is more stuff on the stack, meaning we're more likely to blow the stack
+//
+// * Needed to add caching
+// * The logic in pair node was wrong, because there is no guarantee both sides are at the same level; fixing that added another branch
+//
+// Observations:
+// If we want to count path-ends, MapF wouldn't work, but could pass Option<&V>, which would be fine
+// It might be possible to unify MapF and CollapseF, but 
+//
+//GOAT, TODO: Make a test to hit the stack overflow failure case
+//
+//GOAT:
+// * Look at the callbacks in line node
+// * Send partial paths in pair node too
+// * Come up with new names for in_alg and out_alg...
+// * Put caching back
+// * See if I can get closer to the other cata API without sacrificing performance
+//
+pub fn recursive_cata<A, V, Acc, W, MapF, CollapseF, InAlgF, OutAlgF, const COMPUTE_PATH: bool>(node: &TrieNodeODRc<V, A>, map_f: MapF, collapse_f: CollapseF, in_alg_f: InAlgF, out_alg_f: OutAlgF) -> W
 where
-    MapF: Copy + FnMut(&V, &[u8]) -> W + 'a,
-    CollapseF: Copy + FnMut(&V, W, &[u8]) -> W + 'a,
-    InAlgF: Copy + Fn(&ByteMask, W, &[u8], &mut Alg),
-    OutAlgF: Copy + Fn(&ByteMask, Alg, &[u8]) -> W + 'a,
+    V: Clone + Send + Sync,
+    A: Allocator,
+    Acc: Default,
+    MapF: Copy + Fn(&V, &[u8]) -> W,
+    CollapseF: Copy + Fn(&V, W, &[u8]) -> W,
+    // InAlgF: called for each 
+    InAlgF: Copy + Fn(&ByteMask, W, &[u8], &mut Acc),
+    // OutAlgF: collapses all children at the same level
+    OutAlgF: Copy + Fn(&ByteMask, Acc, &[u8]) -> W,
 {
     match node.as_tagged() {
-        TaggedNodeRef::DenseByteNode(n) => {
-            let mut ws = Some(Alg::default());
-            for cf in n.values.iter() {
-                if let Some(rec) = cf.rec() {
-                    let w = traverse_osplit_cata(rec, map_f, collapse_f, in_alg_f, out_alg_f);
-                    if let Some(v) = cf.val() {
-                        in_alg_f(&n.mask, collapse_f(v, w, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
-                    } else {
-                        in_alg_f(&n.mask, w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
-                    }
-                } else if let Some(v) = cf.val() {
-                    in_alg_f(&n.mask, map_f(v, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
-                }
-            }
-            out_alg_f(&n.mask, unsafe { std::mem::take(&mut ws).unwrap_unchecked() }, &[])
-        }
-        TaggedNodeRef::LineListNode(n) => {
-            // Adam: I skimped out on the collapse logic here, I assume there are some built-in LineListNode functions I can use for prefixes, or another way to organize the branching based on the mask directly
-            let mut ws = Some(Alg::default());
-
-            if n.is_used_value_0() {
-                in_alg_f(&ByteMask::new(), map_f(unsafe { n.val_in_slot::<0>() }, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
-            }
-            if n.is_used_value_1() {
-                in_alg_f(&ByteMask::new(), map_f(unsafe { n.val_in_slot::<1>() }, &[]), &[], unsafe { ws.as_mut().unwrap_unchecked() });
-            }
-            if n.is_used_child_0() {
-                let child_node = unsafe{ n.child_in_slot::<0>() };
-                let w = traverse_osplit_cata(child_node, map_f, collapse_f, in_alg_f, out_alg_f);
-                in_alg_f(&ByteMask::new(), w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
-
-            }
-            if n.is_used_child_1() {
-                let child_node = unsafe{ n.child_in_slot::<1>() };
-                let w = traverse_osplit_cata(child_node, map_f, collapse_f, in_alg_f, out_alg_f);
-                in_alg_f(&ByteMask::new(), w, &[], unsafe { ws.as_mut().unwrap_unchecked() });
-            }
-
-            out_alg_f(&ByteMask::new(), unsafe { std::mem::take(&mut ws).unwrap_unchecked() }, &[])
-        }
+        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(map_f, collapse_f, in_alg_f, out_alg_f) }
+        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(map_f, collapse_f, in_alg_f, out_alg_f) }
         TaggedNodeRef::CellByteNode(_) => { todo!() }
         TaggedNodeRef::TinyRefNode(_) => { todo!() }
-        TaggedNodeRef::EmptyNode => {
-            out_alg_f(&ByteMask::new(), Alg::default(), &[])
-        }
+        TaggedNodeRef::EmptyNode => { out_alg_f(&ByteMask::new(), Acc::default(), &[]) }
     }
 }
 
