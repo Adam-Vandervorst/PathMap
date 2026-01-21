@@ -524,12 +524,11 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
                 //     |bm, ws: &mut [usize], _| { ws.iter().sum() }
                 // ) + root_val
                 // Adam: this doesn't need to be called "traverse_osplit_cata" or be exposed under this interface; it can just live in morphisms
-                recursive_cata::<_, _, _, _, _, _, _, _, false>(
+                recursive_cata::<_, _, _, _, _, _, _, false>(
                     root,
-                    |v, _| { 1usize }, // on leaf values
-                    |_, w, _| { 1 + w }, // on values amongst a path
-                    |bm, w: usize, _, total| { *total += w }, // on merging children into a node
-                    |bm, total: usize, _| { total } // finalizing a node
+                    |v, w, _| { (v.is_some() as usize) + w.unwrap_or(0) }, // on values amongst a path
+                    |bm, w: usize, total| { *total += w }, // on merging children into a node
+                    |bm, total: usize| { total } // finalizing a node
                 ) + root_val
             },
             None => root_val

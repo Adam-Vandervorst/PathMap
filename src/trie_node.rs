@@ -2506,21 +2506,32 @@ where
 }
 */
 
-// Adam: This seems to be a winner, though it needs some work, the split alg gives us the opportunity to nicely compose the different calls for the different node types without introducing overhead
-/// Traverse a trie with a split catamorphism and caller-provided aggregation.
+/// GOAT recursive caching cata.  If this dev branch is successful this should replace the caching cata flavors in the public API
+/// This is the JUMPING cata
 ///
-/// Closure argument meanings:
-/// - `map_f(&V, &[u8]) -> W`: map a leaf value to a result. Args are the value and
-///   a path slice (currently always `&[]` in this implementation).
-/// - `collapse_f(&V, W, &[u8]) -> W`: combine a value stored along a path with a
-///   child result. Args are the value, the child result, and a path slice
-///   (currently always `&[]`).
-/// - `in_alg_f(&ByteMask, W, &[u8], &mut Alg)`: fold a single slot's result into
-///   the node accumulator. Args are the node's mask, the slot result, a path
-///   slice (currently always `&[]`), and the mutable accumulator.
-/// - `out_alg_f(&ByteMask, Alg, &[u8]) -> W`: finalize a node accumulator into the
-///   node's result. Args are the node's mask, the accumulator, and a path slice
-///   (currently always `&[]`).
+/// Closures:
+///
+/// `CollapseF`: Folds a possible value and a possible downstream continuation, prefixed by a linear sub-path into a single `W`
+/// `fn(val: Option<&V>, downstream: Option<W>, prefix: &[u8]) -> W`
+///
+/// `BranchF`: Accumulates the `W` representing a downstream branch into an `Acc` accumulator type
+/// `fn(branch_mask: &ByteMask, downstream: W, accumulator: &mut Acc)`
+///
+/// `FinalizeF`: Converts an `Acc` accumulator into a `W` representing the logical node
+/// `fn(branch_mask: &ByteMask, accumulator: Acc) -> W`
+
+//
+//New plan for API.
+// 3 closures.
+// - closure to deal with straight paths and values.  Fn(Option<&V>, Option<W>, &[u8]) -> W
+// - closure to deal with one downstream branch from a logical node.  Fn(&ByteMask, W, &mut Acc)
+// - closure to fold accumulator back into a W for the logical node.  Fn(&ByteMask, Acc) -> W
+//
+//Then, the non-jumping API would take:
+// 2 closures.
+// - closure to deal with one downstream branch from a logical node.  Fn(&ByteMask, W, &mut Acc)
+// - closure to deal with each path byte / logical node.  Fn(&ByteMask, Option<&V>, Acc) -> W
+
 
 //GOAT issues
 // - The reason it's faster than the other abstraction because it branches on node type once, rather than twice per node.
@@ -2543,24 +2554,21 @@ where
 // * Put caching back
 // * See if I can get closer to the other cata API without sacrificing performance
 //
-pub fn recursive_cata<A, V, Acc, W, MapF, CollapseF, InAlgF, OutAlgF, const COMPUTE_PATH: bool>(node: &TrieNodeODRc<V, A>, map_f: MapF, collapse_f: CollapseF, in_alg_f: InAlgF, out_alg_f: OutAlgF) -> W
+pub fn recursive_cata<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(node: &TrieNodeODRc<V, A>, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
 where
     V: Clone + Send + Sync,
     A: Allocator,
     Acc: Default,
-    MapF: Copy + Fn(&V, &[u8]) -> W,
-    CollapseF: Copy + Fn(&V, W, &[u8]) -> W,
-    // InAlgF: called for each 
-    InAlgF: Copy + Fn(&ByteMask, W, &[u8], &mut Acc),
-    // OutAlgF: collapses all children at the same level
-    OutAlgF: Copy + Fn(&ByteMask, Acc, &[u8]) -> W,
+    CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+    BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+    FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
 {
     match node.as_tagged() {
-        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(map_f, collapse_f, in_alg_f, out_alg_f) }
-        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(map_f, collapse_f, in_alg_f, out_alg_f) }
+        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f) }
+        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f) }
         TaggedNodeRef::CellByteNode(_) => { todo!() }
         TaggedNodeRef::TinyRefNode(_) => { todo!() }
-        TaggedNodeRef::EmptyNode => { out_alg_f(&ByteMask::new(), Acc::default(), &[]) }
+        TaggedNodeRef::EmptyNode => { finalize_f(&ByteMask::EMPTY, Acc::default()) }
     }
 }
 

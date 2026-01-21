@@ -332,13 +332,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     #[inline(always)]
-    pub fn node_recursive_cata<Acc, W, MapF, CollapseF, InAlgF, OutAlgF, const COMPUTE_PATH: bool>(&self, map_f: MapF, collapse_f: CollapseF, in_alg_f: InAlgF, out_alg_f: OutAlgF) -> W
+    pub fn node_recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
     where
         Acc: Default,
-        MapF: Copy + Fn(&V, &[u8]) -> W,
-        CollapseF: Copy + Fn(&V, W, &[u8]) -> W,
-        InAlgF: Copy + Fn(&ByteMask, W, &[u8], &mut Acc),
-        OutAlgF: Copy + Fn(&ByteMask, Acc, &[u8]) -> W,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
     {
         let mut mask_idx = 0;
         let mut lm = unsafe{ *self.mask.0.get_unchecked(0) };
@@ -362,18 +361,18 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             };
 
             //Do the recursive calling
+            //PERF NOTE: The reason we have two code paths around the call to `branch_f` instead of just doing
+            // `let w = cf.rec().map(|rec| recursive_cata(...))` is that the compiler won't optimize the implemntation
+            // of `branch_f` around whether `w` is none or not, if we go with one call to `branch_f`.  That means we
+            // often pay for two dependent branches instead of one, and the difference was 25% to the val_count benchmark.
             if let Some(rec) = cf.rec() {
-                let w = recursive_cata::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(rec, map_f, collapse_f, in_alg_f, out_alg_f);
-                if let Some(v) = cf.val() {
-                    in_alg_f(&self.mask, collapse_f(v, w, path), path, unsafe { ws.as_mut().unwrap_unchecked() });
-                } else {
-                    in_alg_f(&self.mask, w, path, unsafe { ws.as_mut().unwrap_unchecked() });
-                }
-            } else if let Some(v) = cf.val() {
-                in_alg_f(&self.mask, map_f(v, path), path, unsafe { ws.as_mut().unwrap_unchecked() });
+                let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f);
+                branch_f(&self.mask, collapse_f(cf.val(), Some(w), path), unsafe { ws.as_mut().unwrap_unchecked() });
+            } else {
+                branch_f(&self.mask, collapse_f(cf.val(), None, path), unsafe { ws.as_mut().unwrap_unchecked() });
             }
         }
-        out_alg_f(&self.mask, unsafe { std::mem::take(&mut ws).unwrap_unchecked() }, &[])
+        finalize_f(&self.mask, unsafe { std::mem::take(&mut ws).unwrap_unchecked() })
     }
 }
 
