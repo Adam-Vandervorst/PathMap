@@ -7,7 +7,7 @@ use dyn_clone::*;
 use local_or_heap::LocalOrHeap;
 use arrayvec::ArrayVec;
 
-use crate::utils::{BitMask, ByteMask};
+use crate::utils::ByteMask;
 use crate::alloc::Allocator;
 use crate::dense_byte_node::*;
 use crate::ring::*;
@@ -2372,140 +2372,6 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
     }
 }
 
-/// Recursively traverses a trie descending from `node`, visiting every physical non-empty node once
-pub(crate) fn traverse_physical<Ctx, NodeF, FoldF, V, A>(node: &TrieNodeODRc<V, A>, node_f: NodeF, fold_f: FoldF) -> Ctx
-    where
-    V: Clone + Send + Sync,
-    A: Allocator,
-    Ctx: Clone + Default,
-    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
-    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
-{
-    let mut cache = std::collections::HashMap::new();
-    traverse_physical_internal(node, node_f, fold_f, &mut cache)
-}
-
-fn traverse_physical_internal<Ctx, NodeF, FoldF, V, A>(node: &TrieNodeODRc<V, A>, node_f: NodeF, fold_f: FoldF, cache: &mut HashMap<u64, Ctx>) -> Ctx
-    where
-    V: Clone + Send + Sync,
-    A: Allocator,
-    Ctx: Clone + Default,
-    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
-    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
-{
-    if node.is_empty() {
-        return Ctx::default()
-    }
-
-    if node.refcount() > 1 {
-        let hash = node.shared_node_id();
-        match cache.get(&hash) {
-            Some(cached) => cached.clone(),
-            None => {
-                let ctx = traverse_physical_children_internal(node.as_tagged(), node_f, fold_f, cache);
-                cache.insert(hash, ctx.clone());
-                ctx
-            },
-        }
-    } else {
-        traverse_physical_children_internal(node.as_tagged(), node_f, fold_f, cache)
-    }
-}
-
-fn traverse_physical_children_internal<Ctx, NodeF, FoldF, V, A>(node: TaggedNodeRef<V, A>, node_f: NodeF, fold_f: FoldF, cache: &mut HashMap<u64, Ctx>) -> Ctx
-    where
-    V: Clone + Send + Sync,
-    A: Allocator,
-    Ctx: Clone + Default,
-    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
-    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
-{
-    let mut ctx = Ctx::default();
-
-    match node {
-        TaggedNodeRef::DenseByteNode(n) => {
-            for cf in n.values.iter() {
-                if let Some(rec) = cf.rec() {
-                    let child_ctx = traverse_physical_internal(rec, node_f, fold_f, cache);
-                    ctx = fold_f(ctx, child_ctx);
-                }
-            }
-        }
-        TaggedNodeRef::LineListNode(n) => {
-            if n.is_used_child_0() {
-                let child_node = unsafe{ n.child_in_slot::<0>() };
-                let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
-                ctx = fold_f(ctx, child_ctx);
-            }
-            if n.is_used_child_1() {
-                let child_node = unsafe{ n.child_in_slot::<1>() };
-                let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
-                ctx = fold_f(ctx, child_ctx);
-            }
-        }
-        TaggedNodeRef::CellByteNode(_) => { todo!() }
-        TaggedNodeRef::TinyRefNode(_) => { todo!() }
-        TaggedNodeRef::EmptyNode => { todo!() }
-    }
-
-    node_f(node, ctx)
-}
-
-// This experiment is still OK, but the `&mut [W]` is awkward to instantiate if you don't actually have
-/*pub fn traverse_split_cata<'a, A : Allocator, V : TrieValue, W, MapF, CollapseF, AlgF>(node: &TrieNodeODRc<V, A>, mut map_f: MapF, mut collapse_f: CollapseF, alg_f: AlgF) -> W
-where
-    MapF: Copy + FnMut(&V, &[u8]) -> W + 'a,
-    CollapseF: Copy + FnMut(&V, W, &[u8]) -> W + 'a,
-    AlgF: Copy + Fn(&ByteMask, &mut [W], &[u8]) -> W + 'a,
-{
-    match node.as_tagged() {
-        TaggedNodeRef::DenseByteNode(n) => {
-            let mut ws = [const { std::mem::MaybeUninit::<W>::uninit() }; 256];
-            // let mut ws: Vec<std::mem::MaybeUninit::<W>> = Vec::with_capacity(n.mask.count_bits());
-            // unsafe { ws.set_len(n.mask.count_bits()) };
-            let mut c = 0;
-            for cf in n.values.iter() {
-                if let Some(rec) = cf.rec() {
-                    let w = traverse_split_cata(rec, map_f, collapse_f, alg_f);
-                    if let Some(v) = cf.val() {
-                        ws[c].write(collapse_f(v, w, &[]));
-                    } else {
-                        ws[c].write(w);
-                    }
-                } else if let Some(v) = cf.val() {
-                    ws[c].write(map_f(v, &[]));
-                }
-                c += 1;
-            }
-            alg_f(&n.mask, unsafe { std::mem::transmute(&mut ws[..c]) }, &[])
-        }
-        TaggedNodeRef::LineListNode(n) => {
-            // let mut ws = vec![];
-            // if n.is_used_value_0() {
-            //     ws.append(map_f(unsafe { n.val_in_slot::<0>() }, &[]));
-            // }
-            // if n.is_used_value_1() {
-            //     ws.append(map_f(unsafe { n.val_in_slot::<1>() }, &[]));
-            // }
-            // if n.is_used_child_0() {
-            //     let child_node = unsafe{ n.child_in_slot::<0>() };
-            //     let child_ctx = traverse_split_cata(child_node, map_f, collapse_f, alg_f);
-            //
-            // }
-            // if n.is_used_child_1() {
-            //     let child_node = unsafe{ n.child_in_slot::<1>() };
-            //     let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
-            //     ctx = fold_f(ctx, child_ctx);
-            // }
-            alg_f(&ByteMask::new(), &mut [], &[])
-        }
-        TaggedNodeRef::CellByteNode(_) => { todo!() }
-        TaggedNodeRef::TinyRefNode(_) => { todo!() }
-        TaggedNodeRef::EmptyNode => { todo!() }
-    }
-}
-*/
-
 /// GOAT recursive caching cata.  If this dev branch is successful this should replace the caching cata flavors in the public API
 /// This is the JUMPING cata
 ///
@@ -2550,9 +2416,7 @@ where
 //GOAT:
 // * Look at the callbacks in line node
 // * Send partial paths in pair node too
-// * Come up with new names for in_alg and out_alg...
 // * Put caching back
-// * See if I can get closer to the other cata API without sacrificing performance
 //
 pub fn recursive_cata<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(node: &TrieNodeODRc<V, A>, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
 where
@@ -2623,8 +2487,6 @@ pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut Tr
 //  module come from the visibility of the trait it is derived on.  In this case, `TrieNode`
 //Credit to QuineDot for his ideas on this pattern here: https://users.rust-lang.org/t/inferred-lifetime-for-dyn-trait/112116/7
 pub(crate) use opaque_dyn_rc_trie_node::TrieNodeODRc;
-use crate::morphisms::SplitCata;
-use crate::TrieValue;
 
 #[cfg(not(feature = "slim_ptrs"))]
 mod opaque_dyn_rc_trie_node {

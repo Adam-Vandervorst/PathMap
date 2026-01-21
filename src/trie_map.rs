@@ -511,24 +511,11 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
         match self.root() {
             Some(root) => {
-                // root.as_tagged().node_goat_val_count() + root_val
-                // traverse_physical(root,
-                //                   |node, ctx: usize| { ctx + node.node_goat_val_count() },
-                //                   |ctx, child_ctx| { ctx + child_ctx },
-                // ) + root_val
-
-                // traverse_split_cata(
-                //     root,
-                //     |v, _| { 1usize },
-                //     |_, w, _| { 1 + w },
-                //     |bm, ws: &mut [usize], _| { ws.iter().sum() }
-                // ) + root_val
-                // Adam: this doesn't need to be called "traverse_osplit_cata" or be exposed under this interface; it can just live in morphisms
                 recursive_cata::<_, _, _, _, _, _, _, false>(
                     root,
                     |v, w, _| { (v.is_some() as usize) + w.unwrap_or(0) }, // on values amongst a path
-                    |bm, w: usize, total| { *total += w }, // on merging children into a node
-                    |bm, total: usize| { total } // finalizing a node
+                    |_mask, w: usize, total| { *total += w }, // on merging children into a node
+                    |_mask, total: usize| { total } // finalizing a node
                 ) + root_val
             },
             None => root_val
