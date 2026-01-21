@@ -361,15 +361,27 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             };
 
             //Do the recursive calling
-            //PERF NOTE: The reason we have two code paths around the call to `branch_f` instead of just doing
-            // `let w = cf.rec().map(|rec| recursive_cata(...))` is that the compiler won't optimize the implemntation
-            // of `branch_f` around whether `w` is none or not, if we go with one call to `branch_f`.  That means we
-            // often pay for two dependent branches instead of one, and the difference was 25% to the val_count benchmark.
-            if let Some(rec) = cf.rec() {
-                let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f);
-                branch_f(&self.mask, collapse_f(cf.val(), Some(w), path), unsafe { ws.as_mut().unwrap_unchecked() });
-            } else {
-                branch_f(&self.mask, collapse_f(cf.val(), None, path), unsafe { ws.as_mut().unwrap_unchecked() });
+            //PERF NOTE: The reason we have four code paths around the call to `branch_f` instead of just doing
+            // `let w = cf.rec().map(|rec| recursive_cata(...))` and then calling branch_f with the appropriate
+            // pair of `Option<&V>` and `Option<W>` is that the compiler won't optimize the implemntation of
+            // `branch_f` around whether the options are none or not.  That means we often pay for two dependent
+            // branches instead of one, and the difference was 25% to the val_count benchmark.  Breaking out the calls
+            // like this gives the optimizer a site to specialize for each permutation
+            match (cf.rec(), cf.val()) {
+                (Some(rec), Some(val)) => {
+                    let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f);
+                    branch_f(&self.mask, collapse_f(Some(val), Some(w), path), unsafe { ws.as_mut().unwrap_unchecked() });
+                },
+                (Some(rec), None) => {
+                    let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f);
+                    branch_f(&self.mask, collapse_f(None, Some(w), path), unsafe { ws.as_mut().unwrap_unchecked() });
+                },
+                (None, Some(val)) => {
+                    branch_f(&self.mask, collapse_f(Some(val), None, path), unsafe { ws.as_mut().unwrap_unchecked() });
+                },
+                (None, None) => {
+                    branch_f(&self.mask, collapse_f(None, None, path), unsafe { ws.as_mut().unwrap_unchecked() });
+                },
             }
         }
         finalize_f(&self.mask, unsafe { std::mem::take(&mut ws).unwrap_unchecked() })
