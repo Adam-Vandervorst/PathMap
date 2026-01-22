@@ -2377,7 +2377,7 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
 ///
 /// Closures:
 ///
-/// `CollapseF`: Folds a possible value and a possible downstream continuation, prefixed by a linear sub-path, into a single `W`
+/// `CollapseF`: Folds a possible value and a possible downstream continuation, prefixed by a linear sub-path into a single `W`
 /// `fn(val: Option<&V>, downstream: Option<W>, prefix: &[u8]) -> W`
 ///
 /// `BranchF`: Accumulates the `W` representing a downstream branch into an `Acc` accumulator type
@@ -2432,7 +2432,7 @@ where
     BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
     FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
 {
-    if node.refcount() > 1 {
+    if !node.is_empty() && node.refcount() > 1 {
         let hash = node.shared_node_id();
         match cache.get(&hash) {
             Some(cached) => cached.clone(),
@@ -3015,6 +3015,7 @@ mod opaque_dyn_rc_trie_node {
         pub(crate) fn new_empty() -> Self {
             Self { ptr: SlimNodePtr::new_empty(), alloc: MaybeUninit::uninit() }
         }
+        #[inline(always)]
         pub(crate) fn is_empty(&self) -> bool {
             self.tag() == EMPTY_NODE_TAG
         }
