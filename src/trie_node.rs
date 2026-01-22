@@ -2377,7 +2377,7 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
 ///
 /// Closures:
 ///
-/// `CollapseF`: Folds a possible value and a possible downstream continuation, prefixed by a linear sub-path into a single `W`
+/// `CollapseF`: Folds a possible value and a possible downstream continuation, prefixed by a linear sub-path, into a single `W`
 /// `fn(val: Option<&V>, downstream: Option<W>, prefix: &[u8]) -> W`
 ///
 /// `BranchF`: Accumulates the `W` representing a downstream branch into an `Acc` accumulator type
@@ -2399,37 +2399,74 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
 // - closure to deal with each path byte / logical node.  Fn(&ByteMask, Option<&V>, Acc) -> W
 
 
-//GOAT issues
-// - The reason it's faster than the other abstraction because it branches on node type once, rather than twice per node.
-//
-// There is more stuff on the stack, meaning we're more likely to blow the stack
-//
-// * Needed to add caching
-// * The logic in pair node was wrong, because there is no guarantee both sides are at the same level; fixing that added another branch
-//
-// Observations:
-// If we want to count path-ends, MapF wouldn't work, but could pass Option<&V>, which would be fine
-// It might be possible to unify MapF and CollapseF, but 
 //
 //GOAT, TODO: Make a test to hit the stack overflow failure case
-//
-//GOAT:
-// * Look at the callbacks in line node
-// * Send partial paths in pair node too
-// * Put caching back
 //
 pub fn recursive_cata<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(node: &TrieNodeODRc<V, A>, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
 where
     V: Clone + Send + Sync,
     A: Allocator,
     Acc: Default,
+    W: Clone,
+    CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+    BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+    FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+{
+    let mut cache = HashMap::new();
+    recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(node, collapse_f, branch_f, finalize_f, &mut cache)
+}
+
+pub(crate) fn recursive_cata_cached<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(
+    node: &TrieNodeODRc<V, A>,
+    collapse_f: CollapseF,
+    branch_f: BranchF,
+    finalize_f: FinalizeF,
+    cache: &mut HashMap<u64, W>,
+) -> W
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    Acc: Default,
+    W: Clone,
+    CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+    BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+    FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+{
+    if node.refcount() > 1 {
+        let hash = node.shared_node_id();
+        match cache.get(&hash) {
+            Some(cached) => cached.clone(),
+            None => {
+                let w = recursive_cata_dispatch::<_, _, _, _, _, _, _, COMPUTE_PATH>(node, collapse_f, branch_f, finalize_f, cache);
+                cache.insert(hash, w.clone());
+                w
+            },
+        }
+    } else {
+        recursive_cata_dispatch::<_, _, _, _, _, _, _, COMPUTE_PATH>(node, collapse_f, branch_f, finalize_f, cache)
+    }
+}
+
+#[inline(always)]
+fn recursive_cata_dispatch<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(
+    node: &TrieNodeODRc<V, A>,
+    collapse_f: CollapseF,
+    branch_f: BranchF,
+    finalize_f: FinalizeF,
+    cache: &mut HashMap<u64, W>,
+) -> W
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    Acc: Default,
+    W: Clone,
     CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
     BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
     FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
 {
     match node.as_tagged() {
-        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f) }
-        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f) }
+        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache) }
+        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache) }
         TaggedNodeRef::CellByteNode(_) => { todo!() }
         TaggedNodeRef::TinyRefNode(_) => { todo!() }
         TaggedNodeRef::EmptyNode => { finalize_f(&ByteMask::EMPTY, Acc::default()) }

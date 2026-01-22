@@ -2743,9 +2743,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     }
 
     #[inline(always)]
-    pub fn node_recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    pub fn node_recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
     where
         Acc: Default,
+        W: Clone,
         CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
         BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
         FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
@@ -2784,7 +2785,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             //Case 2 (Child, Empty) = (1 << 3) + (1 << 1) | (1 << 3) + (1 << 1) + 1
             10 | 11 => {
                 let child_node = unsafe{ self.child_in_slot::<0>() };
-                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f, cache);
                 let path = if COMPUTE_PATH {
                     unsafe{ self.key_unchecked::<0>() }
                 } else {
@@ -2795,7 +2796,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             //(Child, Val) = (1 << 3) + (1 << 2) + (1 << 1)
             14 => {
                 let child_node = unsafe{ self.child_in_slot::<0>() };
-                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f, cache);
                 let key0 = unsafe{ self.key_unchecked::<0>() };
                 let key1 = unsafe{ self.key_unchecked::<1>() };
                 let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
@@ -2835,7 +2836,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             15 => {
                 let mut acc = Acc::default();
                 let child_node = unsafe{ self.child_in_slot::<0>() };
-                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f, cache);
                 let (path0, path1, mask) = if COMPUTE_PATH {
                     let key0 = unsafe{ self.key_unchecked::<0>() };
                     let key1 = unsafe{ self.key_unchecked::<1>() };
@@ -2847,7 +2848,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                 branch_f(&mask, collapse_f(None, Some(child_w), path0), &mut acc);
 
                 let child_node = unsafe{ self.child_in_slot::<1>() };
-                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f, cache);
                 branch_f(&mask, collapse_f(None, Some(child_w), path1), &mut acc);
 
                 finalize_f(&mask, acc)
@@ -2905,7 +2906,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             //(Val, Child) = (1 << 3) + (1 << 2) + 1
             13 => {
                 let child_node = unsafe{ self.child_in_slot::<1>() };
-                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f, cache);
                 let key0 = unsafe{ self.key_unchecked::<0>() };
                 let key1 = unsafe{ self.key_unchecked::<1>() };
                 let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };

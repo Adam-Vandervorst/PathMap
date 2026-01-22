@@ -332,9 +332,10 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     #[inline(always)]
-    pub fn node_recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    pub fn node_recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
     where
         Acc: Default,
+        W: Clone,
         CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
         BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
         FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
@@ -369,11 +370,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             // like this gives the optimizer a site to specialize for each permutation
             match (cf.rec(), cf.val()) {
                 (Some(rec), Some(val)) => {
-                    let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f);
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f, cache);
                     branch_f(&self.mask, collapse_f(Some(val), Some(w), path), unsafe { ws.as_mut().unwrap_unchecked() });
                 },
                 (Some(rec), None) => {
-                    let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f);
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(rec, collapse_f, branch_f, finalize_f, cache);
                     branch_f(&self.mask, collapse_f(None, Some(w), path), unsafe { ws.as_mut().unwrap_unchecked() });
                 },
                 (None, Some(val)) => {
