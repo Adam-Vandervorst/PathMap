@@ -2467,8 +2467,8 @@ where
     match node.as_tagged() {
         TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache) }
         TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache) }
-        TaggedNodeRef::CellByteNode(_) => { todo!() }
-        TaggedNodeRef::TinyRefNode(_) => { todo!() }
+        TaggedNodeRef::CellByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache) }
+        TaggedNodeRef::TinyRefNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache) }
         TaggedNodeRef::EmptyNode => { finalize_f(&ByteMask::EMPTY, Acc::default()) }
     }
 }

@@ -121,6 +121,17 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TinyRefNode<'a, V, A> {
     fn key(&self) -> &[u8] {
         unsafe{ core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), self.key_len()) }
     }
+
+    pub(crate) fn node_recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
+    where
+        Acc: Default,
+        W: Clone,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+    {
+        self.into_full().unwrap().node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache)
+    }
 }
 
 impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a, V, A> {
