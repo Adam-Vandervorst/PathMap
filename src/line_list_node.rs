@@ -2785,29 +2785,50 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             10 | 11 => {
                 let child_node = unsafe{ self.child_in_slot::<0>() };
                 let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
-                collapse_f(None, Some(child_w), &[])
+                let path = if COMPUTE_PATH {
+                    unsafe{ self.key_unchecked::<0>() }
+                } else {
+                    &[]
+                };
+                collapse_f(None, Some(child_w), path)
             },
             //(Child, Val) = (1 << 3) + (1 << 2) + (1 << 1)
             14 => {
                 let child_node = unsafe{ self.child_in_slot::<0>() };
                 let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
-                let (key0, key1) = self.get_both_keys();
-                //GOAT, we check the length here to short-circuit checking the key bytes, which is likely a lot slower.  But maybe not...  Try it both ways
-                if key1.len() == 1 && unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                let key0 = unsafe{ self.key_unchecked::<0>() };
+                let key1 = unsafe{ self.key_unchecked::<1>() };
+                let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                if key0_byte == key1_byte {
                     //Case 3
                     debug_assert_eq!(key0.len(), 1);
                     debug_assert_eq!(key1.len(), 1);
                     let val = unsafe { self.val_in_slot::<1>() };
-                    collapse_f(Some(val), Some(child_w), &[])
+                    let path = if COMPUTE_PATH {
+                        key0
+                    } else {
+                        &[]
+                    };
+                    collapse_f(Some(val), Some(child_w), path)
                 } else {
                     //Case 4
                     let mut acc = Acc::default();
-                    branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
+                    let (path, mask) = if COMPUTE_PATH {
+                        (&key0[1..], ByteMask::from((key0_byte, key1_byte)))
+                    } else {
+                        (&[] as &[u8], ByteMask::new())
+                    };
+                    branch_f(&mask, collapse_f(None, Some(child_w), path), &mut acc);
 
                     let val = unsafe { self.val_in_slot::<1>() };
-                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
+                    let path = if COMPUTE_PATH {
+                        &key1[1..]
+                    } else {
+                        &[]
+                    };
+                    branch_f(&mask, collapse_f(Some(val), None, path), &mut acc);
 
-                    finalize_f(&ByteMask::new(), acc)
+                    finalize_f(&mask, acc)
                 }
             },
             //Case 5 (Child, Child) = (1 << 3) + (1 << 2) + (1 << 1) + 1
@@ -2815,63 +2836,110 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                 let mut acc = Acc::default();
                 let child_node = unsafe{ self.child_in_slot::<0>() };
                 let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
-                branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
+                let (path0, path1, mask) = if COMPUTE_PATH {
+                    let key0 = unsafe{ self.key_unchecked::<0>() };
+                    let key1 = unsafe{ self.key_unchecked::<1>() };
+                    let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                    (&key0[1..], &key1[1..], ByteMask::from((key0_byte, key1_byte)))
+                } else {
+                    (&[] as &[u8], &[] as &[u8], ByteMask::new())
+                };
+                branch_f(&mask, collapse_f(None, Some(child_w), path0), &mut acc);
 
                 let child_node = unsafe{ self.child_in_slot::<1>() };
                 let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
-                branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
+                branch_f(&mask, collapse_f(None, Some(child_w), path1), &mut acc);
 
-                finalize_f(&ByteMask::new(), acc)
+                finalize_f(&mask, acc)
             },
             //Case 6 (Val, Empty) = (1 << 3) | (1 << 3) + 1
             8 | 9 => {
                 let val = unsafe { self.val_in_slot::<0>() };
-                collapse_f(Some(val), None, &[])
+                let path = if COMPUTE_PATH {
+                    unsafe{ self.key_unchecked::<0>() }
+                } else {
+                    &[]
+                };
+                collapse_f(Some(val), None, path)
             },
             //(Val, Val) = (1 << 3) + (1 << 2)
             12 => {
-                let (key0, key1) = self.get_both_keys();
-                if unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                let key0 = unsafe{ self.key_unchecked::<0>() };
+                let key1 = unsafe{ self.key_unchecked::<1>() };
+                let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                if key0_byte == key1_byte {
                     //Case 7 (Val, Val), common first byte (meaning slot0 is a 1-byte path)
                     debug_assert_eq!(key0.len(), 1);
                     debug_assert!(key1.len() > 1);
                     let val = unsafe { self.val_in_slot::<1>() };
-                    let w1 = collapse_f(Some(val), None, &[]);
+                    let path = if COMPUTE_PATH {
+                        &key1[1..]
+                    } else {
+                        &[]
+                    };
+                    let w1 = collapse_f(Some(val), None, path);
                     let val = unsafe { self.val_in_slot::<0>() };
-                    collapse_f(Some(val), Some(w1), &[])
+                    let path = if COMPUTE_PATH {
+                        &key1[0..1]
+                    } else {
+                        &[]
+                    };
+                    collapse_f(Some(val), Some(w1), path)
                 } else {
                     //Case 8 (Val, Val), different first bytes
                     let mut acc = Acc::default();
                     let val = unsafe{ self.val_in_slot::<0>() };
-                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
+                    let (path0, path1, mask) = if COMPUTE_PATH {
+                        (&key0[1..], &key1[1..], ByteMask::from((key0_byte, key1_byte)))
+                    } else {
+                        (&[] as &[u8], &[] as &[u8], ByteMask::new())
+                    };
+                    branch_f(&mask, collapse_f(Some(val), None, path0), &mut acc);
 
                     let val = unsafe{ self.val_in_slot::<1>() };
-                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
+                    branch_f(&mask, collapse_f(Some(val), None, path1), &mut acc);
 
-                    finalize_f(&ByteMask::new(), acc)
+                    finalize_f(&mask, acc)
                 }
             },
             //(Val, Child) = (1 << 3) + (1 << 2) + 1
             13 => {
                 let child_node = unsafe{ self.child_in_slot::<1>() };
                 let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
-                let (key0, key1) = self.get_both_keys();
-                //GOAT, we check the length here to short-circuit checking the key bytes, which is likely a lot slower.  But maybe not...  Try it both ways
-                if key1.len() == 1 && unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                let key0 = unsafe{ self.key_unchecked::<0>() };
+                let key1 = unsafe{ self.key_unchecked::<1>() };
+                let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                if key0_byte == key1_byte {
                     //Case 9 (Val, Child), 1-byte key, same key byte (We could eliminate this case by requiring a canonical ordering for identical one-byte keys, but currently we don't)
                     debug_assert_eq!(key0.len(), 1);
                     debug_assert_eq!(key1.len(), 1);
                     let val = unsafe { self.val_in_slot::<0>() };
-                    collapse_f(Some(val), Some(child_w), &[])
+                    let path = if COMPUTE_PATH {
+                        key0
+                    } else {
+                        &[]
+                    };
+                    collapse_f(Some(val), Some(child_w), path)
                 } else {
                     //Case 10 (Val, Child), different key bytes
                     let mut acc = Acc::default();
-                    branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
+
+                    let (path, mask) = if COMPUTE_PATH {
+                        (&key1[1..], ByteMask::from((key0_byte, key1_byte)))
+                    } else {
+                        (&[] as &[u8], ByteMask::new())
+                    };
+                    branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), path), &mut acc);
 
                     let val = unsafe { self.val_in_slot::<0>() };
-                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
+                    let path = if COMPUTE_PATH {
+                        &key0[1..]
+                    } else {
+                        &[]
+                    };
+                    branch_f(&mask, collapse_f(Some(val), None, path), &mut acc);
 
-                    finalize_f(&ByteMask::new(), acc)
+                    finalize_f(&mask, acc)
                 }
             },
             _ => { unsafe { unreachable_unchecked() } }
