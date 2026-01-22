@@ -2750,60 +2750,158 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
         FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
     {
-        let mut ws = Some(Acc::default());
+        //Pair node can have the following permutations: (Slot0, Slot1)
+        //
+        // - Case 1 (Empty, Empty)
+        //   Run only `finalize_f` on default `Acc`
+        // - Case 2 (Child, Empty)
+        //   Recursively call on child, then run only `collapse_f` on the result, specifying the path
+        // - Case 3 (Child, Val), 1-byte key, same key byte
+        //   Recursively call on child, then run only `collapse_f` on the result, specifying the value and the 1-byte path
+        // - Case 4 (Child, Val), different key bytes
+        //   Recursively call on child, run `branch_f(collapse_f())` on the result. Then run `branch_f(collapse_f())` again
+        //   with the value's path.  And finally, run `finalize_f()`
+        // - Case 5 (Child, Child)
+        //   Recursively call on child0, run `branch_f(collapse_f())` on the result.  Do the same for child1.  Finally, run
+        //   `finalize_f()`
+        // - Case 6 (Val, Empty)
+        //   Run only `collapse_f` on the val
+        // - Case 7 (Val, Val), common first byte (meaning slot0 is a 1-byte path)
+        //   run `collapse_f` on the slot1 val, specifying the path, then run `collapse_f` again on the slot0 val, specifying
+        //   the common prefix byte
+        // - Case 8 (Val, Val), different first bytes
+        //   Run `branch_f(collapse_f())` on each val, then `finalize_f` at the end
+        // - Case 9 (Val, Child), 1-byte key, same key byte (We could eliminate this case by requiring a canonical ordering for identical one-byte keys, but currently we don't)
+        //   See "Case 3 (Child, Val), 1-byte key, same key byte"
+        // - Case 10 (Val, Child), different key bytes
+        //   See "Case 4 (Child, Val), different key bytes"
+        //
+        //GOAT, It would be nice to refactor the pair_node in order to express each of these permutations as a unique value for the 4 header bits, so we could take the appropriate code path without looking at any path bytes
 
-//Pair node can have the following permutations: (Slot0, Slot1)
-//
-// - (Empty, Empty)
-//   Run only `finalize_f` on default `Acc`
-// - (Child, Empty)
-//   Recursively call on child, then run only `collapse_f` on the result, specifying the path
-// - (Child, Val), 1-byte key, same key byte
-//   Recursively call on child, then run only `collapse_f` on the result, specifying the value and the 1-byte path
-// - (Child, Val), different key bytes
-//   Recursively call on child, run `branch_f(collapse_f())` on the result. Then run `branch_f(collapse_f())` again
-//   with the value's path.  And finally, run `finalize_f()`
-// - (Child, Child)
-//   Recursively call on child0, run `branch_f(collapse_f())` on the result.  Do the same for child1.  Finally, run
-//   `finalize_f()`
-// - (Val, Empty)
-//   Run only `collapse_f` on the val
-// - (Val, Val), common first byte (meaning slot0 is a 1-byte path)
-//   run `collapse_f` on the slot1 val, specifying the path, then run `collapse_f` again on the slot0 val, specifying
-//   the common prefix byte
-// - (Val, Val), different first bytes
-//   Run `branch_f(collapse_f())` on each val, then `finalize_f` at the end
-// - (Val, Child), 1-byte key, same key byte (We could eliminate this case by requiring a canonical ordering for identical one-byte keys, but currently we don't)
-//   See "(Child, Val), 1-byte key, same key byte"
-// - (Val, Child), different key bytes
-//   See (Child, Val), different key bytes
-//
-//GOAT, It would be nice to refactor the pair_node in order to express each of these permutations as a unique value for the 4 header bits, so we could take the appropriate code path without looking at any path bytes
+        match self.header >> 12 {
+            //Case 1 (Empty, Empty)
+            0 => finalize_f(&ByteMask::new(), Acc::default()),
+            //Case 2 (Child, Empty) = (1 << 3) + (1 << 1) | (1 << 3) + (1 << 1) + 1
+            10 | 11 => {
+                let child_node = unsafe{ self.child_in_slot::<0>() };
+                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                collapse_f(None, Some(child_w), &[])
+            },
+            //(Child, Val) = (1 << 3) + (1 << 2) + (1 << 1)
+            14 => {
+                let child_node = unsafe{ self.child_in_slot::<0>() };
+                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                let (key0, key1) = self.get_both_keys();
+                //GOAT, we check the length here to short-circuit checking the key bytes, which is likely a lot slower.  But maybe not...  Try it both ways
+                if key1.len() == 1 && unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                    //Case 3
+                    debug_assert_eq!(key0.len(), 1);
+                    debug_assert_eq!(key1.len(), 1);
+                    let val = unsafe { self.val_in_slot::<1>() };
+                    collapse_f(Some(val), Some(child_w), &[])
+                } else {
+                    //Case 4
+                    let mut acc = Acc::default();
+                    branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
 
+                    let val = unsafe { self.val_in_slot::<1>() };
+                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
 
-        if self.is_used_value_0() {
-            let downstream = collapse_f(Some(unsafe { self.val_in_slot::<0>() }), None, &[]);
-            branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+                    finalize_f(&ByteMask::new(), acc)
+                }
+            },
+            //Case 5 (Child, Child) = (1 << 3) + (1 << 2) + (1 << 1) + 1
+            15 => {
+                let mut acc = Acc::default();
+                let child_node = unsafe{ self.child_in_slot::<0>() };
+                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
+
+                let child_node = unsafe{ self.child_in_slot::<1>() };
+                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
+
+                finalize_f(&ByteMask::new(), acc)
+            },
+            //Case 6 (Val, Empty) = (1 << 3) | (1 << 3) + 1
+            8 | 9 => {
+                let val = unsafe { self.val_in_slot::<0>() };
+                collapse_f(Some(val), None, &[])
+            },
+            //(Val, Val) = (1 << 3) + (1 << 2)
+            12 => {
+                let (key0, key1) = self.get_both_keys();
+                if unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                    //Case 7 (Val, Val), common first byte (meaning slot0 is a 1-byte path)
+                    debug_assert_eq!(key0.len(), 1);
+                    debug_assert!(key1.len() > 1);
+                    let val = unsafe { self.val_in_slot::<1>() };
+                    let w1 = collapse_f(Some(val), None, &[]);
+                    let val = unsafe { self.val_in_slot::<0>() };
+                    collapse_f(Some(val), Some(w1), &[])
+                } else {
+                    //Case 8 (Val, Val), different first bytes
+                    let mut acc = Acc::default();
+                    let val = unsafe{ self.val_in_slot::<0>() };
+                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
+
+                    let val = unsafe{ self.val_in_slot::<1>() };
+                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
+
+                    finalize_f(&ByteMask::new(), acc)
+                }
+            },
+            //(Val, Child) = (1 << 3) + (1 << 2) + 1
+            13 => {
+                let child_node = unsafe{ self.child_in_slot::<1>() };
+                let child_w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+                let (key0, key1) = self.get_both_keys();
+                //GOAT, we check the length here to short-circuit checking the key bytes, which is likely a lot slower.  But maybe not...  Try it both ways
+                if key1.len() == 1 && unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                    //Case 9 (Val, Child), 1-byte key, same key byte (We could eliminate this case by requiring a canonical ordering for identical one-byte keys, but currently we don't)
+                    debug_assert_eq!(key0.len(), 1);
+                    debug_assert_eq!(key1.len(), 1);
+                    let val = unsafe { self.val_in_slot::<0>() };
+                    collapse_f(Some(val), Some(child_w), &[])
+                } else {
+                    //Case 10 (Val, Child), different key bytes
+                    let mut acc = Acc::default();
+                    branch_f(&ByteMask::new(), collapse_f(None, Some(child_w), &[]), &mut acc);
+
+                    let val = unsafe { self.val_in_slot::<0>() };
+                    branch_f(&ByteMask::new(), collapse_f(Some(val), None, &[]), &mut acc);
+
+                    finalize_f(&ByteMask::new(), acc)
+                }
+            },
+            _ => { unsafe { unreachable_unchecked() } }
         }
-        if self.is_used_value_1() {
-            let downstream = collapse_f(Some(unsafe { self.val_in_slot::<1>() }), None, &[]);
-            branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
-        }
-        if self.is_used_child_0() {
-            let child_node = unsafe{ self.child_in_slot::<0>() };
-            let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
-            let downstream = collapse_f(None, Some(w), &[]);
-            branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
 
-        }
-        if self.is_used_child_1() {
-            let child_node = unsafe{ self.child_in_slot::<1>() };
-            let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
-            let downstream = collapse_f(None, Some(w), &[]);
-            branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
-        }
+        // let mut ws = Some(Acc::default());
 
-        finalize_f(&ByteMask::new(), unsafe { std::mem::take(&mut ws).unwrap_unchecked() })
+        // if self.is_used_value_0() {
+        //     let downstream = collapse_f(Some(unsafe { self.val_in_slot::<0>() }), None, &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+        // }
+        // if self.is_used_value_1() {
+        //     let downstream = collapse_f(Some(unsafe { self.val_in_slot::<1>() }), None, &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+        // }
+        // if self.is_used_child_0() {
+        //     let child_node = unsafe{ self.child_in_slot::<0>() };
+        //     let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+        //     let downstream = collapse_f(None, Some(w), &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+
+        // }
+        // if self.is_used_child_1() {
+        //     let child_node = unsafe{ self.child_in_slot::<1>() };
+        //     let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+        //     let downstream = collapse_f(None, Some(w), &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+        // }
+
+        // finalize_f(&ByteMask::new(), unsafe { std::mem::take(&mut ws).unwrap_unchecked() })
     }
 }
 
