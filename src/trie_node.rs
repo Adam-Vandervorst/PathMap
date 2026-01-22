@@ -2398,10 +2398,6 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
 // - closure to deal with one downstream branch from a logical node.  Fn(&ByteMask, W, &mut Acc)
 // - closure to deal with each path byte / logical node.  Fn(&ByteMask, Option<&V>, Acc) -> W
 
-
-//
-//GOAT, TODO: Make a test to hit the stack overflow failure case
-//
 pub fn recursive_cata<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(node: &TrieNodeODRc<V, A>, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
 where
     V: Clone + Send + Sync,
@@ -3252,6 +3248,7 @@ mod tests {
     use crate::alloc::{GlobalAlloc, global_alloc};
     use crate::line_list_node::LineListNode;
     use crate::trie_node::TrieNodeODRc;
+    use crate::trie_node::recursive_cata;
     use crate::PathMap;
     use crate::zipper::*;
 
@@ -3283,5 +3280,27 @@ mod tests {
         let cloned = node_ref.clone();
         node_ref.make_unique();
         drop(cloned);
+    }
+
+    /// Finds the path_depth at which the recursive cata hits a stack overflow
+    ///
+    /// Empirically seems to be somewhere between 8 and 10 KBytes.  But more branching, and thus fewer
+    /// bytes-per-node, will mean it will fail on shorter paths.
+    #[test]
+    fn recursive_cata_stack_overflow_smoke() {
+        const PATH_LEN: usize = 8_000;
+
+        let mut map = PathMap::<()>::new();
+        let path = vec![b'a'; PATH_LEN];
+        map.set_val_at(&path, ());
+
+        let root = map.root().unwrap();
+        let count = recursive_cata::<_, _, _, _, _, _, _, false>(
+            root,
+            |v, w, _| (v.is_some() as usize) + w.unwrap_or(0),
+            |_mask, w: usize, total| { *total += w },
+            |_mask, total: usize| { total },
+        );
+        assert_eq!(count, 1);
     }
 }
