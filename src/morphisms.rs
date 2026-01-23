@@ -72,8 +72,10 @@ use crate::utils::*;
 use crate::alloc::Allocator;
 use crate::PathMap;
 use crate::trie_node::TrieNodeODRc;
+use crate::trie_node::recursive_cata_cached;
 use crate::zipper;
 use crate::zipper::*;
+use crate::zipper::zipper_priv::ZipperPriv;
 
 use crate::gxhash::{HashMap, HashMapExt};
 
@@ -213,8 +215,8 @@ pub trait Catamorphism<V> {
     /// See [into_cata_cached](Catamorphism::into_cata_cached) for explanation of other arguments and behavior
     fn into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
         where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
+        W: Clone,
+        AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
         Self: Sized
     {
         self.into_cata_jumping_cached_fallible(|mask, children, val, sub_path| -> Result<W, Infallible> {
@@ -229,6 +231,55 @@ pub trait Catamorphism<V> {
         where
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>;
+}
+
+/// Provides faster catamorphism methods for types backed by an in-memory trie, such as [`PathMap`]
+/// and some zipper implementations
+pub trait Summarization<V> {
+
+    /// GOAT recursive cached cata.  If this dev branch is successful this should replace the caching cata flavors in the public API
+    /// This is the JUMPING cata
+    ///
+    /// Closures:
+    ///
+    /// `CollapseF`: Folds a possible value and a possible downstream continuation, prefixed by a linear sub-path into a single `W`
+    /// `fn(val: Option<&V>, downstream: Option<W>, prefix: &[u8]) -> W`
+    ///
+    /// `BranchF`: Accumulates the `W` representing a downstream branch into an `Acc` accumulator type
+    /// `fn(branch_mask: &ByteMask, downstream: W, accumulator: &mut Acc)`
+    ///
+    /// `FinalizeF`: Converts an `Acc` accumulator into a `W` representing the logical node
+    /// `fn(branch_mask: &ByteMask, accumulator: Acc) -> W`
+    ///
+    /// GOAT: The `COMPUTE_PATH` parameter shouldn't be necessary in a perfect world, but unfortunately the compiler
+    /// isn't very good at getting rid of the dead code, so passing `COMPUTE_PATH=false` gives a considerable speedup
+    /// at the expense of providing paths and reliable child_masks to the closures.
+    fn recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    where
+        V: Clone + Send + Sync,
+        Acc: Default,
+        W: Clone,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+        Self: Sized;
+
+    /// A stepping (non-jumping) catamorphism for the trie.
+    ///
+    /// Use this when you need the cata to evaluate once per path byte, even across non-branching sub-paths.
+    /// Unlike the jumping version, `branch_f` and `finalize_f` will be called for every path byte.
+    ///
+    /// See [`Catamorphism::recursive_cata`] for closure semantics; this stepping variant omits the prefix argument from `collapse_f`.
+    fn recursive_cata_stepping<Acc, W, CollapseF, BranchF, FinalizeF>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    where
+        V: Clone + Send + Sync,
+        Acc: Default,
+        W: Clone,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+        Self: Sized;
+
 }
 
 //TODO GOAT!!: It would be nice to get rid of this Default bound on all morphism Ws.  In this case, the plan
@@ -417,6 +468,99 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
     {
         let rz = self.into_read_zipper(&[]);
         rz.into_cata_jumping_cached_fallible(alg_f)
+    }
+}
+
+impl<'a, Z, V> Summarization<V> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperPriv<V=V> {
+    fn recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    where
+        V: Clone + Send + Sync,
+        Acc: Default,
+        W: Clone,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+    {
+        let focus = self.get_focus();
+        let w = match focus.borrow() {
+            Some(node) => {
+                let mut cache = HashMap::new();
+                recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(node, collapse_f, branch_f, finalize_f, &mut cache)
+            },
+            None => finalize_f(&ByteMask::EMPTY, Acc::default()),
+        };
+        collapse_f(self.val(), Some(w), &[])
+    }
+
+    fn recursive_cata_stepping<Acc, W, CollapseF, BranchF, FinalizeF>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    where
+        V: Clone + Send + Sync,
+        Acc: Default,
+        W: Clone,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+    {
+        self.recursive_cata::<_, _, _, _, _, true>(
+            |val, downstream, prefix| {
+                let mut w = collapse_f(val, downstream);
+                for byte in prefix.iter().rev() {
+                    let mask = ByteMask::from(*byte);
+                    let mut acc = Acc::default();
+                    branch_f(&mask, w, &mut acc);
+                    w = finalize_f(&mask, acc);
+                }
+                w
+            },
+            branch_f,
+            finalize_f,
+        )
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V> for PathMap<V, A> {
+    fn recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    where
+        V: Clone + Send + Sync,
+        Acc: Default,
+        W: Clone,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+    {
+        let w = match self.root() {
+            Some(node) => {
+                let mut cache = HashMap::new();
+                recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(node, collapse_f, branch_f, finalize_f, &mut cache)
+            },
+            None => finalize_f(&ByteMask::EMPTY, Acc::default()),
+        };
+        collapse_f(self.root_val(), Some(w), &[])
+    }
+
+    fn recursive_cata_stepping<Acc, W, CollapseF, BranchF, FinalizeF>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
+    where
+        V: Clone + Send + Sync,
+        Acc: Default,
+        W: Clone,
+        CollapseF: Copy + Fn(Option<&V>, Option<W>) -> W,
+        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+    {
+        self.recursive_cata::<_, _, _, _, _, true>(
+            |val, downstream, prefix| {
+                let mut w = collapse_f(val, downstream);
+                for byte in prefix.iter().rev() {
+                    let mask = ByteMask::from(*byte);
+                    let mut acc = Acc::default();
+                    branch_f(&mask, w, &mut acc);
+                    w = finalize_f(&mask, acc);
+                }
+                w
+            },
+            branch_f,
+            finalize_f,
+        )
     }
 }
 
@@ -1954,6 +2098,121 @@ mod tests {
 
         assert_eq!(tree_side, tree_cached);
         eprintln!("calls_cached: {calls_cached}\ncalls_side: {calls_side}");
+    }
+
+    /// Adapted from morphisms::cata_test1 for recursive_cata (jumping).
+    #[test]
+    fn recursive_cata_jumping_sum_digits() {
+        let tests = [
+            (vec![], 0),
+            (vec!["1"], 1),
+            (vec!["1", "2"], 3),
+            (vec!["1", "2", "3", "4", "5", "6"], 21),
+            (vec!["a1", "a2"], 3),
+            (vec!["a1", "a2", "a3", "a4", "a5", "a6"], 21),
+            (vec!["12345"], 5),
+            (vec!["1", "12", "123", "1234", "12345"], 15),
+            (vec!["123", "123456", "123789"], 18),
+            (vec!["12", "123", "123456", "123789"], 20),
+            (vec!["1", "2", "123", "123765", "1234", "12345", "12349"], 29),
+        ];
+
+        #[derive(Default)]
+        struct SumAcc {
+            idx: usize,
+            sum: u32,
+        }
+
+        for (keys, expected_sum) in tests {
+            let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
+            let sum = map.recursive_cata::<_, _, _, _, _, true>(
+                |val, downstream, prefix| {
+                    let mut sum = downstream.map(|w: (bool, u32)| w.1).unwrap_or(0);
+                    if val.is_some() {
+                        if let Some(byte) = prefix.last() {
+                            sum += (*byte as char).to_digit(10).unwrap();
+                        }
+                    }
+                    (val.is_some() && prefix.is_empty(), sum)
+                },
+                |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
+                    let byte = mask.indexed_bit::<true>(acc.idx).unwrap();
+                    acc.idx += 1;
+                    if w.0 {
+                        acc.sum += (byte as char).to_digit(10).unwrap();
+                    }
+                    acc.sum += w.1;
+                },
+                |_mask: &ByteMask, acc: SumAcc| { (false, acc.sum) },
+            ).1;
+            assert_eq!(sum, expected_sum);
+        }
+    }
+
+    /// Adapted from morphisms::cata_test1 for recursive_cata_stepping (non-jumping).
+    #[test]
+    fn recursive_cata_stepping_sum_digits() {
+        let tests = [
+            (vec![], 0),
+            (vec!["1"], 1),
+            (vec!["1", "2"], 3),
+            (vec!["1", "2", "3", "4", "5", "6"], 21),
+            (vec!["a1", "a2"], 3),
+            (vec!["a1", "a2", "a3", "a4", "a5", "a6"], 21),
+            (vec!["12345"], 5),
+            (vec!["1", "12", "123", "1234", "12345"], 15),
+            (vec!["123", "123456", "123789"], 18),
+            (vec!["12", "123", "123456", "123789"], 20),
+            (vec!["1", "2", "123", "123765", "1234", "12345", "12349"], 29),
+        ];
+
+        #[derive(Default)]
+        struct SumAcc {
+            idx: usize,
+            sum: u32,
+        }
+
+        for (keys, expected_sum) in tests {
+            let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
+            let sum = map.recursive_cata_stepping::<SumAcc, (bool, u32), _, _, _>(
+                |val, downstream| {
+                    let sum = downstream.map(|w| w.1).unwrap_or(0);
+                    (val.is_some(), sum)
+                },
+                |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
+                    let byte = mask.iter().nth(acc.idx).unwrap();
+                    acc.idx += 1;
+                    if w.0 {
+                        acc.sum += (byte as char).to_digit(10).unwrap();
+                    }
+                    acc.sum += w.1;
+                },
+                |_mask: &ByteMask, acc: SumAcc| {
+                    (false, acc.sum)
+                },
+            ).1;
+            assert_eq!(sum, expected_sum);
+        }
+    }
+
+    /// Finds the path_depth at which the recursive cata hits a stack overflow
+    ///
+    /// Empirically seems to be somewhere between 8 and 10 KBytes.  But more branching, and thus fewer
+    /// bytes-per-node, will mean it will fail on shorter paths.
+    #[test]
+    fn recursive_cata_stack_overflow_smoke() {
+        const PATH_LEN: usize = 8_000;
+
+        let mut map = PathMap::<()>::new();
+        let path = vec![b'a'; PATH_LEN];
+        map.set_val_at(&path, ());
+
+        let count = map.recursive_cata::<_, _, _, _, _, false>(
+            |v, w, _| (v.is_some() as usize) + w.unwrap_or(0),
+            |_mask, w: usize, total| { *total += w },
+            |_mask, total: usize| { total },
+        );
+        assert_eq!(count, 1);
     }
 
     /// Generate some basic tries using the [TrieBuilder::push_byte] API

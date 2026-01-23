@@ -2,7 +2,6 @@
 use core::hint::unreachable_unchecked;
 use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
-use std::collections::HashMap;
 use dyn_clone::*;
 use local_or_heap::LocalOrHeap;
 use arrayvec::ArrayVec;
@@ -13,6 +12,8 @@ use crate::dense_byte_node::*;
 use crate::ring::*;
 use crate::tiny_node::TinyRefNode;
 use crate::line_list_node::LineListNode;
+
+use crate::gxhash::HashMap;
 
 #[cfg(feature = "bridge_nodes")]
 use crate::bridge_node::BridgeNode;
@@ -220,7 +221,7 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
 
     /// Returns the total number of leaves contained within the whole subtree defined by the node
     /// GOAT, this should be deprecated
-    fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize;
+    fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize;
 
     /// Returns the number of values contained within the node itself, irrespective of the positions within
     /// the node; does not include onward links
@@ -1222,7 +1223,7 @@ mod tagged_node_ref {
         }
 
         #[inline]
-        pub fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
+        pub fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
             match self {
                 Self::DenseByteNode(node) => node.node_val_count(cache),
                 Self::LineListNode(node) => node.node_val_count(cache),
@@ -2353,7 +2354,7 @@ pub(crate) fn val_count_below_root<V: Clone + Send + Sync, A: Allocator>(node: T
     node.node_val_count(&mut cache)
 }
 
-pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &TrieNodeODRc<V, A>, cache: &mut HashMap<u64, usize>) -> usize {
+pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &TrieNodeODRc<V, A>, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
     if node.is_empty() {
         return 0
     }
@@ -2372,83 +2373,7 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
     }
 }
 
-/// GOAT recursive caching cata.  If this dev branch is successful this should replace the caching cata flavors in the public API
-/// This is the JUMPING cata
-///
-/// Closures:
-///
-/// `CollapseF`: Folds a possible value and a possible downstream continuation, prefixed by a linear sub-path into a single `W`
-/// `fn(val: Option<&V>, downstream: Option<W>, prefix: &[u8]) -> W`
-///
-/// `BranchF`: Accumulates the `W` representing a downstream branch into an `Acc` accumulator type
-/// `fn(branch_mask: &ByteMask, downstream: W, accumulator: &mut Acc)`
-///
-/// `FinalizeF`: Converts an `Acc` accumulator into a `W` representing the logical node
-/// `fn(branch_mask: &ByteMask, accumulator: Acc) -> W`
-
-//
-//New plan for API.
-// 3 closures.
-// - closure to deal with straight paths and values.  Fn(Option<&V>, Option<W>, &[u8]) -> W
-// - closure to deal with one downstream branch from a logical node.  Fn(&ByteMask, W, &mut Acc)
-// - closure to fold accumulator back into a W for the logical node.  Fn(&ByteMask, Acc) -> W
-//
-//
-//The non-jumping API would be the same, but collapse wouldn't take a prefix path, and instead `finalize_f(branch_f())` would be
-// called in reverse order for each path byte
-
-pub fn recursive_cata<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(node: &TrieNodeODRc<V, A>, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
-where
-    V: Clone + Send + Sync,
-    A: Allocator,
-    Acc: Default,
-    W: Clone,
-    CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
-    BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
-    FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
-{
-    let mut cache = HashMap::new();
-    recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(node, collapse_f, branch_f, finalize_f, &mut cache)
-}
-
-/// A stepping (non-jumping) catamorphism for the trie.
-///
-/// Use this when you need the cata to evaluate once per path byte, even across non-branching sub-paths.
-/// Unlike the jumping version, `branch_f` and `finalize_f` will be called for every path byte.
-///
-/// See [`recursive_cata`] for closure semantics; this stepping variant omits the prefix argument from `collapse_f`.
-pub fn recursive_cata_stepping<A, V, Acc, W, CollapseF, BranchF, FinalizeF>(
-    node: &TrieNodeODRc<V, A>,
-    collapse_f: CollapseF,
-    branch_f: BranchF,
-    finalize_f: FinalizeF,
-) -> W
-where
-    V: Clone + Send + Sync,
-    A: Allocator,
-    Acc: Default,
-    W: Clone,
-    CollapseF: Copy + Fn(Option<&V>, Option<W>) -> W,
-    BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
-    FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
-{
-    recursive_cata::<_, _, _, _, _, _, _, true>(
-        node,
-        |val, downstream, prefix| {
-            let mut w = collapse_f(val, downstream);
-            for byte in prefix.iter().rev() {
-                let mask = ByteMask::from(*byte);
-                let mut acc = Acc::default();
-                branch_f(&mask, w, &mut acc);
-                w = finalize_f(&mask, acc);
-            }
-            w
-        },
-        branch_f,
-        finalize_f,
-    )
-}
-
+/// Internal implementation of recursive_cata
 pub(crate) fn recursive_cata_cached<A, V, Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(
     node: &TrieNodeODRc<V, A>,
     collapse_f: CollapseF,
@@ -3284,8 +3209,7 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLat
 mod tests {
     use crate::alloc::{GlobalAlloc, global_alloc};
     use crate::line_list_node::LineListNode;
-    use crate::trie_node::{TrieNodeODRc, recursive_cata, recursive_cata_stepping};
-    use crate::utils::ByteMask;
+    use crate::trie_node::TrieNodeODRc;
     use crate::PathMap;
     use crate::zipper::*;
 
@@ -3317,138 +3241,5 @@ mod tests {
         let cloned = node_ref.clone();
         node_ref.make_unique();
         drop(cloned);
-    }
-
-    /// Adapted from morphisms::cata_test1 for recursive_cata (jumping).
-    //GOAT, this should be in morphisms, and only use the public API
-    #[test]
-    fn recursive_cata_jumping_sum_digits() {
-        let tests = [
-            (vec![], 0),
-            (vec!["1"], 1),
-            (vec!["1", "2"], 3),
-            (vec!["1", "2", "3", "4", "5", "6"], 21),
-            (vec!["a1", "a2"], 3),
-            (vec!["a1", "a2", "a3", "a4", "a5", "a6"], 21),
-            (vec!["12345"], 5),
-            (vec!["1", "12", "123", "1234", "12345"], 15),
-            (vec!["123", "123456", "123789"], 18),
-            (vec!["12", "123", "123456", "123789"], 20),
-            (vec!["1", "2", "123", "123765", "1234", "12345", "12349"], 29),
-        ];
-
-        #[derive(Default)]
-        struct SumAcc {
-            idx: usize,
-            sum: u32,
-        }
-
-        for (keys, expected_sum) in tests {
-            let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
-            let sum = match map.root() {
-                Some(root) => {
-                    let w = recursive_cata::<_, _, _, _, _, _, _, true>(
-                    root,
-                    |val, downstream, prefix| {
-                        let mut sum = downstream.map(|w: (bool, u32)| w.1).unwrap_or(0);
-                        if val.is_some() {
-                            if let Some(byte) = prefix.last() {
-                                sum += (*byte as char).to_digit(10).unwrap();
-                            }
-                        }
-                        (val.is_some() && prefix.is_empty(), sum)
-                    },
-                    |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
-                        let byte = mask.indexed_bit::<true>(acc.idx).unwrap();
-                        acc.idx += 1;
-                        if w.0 {
-                            acc.sum += (byte as char).to_digit(10).unwrap();
-                        }
-                        acc.sum += w.1;
-                    },
-                    |_mask: &ByteMask, acc: SumAcc| { (false, acc.sum) },
-                );
-                    w.1
-                },
-                None => 0,
-            };
-            assert_eq!(sum, expected_sum);
-        }
-    }
-
-    /// Adapted from morphisms::cata_test1 for recursive_cata_stepping (non-jumping).
-    //GOAT, this should be in morphisms, and only use the public API
-    #[test]
-    fn recursive_cata_stepping_sum_digits() {
-        let tests = [
-            (vec![], 0),
-            (vec!["1"], 1),
-            (vec!["1", "2"], 3),
-            (vec!["1", "2", "3", "4", "5", "6"], 21),
-            (vec!["a1", "a2"], 3),
-            (vec!["a1", "a2", "a3", "a4", "a5", "a6"], 21),
-            (vec!["12345"], 5),
-            (vec!["1", "12", "123", "1234", "12345"], 15),
-            (vec!["123", "123456", "123789"], 18),
-            (vec!["12", "123", "123456", "123789"], 20),
-            (vec!["1", "2", "123", "123765", "1234", "12345", "12349"], 29),
-        ];
-
-        #[derive(Default)]
-        struct SumAcc {
-            idx: usize,
-            sum: u32,
-        }
-
-        for (keys, expected_sum) in tests {
-            let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
-            let sum = match map.root() {
-                Some(root) => {
-                    let w = recursive_cata_stepping::<_, _, SumAcc, (bool, u32), _, _, _>(
-                        root,
-                        |val, downstream| {
-                            let sum = downstream.map(|w| w.1).unwrap_or(0);
-                            (val.is_some(), sum)
-                        },
-                        |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
-                            let byte = mask.iter().nth(acc.idx).unwrap();
-                            acc.idx += 1;
-                            if w.0 {
-                                acc.sum += (byte as char).to_digit(10).unwrap();
-                            }
-                            acc.sum += w.1;
-                        },
-                        |_mask: &ByteMask, acc: SumAcc| {
-                            (false, acc.sum)
-                        },
-                    );
-                    w.1
-                },
-                None => 0,
-            };
-            assert_eq!(sum, expected_sum);
-        }
-    }
-
-    /// Finds the path_depth at which the recursive cata hits a stack overflow
-    ///
-    /// Empirically seems to be somewhere between 8 and 10 KBytes.  But more branching, and thus fewer
-    /// bytes-per-node, will mean it will fail on shorter paths.
-    #[test]
-    fn recursive_cata_stack_overflow_smoke() {
-        const PATH_LEN: usize = 8_000;
-
-        let mut map = PathMap::<()>::new();
-        let path = vec![b'a'; PATH_LEN];
-        map.set_val_at(&path, ());
-
-        let root = map.root().unwrap();
-        let count = recursive_cata::<_, _, _, _, _, _, _, false>(
-            root,
-            |v, w, _| (v.is_some() as usize) + w.unwrap_or(0),
-            |_mask, w: usize, total| { *total += w },
-            |_mask, total: usize| { total },
-        );
-        assert_eq!(count, 1);
     }
 }

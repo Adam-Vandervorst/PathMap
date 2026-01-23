@@ -1,6 +1,6 @@
 use core::hint::unreachable_unchecked;
 use core::mem::{ManuallyDrop, MaybeUninit};
-use std::collections::HashMap;
+use crate::gxhash::HashMap;
 
 use fast_slice_utils::{find_prefix_overlap, starts_with};
 use local_or_heap::LocalOrHeap;
@@ -1968,7 +1968,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
     }
     #[inline]
-    fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
+    fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
         let mut result = 0;
         if self.is_used_value_0() {
             result += 1;

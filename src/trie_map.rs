@@ -1,7 +1,7 @@
 use core::cell::UnsafeCell;
 use std::ptr::slice_from_raw_parts;
 use crate::alloc::{Allocator, GlobalAlloc, global_alloc};
-use crate::morphisms::{new_map_from_ana_in, Catamorphism, TrieBuilder};
+use crate::morphisms::{new_map_from_ana_in, Catamorphism, Summarization, TrieBuilder};
 use crate::trie_node::*;
 use crate::zipper::*;
 use crate::merkleization::{MerkleizeResult, merkleize_impl};
@@ -510,9 +510,8 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     pub fn goat_val_count(&self) -> usize {
         let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
         match self.root() {
-            Some(root) => {
-                recursive_cata::<_, _, _, _, _, _, _, false>(
-                    root,
+            Some(_root) => {
+                self.recursive_cata::<_, _, _, _, _, false>(
                     |v, w, _| { (v.is_some() as usize) + w.unwrap_or(0) }, // on values amongst a path
                     |_mask, w: usize, total| { *total += w }, // on merging children into a node
                     |_mask, total: usize| { total } // finalizing a node
