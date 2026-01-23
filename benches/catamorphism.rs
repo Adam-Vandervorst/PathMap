@@ -1,0 +1,105 @@
+use divan::{Divan, Bencher, black_box};
+use pathmap::morphisms::{Catamorphism, Summarization};
+use pathmap::utils::ByteMask;
+use pathmap::utils::ints::gen_int_range;
+use pathmap::PathMap;
+
+fn main() {
+    // Run registered benchmarks.
+    let divan = Divan::from_args()
+        .sample_count(4000);
+
+    divan.main();
+}
+
+fn build_map(count: u64) -> PathMap<()> {
+    // Dense range of u64 keys encoded as paths; sized to keep benches fast and stable.
+    gen_int_range::<(), 8, u64>(0, count, 1, ())
+}
+
+const MAP_COUNT: u64 = 20_000_000;
+
+#[divan::bench()]
+fn recursive_cata_jumping_val_count(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, false>(
+            |v, w, _| (v.is_some() as usize) + w.unwrap_or(0),
+            |_mask, w: usize, total| { *total += w },
+            |_mask, total: usize| { total },
+        );
+    });
+    assert_eq!(sink, MAP_COUNT as usize);
+}
+
+#[divan::bench()]
+fn cached_jumping_cata_val_count(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = rz.into_cata_jumping_cached(|_mask: &ByteMask, children: &mut [usize], val, _sub_path| {
+            let mut sum: usize = children.iter().sum();
+            if val.is_some() {
+                sum += 1;
+            }
+            sum
+        });
+    });
+    assert_eq!(sink, MAP_COUNT as usize);
+}
+
+#[divan::bench()]
+fn recursive_cata_jumping_total_len(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = (0usize, 0usize);
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, true>(
+            |val, downstream, prefix| {
+                let (mut count, mut total_len) = downstream.unwrap_or((0, 0));
+                total_len += count * prefix.len();
+                if val.is_some() {
+                    count += 1;
+                    total_len += prefix.len();
+                }
+                (count, total_len)
+            },
+            |mask: &ByteMask, w: (usize, usize), acc: &mut (usize, usize, usize)| {
+                let byte = mask.indexed_bit::<true>(acc.0).unwrap();
+                let _ = byte; // byte value unused; only length matters
+                acc.0 += 1;
+                acc.1 += w.0;
+                acc.2 += w.1;
+            },
+            |_mask: &ByteMask, acc: (usize, usize, usize)| { (acc.1, acc.2) },
+        );
+    });
+    assert_eq!(sink.0, MAP_COUNT as usize);
+}
+
+#[divan::bench()]
+fn cached_jumping_cata_total_len(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = (0usize, 0usize);
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = rz.into_cata_jumping_cached(|mask: &ByteMask, children: &mut [(usize, usize)], val, sub_path| {
+            let mut count = 0usize;
+            let mut total_len = 0usize;
+            let prefix_len = sub_path.len();
+            if val.is_some() {
+                count += 1;
+                total_len += prefix_len;
+            }
+            for (_byte, child) in mask.iter().zip(children.iter_mut()) {
+                count += child.0;
+                total_len += child.1 + child.0 * prefix_len;
+            }
+            (count, total_len)
+        });
+    });
+    assert_eq!(sink.0, MAP_COUNT as usize);
+}
