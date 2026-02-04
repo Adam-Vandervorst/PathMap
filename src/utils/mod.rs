@@ -54,6 +54,74 @@ impl ByteMask {
         ByteMaskIter::from(self.0)
     }
 
+    #[cfg(target_feature = "avx2")]
+    #[inline]
+    fn avx(&self) -> std::arch::x86_64::__m256i {
+        unsafe { std::mem::transmute(self.clone()) }
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[inline]
+    fn from_avx(m: std::arch::x86_64::__m256i) -> Self {
+        unsafe { std::mem::transmute(m) }
+    }
+
+    /// mask of non-zero nibble lo masks
+    #[inline]
+    pub fn nibble_mask(&self) -> u16 {
+        #[cfg(target_feature = "avx512")]
+        unsafe {
+            use std::arch::x86_64::*;
+            _mm256_cmp_epi16_mask::<4>(self.avx(), _mm256_set1_epi8(0))
+        }
+        #[cfg(not(target_feature = "avx512"))]
+        unsafe {
+            let mut r = 0;
+            for (i, m) in std::mem::transmute::<_, [u16; 16]>(self.0).iter().enumerate() {
+                if *m != 0 { r |= 1 << i }
+            }
+            r
+        }
+    }
+
+    /// one of 16 sub-masks
+    #[inline]
+    pub fn lo_mask(&self, i: u8) -> u16 {
+        unsafe { std::mem::transmute::<_, [u16; 16]>(self.0)[i as usize] }
+    }
+
+    #[inline]
+    pub(crate) fn store_nz_lo_masks(&self, nm: u16, mut p: *mut u16) {
+        // #[cfg(target_feature = "avx512")]
+        // unsafe {
+        //     use std::arch::x86_64::*;
+        //     _mm256_mask_compressstoreu_epi16(p as _, nm, self.avx())
+        // }
+        #[cfg(not(target_feature = "avx512"))]
+        unsafe {
+            for (i, m) in std::mem::transmute::<_, [u16; 16]>(self.0).iter().enumerate() {
+                if ((nm >> i) & 1) != 0 { *p = *m; p = p.add(1) }
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn load_nz_lo_masks(nm: u16, mut p: *const u16) -> Self {
+        #[cfg(target_feature = "avx512")]
+        unsafe {
+            use std::arch::x86_64::*;
+            Self::from_avx(_mm256_maskz_expandloadu_epi16(nm, p as _))
+        }
+        #[cfg(not(target_feature = "avx512"))]
+        unsafe {
+            let mut a = [0u16; 16];
+            for i in 0..16 {
+                if ((nm >> i) & 1) != 0 { a[i] = *p; p = p.add(1) }
+            }
+            std::mem::transmute(a)
+        }
+    }
+
     /// Returns how many set bits precede the requested bit
     pub fn index_of(&self, byte: u8) -> u8 {
         if byte == 0 {

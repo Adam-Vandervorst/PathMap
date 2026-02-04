@@ -94,6 +94,10 @@ pub mod experimental;
 #[cfg(feature = "arena_compact")]
 pub mod arena_compact;
 
+/// Streaming representation of the trie
+#[cfg(feature = "cbm_stream")]
+pub mod cbm_stream;
+
 /// Track outstanding zippers to be sure they don't conflict
 #[cfg(feature = "zipper_tracking")]
 pub mod zipper_tracking;
