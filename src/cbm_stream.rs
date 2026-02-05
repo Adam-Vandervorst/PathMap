@@ -1,8 +1,12 @@
+use num_traits::PrimInt;
+use smallvec::ExtendFromSlice;
 use crate::alloc::Allocator;
 use crate::write_zipper::ZipperWriting;
 use crate::{utils::ByteMask, zipper::{
     Zipper, ZipperIteration, ZipperValues
 }, TrieValue};
+use crate::ring::{AlgebraicResult, COUNTER_IDENT, SELF_IDENT};
+use crate::utils::BitMask;
 
 fn stream16_bare<RZ : Zipper + ZipperIteration>(rz: &mut RZ, ms: &mut Vec<u16>) {
     let cm = rz.child_mask();
@@ -120,8 +124,93 @@ fn trie16_locations<'a, 'b, A : Allocator, WZ : Zipper + ZipperWriting<(), A>>(m
     (loc, ls)
 }
 
+fn deplete_bare(ms: &[u16], c: &mut usize) {
+    let nm = ms[*c];
+    *c += 1;
+    if nm == 0 {
+        return;
+    }
+    let cm = ByteMask::load_nz_lo_masks(nm, &ms[*c]);
+    *c += nm.count_ones() as usize;
+
+    for _ in 0..cm.count_bits() {
+        deplete_bare(ms, c);
+    }
+}
+
+fn bare_join(sms: &[u16], oms: &[u16], ms: &mut Vec<u16>, sc: &mut usize, oc: &mut usize) {
+    let sm = ByteMask::load_nz_lo_masks(sms[*sc], &sms[*sc+1]);
+    *sc += 1 + sms[*sc].count_ones() as usize;
+    let om = ByteMask::load_nz_lo_masks(oms[*oc], &oms[*oc+1]);
+    *oc += 1 + oms[*oc].count_ones() as usize;
+
+    let jm: ByteMask = sm | om;
+    let mm: ByteMask = sm & om;
+
+    let jnm = jm.nibble_mask();
+    let nz = jnm.count_ones() as usize;
+    ms.push(jnm);
+    ms.reserve(nz as _);
+    jm.store_nz_lo_masks(jnm, unsafe { ms.as_mut_ptr().add(ms.len()) });
+    unsafe { ms.set_len(ms.len() + nz); }
+
+    for b in jm.iter() {
+        if mm.test_bit(b) {
+            bare_join(sms, oms, ms, sc, oc);
+        } else if om.test_bit(b) {
+            let old_oc = *oc;
+            deplete_bare(oms, oc);
+            ms.extend_from_slice(&oms[old_oc..*oc]);
+        } else if sm.test_bit(b) {
+            let old_sc = *sc;
+            deplete_bare(sms, sc);
+            ms.extend_from_slice(&sms[old_sc..*sc]);
+        }
+    }
+}
+
+// returns whether to keep this branch
+fn bare_meet(sms: &[u16], oms: &[u16], ms: &mut Vec<u16>, sc: &mut usize, oc: &mut usize) -> bool {
+    let sm = ByteMask::load_nz_lo_masks(sms[*sc], &sms[*sc+1]);
+    *sc += 1 + sms[*sc].count_ones() as usize;
+    let om = ByteMask::load_nz_lo_masks(oms[*oc], &oms[*oc+1]);
+    *oc += 1 + oms[*oc].count_ones() as usize;
+
+    let jm: ByteMask = sm | om;
+    let mm: ByteMask = sm & om;
+    let mut amm: ByteMask = sm & om;
+
+    let mnm = mm.nibble_mask();
+    let nz = mnm.count_ones() as usize;
+    ms.push(mnm);
+    let amm_pos = ms.len();
+    ms.extend_from_slice(&[0u16; 16][..nz]);
+
+    for (c, b) in jm.iter().enumerate() {
+        if mm.test_bit(b) {
+            let old_ms = ms.len();
+            if !bare_meet(sms, oms, ms, sc, oc) {
+                ms.truncate(old_ms);
+                amm.clear_bit(b);
+            }
+        } else if om.test_bit(b) {
+            deplete_bare(oms, oc);
+        } else if sm.test_bit(b) {
+            deplete_bare(sms, sc);
+        }
+    }
+
+    if amm.count_bits() != 0 {
+        amm.store_nz_lo_masks(mnm, unsafe { ms.as_mut_ptr().add(amm_pos) });
+        true
+    } else {
+        (sm | om).count_bits() == 0
+    }
+}
+
 mod tests {
     use crate::cbm_stream::*;
+    use crate::morphisms::Catamorphism;
     use crate::PathMap;
 
     #[test]
@@ -133,9 +222,7 @@ mod tests {
         let mut v = vec![];
         stream16_bare(&mut btm.read_zipper(), &mut v);
         println!("{} {}", 2*v.len(), rs.iter().map(|x| x.len()).sum::<usize>());
-        for nm in v.iter() {
-            print!("{nm:b}");
-        }
+        for nm in v.iter() { print!("{nm:b}"); }
         println!();
 
         let mut btm_: PathMap<()> = PathMap::new();
@@ -156,9 +243,7 @@ mod tests {
         let mut ms = vec![];
         let mut vs = vec![];
         stream16_values(&mut btm.read_zipper(), &mut ms, &mut vs);
-        for nm in ms.iter() {
-            print!("{nm:b}");
-        }
+        for nm in ms.iter() { print!("{nm:b}"); }
         println!();
         println!("{:?}", vs);
 
@@ -192,5 +277,84 @@ mod tests {
             assert!(btm_.path_exists_at(&p[..]));
             assert!(btm_.get_val_at(&p[..]).is_some())
         }
+    }
+
+    #[test]
+    fn basic_bare_join() {
+        let mut a = PathMap::new();
+        let mut b = PathMap::new();
+        let rs = ["Abbotsford", "Abbottabad", "Abcoude", "Abdul Hakim", "Abdulino", "Abdullahnagar", "Abdurahmoni Jomi", "Abejorral", "Abelardo Luz"];
+        for (i, path) in rs.into_iter().enumerate() {
+            if i % 3 == 0 {
+                a.set_val_at(path, ());
+                b.set_val_at(path, ());
+            } else if i % 3 == 1 {
+                a.set_val_at(path, ());
+            } else {
+                b.set_val_at(path, ());
+            }
+        }
+
+        println!("a {:?}", a);
+        println!("b {:?}", b);
+        let joined = a.join(&b);
+
+        let mut ams = vec![];
+        stream16_bare(&mut a.read_zipper(), &mut ams);
+        let mut bms = vec![];
+        stream16_bare(&mut b.read_zipper(), &mut bms);
+
+        let mut cms = vec![];
+        let mut ac = 0;
+        let mut bc = 0;
+        bare_join(&ams[..], &bms[..], &mut cms, &mut ac, &mut bc);
+
+        let mut joined_ = PathMap::new();
+        trie16_bare(&cms[..], &mut joined_.write_zipper(), ());
+
+        println!("{:?}", joined);
+        println!("{:?}", joined_);
+        assert_eq!(joined.hash(), joined_.hash());
+    }
+
+    #[test]
+    fn basic_bare_meet() {
+        let mut a = PathMap::new();
+        let mut b = PathMap::new();
+        let rs = ["Abbotsford", "Abbottabad", "Abcoude", "Abdul Hakim", "Abdulino", "Abdullahnagar", "Abdurahmoni Jomi", "Abejorral", "Abelardo Luz"];
+        for (i, path) in rs.into_iter().enumerate() {
+            if i % 3 == 0 {
+                a.set_val_at(path, ());
+                b.set_val_at(path, ());
+            } else if i % 3 == 1 {
+                a.set_val_at(path, ());
+            } else {
+                b.set_val_at(path, ());
+            }
+        }
+
+        let met = a.meet(&b);
+
+        let mut ams = vec![];
+        stream16_bare(&mut a.read_zipper(), &mut ams);
+        println!("a: {:?}", ams);
+        for nm in ams.iter() { print!("{nm:016b} "); } println!();
+        let mut bms = vec![];
+        stream16_bare(&mut b.read_zipper(), &mut bms);
+        println!("b: {:?}", bms);
+        for nm in bms.iter() { print!("{nm:016b} "); } println!();
+
+        let mut cms = vec![];
+        let mut ac = 0;
+        let mut bc = 0;
+        bare_meet(&ams[..], &bms[..], &mut cms, &mut ac, &mut bc);
+        for nm in cms.iter() { print!("{nm:016b} "); } println!();
+
+        let mut met_ = PathMap::new();
+        trie16_bare(&cms[..], &mut met_.write_zipper(), ());
+
+        println!("{:?}", met);
+        println!("{:?}", met_);
+        assert_eq!(met.hash(), met_.hash());
     }
 }
