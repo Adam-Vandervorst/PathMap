@@ -92,11 +92,11 @@ impl ByteMask {
 
     #[inline]
     pub(crate) fn store_nz_lo_masks(&self, nm: u16, mut p: *mut u16) {
-        // #[cfg(target_feature = "avx512")]
-        // unsafe {
-        //     use std::arch::x86_64::*;
-        //     _mm256_mask_compressstoreu_epi16(p as _, nm, self.avx())
-        // }
+        #[cfg(target_feature = "avx512")]
+        unsafe {
+            use std::arch::x86_64::*;
+            _mm256_mask_compressstoreu_epi16(p as _, nm, self.avx())
+        }
         #[cfg(not(target_feature = "avx512"))]
         unsafe {
             for (i, m) in std::mem::transmute::<_, [u16; 16]>(self.0).iter().enumerate() {
