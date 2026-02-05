@@ -54,13 +54,13 @@ impl ByteMask {
         ByteMaskIter::from(self.0)
     }
 
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_feature = "avx512f")]
     #[inline]
     fn avx(&self) -> std::arch::x86_64::__m256i {
         unsafe { std::mem::transmute(self.clone()) }
     }
 
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_feature = "avx512f")]
     #[inline]
     fn from_avx(m: std::arch::x86_64::__m256i) -> Self {
         unsafe { std::mem::transmute(m) }
@@ -69,12 +69,12 @@ impl ByteMask {
     /// mask of non-zero nibble lo masks
     #[inline]
     pub fn nibble_mask(&self) -> u16 {
-        #[cfg(target_feature = "avx512")]
+        #[cfg(target_feature = "avx512f")]
         unsafe {
             use std::arch::x86_64::*;
             _mm256_cmp_epi16_mask::<4>(self.avx(), _mm256_set1_epi8(0))
         }
-        #[cfg(not(target_feature = "avx512"))]
+        #[cfg(not(target_feature = "avx512f"))]
         unsafe {
             let mut r = 0;
             for (i, m) in std::mem::transmute::<_, [u16; 16]>(self.0).iter().enumerate() {
@@ -92,12 +92,12 @@ impl ByteMask {
 
     #[inline]
     pub(crate) fn store_nz_lo_masks(&self, nm: u16, mut p: *mut u16) {
-        #[cfg(target_feature = "avx512")]
+        #[cfg(target_feature = "avx512f")]
         unsafe {
             use std::arch::x86_64::*;
             _mm256_mask_compressstoreu_epi16(p as _, nm, self.avx())
         }
-        #[cfg(not(target_feature = "avx512"))]
+        #[cfg(not(target_feature = "avx512f"))]
         unsafe {
             for (i, m) in std::mem::transmute::<_, [u16; 16]>(self.0).iter().enumerate() {
                 if ((nm >> i) & 1) != 0 { *p = *m; p = p.add(1) }
@@ -107,12 +107,12 @@ impl ByteMask {
 
     #[inline]
     pub(crate) fn load_nz_lo_masks(nm: u16, mut p: *const u16) -> Self {
-        #[cfg(target_feature = "avx512")]
+        #[cfg(target_feature = "avx512f")]
         unsafe {
             use std::arch::x86_64::*;
             Self::from_avx(_mm256_maskz_expandloadu_epi16(nm, p as _))
         }
-        #[cfg(not(target_feature = "avx512"))]
+        #[cfg(not(target_feature = "avx512f"))]
         unsafe {
             let mut a = [0u16; 16];
             for i in 0..16 {

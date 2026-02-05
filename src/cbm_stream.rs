@@ -1,11 +1,8 @@
-use std::io::Write;
-use crate::alloc::{GlobalAlloc, global_alloc, Allocator};
-use crate::{PathMap, morphisms::Catamorphism, utils::{BitMask, ByteMask, find_prefix_overlap}, zipper::{
-    Zipper, ZipperValues, ZipperForking, ZipperAbsolutePath, ZipperIteration,
-    ZipperMoving, ZipperPathBuffer, ZipperReadOnlyValues, ZipperSubtries,
-    ZipperConcrete, ZipperReadOnlyConditionalValues, TrieRef
-}, TrieValue};
+use crate::alloc::Allocator;
 use crate::write_zipper::ZipperWriting;
+use crate::{utils::ByteMask, zipper::{
+    Zipper, ZipperIteration, ZipperValues
+}, TrieValue};
 
 fn stream16_bare<RZ : Zipper + ZipperIteration>(rz: &mut RZ, ms: &mut Vec<u16>) {
     let cm = rz.child_mask();
@@ -170,7 +167,6 @@ mod tests {
         println!("{:?}", btm_);
         for (p, v) in btm.iter() {
             assert!(btm_.path_exists_at(&p[..]));
-            println!("{:?}", std::str::from_utf8(&p[..]));
             assert_eq!(v, btm_.get_val_at(&p[..]).unwrap())
         }
     }
@@ -178,8 +174,7 @@ mod tests {
     #[test]
     fn locations16() {
         let mut btm = PathMap::new();
-        // internal values paths unsupported "roman"
-        let rs = ["arrow", "bow", "cannon", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
 
         let mut ms = vec![];
@@ -193,7 +188,7 @@ mod tests {
 
         let mut btm_: PathMap<()> = PathMap::new();
         trie16_locations(&ms[..], &mut ls, &mut btm_.write_zipper(), 0);
-        for (p, v) in btm.iter() {
+        for (p, _) in btm.iter() {
             assert!(btm_.path_exists_at(&p[..]));
             assert!(btm_.get_val_at(&p[..]).is_some())
         }
