@@ -2952,6 +2952,11 @@ mod opaque_dyn_rc_trie_node {
     }
 
     impl<V: Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
+        pub(crate) fn saturate(&mut self) {
+            let (ptr, _tag) = self.ptr.get_raw_parts();
+            unsafe{ &*ptr }.store(REFCOUNT_SATURATION_VAL, Relaxed);
+        }
+        
         #[inline]
         pub(crate) fn new_in<'odb, T>(node: T, alloc: A) -> Self
         where

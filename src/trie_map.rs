@@ -200,6 +200,23 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         }
     }
 
+    /// Internal Method.  Creates a new `PathMap` with the supplied root node
+    #[inline]
+    pub(crate) fn new_cyclic(alloc: A) -> Self {
+        use crate::dense_byte_node::DenseByteNode;
+
+        let mut tn = TrieNodeODRc::new_in(DenseByteNode::with_capacity_in(256, alloc.clone()), alloc.clone());
+        let tn_ptr = &tn as *const _;
+        let TaggedNodeRefMut::DenseByteNode(n) = tn.make_mut() else { unreachable!() };
+        for i in 0..256 { n.set_child(i as u8, unsafe { std::ptr::read(tn_ptr) }); }
+        tn.saturate();
+        Self {
+            root: UnsafeCell::new(Some(tn)),
+            root_val: UnsafeCell::new(None),
+            alloc
+        }
+    }
+
     /// Internal Method.  Removes and returns the root node and root_val from a `PathMap`
     #[inline]
     pub(crate) fn into_root(self) -> (Option<TrieNodeODRc<V, A>>, Option<V>) {
@@ -1448,6 +1465,23 @@ mod tests {
         //Validate meet with all_but_root removes it
         let result_map = map.meet(&all_but_root_map);
         assert_eq!(result_map.iter().count(), 2);
+    }
+
+    #[test]
+    fn cyclic_test() {
+        let top: PathMap<()> = PathMap::new_cyclic(global_alloc());
+
+        let mut z = top.into_read_zipper(&[]);
+        z.descend_first_k_path(2);
+        loop {
+            println!("{:?}", z.path());
+            if !z.to_next_k_path(2) { break }
+        }
+
+        // let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        // let mut btm: PathMap<()> = rs.into_iter().map(|k| (k, ())).collect();
+        //
+        // println!("{:?}", btm.meet(&top).iter().collect::<Vec<_>>());
     }
 }
 
