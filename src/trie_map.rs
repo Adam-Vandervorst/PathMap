@@ -202,17 +202,20 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
 
     /// Internal Method.  Creates a new `PathMap` with the supplied root node
     #[inline]
-    pub(crate) fn new_cyclic(alloc: A) -> Self {
+    pub(crate) fn new_cyclic(v: V, alloc: A) -> Self {
         use crate::dense_byte_node::DenseByteNode;
 
         let mut tn = TrieNodeODRc::new_in(DenseByteNode::with_capacity_in(256, alloc.clone()), alloc.clone());
         let tn_ptr = &tn as *const _;
         let TaggedNodeRefMut::DenseByteNode(n) = tn.make_mut() else { unreachable!() };
-        for i in 0..256 { n.set_child(i as u8, unsafe { std::ptr::read(tn_ptr) }); }
+        for i in 0..256 {
+            n.set_child(i as u8, unsafe { std::ptr::read(tn_ptr) });
+            n.set_val(i as u8, v.clone());
+        }
         tn.saturate();
         Self {
             root: UnsafeCell::new(Some(tn)),
-            root_val: UnsafeCell::new(None),
+            root_val: UnsafeCell::new(Some(v)),
             alloc
         }
     }
@@ -815,6 +818,7 @@ impl<V: Clone + Send + Sync + Unpin> Default for PathMap<V> {
 
 #[cfg(test)]
 mod tests {
+    use crate::morphisms::Catamorphism;
     use crate::trie_map::*;
     use crate::ring::Lattice;
 
@@ -1469,19 +1473,23 @@ mod tests {
 
     #[test]
     fn cyclic_test() {
-        let top: PathMap<()> = PathMap::new_cyclic(global_alloc());
+        let top: PathMap<()> = PathMap::new_cyclic((), global_alloc());
 
-        let mut z = top.into_read_zipper(&[]);
+        let mut z = top.read_zipper();
         z.descend_first_k_path(2);
-        loop {
-            println!("{:?}", z.path());
-            if !z.to_next_k_path(2) { break }
+        for i in 0..(1 << 2*8) {
+            let p = z.path();
+            assert_eq!(p.len(), 2);
+            assert_eq!(p[1], (i % 256) as u8);
+            assert_eq!(p[0], (i / 256) as u8);
+            if !z.to_next_k_path(2) { assert_eq!(i, (1 << 2*8) - 1) }
         }
 
-        // let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
-        // let mut btm: PathMap<()> = rs.into_iter().map(|k| (k, ())).collect();
-        //
-        // println!("{:?}", btm.meet(&top).iter().collect::<Vec<_>>());
+        let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        let btm: PathMap<()> = rs.into_iter().map(|k| (k, ())).collect();
+
+        let mt = top.meet(&btm);
+        assert_eq!(mt.hash(), btm.hash());
     }
 }
 
