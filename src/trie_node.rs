@@ -344,6 +344,15 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice;
 
     /// Allows for the implementation of the DistributiveLattice algebraic operations
+    ///
+    /// BUG / CONSTRAINT: The `LineListNode` implementation assumes that when it holds a value
+    /// at a given key, `other` — if it overlaps at that path — also contains a value at the
+    /// same key depth (not merely a child link whose subtree contains the value deeper down).
+    /// This holds when both operands originate from the same trie construction path, but can
+    /// be violated when `other` is a synthetic node produced by composing `pjoin_dyn` /
+    /// `pmeet_dyn` results, which may have a different internal structure.  Specifically,
+    /// `line_list_node.rs:1159` will panic on `unwrap()` if `node_get_val(onward_key)` returns
+    /// `None` because the other node has structure at that path but the value lives deeper.
     fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice;
 
     /// Allows for the implementation of the Quantale algebraic operations
