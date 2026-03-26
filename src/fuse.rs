@@ -37,12 +37,6 @@ impl FuseExpr {
 }
 
 /// Evaluate a fused expression tree over multiple input `PathMap`s.
-///
-/// The expression tree is evaluated bottom-up: leaf nodes reference
-/// inputs by index, binary op nodes combine their children using the
-/// optimized node-level operations.  No intermediate `PathMap` is
-/// ever constructed — only `TrieNodeODRc` nodes are produced and
-/// immediately consumed by the parent operation.
 pub fn fuse_eval<V>(
     expr: &FuseExpr,
     inputs: &[&PathMap<V>],
@@ -50,14 +44,14 @@ pub fn fuse_eval<V>(
 where
     V: Clone + Send + Sync + Unpin + Lattice + DistributiveLattice,
 {
-    let nodes: Vec<Option<TrieNodeODRc<V, GlobalAlloc>>> = inputs
+    let nodes: Vec<Option<&TrieNodeODRc<V, GlobalAlloc>>> = inputs
         .iter()
-        .map(|m| m.root().cloned())
+        .map(|m| m.root())
         .collect();
 
-    let vals: Vec<Option<V>> = inputs
+    let vals: Vec<Option<&V>> = inputs
         .iter()
-        .map(|m| m.root_val().cloned())
+        .map(|m| m.root_val())
         .collect();
 
     let (result_node, result_val) = eval_expr(expr, &nodes, &vals);
@@ -66,23 +60,89 @@ where
 
 // ── Core evaluator ───────────────────────────────────────────────────
 
+/// Evaluate an expression tree. Leaf nodes borrow from inputs (cheap
+/// Arc refcount bump only when entering a binary op that needs ownership).
 fn eval_expr<V, A>(
     expr: &FuseExpr,
-    nodes: &[Option<TrieNodeODRc<V, A>>],
-    vals: &[Option<V>],
+    nodes: &[Option<&TrieNodeODRc<V, A>>],
+    vals: &[Option<&V>],
 ) -> (Option<TrieNodeODRc<V, A>>, Option<V>)
 where
     V: Clone + Send + Sync + Unpin + Lattice + DistributiveLattice,
     A: Allocator,
 {
     match expr {
-        FuseExpr::Leaf(i) => (nodes[*i].clone(), vals[*i].clone()),
+        FuseExpr::Leaf(i) => {
+            (nodes[*i].cloned(), vals[*i].cloned())
+        }
         FuseExpr::Op(op, lhs, rhs) => {
-            let (l_node, l_val) = eval_expr(lhs, nodes, vals);
-            let (r_node, r_val) = eval_expr(rhs, nodes, vals);
-            let result_val = combine_val(*op, l_val, r_val);
-            let result_node = combine_node(*op, l_node, r_node);
-            (result_node, result_val)
+            // Distributive law: And(Or(A,B), C) → Or(And(A,C), And(B,C))
+            // This avoids building the large Or(A,B) intermediate only to
+            // discard most of it in the And with C.
+            if *op == FuseOp::And {
+                if let FuseExpr::Op(FuseOp::Or, a, b) = lhs.as_ref() {
+                    // And(Or(A,B), C) → Or(And(A,C), And(B,C))
+                    let (r_node, r_val) = eval_expr(rhs, nodes, vals);
+                    if r_node.is_none() && r_val.is_none() {
+                        return (None, None);
+                    }
+                    let (a_node, a_val) = eval_expr(a, nodes, vals);
+                    let ac_node = combine_node(FuseOp::And, a_node, r_node.clone());
+                    let ac_val = combine_val(FuseOp::And, a_val, r_val.clone());
+
+                    let (b_node, b_val) = eval_expr(b, nodes, vals);
+                    let bc_node = combine_node(FuseOp::And, b_node, r_node);
+                    let bc_val = combine_val(FuseOp::And, b_val, r_val);
+
+                    return (combine_node(FuseOp::Or, ac_node, bc_node),
+                            combine_val(FuseOp::Or, ac_val, bc_val));
+                }
+                if let FuseExpr::Op(FuseOp::Or, a, b) = rhs.as_ref() {
+                    // And(C, Or(A,B)) → Or(And(C,A), And(C,B))
+                    let (l_node, l_val) = eval_expr(lhs, nodes, vals);
+                    if l_node.is_none() && l_val.is_none() {
+                        return (None, None);
+                    }
+                    let (a_node, a_val) = eval_expr(a, nodes, vals);
+                    let ca_node = combine_node(FuseOp::And, l_node.clone(), a_node);
+                    let ca_val = combine_val(FuseOp::And, l_val.clone(), a_val);
+
+                    let (b_node, b_val) = eval_expr(b, nodes, vals);
+                    let cb_node = combine_node(FuseOp::And, l_node, b_node);
+                    let cb_val = combine_val(FuseOp::And, l_val, b_val);
+
+                    return (combine_node(FuseOp::Or, ca_node, cb_node),
+                            combine_val(FuseOp::Or, ca_val, cb_val));
+                }
+            }
+
+            // Short-circuit: for And/AndNot, if lhs produces nothing, skip rhs.
+            match op {
+                FuseOp::And => {
+                    let (l_node, l_val) = eval_expr(lhs, nodes, vals);
+                    if l_node.is_none() && l_val.is_none() {
+                        return (None, None);
+                    }
+                    let (r_node, r_val) = eval_expr(rhs, nodes, vals);
+                    if r_node.is_none() && r_val.is_none() {
+                        return (None, None);
+                    }
+                    (combine_node(*op, l_node, r_node), combine_val(*op, l_val, r_val))
+                }
+                FuseOp::AndNot => {
+                    let (l_node, l_val) = eval_expr(lhs, nodes, vals);
+                    if l_node.is_none() && l_val.is_none() {
+                        return (None, None);
+                    }
+                    let (r_node, r_val) = eval_expr(rhs, nodes, vals);
+                    (combine_node(*op, l_node, r_node), combine_val(*op, l_val, r_val))
+                }
+                _ => {
+                    let (l_node, l_val) = eval_expr(lhs, nodes, vals);
+                    let (r_node, r_val) = eval_expr(rhs, nodes, vals);
+                    (combine_node(*op, l_node, r_node), combine_val(*op, l_val, r_val))
+                }
+            }
         }
     }
 }
@@ -117,24 +177,44 @@ where
     match op {
         FuseOp::Or => match (l, r) {
             (None, x) | (x, None) => x,
-            (Some(l), Some(r)) => resolve(l.as_tagged().pjoin_dyn(r.as_tagged()), l, r),
+            (Some(l), Some(r)) => {
+                if l.ptr_eq(&r) { return Some(l); }
+                resolve(l.as_tagged().pjoin_dyn(r.as_tagged()), l, r)
+            }
         },
         FuseOp::And => match (l, r) {
             (None, _) | (_, None) => None,
-            (Some(l), Some(r)) => resolve(l.as_tagged().pmeet_dyn(r.as_tagged()), l, r),
+            (Some(l), Some(r)) => {
+                if l.ptr_eq(&r) { return Some(l); }
+                resolve(l.as_tagged().pmeet_dyn(r.as_tagged()), l, r)
+            }
         },
         FuseOp::Xor => match (l, r) {
             (None, x) | (x, None) => x,
             (Some(l), Some(r)) => {
+                if l.ptr_eq(&r) { return None; }
+                // Compute L\R, then join R\L into it in-place.
                 let l_minus_r = resolve(l.as_tagged().psubtract_dyn(r.as_tagged()), l.clone(), r.clone());
                 let r_minus_l = resolve(r.as_tagged().psubtract_dyn(l.as_tagged()), r, l);
-                combine_node(FuseOp::Or, l_minus_r, r_minus_l)
+                match (l_minus_r, r_minus_l) {
+                    (None, x) | (x, None) => x,
+                    (Some(mut a), Some(b)) => {
+                        let (status, _) = a.make_mut().join_into_dyn(b);
+                        match status {
+                            AlgebraicStatus::None => None,
+                            _ => Some(a),
+                        }
+                    }
+                }
             }
         },
         FuseOp::AndNot => match (l, r) {
             (None, _) => None,
             (l, None) => l,
-            (Some(l), Some(r)) => resolve(l.as_tagged().psubtract_dyn(r.as_tagged()), l, r),
+            (Some(l), Some(r)) => {
+                if l.ptr_eq(&r) { return None; }
+                resolve(l.as_tagged().psubtract_dyn(r.as_tagged()), l, r)
+            }
         },
     }
 }
