@@ -83,6 +83,67 @@ impl FuseProgram {
         FuseRef::Input(i)
     }
 
+    /// Apply the distributive law: `And(Or(A,B), C) → Or(And(A,C), And(B,C))`.
+    ///
+    /// This avoids building the large `Or(A,B)` intermediate when it would
+    /// be mostly discarded by the `And` with `C`.  The rewrite is applied
+    /// once (not recursively) to each `And` step whose operand is an `Or`.
+    ///
+    /// Returns a new program with updated step indices. Output refs from
+    /// the original program must be remapped via the returned mapping.
+    pub fn distribute_and_over_or(&self) -> (FuseProgram, Vec<FuseRef>) {
+        // Build a new program, mapping old step indices to new ones.
+        let mut new_prog = FuseProgram::new();
+        // map[old_step_index] = new FuseRef
+        let mut map: Vec<FuseRef> = Vec::with_capacity(self.steps.len());
+
+        let remap = |r: FuseRef, map: &[FuseRef]| -> FuseRef {
+            match r {
+                FuseRef::Input(i) => FuseRef::Input(i),
+                FuseRef::Step(i) => map[i],
+            }
+        };
+
+        for step in &self.steps {
+            let lhs = remap(step.lhs, &map);
+            let rhs = remap(step.rhs, &map);
+
+            if step.op == FuseOp::And {
+                // Check if lhs is an Or step
+                if let FuseRef::Step(li) = step.lhs {
+                    if self.steps[li].op == FuseOp::Or {
+                        let or_a = remap(self.steps[li].lhs, &map);
+                        let or_b = remap(self.steps[li].rhs, &map);
+                        // And(Or(A,B), C) → Or(And(A,C), And(B,C))
+                        let ac = new_prog.push(FuseOp::And, or_a, rhs);
+                        let bc = new_prog.push(FuseOp::And, or_b, rhs);
+                        let result = new_prog.push(FuseOp::Or, ac, bc);
+                        map.push(result);
+                        continue;
+                    }
+                }
+                // Check if rhs is an Or step
+                if let FuseRef::Step(ri) = step.rhs {
+                    if self.steps[ri].op == FuseOp::Or {
+                        let or_a = remap(self.steps[ri].lhs, &map);
+                        let or_b = remap(self.steps[ri].rhs, &map);
+                        // And(C, Or(A,B)) → Or(And(C,A), And(C,B))
+                        let ca = new_prog.push(FuseOp::And, lhs, or_a);
+                        let cb = new_prog.push(FuseOp::And, lhs, or_b);
+                        let result = new_prog.push(FuseOp::Or, ca, cb);
+                        map.push(result);
+                        continue;
+                    }
+                }
+            }
+
+            let result = new_prog.push(step.op, lhs, rhs);
+            map.push(result);
+        }
+
+        (new_prog, map)
+    }
+
     /// Evaluate the program, returning one `PathMap` per output ref.
     pub fn eval<V>(
         &self,
@@ -126,6 +187,30 @@ impl FuseProgram {
             let (node, val) = get_ref(*r, &input_nodes, &input_vals, &results);
             PathMap::new_with_root_in(node, val, global_alloc())
         }).collect()
+    }
+
+    /// Apply distributive rewrite then evaluate.
+    ///
+    /// Only beneficial when `And` filters out most of a large `Or`
+    /// intermediate (e.g. `(A|B|..|H) & sparse_filter`).  For general
+    /// use, prefer `eval` — the rewrite doubles work when the
+    /// intersection is large.
+    pub fn eval_distributed<V>(
+        &self,
+        inputs: &[&PathMap<V>],
+        outputs: &[FuseRef],
+    ) -> Vec<PathMap<V>>
+    where
+        V: Clone + Send + Sync + Unpin + Lattice + DistributiveLattice,
+    {
+        let (new_prog, map) = self.distribute_and_over_or();
+        let new_outputs: Vec<FuseRef> = outputs.iter().map(|r| {
+            match r {
+                FuseRef::Input(i) => FuseRef::Input(*i),
+                FuseRef::Step(i) => map[*i],
+            }
+        }).collect();
+        new_prog.eval(inputs, &new_outputs)
     }
 }
 
@@ -180,7 +265,7 @@ fn compile_expr(expr: &FuseExpr, prog: &mut FuseProgram) -> FuseRef {
     }
 }
 
-/// Evaluate a `FuseExpr` tree (convenience wrapper around `FuseProgram`).
+/// Evaluate a `FuseExpr` tree (convenience wrapper).
 pub fn fuse_eval<V>(
     expr: &FuseExpr,
     inputs: &[&PathMap<V>],
