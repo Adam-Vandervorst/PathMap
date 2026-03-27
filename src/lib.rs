@@ -86,6 +86,8 @@ pub mod merkleization;
 
 /// Fused evaluation of expression trees over trie nodes
 pub mod fuse;
+#[cfg(test)]
+mod fuse_test;
 
 /// Handy conveniences and utilities to use with a [PathMap]
 pub mod utils;
