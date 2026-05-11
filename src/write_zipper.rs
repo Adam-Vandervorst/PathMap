@@ -139,12 +139,6 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         }
     }
 
-    /// Deprecated alias for [graft_masked_branches](ZipperWriting::graft_masked_branches)
-    #[deprecated]
-    fn graft_children<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask) {
-        self.graft_masked_branches(src, child_mask, false)
-    }
-
     /// Joins (union of) the subtrie below the focus of `read_zipper` into the subtrie downstream from the
     /// focus of `self`
     ///

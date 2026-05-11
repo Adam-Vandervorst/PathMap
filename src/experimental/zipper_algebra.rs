@@ -1485,7 +1485,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, range);
+        out.graft_masked_branches(z, range, false)
     }
 
     #[inline]
@@ -1500,7 +1500,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, ByteMask::FULL);
+        out.graft_masked_branches(z, ByteMask::FULL, false)
     }
 }
 
@@ -1575,7 +1575,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, ByteMask::FULL);
+        out.graft_masked_branches(z, ByteMask::FULL, false);
     }
 }
 
@@ -1650,7 +1650,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, range);
+        out.graft_masked_branches(z, range, false);
     }
 
     #[inline]
@@ -1670,7 +1670,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
         Out: ZipperWriting<V, A>,
     {
         if mask == 1 {
-            out.graft_children(z, range);
+            out.graft_masked_branches(z, range, false)
         }
     }
 
