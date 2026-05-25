@@ -1,7 +1,9 @@
+use std::borrow::Cow;
+
 use crate::{
     alloc::{Allocator, GlobalAlloc},
     ring::{AlgebraicResult, COUNTER_IDENT, DistributiveLattice, Lattice, SELF_IDENT},
-    utils::ByteMask,
+    utils::{BitMask, ByteMask},
     zipper::*,
 };
 
@@ -360,26 +362,43 @@ trait MergePolicy<V: Clone + Send + Sync> {
         Out: ZipperWriting<V, A>;
 }
 
-trait ValuePolicy<V> {
-    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V>;
+#[inline(always)]
+fn lift<'a, V: Clone>(v: Option<&'a V>) -> Option<Cow<'a, V>> {
+    v.map(Cow::Borrowed)
+}
+
+#[inline(always)]
+fn unlift<V: Clone>(v: Option<Cow<V>>) -> Option<V> {
+    v.map(Cow::into_owned)
+}
+trait ValuePolicy<V: Clone> {
+    fn combine_impl<'a>(l: Option<Cow<'a, V>>, r: Option<Cow<'a, V>>) -> Option<Cow<'a, V>>;
     #[inline]
-    fn combine_acc(l: Option<V>, r: Option<&V>) -> Option<V> {
-        Self::combine(l.as_ref(), r)
+    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+        unlift(Self::combine_impl(lift(l), lift(r)))
     }
+    #[inline]
     fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
         // (l op m) op r
-        Self::combine_acc(Self::combine(l, m), r)
+        unlift(Self::combine_impl(
+            Self::combine_impl(lift(l), lift(m)),
+            lift(r),
+        ))
     }
+    #[inline]
     fn combine4(a: Option<&V>, b: Option<&V>, c: Option<&V>, d: Option<&V>) -> Option<V> {
         // ((a op b) op c) op d
-        Self::combine_acc(Self::combine_acc(Self::combine(a, b), c), d)
+        unlift(Self::combine_impl(
+            Self::combine_impl(Self::combine_impl(lift(a), lift(b)), lift(c)),
+            lift(d),
+        ))
     }
     fn combine_n<'a, I>(vals: I) -> Option<V>
     where
-        I: Iterator<Item = Option<&'a V>>,
+        I: Iterator<Item = Option<Cow<'a, V>>>,
         V: 'a,
     {
-        vals.fold(None, |acc, v| Self::combine_acc(acc, v))
+        unlift(vals.fold(None, |acc, v| Self::combine_impl(acc, v)))
     }
 }
 
@@ -1194,12 +1213,12 @@ where
     fn values<'a, V, Z, const N: usize>(
         zs: &'a [Z; N],
         active: u64,
-    ) -> impl Iterator<Item = Option<&'a V>>
+    ) -> impl Iterator<Item = Option<Cow<'a, V>>>
     where
-        V: 'a,
+        V: Clone + 'a,
         Z: ZipperValues<V>,
     {
-        only_active(zs, active).map(|(_, z)| z.val())
+        only_active(zs, active).map(|(_, z)| lift(z.val()))
     }
 
     fn all_active_share<Z, const N: usize>(zs: &[Z; N], active: u64) -> bool
@@ -1505,47 +1524,25 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
 }
 
 impl<V: Lattice + Clone> ValuePolicy<V> for Join {
-    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
-        if let Some(lv) = l {
-            if let Some(rv) = r {
+    fn combine_impl<'a>(l: Option<Cow<'a, V>>, r: Option<Cow<'a, V>>) -> Option<Cow<'a, V>> {
+        if let Some(ref lv) = l {
+            if let Some(ref rv) = r {
                 match lv.pjoin(rv) {
                     AlgebraicResult::None => None,
                     AlgebraicResult::Identity(mask) => {
                         if mask & SELF_IDENT != 0 {
-                            l.cloned()
+                            l
                         } else {
-                            r.cloned()
+                            r
                         }
                     }
-                    AlgebraicResult::Element(v) => Some(v),
+                    AlgebraicResult::Element(v) => Some(Cow::Owned(v)),
                 }
             } else {
-                l.cloned()
+                l
             }
         } else {
-            r.cloned()
-        }
-    }
-
-    fn combine_acc(l: Option<V>, r: Option<&V>) -> Option<V> {
-        if let Some(lv) = l {
-            if let Some(rv) = r {
-                match lv.pjoin(rv) {
-                    AlgebraicResult::None => None,
-                    AlgebraicResult::Identity(mask) => {
-                        if mask & SELF_IDENT != 0 {
-                            Some(lv)
-                        } else {
-                            r.cloned()
-                        }
-                    }
-                    AlgebraicResult::Element(v) => Some(v),
-                }
-            } else {
-                Some(lv)
-            }
-        } else {
-            r.cloned()
+            r
         }
     }
 }
@@ -1580,62 +1577,68 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
 }
 
 impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
-    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
-        l.and_then(|lv| r.and_then(|rv| meet_refs(lv, rv)))
+    #[inline]
+    fn combine_impl<'a>(l: Option<Cow<'a, V>>, r: Option<Cow<'a, V>>) -> Option<Cow<'a, V>> {
+        l.and_then(|lv| r.and_then(|rv| meet_impl(lv, rv)))
     }
 
     fn combine3(l: Option<&V>, m: Option<&V>, r: Option<&V>) -> Option<V> {
-        l.and_then(|x| m.and_then(|y| r.and_then(|z| meet_acc(meet_refs(x, y)?, z))))
+        l.and_then(|x| {
+            m.and_then(|y| {
+                r.and_then(|z| {
+                    unlift(meet_impl(
+                        meet_impl(Cow::Borrowed(x), Cow::Borrowed(y))?,
+                        Cow::Borrowed(z),
+                    ))
+                })
+            })
+        })
     }
 
     fn combine4(a: Option<&V>, b: Option<&V>, c: Option<&V>, d: Option<&V>) -> Option<V> {
         a.and_then(|w| {
             b.and_then(|x| {
-                c.and_then(|y| d.and_then(|z| meet_acc(meet_acc(meet_refs(w, x)?, y)?, z)))
+                c.and_then(|y| {
+                    d.and_then(|z| {
+                        unlift(meet_impl(
+                            meet_impl(
+                                meet_impl(Cow::Borrowed(w), Cow::Borrowed(x))?,
+                                Cow::Borrowed(y),
+                            )?,
+                            Cow::Borrowed(z),
+                        ))
+                    })
+                })
             })
         })
     }
 
     fn combine_n<'a, I>(vals: I) -> Option<V>
     where
-        I: Iterator<Item = Option<&'a V>>,
+        I: Iterator<Item = Option<Cow<'a, V>>>,
         V: 'a,
     {
         let mut it = vals;
-        let z = it.next()?.cloned()?;
-        it.try_fold(z, |acc, v| {
+        let z = it.next()??;
+        unlift(it.try_fold(z, |acc, v| {
             let rv = v?;
-            meet_acc(acc, rv)
-        })
+            meet_impl(acc, rv)
+        }))
     }
 }
 
 #[inline]
-fn meet_refs<V: Lattice + Clone>(a: &V, b: &V) -> Option<V> {
-    match a.pmeet(b) {
-        AlgebraicResult::None => None,
-        AlgebraicResult::Identity(mask) => {
-            if mask & SELF_IDENT != 0 {
-                Some(a.clone())
-            } else {
-                Some(b.clone())
-            }
-        }
-        AlgebraicResult::Element(v) => Some(v),
-    }
-}
-#[inline]
-fn meet_acc<V: Lattice + Clone>(a: V, b: &V) -> Option<V> {
-    match a.pmeet(b) {
+fn meet_impl<'a, V: Lattice + Clone>(a: Cow<'a, V>, b: Cow<'a, V>) -> Option<Cow<'a, V>> {
+    match a.pmeet(&b) {
         AlgebraicResult::None => None,
         AlgebraicResult::Identity(mask) => {
             if mask & SELF_IDENT != 0 {
                 Some(a)
             } else {
-                Some(b.clone())
+                Some(b)
             }
         }
-        AlgebraicResult::Element(v) => Some(v),
+        AlgebraicResult::Element(v) => Some(Cow::Owned(v)),
     }
 }
 
@@ -1690,59 +1693,37 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
 }
 
 impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
-    fn combine(l: Option<&V>, r: Option<&V>) -> Option<V> {
+    fn combine_impl<'a>(l: Option<Cow<'a, V>>, r: Option<Cow<'a, V>>) -> Option<Cow<'a, V>> {
         l.and_then(|lv| {
             if let Some(rv) = r {
-                subtract_refs(lv, rv)
-            } else {
-                // lhs-only → keep
-                Some(lv.clone())
-            }
-        })
-    }
-
-    fn combine_n<'a, I>(vals: I) -> Option<V>
-    where
-        I: Iterator<Item = Option<&'a V>>,
-        V: 'a,
-    {
-        let mut it = vals;
-        let z = it.next()?.cloned()?;
-        it.try_fold(z, |acc, v| match v {
-            Some(rv) => subtract_acc(acc, rv),
-            None => Some(acc),
-        })
-    }
-
-    fn combine_acc(l: Option<V>, r: Option<&V>) -> Option<V> {
-        l.and_then(|lv| {
-            if let Some(rv) = r {
-                subtract_acc(lv, rv)
+                subtract_impl(lv, rv)
             } else {
                 // lhs-only → keep
                 Some(lv)
             }
         })
     }
+
+    fn combine_n<'a, I>(vals: I) -> Option<V>
+    where
+        I: Iterator<Item = Option<Cow<'a, V>>>,
+        V: 'a,
+    {
+        let mut it = vals;
+        let z = it.next()??;
+        unlift(it.try_fold(z, |acc, v| match v {
+            Some(rv) => subtract_impl(acc, rv),
+            None => Some(acc),
+        }))
+    }
 }
 
 #[inline]
-fn subtract_refs<V: DistributiveLattice + Clone>(a: &V, b: &V) -> Option<V> {
-    match a.psubtract(b) {
-        AlgebraicResult::None => None,
-        AlgebraicResult::Identity(mask) => {
-            if mask & SELF_IDENT != 0 {
-                Some(a.clone())
-            } else {
-                None
-            }
-        }
-        AlgebraicResult::Element(v) => Some(v),
-    }
-}
-#[inline]
-fn subtract_acc<V: DistributiveLattice>(a: V, b: &V) -> Option<V> {
-    match a.psubtract(b) {
+fn subtract_impl<'a, V: DistributiveLattice + Clone>(
+    a: Cow<'a, V>,
+    b: Cow<'a, V>,
+) -> Option<Cow<'a, V>> {
+    match a.psubtract(&b) {
         AlgebraicResult::None => None,
         AlgebraicResult::Identity(mask) => {
             if mask & SELF_IDENT != 0 {
@@ -1751,7 +1732,7 @@ fn subtract_acc<V: DistributiveLattice>(a: V, b: &V) -> Option<V> {
                 None
             }
         }
-        AlgebraicResult::Element(v) => Some(v),
+        AlgebraicResult::Element(v) => Some(Cow::Owned(v)),
     }
 }
 
