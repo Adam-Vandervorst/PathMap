@@ -1180,6 +1180,35 @@ where
     zipper_merge_n_mono::<Subtract, _, _, _, _, _>(zs, (1 << N) - 1, out);
 }
 
+// small micro-helpers
+#[inline(always)]
+fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
+    while bits != 0 {
+        let i = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        f(i);
+    }
+}
+
+#[inline]
+fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
+    (0..N).filter(move |i| (active >> i) & 1 != 0)
+}
+
+fn only_active<'a, T, const N: usize>(
+    ts: &'a [T; N],
+    active: u64,
+) -> impl Iterator<Item = (usize, &'a T)> {
+    active_bits::<N>(active).map(|i| (i, &ts[i]))
+}
+
+#[inline(always)]
+fn first_active_mut<T, const N: usize>(ts: &mut [T; N], active: u64) -> &mut T {
+    debug_assert_ne!(active, 0);
+    let i0 = active.trailing_zeros() as usize;
+    &mut ts[i0]
+}
+
 // - The function is fully monomorphized over `Z` and `N` and uses a bitmask (`active`)
 //   to track participating zippers.
 // - Small frontiers (`k ≤ 4`) are dispatched to specialized implementations
@@ -1197,18 +1226,6 @@ where
     // LLVM needs to prove: `0 ≤ i < N` But i comes from: `i = bits.trailing_zeros() as usize;`` So the
     // compiler must connect: “this bitmask only contains bits < N”
     assert!(active >> N == 0);
-
-    #[inline]
-    fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
-        (0..N).filter(move |i| (active >> i) & 1 != 0)
-    }
-
-    fn only_active<'a, T, const N: usize>(
-        ts: &'a [T; N],
-        active: u64,
-    ) -> impl Iterator<Item = (usize, &'a T)> {
-        active_bits::<N>(active).map(|i| (i, &ts[i]))
-    }
 
     fn values<'a, V, Z, const N: usize>(
         zs: &'a [Z; N],
@@ -1229,23 +1246,6 @@ where
         match iter.next() {
             Some(Some(first)) => iter.all(|next| next.is_some_and(|snid| snid == first)),
             _ => false,
-        }
-    }
-
-    // small micro-helpers
-    #[inline(always)]
-    fn first_active<T, const N: usize>(ts: &mut [T; N], active: u64) -> &mut T {
-        debug_assert_ne!(active, 0);
-        let i0 = active.trailing_zeros() as usize;
-        &mut ts[i0]
-    }
-
-    #[inline(always)]
-    fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
-        while bits != 0 {
-            let i = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            f(i);
         }
     }
 
@@ -1280,7 +1280,7 @@ where
 
     // check for node-sharing first
     if all_active_share(zs, active) {
-        P::on_id(first_active(zs, active), out);
+        P::on_id(first_active_mut(zs, active), out);
         return;
     }
 
@@ -1370,7 +1370,7 @@ where
 
                         // check structural sharing first
                         if all_active_share(zs, active) {
-                            P::on_id(first_active(zs, active), out);
+                            P::on_id(first_active_mut(zs, active), out);
 
                             for_each_bit(active, |i| {
                                 zs[i].ascend_byte();
@@ -1475,7 +1475,7 @@ where
         if (k == 0) {
             break 'ascend;
         }
-        let byte_from = *first_active(zs, active)
+        let byte_from = *first_active_mut(zs, active)
             .path()
             .last()
             .expect("non-empty path when k > 0");
@@ -1491,6 +1491,212 @@ where
         out.ascend_byte();
         k -= 1;
     }
+}
+
+fn zipper_merge_dnf<V, Z, Out, A, const M: usize>(clauses: &mut [&mut [Z]; M], out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync + Unpin,
+    A: Allocator,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    #[inline(always)]
+    fn clause_mask<Z>(zs: &[Z]) -> ByteMask
+    where
+        Z: Zipper,
+    {
+        if zs.is_empty() {
+            return ByteMask::EMPTY;
+        };
+        zs.iter()
+            .try_fold(ByteMask::FULL, |mut mask, z| {
+                mask &= z.child_mask();
+                if mask.is_empty_mask() {
+                    None
+                } else {
+                    Some(mask)
+                }
+            })
+            .unwrap_or(ByteMask::EMPTY)
+    }
+
+    #[inline(always)]
+    fn clause_value<V, Z>(zs: &[Z]) -> Option<V>
+    where
+        V: Lattice + Clone,
+        Z: ZipperValues<V>,
+    {
+        Meet::combine_n(zs.iter().map(|z| lift(z.val())))
+    }
+
+    fn active_clauses_value<V, Z, const M: usize>(clauses: &[&mut [Z]; M], active: u64) -> Option<V>
+    where
+        V: Lattice + Clone,
+        Z: ZipperValues<V>,
+    {
+        Join::combine_n(
+            only_active(clauses, active).map(|(_, zs)| clause_value(zs).map(Cow::Owned)),
+        )
+    }
+
+    #[inline(always)]
+    fn compute_masks<Z, const M: usize>(
+        clauses: &[&mut [Z]; M],
+        active: u64,
+        clause_masks: &mut [ByteMask; M],
+    ) -> ByteMask
+    where
+        Z: Zipper,
+    {
+        let mut global = ByteMask::EMPTY;
+
+        for (i, zs) in only_active(clauses, active) {
+            let m = clause_mask(zs);
+
+            clause_masks[i] = m;
+            global |= m;
+        }
+
+        global
+    }
+
+    fn zipper_merge_dnf_branch<V, Z, Out, A, const M: usize>(
+        clauses: &mut [&mut [Z]; M],
+        active: u64,
+        out: &mut Out,
+    ) where
+        V: Lattice + Clone + Send + Sync + Unpin,
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        assert!(active >> M == 0);
+
+        // check for singleton
+        if active.count_ones() == 1 {
+            let single_clause = first_active_mut(clauses, active);
+            match single_clause {
+                [z0] => {
+                    Meet::on_id(z0, out);
+                    return;
+                }
+                [z0, z1] => {
+                    zipper_meet(z0, z1, out);
+                    return;
+                }
+                [z0, z1, z2] => {
+                    zipper_meet3(z0, z1, z2, out);
+                    return;
+                }
+                [z0, z1, z2, z3] => {
+                    zipper_merge4::<Meet, V, Z, Z, Z, Z, Out, A>(z0, z1, z2, z3, out);
+                    return;
+                }
+                _ => {} // do nothing special
+            }
+        }
+
+        let mut clause_masks = [ByteMask::EMPTY; M];
+        let mut depth = 0;
+
+        // -------------------------------------------------
+        // Emit values
+        // -------------------------------------------------
+
+        if let Some(v) = active_clauses_value(clauses, active) {
+            out.set_val(v);
+        }
+        // -------------------------------------------------
+        // Compute clause masks
+        // -------------------------------------------------
+
+        let mut global = compute_masks(clauses, active, &mut clause_masks);
+        let mut next = global.indexed_bit::<true>(0);
+        'descend: loop {
+            // -------------------------------------------------
+            // Iterate global frontier
+            // -------------------------------------------------
+            while let Some(byte) = next {
+                out.descend_to_byte(byte);
+
+                let mut sub_active = 0u64;
+
+                // descend participating clauses
+                for_each_bit(active, |i| {
+                    if clause_masks[i].test_bit(byte) {
+                        sub_active |= 1 << i;
+
+                        for z in clauses[i].iter_mut() {
+                            z.descend_to_byte(byte);
+                        }
+                    }
+                });
+
+                // -------------------------------------------------
+                // Tail-descent fast path
+                // -------------------------------------------------
+
+                if sub_active == active {
+                    depth += 1;
+
+                    if let Some(v) = active_clauses_value(clauses, active) {
+                        out.set_val(v);
+                    }
+
+                    global = compute_masks(clauses, active, &mut clause_masks);
+                    next = global.indexed_bit::<true>(0);
+                    continue 'descend;
+                }
+
+                // -------------------------------------------------
+                // Branching recursion
+                // -------------------------------------------------
+
+                zipper_merge_dnf_branch(clauses, sub_active, out);
+
+                // ascend
+                for_each_bit(sub_active, |i| {
+                    for z in clauses[i].iter_mut() {
+                        z.ascend_byte();
+                    }
+                });
+
+                out.ascend_byte();
+
+                next = global.next_bit(byte);
+            }
+
+            // -------------------------------------------------
+            // Ascend iterative spine
+            // -------------------------------------------------
+            if depth == 0 {
+                break;
+            }
+
+            let byte_from = first_active_mut(clauses, active)
+                .first()
+                .and_then(|z| z.path().last().copied())
+                .expect("non-empty path at depth > 0");
+
+            for_each_bit(active, |i| {
+                for z in clauses[i].iter_mut() {
+                    z.ascend_byte();
+                }
+            });
+
+            out.ascend_byte();
+
+            depth -= 1;
+
+            // recompute masks after ascent
+            global = compute_masks(clauses, active, &mut clause_masks);
+            // resume sibling traversal
+            next = global.next_bit(byte_from);
+        }
+    }
+
+    debug_assert!(M > 0 && M <= 64);
+    zipper_merge_dnf_branch(clauses, ((1 << M) - 1), out);
 }
 
 // ==================== JOIN ====================
@@ -2084,6 +2290,7 @@ mod tests {
             ZipperWriting,
         },
     };
+    use std::borrow::Borrow;
 
     type Paths = &'static [(&'static [u8], u64)];
     type BinaryTest = (Paths, Paths);
@@ -2130,7 +2337,7 @@ mod tests {
 
         op(&mut lhs, &mut rhs, &mut out);
 
-        assert_trie(expected, result);
+        assert_trie(expected.into_iter().copied(), result);
     }
 
     fn check3<
@@ -2158,7 +2365,7 @@ mod tests {
 
         op(&mut lhs, &mut mid, &mut rhs, &mut out);
 
-        assert_trie(expected, result);
+        assert_trie(expected.into_iter().copied(), result);
     }
 
     fn checkn<
@@ -2179,10 +2386,10 @@ mod tests {
             result.write_zipper(),
         );
 
-        assert_trie(expected, result);
+        assert_trie(expected.into_iter().copied(), result);
     }
 
-    fn assert_trie<'a, T: IntoIterator<Item = &'a (&'a [u8], u64)>>(
+    fn assert_trie<T: IntoIterator<Item = (P, u64)>, P: Borrow<[u8]>>(
         expected: T,
         result: PathMap<u64>,
     ) {
@@ -2190,17 +2397,19 @@ mod tests {
 
         for (expected_path, expected_val) in expected {
             assert!(
-                result.path_exists_at(expected_path),
-                "Path {expected_path:#?} does NOT exist in {result:#?}"
+                result.path_exists_at(expected_path.borrow()),
+                "Path {:#?} does NOT exist in {result:#?}",
+                expected_path.borrow()
             );
-            let actual_val = result.get_val_at(expected_path);
+            let actual_val = result.get_val_at(expected_path.borrow()).copied();
             assert_eq!(
                 actual_val,
                 Some(expected_val),
-                "Value at {expected_path:#?}"
+                "Value at {:#?}",
+                expected_path.borrow()
             );
 
-            result_copy.remove_val_at(expected_path, true);
+            result_copy.remove_val_at(expected_path.borrow(), true);
         }
 
         assert!(
@@ -3606,7 +3815,7 @@ mod tests {
             (&[0b11, 0b0111], 11),
             (&[0b11, 0b1111], 12),
         ];
-        assert_trie(expected0, result0);
+        assert_trie(expected0.iter().copied(), result0);
 
         fn prefixed<V: Clone + Send + Sync + Unpin, Z: ZipperInfallibleSubtries<V>>(
             rz: &Z,
@@ -3637,7 +3846,7 @@ mod tests {
             (&[0b0, 0b01, 0b0111], 7),
             (&[0b0, 0b01, 0b1111], 8),
         ];
-        assert_trie(expected1, result1);
+        assert_trie(expected1.iter().copied(), result1);
 
         let mut map3 = prefixed(&mut r5, &[0]);
         let mut map4 = prefixed(&mut r6, &[1]);
@@ -3663,6 +3872,114 @@ mod tests {
             (&[0b1, 0b00, 0b0111], 3),
             (&[0b1, 0b00, 0b1111], 4),
         ];
-        assert_trie(expected2, result2);
+        assert_trie(expected2.iter().copied(), result2);
+    }
+
+    mod dnf {
+        use crate::experimental::zipper_algebra::{zipper_join3, zipper_meet3, zipper_merge_dnf};
+
+        use super::*;
+
+        const SMALL_TRIE_1: Paths = &[(&[0, 1, 2], 1), (&[0, 1, 3], 2)];
+        const SMALL_TRIE_2: Paths = &[(&[0, 1], 1), (&[0, 2], 2), (&[3], 3), (&[2, 3], 4)];
+        const SMALL_TRIE_3: Paths = &[(&[0, 1, 2], 1), (&[0, 1, 3], 2), (&[0, 1, 4], 3)];
+
+        #[test]
+        fn test_single_clause_multiple_zippers() {
+            let mut trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
+
+            let mut z1 = trie1.read_zipper();
+            let mut z2 = trie2.read_zipper();
+            let mut z3 = trie3.read_zipper();
+
+            let mut result = PathMap::new();
+            let mut out = result.write_zipper();
+            zipper_merge_dnf(&mut [&mut [&mut z1, &mut z2, &mut z3]], &mut out);
+
+            let mut expected = PathMap::new();
+            {
+                z1.reset();
+                z2.reset();
+                z3.reset();
+                zipper_meet3(&mut z1, &mut z2, &mut z3, &mut expected.write_zipper());
+            }
+
+            assert_trie(expected, result);
+        }
+
+        #[test]
+        fn test_multiple_singleton_clauses() {
+            let mut trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
+
+            let mut z1 = trie1.read_zipper();
+            let mut z2 = trie2.read_zipper();
+            let mut z3 = trie3.read_zipper();
+
+            let mut result = PathMap::new();
+            let mut out = result.write_zipper();
+            zipper_merge_dnf(
+                &mut [&mut [&mut z1], &mut [&mut z2], &mut [&mut z3]],
+                &mut out,
+            );
+
+            let mut expected = PathMap::new();
+            {
+                z1.reset();
+                z2.reset();
+                z3.reset();
+                zipper_join3(&mut z1, &mut z2, &mut z3, &mut expected.write_zipper());
+            }
+
+            assert_trie(expected, result);
+        }
+
+        #[test]
+        fn test_partial_overlap_1() {
+            let mut trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
+
+            let mut z2 = trie2.read_zipper();
+            let mut z3 = trie3.read_zipper();
+
+            let mut result = PathMap::new();
+            let mut out = result.write_zipper();
+            zipper_merge_dnf(
+                &mut [
+                    &mut [&mut trie1.read_zipper(), &mut z2],
+                    &mut [&mut trie1.read_zipper(), &mut z3],
+                ],
+                &mut out,
+            );
+            let expected = trie1.meet(&trie2.join(&trie3));
+            assert_trie(expected, result);
+        }
+
+        #[test]
+        fn test_partial_overlap_2() {
+            let mut trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
+
+            let mut z1 = trie1.read_zipper();
+            let mut z2 = trie2.read_zipper();
+            let mut z3 = trie3.read_zipper();
+
+            let mut result = PathMap::new();
+            let mut out = result.write_zipper();
+            zipper_merge_dnf(
+                &mut [
+                    &mut [&mut z1, &mut trie2.read_zipper()],
+                    &mut [&mut trie2.read_zipper(), &mut z3],
+                ],
+                &mut out,
+            );
+            let expected = trie2.meet(&trie1.join(&trie3));
+            assert_trie(expected, result);
+        }
     }
 }
