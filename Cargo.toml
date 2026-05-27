@@ -125,5 +125,5 @@ name = "multiplicities"
 harness = false
 
 [workspace]
-members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests"]
+members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "linalg"]
 resolver = "2"
