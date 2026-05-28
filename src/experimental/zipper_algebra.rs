@@ -3790,6 +3790,16 @@ mod tests {
         (&[0b000001, 0b11, 0b1111], 12),
     ];
 
+    fn prefixed<V: Clone + Send + Sync + Unpin, Z: ZipperInfallibleSubtries<V>>(
+        rz: &Z,
+        path: &[u8],
+    ) -> PathMap<V> {
+        let mut res = PathMap::new();
+        let mut out = res.write_zipper_at_path(path);
+        out.graft(rz);
+        res
+    }
+
     #[test]
     fn test_merkleization() {
         use crate::experimental::zipper_algebra::*;
@@ -3824,16 +3834,6 @@ mod tests {
             (&[0b11, 0b1111], 12),
         ];
         assert_trie(expected0.iter().copied(), result0);
-
-        fn prefixed<V: Clone + Send + Sync + Unpin, Z: ZipperInfallibleSubtries<V>>(
-            rz: &Z,
-            path: &[u8],
-        ) -> PathMap<V> {
-            let mut res = PathMap::new();
-            let mut out = res.write_zipper_at_path(path);
-            out.graft(rz);
-            res
-        }
 
         let mut map1 = prefixed(&mut r3, &[0]);
         let mut map2 = prefixed(&mut r4, &[0]);
@@ -3987,6 +3987,73 @@ mod tests {
                 &mut out,
             );
             let expected = trie2.meet(&trie1.join(&trie3));
+            assert_trie(expected, result);
+        }
+
+        #[test]
+        fn test_partial_overlap_3() {
+            let mut trie1 = PathMap::from_iter(SMALL_TRIE_1);
+            let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
+            let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
+
+            let mut z3 = trie3.read_zipper();
+
+            let mut result = PathMap::new();
+            let mut out = result.write_zipper();
+            zipper_merge_dnf(
+                &mut [
+                    &mut [&mut trie1.read_zipper(), &mut trie2.read_zipper(), &mut z3],
+                    &mut [&mut trie1.read_zipper(), &mut trie2.read_zipper()],
+                ],
+                &mut out,
+            );
+            let expected = trie2.meet(&trie1);
+            assert_trie(expected, result);
+        }
+
+        #[test]
+        fn test_mixed_depth() {
+            let deep_chain: Vec<u8> = (0..100).map(|i| i & 1).collect();
+            let shallow_chain: Vec<u8> = (0..10).map(|i| (i + 1) & 1).collect();
+            let branches: Paths = &[
+                (&[0b0], 0),
+                (&[0b0, 0b01], 1),
+                (&[0b0, 0b10], 2),
+                (&[0b0, 0b11], 3),
+                (&[0b0, 0b01, 0b01], 4),
+                (&[0b0, 0b01, 0b11], 5),
+                (&[0b0, 0b10, 0b10], 6),
+                (&[0b0, 0b10, 0b10, 0b0], 7),
+                (&[0b0, 0b11, 0b00], 8),
+                (&[0b0, 0b11, 0b10], 9),
+                (&[0b0, 0b11, 0b10], 9),
+                (&[0b0, 0b11, 0b00, 0b00], 11),
+                (&[0b0, 0b11, 0b10, 0b00], 12),
+                (&[0b0, 0b11, 0b10, 0b00], 13),
+            ];
+
+            let mut trie1 = PathMap::from_iter(&[(deep_chain, 0)]);
+            let mut trie2 = PathMap::from_iter(&[(shallow_chain, 1)]);
+            let mut trie3 = PathMap::from_iter(branches);
+
+            let a = &[0, 0, 0, 0];
+            let a_deep_chain = prefixed(&trie1.read_zipper(), a);
+            let a_shallow_chain = prefixed(&trie2.read_zipper(), a);
+            let a_branching = prefixed(&trie3.read_zipper(), a);
+
+            let mut z3 = trie3.read_zipper();
+
+            let mut result = PathMap::new();
+            let mut out = result.write_zipper();
+            zipper_merge_dnf(
+                &mut [
+                    &mut [&mut a_deep_chain.read_zipper()],
+                    &mut [&mut a_shallow_chain.read_zipper()],
+                    &mut [&mut a_branching.read_zipper()],
+                ],
+                &mut out,
+            );
+            let expected = a_deep_chain.join(&a_shallow_chain.join(&a_branching));
             assert_trie(expected, result);
         }
     }
