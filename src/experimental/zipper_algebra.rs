@@ -1572,7 +1572,9 @@ where
     {
         assert!(active >> M == 0);
 
-        // check for singleton
+        // -------------------------------------------------
+        // Single clause fast path
+        // -------------------------------------------------
         if active.count_ones() == 1 {
             let single_clause = first_active_mut(clauses, active);
             match single_clause {
@@ -1725,7 +1727,10 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_masked_branches(z, ByteMask::FULL, false)
+        if let Some(v) = z.val() {
+            out.set_val(v.clone());
+        }
+        out.graft(z);
     }
 }
 
@@ -1778,7 +1783,10 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_masked_branches(z, ByteMask::FULL, false);
+        if let Some(v) = z.val() {
+            out.set_val(v.clone());
+        }
+        out.graft(z);
     }
 }
 
