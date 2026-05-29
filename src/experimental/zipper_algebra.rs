@@ -400,6 +400,9 @@ trait ValuePolicy<V: Clone> {
     {
         unlift(vals.fold(None, |acc, v| Self::combine_impl(acc, v)))
     }
+    fn combine_n_times(val: Option<Cow<V>>, n: usize) -> Option<V> {
+        Self::combine_n(std::iter::repeat_n(val, n))
+    }
 }
 
 fn zipper_merge<P, V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
@@ -421,6 +424,9 @@ where
     }
     // check for node-sharing first
     if check_sharing(lhs, rhs) {
+        if let Some(v) = P::combine_n_times(lift(lhs.val()), 2) {
+            out.set_val(v);
+        }
         P::on_id(lhs, out);
         return;
     }
@@ -467,6 +473,9 @@ where
                         // optimization - if both zippers share the node after descend, we can skip
                         // further descend and continue merging
                         if check_sharing(lhs, rhs) {
+                            if let Some(v) = P::combine_n_times(lift(lhs.val()), 2) {
+                                out.set_val(v);
+                            }
                             P::on_id(lhs, out);
 
                             rhs.ascend_byte();
@@ -592,6 +601,9 @@ where
 
     // check for node-sharing first
     if all_share(lhs, mid, rhs) {
+        if let Some(v) = P::combine_n_times(lift(lhs.val()), 3) {
+            out.set_val(v);
+        }
         P::on_id(lhs, out);
         return;
     }
@@ -694,6 +706,9 @@ where
 
                         //structural sharing check
                         if all_share(lhs, mid, rhs) {
+                            if let Some(v) = P::combine_n_times(lift(lhs.val()), 3) {
+                                out.set_val(v);
+                            }
                             P::on_id(lhs, out);
 
                             rhs.ascend_byte();
@@ -793,6 +808,9 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
 
     // check for node-sharing first
     if all_share(z0, z1, z2, z3) {
+        if let Some(v) = P::combine_n_times(lift(z0.val()), 4) {
+            out.set_val(v);
+        }
         P::on_id(z0, out);
         return;
     }
@@ -852,6 +870,9 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
 
                     // check structural sharing
                     if all_share(z0, z1, z2, z3) {
+                        if let Some(v) = P::combine_n_times(lift(z0.val()), 4) {
+                            out.set_val(v);
+                        }
                         P::on_id(z0, out);
 
                         z3.ascend_byte();
@@ -1280,7 +1301,11 @@ where
 
     // check for node-sharing first
     if all_active_share(zs, active) {
-        P::on_id(first_active_mut(zs, active), out);
+        let z0 = first_active_mut(zs, active);
+        if let Some(v) = P::combine_n_times(lift(z0.val()), active.count_ones() as usize) {
+            out.set_val(v);
+        }
+        P::on_id(z0, out);
         return;
     }
 
@@ -1370,7 +1395,13 @@ where
 
                         // check structural sharing first
                         if all_active_share(zs, active) {
-                            P::on_id(first_active_mut(zs, active), out);
+                            let z0 = first_active_mut(zs, active);
+                            if let Some(v) =
+                                P::combine_n_times(lift(z0.val()), active.count_ones() as usize)
+                            {
+                                out.set_val(v);
+                            }
+                            P::on_id(z0, out);
 
                             for_each_bit(active, |i| {
                                 zs[i].ascend_byte();
@@ -1727,9 +1758,6 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        if let Some(v) = z.val() {
-            out.set_val(v.clone());
-        }
         out.graft(z);
     }
 }
@@ -1755,6 +1783,10 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Join {
         } else {
             r
         }
+    }
+    fn combine_n_times(val: Option<Cow<V>>, n: usize) -> Option<V> {
+        // join is idempotent
+        unlift(val)
     }
 }
 
@@ -1783,9 +1815,6 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        if let Some(v) = z.val() {
-            out.set_val(v.clone());
-        }
         out.graft(z);
     }
 }
@@ -1838,6 +1867,11 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
             let rv = v?;
             meet_impl(acc, rv)
         }))
+    }
+
+    fn combine_n_times(val: Option<Cow<V>>, n: usize) -> Option<V> {
+        // meet is idempotent
+        unlift(val)
     }
 }
 
@@ -1929,6 +1963,10 @@ impl<V: DistributiveLattice + Clone> ValuePolicy<V> for Subtract {
             Some(rv) => subtract_impl(acc, rv),
             None => Some(acc),
         }))
+    }
+
+    fn combine_n_times(_val: Option<Cow<V>>, _n: usize) -> Option<V> {
+        None
     }
 }
 
