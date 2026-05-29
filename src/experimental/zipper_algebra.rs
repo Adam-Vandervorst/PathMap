@@ -1493,7 +1493,7 @@ where
     }
 }
 
-fn zipper_merge_dnf<V, Z, Out, A, const M: usize>(clauses: &mut [&mut [Z]; M], out: &mut Out)
+pub fn zipper_merge_dnf<V, Z, Out, A, const M: usize>(clauses: &mut [&mut [Z]; M], out: &mut Out)
 where
     V: Lattice + Clone + Send + Sync + Unpin,
     A: Allocator,
