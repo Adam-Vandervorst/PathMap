@@ -1610,6 +1610,9 @@ where
             let single_clause = first_active_mut(clauses, active);
             match single_clause {
                 [z0] => {
+                    if let Some(v) = z0.val() {
+                        out.set_val(v.clone());
+                    }
                     Meet::on_id(z0, out);
                     return;
                 }
