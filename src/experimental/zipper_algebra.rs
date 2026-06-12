@@ -29,7 +29,7 @@ pub use zipper_algebra_poly::ZipperMergeF;
 /// without visiting unrelated regions.
 ///
 /// Each method delegates to a corresponding free function ([`zipper_join`],
-/// [`zipper_meet`], [`zipper_subtract`]), preserving their performance
+/// [`zipper_meet`], [`zipper_subtract`], [`zipper_xor`]), preserving their performance
 /// characteristics and semantics.
 ///
 /// # Semantics
@@ -39,6 +39,7 @@ pub use zipper_algebra_poly::ZipperMergeF;
 /// - [`join`](Self::join): least upper bound (union-like merge),
 /// - [`meet`](Self::meet): greatest lower bound (intersection),
 /// - [`subtract`](Self::subtract): asymmetric difference (`lhs \ rhs`).
+/// - [`xor`](Self::xor): symmetric difference (`(lhs \/ rhs) \ (lhs /\ rhs)`).
 ///
 /// All operations write their result into a separate output zipper implementing
 /// [`ZipperWriting`].
@@ -56,6 +57,7 @@ pub use zipper_algebra_poly::ZipperMergeF;
 /// - [`zipper_join`]
 /// - [`zipper_meet`]
 /// - [`zipper_subtract`]
+/// - [`zipper_xor`]
 pub trait ZipperAlgebraExt<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>:
     ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving + Sized
 {
@@ -87,6 +89,16 @@ pub trait ZipperAlgebraExt<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>:
         Out: ZipperWriting<V, A>,
     {
         zipper_subtract(self, rhs, out);
+    }
+
+    #[inline]
+    fn xor<ZR, Out>(&mut self, rhs: &mut ZR, out: &mut Out)
+    where
+        V: DistributiveLattice + Lattice,
+        ZR: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        zipper_xor(self, rhs, out);
     }
 }
 
@@ -327,6 +339,90 @@ pub fn zipper_subtract3<V, ZL, ZM, ZR, Out, A>(
     zipper_merge3::<Subtract, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
 }
 
+/// Performs a symmetric difference of two radix-256 tries using zipper traversal.
+///
+/// This function computes the symmetric difference (`XOR`) of two tries whose
+/// values form a distributive lattice. The traversal strategy is identical to
+/// [`zipper_join`]:
+///
+/// - Child edges are treated as sorted sequences and merged lexicographically.
+/// - Subtries that exist only on one side are grafted directly into the output.
+/// - The traversal descends only into child edges present in both inputs.
+/// - Descent is implemented iteratively via zipper movement and an explicit
+///   depth counter.
+///
+/// # Value semantics
+///
+/// When both tries contain a value at the same key, the values are combined
+/// using the lattice symmetric-difference operation.
+///
+/// For distributive lattices, symmetric difference is defined as:
+///
+/// ```text
+/// (a ∨ b) \ (a ∧ b)
+/// ```
+///
+/// Equivalently:
+///
+/// ```text
+/// (a \ b) ∨ (b \ a)
+/// ```
+///
+/// If the resulting value is the lattice bottom element, no value is written
+/// to the output.
+///
+/// Values that occur in only one input trie are propagated unchanged.
+///
+/// # Complexity
+///
+/// Let:
+///
+/// - `h` be the maximum key length,
+/// - `d` be the size of overlapping subtries,
+/// - `f` be the number of distinct child edges encountered during traversal.
+///
+/// Then:
+///
+/// - Best case (disjoint tries): `O(h)`
+/// - Typical case: `O(h + f)`
+/// - Worst case (identical structure): `O(n)`
+///
+/// Entire disjoint subtries are copied without traversal whenever possible.
+///
+/// # Notes
+///
+/// The traversal logic is identical to [`zipper_join`]. Only the value
+/// combination operation differs.
+pub fn zipper_xor<V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+where
+    V: DistributiveLattice + Lattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge::<Xor, V, ZL, ZR, Out, A>(lhs, rhs, out);
+}
+
+/// Performs a symmetric difference (XOR) of three radix-256 tries using zipper traversal.
+/// That is, it performs: (`lhs` △ `mid`) △ `rhs`, where `△` = [`zipper_xor`]
+///
+/// # See also
+///
+/// [`zipper_xor`]
+///
+pub fn zipper_xor3<V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
+where
+    V: DistributiveLattice + Lattice + Clone + Send + Sync,
+    A: Allocator,
+    ZL: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    ZM: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    ZR: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    zipper_merge3::<Xor, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
+}
+
 trait MergePolicy<V: Clone + Send + Sync> {
     #[inline]
     fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
@@ -355,7 +451,8 @@ trait MergePolicy<V: Clone + Send + Sync> {
         Out: ZipperWriting<V, A>;
 
     fn descend_on_some_equal(mask: u64) -> bool;
-    fn on_id<Z, Out, A>(z: &mut Z, out: &mut Out)
+
+    fn on_id<Z, Out, A>(z: &mut Z, n: usize, out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
@@ -427,7 +524,7 @@ where
         if let Some(v) = P::combine_n_times(lift(lhs.val()), 2) {
             out.set_val(v);
         }
-        P::on_id(lhs, out);
+        P::on_id(lhs, 2, out);
         return;
     }
 
@@ -476,7 +573,7 @@ where
                             if let Some(v) = P::combine_n_times(lift(lhs.val()), 2) {
                                 out.set_val(v);
                             }
-                            P::on_id(lhs, out);
+                            P::on_id(lhs, 2, out);
 
                             rhs.ascend_byte();
                             rhs_next = rhs_mask.next_bit(lhs_byte);
@@ -604,7 +701,7 @@ where
         if let Some(v) = P::combine_n_times(lift(lhs.val()), 3) {
             out.set_val(v);
         }
-        P::on_id(lhs, out);
+        P::on_id(lhs, 3, out);
         return;
     }
 
@@ -709,7 +806,7 @@ where
                             if let Some(v) = P::combine_n_times(lift(lhs.val()), 3) {
                                 out.set_val(v);
                             }
-                            P::on_id(lhs, out);
+                            P::on_id(lhs, 3, out);
 
                             rhs.ascend_byte();
                             r = rhs_mask.next_bit(min);
@@ -811,7 +908,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
         if let Some(v) = P::combine_n_times(lift(z0.val()), 4) {
             out.set_val(v);
         }
-        P::on_id(z0, out);
+        P::on_id(z0, 4, out);
         return;
     }
 
@@ -873,7 +970,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                         if let Some(v) = P::combine_n_times(lift(z0.val()), 4) {
                             out.set_val(v);
                         }
-                        P::on_id(z0, out);
+                        P::on_id(z0, 4, out);
 
                         z3.ascend_byte();
                         b3 = m3.next_bit(min);
@@ -1201,6 +1298,69 @@ where
     zipper_merge_n_mono::<Subtract, _, _, _, _, _>(zs, (1 << N) - 1, out);
 }
 
+/// Performs an n-way symmetric difference of radix-256 tries using zipper traversal.
+///
+/// The input tries are interpreted as sparse mappings from paths to values,
+/// where missing paths implicitly contain the lattice bottom element.
+///
+/// For each path `p`, the resulting value is computed as the n-ary symmetric
+/// difference of all values present at `p`:
+///
+/// `text
+/// result(p) = xor(v₁(p), v₂(p), ..., vₙ(p))
+/// `
+///
+/// where absent values are treated as bottom.
+///
+/// Operationally, the traversal behaves similarly to an n-way join:
+///
+/// - A child edge is traversed whenever it is present in at least one input.
+/// - Subtries that appear in only one input are grafted directly into the
+///   output.
+/// - Values at coincident paths are combined using the lattice symmetric
+///   difference operation.
+/// - Paths whose resulting value is bottom are omitted from the output.
+///
+/// # Why traversal follows join semantics
+///
+/// Although symmetric difference is often associated with parity ("a path
+/// survives iff it appears an odd number of times"), this implementation
+/// performs XOR on values rather than on path presence.
+///
+/// This distinction is important because cancellation at a path does not imply
+/// cancellation of its descendants. A node whose value XORs to bottom may still
+/// contain descendant paths whose values survive.
+///
+/// Consequently, traversal proceeds whenever any input contains a child edge,
+/// just as in join. Pruning is only valid when an entire subtrie is known to
+/// cancel.
+///
+/// # Complexity
+///
+/// Let:
+///
+/// - `h` be the maximum key length,
+/// - `f` be the number of frontier edges visited during traversal,
+/// - `d` be the size of overlapping subtries.
+///
+/// Then:
+///
+/// - Best case (disjoint tries): `O(h)`
+/// - Typical case: `O(h + f)`
+/// - Worst case: `O(n)`
+///
+/// As with join, large disjoint subtries are copied without traversal whenever
+/// possible.
+pub fn zipper_n_xor<V, Z, Out, A, const N: usize>(zs: &mut [Z; N], out: &mut Out)
+where
+    V: Lattice + DistributiveLattice + Clone + Send + Sync + Unpin,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+    A: Allocator,
+{
+    zipper_merge_n_mono::<Xor, _, _, _, _, _>(zs, (1 << N) - 1, out);
+}
+
 // small micro-helpers
 #[inline(always)]
 fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
@@ -1302,10 +1462,11 @@ where
     // check for node-sharing first
     if all_active_share(zs, active) {
         let z0 = first_active_mut(zs, active);
-        if let Some(v) = P::combine_n_times(lift(z0.val()), active.count_ones() as usize) {
+        let n = active.count_ones() as usize;
+        if let Some(v) = P::combine_n_times(lift(z0.val()), n) {
             out.set_val(v);
         }
-        P::on_id(z0, out);
+        P::on_id(z0, n, out);
         return;
     }
 
@@ -1383,6 +1544,7 @@ where
                 }
                 Some(a) => {
                     // Dispatch
+                    let cnt = frontier.count_ones() as usize;
 
                     // - Case A: full match (frontier == all bits)
                     if frontier == active {
@@ -1396,12 +1558,10 @@ where
                         // check structural sharing first
                         if all_active_share(zs, active) {
                             let z0 = first_active_mut(zs, active);
-                            if let Some(v) =
-                                P::combine_n_times(lift(z0.val()), active.count_ones() as usize)
-                            {
+                            if let Some(v) = P::combine_n_times(lift(z0.val()), cnt) {
                                 out.set_val(v);
                             }
-                            P::on_id(z0, out);
+                            P::on_id(z0, cnt, out);
 
                             for_each_bit(active, |i| {
                                 zs[i].ascend_byte();
@@ -1424,7 +1584,6 @@ where
                         continue 'merge_level;
                     }
 
-                    let cnt = frontier.count_ones();
                     // - Case B: singleton (|frontier| = 1)
                     if (cnt == 1) {
                         let i = frontier.trailing_zeros() as usize;
@@ -1613,7 +1772,7 @@ where
                     if let Some(v) = z0.val() {
                         out.set_val(v.clone());
                     }
-                    Meet::on_id(z0, out);
+                    Meet::on_id(z0, 1, out);
                     return;
                 }
                 [z0, z1] => {
@@ -1755,7 +1914,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
     }
 
     #[inline]
-    fn on_id<Z, Out, A>(z: &mut Z, out: &mut Out)
+    fn on_id<Z, Out, A>(z: &mut Z, _n: usize, out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
@@ -1812,7 +1971,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
     }
 
     #[inline(always)]
-    fn on_id<Z, Out, A>(z: &mut Z, out: &mut Out)
+    fn on_id<Z, Out, A>(z: &mut Z, _n: usize, out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
@@ -1934,7 +2093,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
     }
 
     #[inline]
-    fn on_id<Z, Out, A>(_z: &mut Z, _out: &mut Out)
+    fn on_id<Z, Out, A>(_z: &mut Z, _n: usize, _out: &mut Out)
     where
         A: Allocator,
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
@@ -1988,6 +2147,95 @@ fn subtract_impl<'a, V: DistributiveLattice + Clone>(
             }
         }
         AlgebraicResult::Element(v) => Some(Cow::Owned(v)),
+    }
+}
+
+// ==================== XOR ====================
+
+struct Xor;
+impl<V: Clone + Send + Sync> MergePolicy<V> for Xor {
+    #[inline(always)]
+    fn on_single<Z, Out, A>(z: &mut Z, _mask: u64, range: ByteMask, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        out.graft_masked_branches(z, range, false)
+    }
+
+    #[inline(always)]
+    fn descend_on_some_equal(_mask: u64) -> bool {
+        // the traversal shape essentially the same as join
+        true
+    }
+
+    #[inline(always)]
+    fn on_id<Z, Out, A>(z: &mut Z, n: usize, out: &mut Out)
+    where
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+        Out: ZipperWriting<V, A>,
+    {
+        // an element belongs to A△A△A ... iff it belongs to an odd number of the sets.
+        if n % 2 == 1 {
+            out.graft(z)
+        }
+    }
+}
+
+impl<V: Lattice + DistributiveLattice + Clone> ValuePolicy<V> for Xor {
+    fn combine_impl<'a>(l: Option<Cow<'a, V>>, r: Option<Cow<'a, V>>) -> Option<Cow<'a, V>> {
+        match (l, r) {
+            (None, x) | (x, None) => x,
+
+            (Some(a), Some(b)) => match a.pjoin(&b) {
+                AlgebraicResult::None => None,
+                AlgebraicResult::Identity(join) => match a.pmeet(&b) {
+                    AlgebraicResult::None => {
+                        if join & SELF_IDENT != 0 {
+                            Some(a)
+                        } else {
+                            Some(b)
+                        }
+                    }
+                    AlgebraicResult::Identity(meet) => {
+                        if join == meet {
+                            None
+                        } else if join & SELF_IDENT != 0 {
+                            subtract_impl(a, b)
+                        } else {
+                            subtract_impl(b, a)
+                        }
+                    }
+                    AlgebraicResult::Element(meet) => {
+                        if join & SELF_IDENT != 0 {
+                            subtract_impl(a, Cow::Owned(meet))
+                        } else {
+                            subtract_impl(b, Cow::Owned(meet))
+                        }
+                    }
+                },
+                AlgebraicResult::Element(join) => match a.pmeet(&b) {
+                    AlgebraicResult::None => Some(Cow::Owned(join)),
+                    AlgebraicResult::Identity(meet) => {
+                        if meet & SELF_IDENT != 0 {
+                            subtract_impl(Cow::Owned(join), a)
+                        } else {
+                            subtract_impl(Cow::Owned(join), b)
+                        }
+                    }
+                    AlgebraicResult::Element(meet) => {
+                        subtract_impl(Cow::Owned(join), Cow::Owned(meet))
+                    }
+                },
+            },
+        }
+    }
+
+    fn combine_n_times(val: Option<Cow<V>>, n: usize) -> Option<V> {
+        // an element belongs to A△A△A ... iff it belongs to an odd number of the sets.
+        if n % 2 == 1 { unlift(val) } else { None }
     }
 }
 
@@ -2093,6 +2341,16 @@ mod zipper_algebra_poly {
             V: DistributiveLattice,
         {
             self.merge_n::<super::Subtract>(out);
+        }
+
+        /// Performs an N-way ordered symmetric difference of radix-256 trie zippers using a stackless traversal.
+        ///
+        /// This function generalizes pairwise [`super::zipper_xor`] to an arbitrary number of input tries,
+        fn xor_n(self, out: &mut Out)
+        where
+            V: Lattice + DistributiveLattice,
+        {
+            self.merge_n::<super::Xor>(out);
         }
 
         fn merge_n<P>(self, out: &mut Out)
@@ -2326,6 +2584,28 @@ mod zipper_algebra_poly {
     macro_rules! zipper_subtract_n {
     ( $($z:ident),+ => $out:ident ) => {{
         ( $( &mut $z ),+ ).subtract_n(&mut $out)
+    }};
+}
+
+    /// Performs an N-ary zipper symmetric difference by borrowing all inputs mutably
+    /// and forwarding them to [`ZipperMergeF::xor_n`].
+    ///
+    /// # Example
+    /// ```ignore
+    /// zipper_xor_n!(z1, z2, z3 => out);
+    /// ```
+    ///
+    /// Expands roughly to:
+    /// ```ignore
+    /// (&mut z1, &mut z2, &mut z3).xor_n(&mut out)
+    /// ```
+    ///
+    /// # See also
+    /// [`ZipperMergeF::xor_n`]
+    #[macro_export]
+    macro_rules! zipper_xor_n {
+    ( $($z:ident),+ => $out:ident ) => {{
+        ( $( &mut $z ),+ ).xor_n(&mut $out)
     }};
 }
 }
@@ -3797,6 +4077,382 @@ mod tests {
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN_N,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN_N[0],
                 |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_subtract_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+    }
+
+    mod xor {
+        use super::*;
+        use crate::experimental::zipper_algebra::{
+            ZipperAlgebraExt, ZipperMergeF, zipper_join, zipper_xor3,
+        };
+        use crate::zipper_xor_n;
+
+        #[test]
+        fn test_disjoint() {
+            check2(
+                &DISJOINT_PATHS,
+                &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
+                |lhs, rhs, out| lhs.xor(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_disjoint3() {
+            check3(
+                &DISJOINT_PATHS_3,
+                &[DISJOINT_PATHS_3.0, DISJOINT_PATHS_3.1, DISJOINT_PATHS_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_disjoint_n() {
+            checkn(
+                &DISJOINT_PATHS_N,
+                &[
+                    DISJOINT_PATHS_N[0],
+                    DISJOINT_PATHS_N[1],
+                    DISJOINT_PATHS_N[2],
+                    DISJOINT_PATHS_N[3],
+                    DISJOINT_PATHS_N[4],
+                    DISJOINT_PATHS_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
+        fn test_deep_shared_prefix_then_split() {
+            check2(
+                &PATHS_WITH_SHARED_PREFIX,
+                &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
+                |lhs, rhs, out| lhs.xor(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_deep_shared_prefix_then_split3() {
+            check3(
+                &PATHS_WITH_SHARED_PREFIX_3,
+                &[
+                    PATHS_WITH_SHARED_PREFIX_3.0,
+                    PATHS_WITH_SHARED_PREFIX_3.1,
+                    PATHS_WITH_SHARED_PREFIX_3.2,
+                ]
+                .concat(),
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_deep_shared_prefix_then_split_n() {
+            checkn(
+                &PATHS_WITH_SHARED_PREFIX_N,
+                &[
+                    PATHS_WITH_SHARED_PREFIX_N[0],
+                    PATHS_WITH_SHARED_PREFIX_N[1],
+                    PATHS_WITH_SHARED_PREFIX_N[2],
+                    PATHS_WITH_SHARED_PREFIX_N[3],
+                    PATHS_WITH_SHARED_PREFIX_N[4],
+                    PATHS_WITH_SHARED_PREFIX_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
+        fn test_interleaving_paths() {
+            check2(
+                &INTERLEAVING_PATHS,
+                &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
+                |lhs, rhs, out| lhs.xor(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_interleaving_paths3() {
+            check3(
+                &INTERLEAVING_PATHS_3,
+                &[
+                    INTERLEAVING_PATHS_3.0,
+                    INTERLEAVING_PATHS_3.1,
+                    INTERLEAVING_PATHS_3.2,
+                ]
+                .concat(),
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_interleaving_paths_n() {
+            checkn(
+                &INTERLEAVING_PATHS_N,
+                &[
+                    INTERLEAVING_PATHS_N[0],
+                    INTERLEAVING_PATHS_N[1],
+                    INTERLEAVING_PATHS_N[2],
+                    INTERLEAVING_PATHS_N[3],
+                    INTERLEAVING_PATHS_N[4],
+                    INTERLEAVING_PATHS_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels() {
+            let expected: Paths = &[
+                (&[0x00, 0x01], 1),
+                (&[0x00, 0x01, 0x02], 2),
+                (&[0x01], 4),
+                (&[0x01, 0x02], 5),
+                (&[0x01, 0x02, 0x03], 6),
+                (&[0x01, 0x02, 0x03, 0x04], 7),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+            ];
+            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
+                lhs.xor(rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels3() {
+            let expected: Paths = &[
+                (&[0x00], 0),
+                (&[0x00, 0x01], 1),
+                (&[0x01], 4),
+                (&[0x01, 0x02], 5),
+                (&[0x01, 0x02, 0x03], 6),
+                (&[0x01, 0x02, 0x03, 0x04], 7),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+            ];
+            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_xor3(lhs, mid, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels_n() {
+            let expected: Paths = &[
+                (&[0x00], 0),
+                (&[0x00, 0x01], 1),
+                (&[0x01, 0x02, 0x03, 0x04], 7),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
+            ];
+            checkn(
+                &ONE_SIDED_PATHS_N,
+                expected,
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
+        fn test_almost_identical_paths() {
+            let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
+            check2(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
+                lhs.xor(rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_almost_identical_paths3() {
+            let expected: Paths = &[(b"abcdefg", 0), (b"1", 4), (b"4", 7), (b"5", 8)];
+            check3(&ALMOST_IDENTICAL_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_xor3(lhs, mid, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_almost_identical_paths_n() {
+            let expected: Paths = &[(b"abcdefg", 0), (b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
+            checkn(
+                &ALMOST_IDENTICAL_PATHS_N,
+                expected,
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty() {
+            check2(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.xor(rhs, out));
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.xor(rhs, out));
+        }
+
+        #[test]
+        fn test_one_side_empty3() {
+            check3(
+                &LHS_EMPTY_3,
+                &[LHS_EMPTY_3.1, LHS_EMPTY_3.2].concat(),
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+            check3(
+                &MID_EMPTY,
+                &[MID_EMPTY.0, MID_EMPTY.2].concat(),
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+            check3(
+                &RHS_EMPTY_3,
+                &[RHS_EMPTY_3.0, RHS_EMPTY_3.1].concat(),
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty_n() {
+            checkn(
+                &LHS_EMPTY_N,
+                &[
+                    LHS_EMPTY_N[1],
+                    LHS_EMPTY_N[2],
+                    LHS_EMPTY_N[3],
+                    LHS_EMPTY_N[4],
+                    LHS_EMPTY_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &MID_EMPTY_N,
+                &[
+                    MID_EMPTY_N[0],
+                    MID_EMPTY_N[1],
+                    MID_EMPTY_N[3],
+                    MID_EMPTY_N[4],
+                    MID_EMPTY_N[5],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+            checkn(
+                &RHS_EMPTY_N,
+                &[
+                    RHS_EMPTY_N[0],
+                    RHS_EMPTY_N[1],
+                    RHS_EMPTY_N[2],
+                    RHS_EMPTY_N[3],
+                    RHS_EMPTY_N[4],
+                ]
+                .concat(),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries() {
+            let expected: Paths = &[
+                (&[1, 2, 3, 4], 1),
+                (&[1, 2, 3, 5], 11),
+                (&[1, 2, 3, 10, 11, 0], 12),
+                (&[1, 2, 3, 10, 11, 12], 2),
+            ];
+            check2(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
+                expected,
+                |lhs, rhs, out| lhs.xor(rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries3() {
+            let expected: Paths = &[
+                (&[1, 2, 3], 20),
+                (&[1, 2, 3, 4], 1),
+                (&[1, 2, 3, 5], 11),
+                (&[1, 2, 3, 6], 21),
+                (&[1, 2, 3, 10, 11, 0], 12),
+                (&[1, 2, 3, 10, 11, 1], 22),
+                (&[1, 2, 3, 10, 11, 12], 2),
+            ];
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                expected,
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries_n() {
+            let expected: Paths = &[
+                (&[1, 2, 3, 4], 1),
+                (&[1, 2, 3, 5], 11),
+                (&[1, 2, 3, 6], 21),
+                (&[1, 2, 3, 7], 31),
+                (&[1, 2, 3, 8], 41),
+                (&[1, 2, 3, 9], 51),
+                (&[1, 2, 3, 10, 11, 0], 12),
+                (&[1, 2, 3, 10, 11, 1], 22),
+                (&[1, 2, 3, 10, 11, 2], 32),
+                (&[1, 2, 3, 10, 11, 3], 42),
+                (&[1, 2, 3, 10, 11, 4], 52),
+                (&[1, 2, 3, 10, 11, 12], 2),
+            ];
+            checkn(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_N,
+                expected,
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+            );
+        }
+
+        #[test]
+        fn test_zigzag() {
+            let expected: Paths = &[
+                (&[1, 1], 0),
+                (&[2], 1),
+                (&[3, 2, 1], 4),
+                (&[4], 4),
+                (&[4, 3, 2, 1], 5),
+                (&[1], 0),
+                (&[1, 2], 1),
+                (&[3, 4], 4),
+                (&[4, 3], 5),
+            ];
+            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| lhs.xor(rhs, out));
+        }
+
+        #[test]
+        fn test_zigzag3() {
+            let expected: Paths = &[
+                (&[1, 1], 0),
+                (&[2, 1], 2),
+                (&[3, 2, 1], 4),
+                (&[4], 4),
+                (&[1, 2], 1),
+                (&[3, 4], 4),
+                (&[4, 3], 5),
+                (&[3, 2, 1, 0], 3),
+                (&[4, 3, 2, 1, 0], 4),
+            ];
+            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_xor3(lhs, mid, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_root_values() {
+            check2(&PATHS_WITH_ROOT_VALS_AND_CHILDREN, &[], |lhs, rhs, out| {
+                lhs.xor(rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_root_values3() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.2,
+                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_root_values_n() {
+            checkn(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_N,
+                &[],
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
     }
