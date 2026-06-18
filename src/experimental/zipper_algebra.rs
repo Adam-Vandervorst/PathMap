@@ -1384,10 +1384,46 @@ fn only_active<'a, T, const N: usize>(
 }
 
 #[inline(always)]
+fn first_active<T, const N: usize>(ts: &[T; N], active: u64) -> &T {
+    debug_assert_ne!(active, 0);
+    let i0 = active.trailing_zeros() as usize;
+    &ts[i0]
+}
+
+#[inline(always)]
 fn first_active_mut<T, const N: usize>(ts: &mut [T; N], active: u64) -> &mut T {
     debug_assert_ne!(active, 0);
     let i0 = active.trailing_zeros() as usize;
     &mut ts[i0]
+}
+
+#[inline(always)]
+fn with_k<const K: usize, T, R>(
+    xs: &mut [T],
+    mut bits: u64,
+    f: impl FnOnce([&mut T; K]) -> R,
+) -> R {
+    debug_assert!(bits.count_ones() as usize >= K);
+
+    // collect raw pointers first (safe)
+    let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
+
+    let mut i = 0;
+    while i < K {
+        let idx = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
+        i += 1;
+    }
+
+    // SAFETY:
+    // - indices are distinct (bitmask)
+    // - derived from same slice
+
+    // should be zero-cost after inlining
+    let refs = unsafe { ptrs.map(|p| &mut *p) };
+
+    f(refs)
 }
 
 // - The function is fully monomorphized over `Z` and `N` and uses a bitmask (`active`)
@@ -1428,35 +1464,6 @@ where
             Some(Some(first)) => iter.all(|next| next.is_some_and(|snid| snid == first)),
             _ => false,
         }
-    }
-
-    #[inline(always)]
-    fn with_k<const K: usize, T, R>(
-        xs: &mut [T],
-        mut bits: u64,
-        f: impl FnOnce([&mut T; K]) -> R,
-    ) -> R {
-        debug_assert!(bits.count_ones() as usize >= K);
-
-        // collect raw pointers first (safe)
-        let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
-
-        let mut i = 0;
-        while i < K {
-            let idx = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
-            i += 1;
-        }
-
-        // SAFETY:
-        // - indices are distinct (bitmask)
-        // - derived from same slice
-
-        // should be zero-cost after inlining
-        let refs = unsafe { ptrs.map(|p| &mut *p) };
-
-        f(refs)
     }
 
     // check for node-sharing first
@@ -1683,23 +1690,26 @@ where
     }
 }
 
-pub fn zipper_merge_dnf<V, Z, Out, A, const M: usize>(clauses: &mut [&mut [Z]; M], out: &mut Out)
-where
+pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
+    zs: &mut [Z; N],
+    clauses: [u64; M],
+    out: &mut Out,
+) where
     V: Lattice + Clone + Send + Sync + Unpin,
     A: Allocator,
     Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
     #[inline(always)]
-    fn clause_mask<Z>(zs: &[Z]) -> ByteMask
+    fn clause_mask<Z, const N: usize>(zs: &[Z; N], members: u64) -> ByteMask
     where
         Z: Zipper,
     {
-        if zs.is_empty() {
+        if members == 0 {
             return ByteMask::EMPTY;
         };
-        zs.iter()
-            .try_fold(ByteMask::FULL, |mut mask, z| {
+        only_active(zs, members)
+            .try_fold(ByteMask::FULL, |mut mask, (_, z)| {
                 mask &= z.child_mask();
                 if mask.is_empty_mask() {
                     None
@@ -1711,27 +1721,32 @@ where
     }
 
     #[inline(always)]
-    fn clause_value<V, Z>(zs: &[Z]) -> Option<V>
+    fn clause_value<V, Z, const N: usize>(zs: &[Z; N], members: u64) -> Option<V>
     where
         V: Lattice + Clone,
         Z: ZipperValues<V>,
     {
-        Meet::combine_n(zs.iter().map(|z| lift(z.val())))
+        Meet::combine_n(only_active(zs, members).map(|(_, z)| lift(z.val())))
     }
 
-    fn active_clauses_value<V, Z, const M: usize>(clauses: &[&mut [Z]; M], active: u64) -> Option<V>
+    fn active_clauses_value<V, Z, const N: usize, const M: usize>(
+        zs: &[Z; N],
+        clauses: &[u64; M],
+        active: u64,
+    ) -> Option<V>
     where
         V: Lattice + Clone,
         Z: ZipperValues<V>,
     {
         Join::combine_n(
-            only_active(clauses, active).map(|(_, zs)| clause_value(zs).map(Cow::Owned)),
+            only_active(clauses, active).map(|(_, i)| clause_value(zs, *i).map(Cow::Owned)),
         )
     }
 
     #[inline(always)]
-    fn compute_masks<Z, const M: usize>(
-        clauses: &[&mut [Z]; M],
+    fn compute_masks<Z, const N: usize, const M: usize>(
+        zs: &[Z; N],
+        clauses: &[u64; M],
         active: u64,
         clause_masks: &mut [ByteMask; M],
     ) -> ByteMask
@@ -1740,18 +1755,19 @@ where
     {
         let mut global = ByteMask::EMPTY;
 
-        for (i, zs) in only_active(clauses, active) {
-            let m = clause_mask(zs);
+        for_each_bit(active, |i| {
+            let m = clause_mask(zs, clauses[i]);
 
             clause_masks[i] = m;
             global |= m;
-        }
+        });
 
         global
     }
 
-    fn zipper_merge_dnf_branch<V, Z, Out, A, const M: usize>(
-        clauses: &mut [&mut [Z]; M],
+    fn zipper_merge_dnf_branch<V, Z, Out, A, const N: usize, const M: usize>(
+        zs: &mut [Z; N],
+        clauses: &[u64; M],
         active: u64,
         out: &mut Out,
     ) where
@@ -1766,25 +1782,32 @@ where
         // Single clause fast path
         // -------------------------------------------------
         if active.count_ones() == 1 {
-            let single_clause = first_active_mut(clauses, active);
-            match single_clause {
-                [z0] => {
+            let members = first_active(clauses, active);
+            match members.count_ones() {
+                1 => {
+                    let z0 = first_active_mut(zs, *members);
                     if let Some(v) = z0.val() {
                         out.set_val(v.clone());
                     }
                     Meet::on_id(z0, 1, out);
                     return;
                 }
-                [z0, z1] => {
-                    zipper_meet(z0, z1, out);
+                2 => {
+                    with_k::<2, _, _>(zs, *members, |[z0, z1]| {
+                        zipper_meet(z0, z1, out);
+                    });
                     return;
                 }
-                [z0, z1, z2] => {
-                    zipper_meet3(z0, z1, z2, out);
+                3 => {
+                    with_k::<3, _, _>(zs, *members, |[z0, z1, z2]| {
+                        zipper_meet3(z0, z1, z2, out);
+                    });
                     return;
                 }
-                [z0, z1, z2, z3] => {
-                    zipper_merge4::<Meet, V, Z, Z, Z, Z, Out, A>(z0, z1, z2, z3, out);
+                4 => {
+                    with_k::<4, _, _>(zs, *members, |[z0, z1, z2, z3]| {
+                        zipper_merge4::<Meet, V, Z, Z, Z, Z, Out, A>(z0, z1, z2, z3, out);
+                    });
                     return;
                 }
                 _ => {} // do nothing special
@@ -1798,14 +1821,14 @@ where
         // Emit values
         // -------------------------------------------------
 
-        if let Some(v) = active_clauses_value(clauses, active) {
+        if let Some(v) = active_clauses_value(zs, clauses, active) {
             out.set_val(v);
         }
         // -------------------------------------------------
         // Compute clause masks
         // -------------------------------------------------
 
-        let mut global = compute_masks(clauses, active, &mut clause_masks);
+        let mut global = compute_masks(zs, clauses, active, &mut clause_masks);
         let mut next = global.indexed_bit::<true>(0);
         'descend: loop {
             // -------------------------------------------------
@@ -1815,16 +1838,17 @@ where
                 out.descend_to_byte(byte);
 
                 let mut sub_active = 0u64;
+                let mut participating = 0u64;
 
                 // descend participating clauses
                 for_each_bit(active, |i| {
                     if clause_masks[i].test_bit(byte) {
                         sub_active |= 1 << i;
-
-                        for z in clauses[i].iter_mut() {
-                            z.descend_to_byte(byte);
-                        }
+                        participating |= clauses[i];
                     }
+                });
+                for_each_bit(participating, |i| {
+                    zs[i].descend_to_byte(byte);
                 });
 
                 // -------------------------------------------------
@@ -1834,11 +1858,11 @@ where
                 if sub_active == active {
                     depth += 1;
 
-                    if let Some(v) = active_clauses_value(clauses, active) {
+                    if let Some(v) = active_clauses_value(zs, clauses, active) {
                         out.set_val(v);
                     }
 
-                    global = compute_masks(clauses, active, &mut clause_masks);
+                    global = compute_masks(zs, clauses, active, &mut clause_masks);
                     next = global.indexed_bit::<true>(0);
                     continue 'descend;
                 }
@@ -1847,13 +1871,11 @@ where
                 // Branching recursion
                 // -------------------------------------------------
 
-                zipper_merge_dnf_branch(clauses, sub_active, out);
+                zipper_merge_dnf_branch(zs, clauses, sub_active, out);
 
                 // ascend
-                for_each_bit(sub_active, |i| {
-                    for z in clauses[i].iter_mut() {
-                        z.ascend_byte();
-                    }
+                for_each_bit(participating, |i| {
+                    zs[i].ascend_byte();
                 });
 
                 out.ascend_byte();
@@ -1868,30 +1890,33 @@ where
                 break;
             }
 
-            let byte_from = first_active_mut(clauses, active)
-                .first()
-                .and_then(|z| z.path().last().copied())
+            let byte_from = *first_active(zs, *first_active(clauses, active))
+                .path()
+                .last()
                 .expect("non-empty path at depth > 0");
 
+            let mut active_zippers = 0;
             for_each_bit(active, |i| {
-                for z in clauses[i].iter_mut() {
-                    z.ascend_byte();
-                }
+                active_zippers |= clauses[i];
             });
 
+            for_each_bit(active_zippers, |i| {
+                zs[i].ascend_byte();
+            });
             out.ascend_byte();
 
             depth -= 1;
 
             // recompute masks after ascent
-            global = compute_masks(clauses, active, &mut clause_masks);
+            global = compute_masks(zs, clauses, active, &mut clause_masks);
             // resume sibling traversal
             next = global.next_bit(byte_from);
         }
     }
 
-    debug_assert!(M > 0 && M <= 64);
-    zipper_merge_dnf_branch(clauses, ((1 << M) - 1), out);
+    assert!(N > 0 && N <= 64);
+    assert!(M > 0 && M <= 64);
+    zipper_merge_dnf_branch(zs, &clauses, ((1 << M) - 1), out);
 }
 
 /// Computes the majority (2-of-3) combination of three zippers.
@@ -1919,19 +1944,16 @@ pub fn zipper_majority<V, Z, Out, A>(x: Z, y: Z, z: Z, out: &mut Out)
 where
     V: Lattice + Clone + Send + Sync + Unpin,
     A: Allocator,
-    Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving + Clone,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    let x_1 = x.clone();
-    let y_1 = y.clone();
-    let z_1 = z.clone();
-    let mut xy = [x, y];
-    let mut xz = [x_1, z];
-    let mut yz = [y_1, z_1];
+    let clauses = [
+        0b011, // x ∧ y
+        0b101, // x ∧ z
+        0b110, // y ∧ z
+    ];
 
-    let mut clauses = [xy.as_mut_slice(), xz.as_mut_slice(), yz.as_mut_slice()];
-
-    zipper_merge_dnf::<V, Z, Out, A, 3>(&mut clauses, out);
+    zipper_merge_dnf(&mut [x, y, z], clauses, out);
 }
 
 // ==================== JOIN ====================
@@ -4731,7 +4753,7 @@ mod tests {
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(&mut [&mut [&mut z1, &mut z2, &mut z3]], &mut out);
+            zipper_merge_dnf(&mut [&mut z1, &mut z2, &mut z3], [0b111], &mut out);
 
             let mut expected = PathMap::new();
             {
@@ -4757,7 +4779,8 @@ mod tests {
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
             zipper_merge_dnf(
-                &mut [&mut [&mut z1], &mut [&mut z2], &mut [&mut z3]],
+                &mut [&mut z1, &mut z2, &mut z3],
+                [0b001, 0b010, 0b100],
                 &mut out,
             );
 
@@ -4778,18 +4801,13 @@ mod tests {
             let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
             let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
 
+            let mut z1 = trie1.read_zipper();
             let mut z2 = trie2.read_zipper();
             let mut z3 = trie3.read_zipper();
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(
-                &mut [
-                    &mut [&mut trie1.read_zipper(), &mut z2],
-                    &mut [&mut trie1.read_zipper(), &mut z3],
-                ],
-                &mut out,
-            );
+            zipper_merge_dnf(&mut [z1, z2, z3], [0b011, 0b101], &mut out);
             let expected = trie1.meet(&trie2.join(&trie3));
             assert_trie(expected, result);
         }
@@ -4806,13 +4824,7 @@ mod tests {
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(
-                &mut [
-                    &mut [&mut z1, &mut trie2.read_zipper()],
-                    &mut [&mut trie2.read_zipper(), &mut z3],
-                ],
-                &mut out,
-            );
+            zipper_merge_dnf(&mut [z1, z2, z3], [0b011, 0b110], &mut out);
             let expected = trie2.meet(&trie1.join(&trie3));
             assert_trie(expected, result);
         }
@@ -4823,17 +4835,13 @@ mod tests {
             let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
             let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
 
+            let mut z1 = trie1.read_zipper();
+            let mut z2 = trie2.read_zipper();
             let mut z3 = trie3.read_zipper();
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(
-                &mut [
-                    &mut [&mut trie1.read_zipper(), &mut trie2.read_zipper(), &mut z3],
-                    &mut [&mut trie1.read_zipper(), &mut trie2.read_zipper()],
-                ],
-                &mut out,
-            );
+            zipper_merge_dnf(&mut [z1, z2, z3], [0b111, 0b011], &mut out);
             let expected = trie2.meet(&trie1);
             assert_trie(expected, result);
         }
@@ -4868,16 +4876,15 @@ mod tests {
             let a_shallow_chain = prefixed(&trie2.read_zipper(), a);
             let a_branching = prefixed(&trie3.read_zipper(), a);
 
-            let mut z3 = trie3.read_zipper();
-
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
             zipper_merge_dnf(
                 &mut [
-                    &mut [&mut a_deep_chain.read_zipper()],
-                    &mut [&mut a_shallow_chain.read_zipper()],
-                    &mut [&mut a_branching.read_zipper()],
+                    a_deep_chain.read_zipper(),
+                    a_shallow_chain.read_zipper(),
+                    a_branching.read_zipper(),
                 ],
+                [0b001, 0b010, 0b100],
                 &mut out,
             );
             let expected = a_deep_chain.join(&a_shallow_chain.join(&a_branching));
