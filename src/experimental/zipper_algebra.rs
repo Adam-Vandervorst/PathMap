@@ -1690,9 +1690,358 @@ where
     }
 }
 
+/// A conjunction clause in a Disjunctive Normal Form (DNF) expression.
+///
+/// A clause is represented as a bitmask over a fixed universe of `N` input
+/// zippers. Bit `i` is set iff zipper `i` participates in the conjunction.
+///
+/// For example, for `N = 4`:
+///
+/// ```text
+/// {0,2}  => 0b0101
+/// {1,3}  => 0b1010
+/// ```
+///
+/// The DNF expression
+///
+/// ```text
+/// (x₀ ∧ x₂) ∨ (x₁ ∧ x₃)
+/// ```
+///
+/// can therefore be represented as:
+///
+/// ```ignore
+/// [
+///     Clause::<4>::from_indices([0, 2]),
+///     Clause::<4>::from_indices([1, 3]),
+/// ]
+/// ```
+///
+/// All indices are validated at construction time, guaranteeing that no bit
+/// outside the range `[0, N)` is ever set.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct Clause<const N: usize> {
+    members: u64,
+}
+
+impl<const N: usize> Clause<N> {
+    pub const EMPTY: Self = Self { members: 0 };
+    pub const FULL: Self = Self {
+        members: if N == 64 { u64::MAX } else { (1u64 << N) - 1 },
+    };
+
+    /// Creates a clause from a raw bitmask.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mask references a zipper index greater than or equal to `N`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<4>::from_mask(0b0101);
+    /// ```
+    #[inline]
+    pub const fn from_mask(mask: u64) -> Self {
+        assert!(N > 0 && N <= 64);
+        assert!(mask >> N == 0);
+
+        Self { members: mask }
+    }
+
+    /// Creates a clause containing exactly one zipper.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<8>::singleton(3);
+    /// ```
+    ///
+    /// corresponds to:
+    ///
+    /// ```text
+    /// x₃
+    /// ```
+    #[inline]
+    pub const fn singleton(i: usize) -> Self {
+        assert!(i < N);
+        Self::from_mask(1 << i)
+    }
+
+    /// Creates a clause from a collection of zipper indices.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<5>::new(&[0, 2, 4]);
+    /// ```
+    ///
+    /// corresponds to:
+    ///
+    /// ```text
+    /// x₀ ∧ x₂ ∧ x₄
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if any index is greater than or equal to `N`.
+    #[inline]
+    pub fn new(indices: &[usize]) -> Self {
+        let mut mask = 0;
+
+        for &i in indices {
+            assert!(i < N);
+            mask |= 1u64 << i;
+        }
+
+        Self::from_mask(mask)
+    }
+
+    pub const fn pair(i: usize, j: usize) -> Self {
+        assert!(i < N);
+        assert!(j < N);
+
+        Self::from_mask((1u64 << i) | (1u64 << j))
+    }
+
+    /// Creates a clause from a collection of zipper indices.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<5>::from_indices([0, 2, 4]);
+    /// ```
+    ///
+    /// corresponds to:
+    ///
+    /// ```text
+    /// x₀ ∧ x₂ ∧ x₄
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if any index is greater than or equal to `N`.
+    pub const fn from_indices<const K: usize>(indices: [usize; K]) -> Self {
+        let mut mask = 0u64;
+        let mut i = 0;
+
+        while i < K {
+            let idx = indices[i];
+
+            assert!(idx < N);
+
+            mask |= 1u64 << idx;
+            i += 1;
+        }
+
+        Self::from_mask(mask)
+    }
+
+    /// Returns the internal membership bitmask.
+    ///
+    /// Bit `i` is set iff zipper `i` participates in this clause.
+    ///
+    /// This operation is constant-time.
+    #[inline(always)]
+    pub const fn members(self) -> u64 {
+        debug_assert!(self.members >> N == 0);
+        self.members
+    }
+
+    pub const fn len(self) -> usize {
+        self.members.count_ones() as usize
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.members == 0
+    }
+}
+
+/// Constructs a [`Clause`] using zipper indices.
+///
+/// # Examples
+///
+/// ```ignore
+/// let clause = clause![0, 2, 4];
+/// ```
+///
+/// which is equivalent to:
+///
+/// ```ignore
+/// Clause::<N>::from_indices([0, 2, 4])
+/// ```
+///
+/// This macro is primarily intended for constructing DNF expressions in a
+/// concise and readable form.
+///
+/// ```ignore
+/// let dnf = [
+///     clause![0, 1],
+///     clause![0, 2],
+///     clause![1, 2],
+/// ];
+/// ```
+#[macro_export]
+macro_rules! clause {
+    ($($i:expr),+ $(,)?) => {
+        $crate::Clause::from_indices([$($i),+])
+    };
+}
+
+/// Constructs a DNF expression as an array of [`Clause`] values.
+///
+/// Each inner bracket denotes a conjunction clause, specified by the
+/// indices of the participating zippers.
+///
+/// # Examples
+///
+/// Majority-of-three:
+///
+/// ```ignore
+/// let dnf = dnf![
+///     [0, 1],
+///     [0, 2],
+///     [1, 2],
+/// ];
+/// ```
+///
+/// corresponds to:
+///
+/// ```text
+/// (x₀ ∧ x₁)
+/// ∨ (x₀ ∧ x₂)
+/// ∨ (x₁ ∧ x₂)
+/// ```
+///
+/// A larger example:
+///
+/// ```ignore
+/// let dnf = dnf![
+///     [0],
+///     [1, 2],
+///     [0, 3, 4],
+/// ];
+/// ```
+///
+/// corresponds to:
+///
+/// ```text
+/// x₀
+/// ∨ (x₁ ∧ x₂)
+/// ∨ (x₀ ∧ x₃ ∧ x₄)
+/// ```
+///
+/// The resulting value can be passed directly to [`zipper_merge_dnf`]:
+///
+/// ```ignore
+/// let clauses = dnf![
+///     [0, 1],
+///     [0, 2],
+///     [1, 2],
+/// ];
+///
+/// zipper_merge_dnf::<_, _, _, _, 3, 3>(
+///     &mut [x, y, z],
+///     clauses,
+///     out,
+/// );
+/// ```
+///
+/// # Expansion
+///
+/// ```ignore
+/// dnf![
+///     [0, 1],
+///     [2, 3],
+/// ]
+/// ```
+///
+/// expands approximately to:
+///
+/// ```ignore
+/// [
+///     Clause::from_indices([0, 1]),
+///     Clause::from_indices([2, 3]),
+/// ]
+/// ```
+#[macro_export]
+macro_rules! dnf {
+    (
+        $(
+            [$($idx:expr),*]
+        ),* $(,)?
+    ) => {
+        [
+            $(
+                Clause::from_indices([$($idx),*])
+            ),*
+        ]
+    };
+}
+
+/// Evaluates a monotone Boolean expression in Disjunctive Normal Form (DNF)
+/// over a collection of input zippers.
+///
+/// Each clause represents a conjunction (`Meet`) of selected input zippers,
+/// while the final result is the disjunction (`Join`) of all clauses:
+///
+/// ```text
+/// (Clause₀) ∨ (Clause₁) ∨ ... ∨ (Clauseₘ)
+/// ```
+///
+/// where each clause is interpreted as:
+///
+/// ```text
+/// xᵢ ∧ xⱼ ∧ ...
+/// ```
+///
+/// The algorithm traverses the input tries simultaneously using zipper
+/// operations and emits the resulting trie into `out`.
+///
+/// # Example
+///
+/// Majority-of-three can be expressed as:
+///
+/// ```text
+/// (x ∧ y) ∨ (x ∧ z) ∨ (y ∧ z)
+/// ```
+///
+/// ```ignore
+/// let clauses = [
+///     clause![0, 1],
+///     clause![0, 2],
+///     clause![1, 2],
+/// ];
+///
+/// zipper_merge_dnf::<_, _, _, _, 3, 3>(
+///     &mut [x, y, z],
+///     clauses,
+///     out,
+/// );
+/// ```
+///
+/// # Complexity
+///
+/// The traversal is output-sensitive and explores only trie regions that are
+/// reachable through at least one active clause.
+///
+/// Whenever all currently active clauses descend through the same byte, the
+/// algorithm performs an iterative tail descent without recursion. Recursive
+/// calls occur only when the active clause set splits.
+///
+/// # Optimizations
+///
+/// * Single active clauses are dispatched to specialized meet
+///   implementations (`zipper_meet`, `zipper_meet3`, `zipper_merge4`, ...).
+/// * Zippers shared between multiple clauses are descended only once.
+/// * Long common paths are traversed iteratively without recursion.
+///
+/// # Panics
+///
+/// Panics if `N == 0`, `M == 0`, or either exceeds 64.
 pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
     zs: &mut [Z; N],
-    clauses: [u64; M],
+    clauses: [Clause<N>; M],
     out: &mut Out,
 ) where
     V: Lattice + Clone + Send + Sync + Unpin,
@@ -1701,14 +2050,14 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
     Out: ZipperWriting<V, A>,
 {
     #[inline(always)]
-    fn clause_mask<Z, const N: usize>(zs: &[Z; N], members: u64) -> ByteMask
+    fn clause_mask<Z, const N: usize>(zs: &[Z; N], clause: &Clause<N>) -> ByteMask
     where
         Z: Zipper,
     {
-        if members == 0 {
+        if clause.is_empty() {
             return ByteMask::EMPTY;
         };
-        only_active(zs, members)
+        only_active(zs, clause.members())
             .try_fold(ByteMask::FULL, |mut mask, (_, z)| {
                 mask &= z.child_mask();
                 if mask.is_empty_mask() {
@@ -1721,17 +2070,17 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
     }
 
     #[inline(always)]
-    fn clause_value<V, Z, const N: usize>(zs: &[Z; N], members: u64) -> Option<V>
+    fn clause_value<V, Z, const N: usize>(zs: &[Z; N], clause: &Clause<N>) -> Option<V>
     where
         V: Lattice + Clone,
         Z: ZipperValues<V>,
     {
-        Meet::combine_n(only_active(zs, members).map(|(_, z)| lift(z.val())))
+        Meet::combine_n(only_active(zs, clause.members()).map(|(_, z)| lift(z.val())))
     }
 
     fn active_clauses_value<V, Z, const N: usize, const M: usize>(
         zs: &[Z; N],
-        clauses: &[u64; M],
+        clauses: &[Clause<N>; M],
         active: u64,
     ) -> Option<V>
     where
@@ -1739,14 +2088,15 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
         Z: ZipperValues<V>,
     {
         Join::combine_n(
-            only_active(clauses, active).map(|(_, i)| clause_value(zs, *i).map(Cow::Owned)),
+            only_active(clauses, active)
+                .map(|(_, clause)| clause_value(zs, clause).map(Cow::Owned)),
         )
     }
 
     #[inline(always)]
     fn compute_masks<Z, const N: usize, const M: usize>(
         zs: &[Z; N],
-        clauses: &[u64; M],
+        clauses: &[Clause<N>; M],
         active: u64,
         clause_masks: &mut [ByteMask; M],
     ) -> ByteMask
@@ -1756,7 +2106,7 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
         let mut global = ByteMask::EMPTY;
 
         for_each_bit(active, |i| {
-            let m = clause_mask(zs, clauses[i]);
+            let m = clause_mask(zs, &clauses[i]);
 
             clause_masks[i] = m;
             global |= m;
@@ -1767,7 +2117,7 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
 
     fn zipper_merge_dnf_branch<V, Z, Out, A, const N: usize, const M: usize>(
         zs: &mut [Z; N],
-        clauses: &[u64; M],
+        clauses: &[Clause<N>; M],
         active: u64,
         out: &mut Out,
     ) where
@@ -1782,10 +2132,10 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
         // Single clause fast path
         // -------------------------------------------------
         if active.count_ones() == 1 {
-            let members = first_active(clauses, active);
-            match members.count_ones() {
+            let single_clause = first_active(clauses, active);
+            match single_clause.len() {
                 1 => {
-                    let z0 = first_active_mut(zs, *members);
+                    let z0 = first_active_mut(zs, single_clause.members());
                     if let Some(v) = z0.val() {
                         out.set_val(v.clone());
                     }
@@ -1793,19 +2143,19 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                     return;
                 }
                 2 => {
-                    with_k::<2, _, _>(zs, *members, |[z0, z1]| {
+                    with_k::<2, _, _>(zs, single_clause.members(), |[z0, z1]| {
                         zipper_meet(z0, z1, out);
                     });
                     return;
                 }
                 3 => {
-                    with_k::<3, _, _>(zs, *members, |[z0, z1, z2]| {
+                    with_k::<3, _, _>(zs, single_clause.members(), |[z0, z1, z2]| {
                         zipper_meet3(z0, z1, z2, out);
                     });
                     return;
                 }
                 4 => {
-                    with_k::<4, _, _>(zs, *members, |[z0, z1, z2, z3]| {
+                    with_k::<4, _, _>(zs, single_clause.members(), |[z0, z1, z2, z3]| {
                         zipper_merge4::<Meet, V, Z, Z, Z, Z, Out, A>(z0, z1, z2, z3, out);
                     });
                     return;
@@ -1844,7 +2194,7 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                 for_each_bit(active, |i| {
                     if clause_masks[i].test_bit(byte) {
                         sub_active |= 1 << i;
-                        participating |= clauses[i];
+                        participating |= clauses[i].members();
                     }
                 });
                 for_each_bit(participating, |i| {
@@ -1890,14 +2240,14 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                 break;
             }
 
-            let byte_from = *first_active(zs, *first_active(clauses, active))
+            let byte_from = *first_active(zs, first_active(clauses, active).members())
                 .path()
                 .last()
                 .expect("non-empty path at depth > 0");
 
             let mut active_zippers = 0;
             for_each_bit(active, |i| {
-                active_zippers |= clauses[i];
+                active_zippers |= clauses[i].members();
             });
 
             for_each_bit(active_zippers, |i| {
@@ -1947,13 +2297,13 @@ where
     Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    let clauses = [
-        0b011, // x ∧ y
-        0b101, // x ∧ z
-        0b110, // y ∧ z
+    const MAJORITY: [Clause<3>; 3] = [
+        Clause::from_mask(0b011), // x ∧ y
+        Clause::from_mask(0b101), // x ∧ z
+        Clause::from_mask(0b110), // y ∧ z
     ];
 
-    zipper_merge_dnf(&mut [x, y, z], clauses, out);
+    zipper_merge_dnf(&mut [x, y, z], MAJORITY, out);
 }
 
 // ==================== JOIN ====================
@@ -4733,7 +5083,9 @@ mod tests {
     }
 
     mod dnf {
-        use crate::experimental::zipper_algebra::{zipper_join3, zipper_meet3, zipper_merge_dnf};
+        use crate::experimental::zipper_algebra::{
+            Clause, zipper_join3, zipper_meet3, zipper_merge_dnf,
+        };
 
         use super::*;
 
@@ -4753,7 +5105,7 @@ mod tests {
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(&mut [&mut z1, &mut z2, &mut z3], [0b111], &mut out);
+            zipper_merge_dnf(&mut [&mut z1, &mut z2, &mut z3], [Clause::FULL], &mut out);
 
             let mut expected = PathMap::new();
             {
@@ -4780,7 +5132,11 @@ mod tests {
             let mut out = result.write_zipper();
             zipper_merge_dnf(
                 &mut [&mut z1, &mut z2, &mut z3],
-                [0b001, 0b010, 0b100],
+                [
+                    Clause::singleton(0),
+                    Clause::singleton(1),
+                    Clause::singleton(2),
+                ],
                 &mut out,
             );
 
@@ -4807,7 +5163,11 @@ mod tests {
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(&mut [z1, z2, z3], [0b011, 0b101], &mut out);
+            zipper_merge_dnf(
+                &mut [z1, z2, z3],
+                [Clause::from_mask(0b011), Clause::from_mask(0b101)],
+                &mut out,
+            );
             let expected = trie1.meet(&trie2.join(&trie3));
             assert_trie(expected, result);
         }
@@ -4824,7 +5184,11 @@ mod tests {
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(&mut [z1, z2, z3], [0b011, 0b110], &mut out);
+            zipper_merge_dnf(
+                &mut [z1, z2, z3],
+                [Clause::from_mask(0b011), Clause::from_mask(0b110)],
+                &mut out,
+            );
             let expected = trie2.meet(&trie1.join(&trie3));
             assert_trie(expected, result);
         }
@@ -4841,7 +5205,11 @@ mod tests {
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(&mut [z1, z2, z3], [0b111, 0b011], &mut out);
+            zipper_merge_dnf(
+                &mut [z1, z2, z3],
+                [Clause::FULL, Clause::from_indices([0, 1])],
+                &mut out,
+            );
             let expected = trie2.meet(&trie1);
             assert_trie(expected, result);
         }
@@ -4884,7 +5252,11 @@ mod tests {
                     a_shallow_chain.read_zipper(),
                     a_branching.read_zipper(),
                 ],
-                [0b001, 0b010, 0b100],
+                [
+                    Clause::singleton(0),
+                    Clause::singleton(1),
+                    Clause::singleton(2),
+                ],
                 &mut out,
             );
             let expected = a_deep_chain.join(&a_shallow_chain.join(&a_branching));
