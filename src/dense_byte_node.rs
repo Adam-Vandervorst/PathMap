@@ -698,6 +698,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 requested_mask.clear_bit(byte);
                 match self.get(byte) {
                     Some(cf) => {
+                        // An exact value-only request does not enumerate an onward link stored in the
+                        // same CoFree.  The preceding stashed-value fast path means this branch is
+                        // reached only when that link was not requested separately.
+                        if key.len() == 1 && *expect_val && cf.has_rec() {
+                            unrequested_cofree_half = true;
+                        }
+
                         //A key longer than 1 byte or an explicit request for a rec link can be answered with a Child
                         if key.len() > 1 || !*expect_val {
                             match cf.rec() {
@@ -1914,7 +1921,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree
                 if new_mask > 0 {
                     AlgebraicResult::Identity(new_mask)
                 } else {
-                    AlgebraicResult::Element(Self::new(None, self.val().cloned()))
+                    let val = if val_mask & SELF_IDENT > 0 {
+                        self.val().cloned()
+                    } else {
+                        other.val().cloned()
+                    };
+                    AlgebraicResult::Element(Self::new(None, val))
                 }
             },
             (AlgebraicResult::Identity(rec_mask), AlgebraicResult::None) => {
@@ -1928,7 +1940,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree
                 if new_mask > 0 {
                     AlgebraicResult::Identity(new_mask)
                 } else {
-                    AlgebraicResult::Element(Self::new(self.rec().cloned(), None))
+                    let rec = if rec_mask & SELF_IDENT > 0 {
+                        self.rec().cloned()
+                    } else {
+                        other.rec().cloned()
+                    };
+                    AlgebraicResult::Element(Self::new(rec, None))
                 }
             },
             (rec_el, val_el) => {
