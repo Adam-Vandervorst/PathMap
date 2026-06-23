@@ -1,5 +1,5 @@
 
-use std::ops::{RangeBounds, Bound};
+use std::ops::{Bound, Range, RangeBounds, RangeInclusive};
 
 use crate::ring::*;
 
@@ -16,6 +16,10 @@ pub use fast_slice_utils::find_prefix_overlap;
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ByteMask(pub [u64; 4]);
+
+/// Alternate formatter for displaying a [`ByteMask`] as binary instead of as a set of byte indices.
+#[derive(Clone, Copy)]
+pub struct ByteMaskBinaryFmt(ByteMask);
 
 impl ByteMask {
     pub const EMPTY: ByteMask = Self([0u64; 4]);
@@ -120,7 +124,7 @@ impl ByteMask {
             // last partial word
             mask[end_word] = u64::MAX >> (63 - end_bit);
         }
-        
+
         ByteMask(mask)
     }
 
@@ -133,6 +137,18 @@ impl ByteMask {
     #[inline]
     pub fn iter(&self) -> ByteMaskIter {
         ByteMaskIter::from(self.0)
+    }
+
+    /// Create an iterator over contiguous ranges of set bits, in ascending order
+    #[inline]
+    pub fn range_iter(&self) -> ByteMaskRangeIter {
+        ByteMaskRangeIter::from(self.0)
+    }
+
+    /// Returns a wrapper that renders this mask as 256 bits of binary text.
+    #[inline]
+    pub fn fmt_binary(&self) -> ByteMaskBinaryFmt {
+        ByteMaskBinaryFmt(self.clone())
     }
 
     /// Returns how many set bits precede the requested bit
@@ -293,6 +309,32 @@ impl core::fmt::Debug for ByteMask {
     }
 }
 
+impl core::fmt::Debug for ByteMaskBinaryFmt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for word in self.0.0.iter().rev() {
+            write!(f, "{word:064b}")?;
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for ByteMaskBinaryFmt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut bit_count = 0usize;
+        for word in self.0.0.iter().rev() {
+            for shift in (0..64).rev() {
+                let bit = (word >> shift) & 1;
+                write!(f, "{bit}")?;
+                bit_count += 1;
+                if bit_count < 256 && bit_count % 8 == 0 {
+                    write!(f, " ")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl BitMask for ByteMask {
     #[inline]
     fn count_bits(&self) -> usize { self.0.count_bits() }
@@ -336,6 +378,20 @@ impl From<u8> for ByteMask {
         let mut new_mask = Self::new();
         new_mask.set_bit(singleton_byte);
         new_mask
+    }
+}
+
+impl From<Range<u8>> for ByteMask {
+    #[inline]
+    fn from(range: Range<u8>) -> Self {
+        Self::from_range(range)
+    }
+}
+
+impl From<RangeInclusive<u8>> for ByteMask {
+    #[inline]
+    fn from(range: RangeInclusive<u8>) -> Self {
+        Self::from_range(range)
     }
 }
 
@@ -575,6 +631,16 @@ crate::impl_name_only_debug!(
     impl core::fmt::Debug for ByteMaskIter
 );
 
+/// An iterator to visit contiguous ranges of set bytes in ascending order.
+pub struct ByteMaskRangeIter {
+    i: u8,
+    mask: [u64; 4],
+}
+
+crate::impl_name_only_debug!(
+    impl core::fmt::Debug for ByteMaskRangeIter
+);
+
 /// Iterate over a [u64; 4].  Deprecated in favor [`ByteMask`]
 #[deprecated]
 pub trait IntoByteMaskIter {
@@ -597,23 +663,44 @@ impl IntoByteMaskIter for &[u64; 4] {
 
 impl From<[u64; 4]> for ByteMaskIter {
     fn from(mask: [u64; 4]) -> Self {
+        Self::new(ByteMask(mask))
+    }
+}
+
+impl From<ByteMask> for ByteMaskIter {
+    fn from(mask: ByteMask) -> Self {
+        Self::new(mask)
+    }
+}
+
+impl From<[u64; 4]> for ByteMaskRangeIter {
+    fn from(mask: [u64; 4]) -> Self {
+        Self::new(ByteMask(mask))
+    }
+}
+
+impl From<ByteMask> for ByteMaskRangeIter {
+    fn from(mask: ByteMask) -> Self {
         Self::new(mask)
     }
 }
 
 impl ByteMaskIter {
-    /// Make a new `ByteMaskIter` from a mask, as you might get from [child_mask](crate::zipper::Zipper::child_mask)
-    pub fn new(mask: [u64; 4]) -> Self {
-        Self {
-            i: 0,
-            mask,
-        }
+    pub fn new(mask: ByteMask) -> Self {
+        Self { i: 0, mask: mask.0 }
+    }
+}
+
+impl ByteMaskRangeIter {
+    pub fn new(mask: ByteMask) -> Self {
+        Self { i: 0, mask: mask.0 }
     }
 }
 
 impl Iterator for ByteMaskIter {
     type Item = u8;
 
+    #[inline]
     fn next(&mut self) -> Option<u8> {
         loop {
             let w = &mut self.mask[self.i as usize];
@@ -628,6 +715,63 @@ impl Iterator for ByteMaskIter {
                 return None
             }
         }
+    }
+}
+
+impl Iterator for ByteMaskRangeIter {
+    type Item = RangeInclusive<u8>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        // Skip empty words until we find the first set bit of the next range.
+        let start_bit;
+        let start = loop {
+            let w = self.mask[self.i as usize];
+            if w != 0 {
+                start_bit = w.trailing_zeros() as u8;
+                break self.i * 64 + start_bit;
+            } else if self.i < 3 {
+                self.i += 1;
+            } else {
+                return None;
+            }
+        };
+
+        let run_len = (self.mask[self.i as usize] >> start_bit).trailing_ones() as u8;
+        // The range ends inside the current word, so clear just that span and return it.
+        if run_len < 64 - start_bit {
+            let clear_mask = ((1u64 << run_len) - 1) << start_bit;
+            self.mask[self.i as usize] &= !clear_mask;
+            return Some(start..=(start + run_len - 1));
+        }
+
+        // The range consumes the rest of the current word, so clear it before advancing.
+        self.mask[self.i as usize] = 0;
+
+        //Find the end of the range
+        while self.i < 3 {
+            self.i += 1;
+            let next_word = self.mask[self.i as usize];
+
+            // The range covers this entire next word, so clear it and continue forward.
+            if next_word == u64::MAX {
+                self.mask[self.i as usize] = 0;
+                continue;
+            }
+
+            let next_run_len = next_word.trailing_ones() as u8;
+            // The next word starts with a zero bit, so the range ended at the prior word boundary.
+            if next_run_len == 0 {
+                return Some(start..=((self.i - 1) * 64 + 63));
+            }
+
+            // The range ends inside the prefix of the next word, so clear that prefix and return it.
+            self.mask[self.i as usize] &= !((1u64 << next_run_len) - 1);
+            return Some(start..=(self.i * 64 + next_run_len - 1));
+        }
+
+        // The range runs through the end of the mask after clearing every fully covered word.
+        Some(start..=(self.i * 64 + 63))
     }
 }
 
@@ -779,4 +923,50 @@ fn from_range_test() {
     assert_eq!(ByteMask::from_range(0..=0), ByteMask::from(0));
     assert_eq!(ByteMask::from_range(255..255), ByteMask::EMPTY);
     assert_eq!(ByteMask::from_range(255..=255), ByteMask::from(255));
+}
+
+#[test]
+fn range_iter_test() {
+    fn next_once(mask: ByteMask) -> Option<RangeInclusive<u8>> {
+        let mut iter = mask.range_iter();
+        iter.next()
+    }
+
+    // Returns from the short in-word path.
+    assert_eq!(next_once(ByteMask::from(10..12)), Some(10..=11));
+
+    // Returns at a word boundary when the next word starts with zero.
+    assert_eq!(next_once(ByteMask::from(62..=63)), Some(62..=63));
+
+    // Returns from the next-word prefix path.
+    assert_eq!(next_once(ByteMask::from(62..=66)), Some(62..=66));
+
+    // Returns from the full-word continuation path after spanning a whole intermediate word.
+    assert_eq!(next_once(ByteMask::from(62..=130)), Some(62..=130));
+
+    // Returns from the end-of-mask path.
+    assert_eq!(next_once(ByteMask::from(250..=255)), Some(250..=255));
+
+    // Iterates multiple disjoint ranges in ascending order.
+    let mask = ByteMask::from(0..=3)
+        | ByteMask::from(10..12)
+        | ByteMask::from(64..=64)
+        | ByteMask::from(126..=130)
+        | ByteMask::from(255..=255);
+    let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
+    assert_eq!(ranges, vec![0..=3, 10..=11, 64..=64, 126..=130, 255..=255]);
+
+    // Span multiple words
+    let mask = ByteMask::from(2..=4)
+        | ByteMask::from(30..220);
+    let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
+    assert_eq!(ranges, vec![2..=4, 30..=219]);
+
+    // Empty mask
+    let mut iter = ByteMask::EMPTY.range_iter();
+    assert_eq!(iter.next(), None);
+
+    // Full mask
+    let mut iter = ByteMask::FULL.range_iter();
+    assert_eq!(iter.next(), Some(0..=255));
 }

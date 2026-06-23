@@ -312,6 +312,12 @@ fn derive_poly_zipper_with_traits(
                         #(#variant_arms => inner.val(),)*
                     }
                 }
+
+                fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+                    match self {
+                        #(#variant_arms => inner.val_at(path),)*
+                    }
+                }
             }
         })
     } else {
@@ -337,6 +343,12 @@ fn derive_poly_zipper_with_traits(
                 fn get_val(&self) -> Option<&'trie V> {
                     match self {
                         #(#variant_arms => inner.get_val(),)*
+                    }
+                }
+
+                fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'trie V> {
+                    match self {
+                        #(#variant_arms => inner.get_val_at(path),)*
                     }
                 }
             }
@@ -789,6 +801,12 @@ fn derive_poly_zipper_with_traits(
                 fn get_focus(&self) -> pathmap::zipper::OpaqueAbstractNodeRef<'_, V, pathmap::alloc::GlobalAlloc> {
                     match self {
                         #(#variant_arms => inner.get_focus(),)*
+                    }
+                }
+
+                fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> pathmap::zipper::OpaqueAbstractNodeRef<'_, V, pathmap::alloc::GlobalAlloc> {
+                    match self {
+                        #(#variant_arms => inner.get_focus_at(path),)*
                     }
                 }
 

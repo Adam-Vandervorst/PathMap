@@ -124,6 +124,10 @@ harness = false
 name = "multiplicities"
 harness = false
 
+[[bench]]
+name = "graft_masked_branches"
+harness = false
+
 [workspace]
 members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests"]
 resolver = "2"

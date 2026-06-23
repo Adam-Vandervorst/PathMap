@@ -1462,6 +1462,70 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for ByteNode<C
     }
 }
 
+/// Used in the optimized implementation of `graft_masked_branches`
+pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator, CfDst: CoFree<V=V, A=A>, CfSrc: CoFree<V=V, A=A>, const REMOVE_UNSET: bool>(
+    dst_node: &ByteNode<CfDst, A>,
+    src_node: &ByteNode<CfSrc, A>,
+    child_mask: ByteMask
+) -> TrieNodeODRc<V, A>
+where
+    ByteNode<CfDst, A>: TrieNodeDowncast<V, A>,
+{
+    let old_mask = dst_node.mask;
+    let combined_mask = if REMOVE_UNSET { child_mask } else { child_mask | old_mask };
+    let mut new_values = ValuesVec::with_capacity_in(combined_mask.count_bits(), dst_node.alloc.clone());
+    let mut prev_end = 0;
+    let mut new_mask = ByteMask::EMPTY;
+
+    //Loop over each contiguous range in `child_mask`
+    for range in child_mask.range_iter() {
+        let range_start = *range.start();
+        let range_end = *range.end();
+
+        if !REMOVE_UNSET && prev_end < range_start as usize {
+            let gap_start = prev_end as u8;
+            let gap_mask = old_mask & ByteMask::from_range(gap_start..range_start);
+            let gap_len = gap_mask.count_bits();
+            if gap_len > 0 {
+                let gap_ix = old_mask.index_of(gap_start) as usize;
+                for cf in &dst_node.values[gap_ix..gap_ix + gap_len] {
+                    new_values.v.push(CfDst::from_cf(cf.clone()));
+                }
+                new_mask = new_mask | gap_mask;
+            }
+        }
+
+        let src_range_mask = src_node.mask & ByteMask::from_range(range_start..=range_end);
+        let mut src_ix = src_node.mask.index_of(range_start) as usize;
+        for child_byte in src_range_mask.iter() {
+            let cf = unsafe { src_node.values.get_unchecked(src_ix) };
+            src_ix += 1;
+
+            if cf.has_rec() || cf.has_val() {
+                new_values.v.push(CfDst::from_cf(cf.clone()));
+                new_mask.set_bit(child_byte);
+            }
+        }
+
+        prev_end = range_end as usize + 1;
+    }
+
+    if !REMOVE_UNSET && prev_end < 256 {
+        let tail_start = prev_end as u8;
+        let tail_mask = old_mask & ByteMask::from_range(tail_start..);
+        let tail_len = tail_mask.count_bits();
+        if tail_len > 0 {
+            let tail_ix = old_mask.index_of(tail_start) as usize;
+            for cf in &dst_node.values[tail_ix..tail_ix + tail_len] {
+                new_values.v.push(CfDst::from_cf(cf.clone()));
+            }
+            new_mask = new_mask | tail_mask;
+        }
+    }
+
+    TrieNodeODRc::new_in(ByteNode::new_with_fields_in(new_mask, new_values, dst_node.alloc.clone()), dst_node.alloc.clone())
+}
+
 /// returns the position of the next/previous active bit in x
 /// if there is no next/previous bit, returns the argument position
 /// assumes that pos is active in x

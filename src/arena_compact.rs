@@ -1498,6 +1498,75 @@ where Storage: AsRef<[u8]>
         Some(value)
     }
 
+    /// Internal method to facilitate traversing to a path without needing to clone the zipper
+    fn with_lookup_from_focus<R, F>(&self, path: &[u8], mut f: F) -> Option<R>
+    where
+        F: FnMut(Node, usize) -> Option<R>,
+    {
+        if self.invalid > 0 {
+            return None;
+        }
+
+        let mut path = path;
+        let mut cur_node = self.cur_node.clone();
+        let mut node_depth = self.stack.last()?.node_depth;
+
+        loop {
+            match cur_node {
+                Node::Branch(node) => {
+                    if path.is_empty() {
+                        return f(Node::Branch(node), node_depth);
+                    }
+                    if !node.bytemask.test_bit(path[0]) {
+                        return None;
+                    }
+                    let first_child = node.first_child?;
+                    let idx = node.bytemask.index_of(path[0]) as usize;
+                    cur_node = self.tree.nth_node(first_child, idx).0;
+                    node_depth = 0;
+                    path = &path[1..];
+                }
+                Node::Line(line) => {
+                    let line_path = self.tree.get_line(line.path);
+                    let rest_path = &line_path[node_depth..];
+                    if !starts_with(path, rest_path) {
+                        return None;
+                    }
+                    if path.len() < rest_path.len() {
+                        node_depth += path.len();
+                        return f(Node::Line(line), node_depth);
+                    }
+                    path = &path[rest_path.len()..];
+                    if path.is_empty() {
+                        if line.value.is_some() {
+                            return f(Node::Line(line), line_path.len());
+                        }
+                        cur_node = self.tree.get_node(line.child?).0;
+                        node_depth = 0;
+                        continue;
+                    }
+                    cur_node = self.tree.get_node(line.child?).0;
+                    node_depth = 0;
+                }
+            }
+        }
+    }
+    fn get_value_at(&self, path: &[u8]) -> Option<u64> {
+        self.with_lookup_from_focus(path, |node, node_depth| {
+            match node {
+                Node::Branch(node) => node.value,
+                Node::Line(line) => {
+                    let line_path = self.tree.get_line(line.path);
+                    if node_depth < line_path.len() {
+                        None
+                    } else {
+                        line.value
+                    }
+                }
+            }
+        })
+    }
+
     fn ascend_invalid(&mut self, limit: Option<&mut usize>) -> bool {
         if self.invalid == 0 {
             return true;
@@ -1655,23 +1724,21 @@ where Storage: AsRef<[u8]>
     fn val(&self) -> Option<&()> {
         self.get_value().map(|_x| &())
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&()> {
+        self.get_value_at(path.as_ref()).map(|_x| &())
+    }
 }
 
 impl<'tree, Storage> ZipperValues<u64> for ACTZipper<'tree, Storage, u64>
 where Storage: AsRef<[u8]>
 {
     fn val(&self) -> Option<&u64> {
-        let value = self.get_value()?;
-        if self.tree.value.get() != value {
-            self.tree.value.set(value);            
-        }
-        let ptr = self.tree.value.as_ptr();
-        // technically if someone borrows the value twice, they will hit UB
-        // since we provided a read-only reference to the value, and we ALSO
-        // can update it.
-        // all of this is done so that the value can be borrowed with the same
-        // lifetime as the tree.
-        Some(unsafe { &*ptr })
+        //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
+        self.get_val()
+    }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&u64> {
+        //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
+        self.get_val_at(path)
     }
 }
 
@@ -1699,6 +1766,9 @@ where Storage: AsRef<[u8]>
     fn get_val(&self) -> Option<&'tree ()> {
         self.get_value().map(|_x| &())
     }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'tree ()> {
+        self.get_value_at(path.as_ref()).map(|_x| &())
+    }
 }
 
 impl<'tree, Storage> ZipperReadOnlyValues<'tree, u64> for ACTZipper<'tree, Storage, u64>
@@ -1706,6 +1776,25 @@ where Storage: AsRef<[u8]>
 {
     fn get_val(&self) -> Option<&'tree u64> {
         let value = self.get_value()?;
+        if self.tree.value.get() != value {
+            self.tree.value.set(value);
+        }
+        let ptr = self.tree.value.as_ptr();
+        // technically if someone borrows the value twice, they will hit UB
+        // since we provided a read-only reference to the value, and we ALSO
+        // can update it.
+        // all of this is done so that the value can be borrowed with the same
+        // lifetime as the tree.
+        //
+        //LP: GOAT, UNSOUND!!, this seems like a pretty horrible soundness hole
+        // For `val()` the simple fix is to move the temporary value Cell onto the zipper, but that doesn't
+        // address `get_val()`, `val_at()`, nor `get_val_at()`.  It seems like the only comprehensive fix is
+        // to split the ZipperValues trait into one that can return borrowed values and one that returns
+        // cloned values.  And ZipperReadOnlyValues simply could not be implemented on ACTZipper.
+        Some(unsafe { &*ptr })
+    }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'tree u64> {
+        let value = self.get_value_at(path.as_ref())?;
         if self.tree.value.get() != value {
             self.tree.value.set(value);
         }

@@ -219,7 +219,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     pub fn trie_ref_at_path<K: AsRef<[u8]>>(&self, path: K) -> TrieRefBorrowed<'_, V, A> {
         self.ensure_root();
         let path = path.as_ref();
-        TrieRefBorrowed::new_with_key_and_path_in(self.root().unwrap(), self.root_val(), &[], path, self.alloc.clone())
+        TrieRefBorrowed::new_with_key_and_path_in(self.root().unwrap(), || self.root_val(), &[], path, self.alloc.clone())
     }
 
     /// Creates a new read-only [Zipper], starting at the root of a `PathMap`

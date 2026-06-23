@@ -853,7 +853,7 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
                              let [mask_idx, branches_idx] = node_buf.map(|x| x as usize);
 
                              let Deserialized::ChildMask(mask) = &deserialized[mask_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected childmask as `(/?<hex_top><Hex_bot>)*`")); };
-                             let iter = crate::utils::ByteMaskIter::new(*mask);
+                             let iter: crate::utils::ByteMaskIter = (*mask).into();
 
                              let Deserialized::Branches(r) = &deserialized[branches_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected branches")); };
                              let branches = &branches_buffer[r.start..r.end];

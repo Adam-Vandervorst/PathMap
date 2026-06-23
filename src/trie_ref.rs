@@ -125,8 +125,16 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
     }
 
     /// Internal function to implement [ZipperReadOnlySubtries::trie_ref_at_path] for all the types that need it
-    pub(crate) fn new_with_key_and_path_in<'paths>(mut node: &'a TrieNodeODRc<V, A>, root_val: Option<&'a V>, node_key: &'paths [u8], mut path: &'paths [u8], alloc: A) -> Self {
-
+    ///
+    /// The root value is computed lazily because it is only needed if the combined `node_key + path`
+    /// resolves to the current node root rather than to a non-empty key within that node.
+    pub(crate) fn new_with_key_and_path_in<'paths>(
+        mut node: &'a TrieNodeODRc<V, A>,
+        root_val_f: impl FnOnce() -> Option<&'a V>,
+        node_key: &'paths [u8],
+        mut path: &'paths [u8],
+        alloc: A,
+    ) -> Self {
         // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`
         let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
 
@@ -137,6 +145,10 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
         // descend one step
         if node_key_len > 0 && path_len > 0 {
             let next_node_path = unsafe {
+                // SAFETY: `temp_key_buf` has capacity for `MAX_NODE_KEY_BYTES` bytes. We copy exactly
+                // `node_key_len` bytes from `node_key`, which is a valid slice, then append at most the
+                // remaining buffer capacity from the valid slice `path`. Both destination ranges are
+                // within the stack buffer and do not overlap the sources.
                 let src_ptr = node_key.as_ptr();
                 let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
                 core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
@@ -147,6 +159,9 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
                 core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, remaining_len);
 
                 let total_buf_len = node_key_len + remaining_len;
+                // SAFETY: The first `total_buf_len` bytes of `temp_key_buf` were initialized by the
+                // copies above, and `total_buf_len <= MAX_NODE_KEY_BYTES`, so this slice is valid for
+                // reads for the duration of this function.
                 core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
             };
 
@@ -163,10 +178,29 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
             }
         }
 
-        //Descend the rest of the way along the path
-        let (node, key, val) = node_along_path(node, path, root_val, true);
+        let (node, key, val) = if path.is_empty() {
+            (node, &[] as &[u8], root_val_f())
+        } else {
+            //Descend the rest of the way along the path
+            node_along_path(node, path, None, true)
+        };
 
         TrieRefBorrowed::new_with_node_and_path_in(node, val, key, alloc)
+    }
+
+    /// Internal Method to convert a trie ref into an [AbstractNodeRef]
+    #[inline]
+    pub(crate) fn into_focus(self) -> AbstractNodeRef<'a, V, A> {
+        if let Some(focus_node) = self.focus_node {
+            let node_key = self.node_key();
+            if node_key.len() > 0 {
+                focus_node.as_tagged().get_node_at_key(node_key)
+            } else {
+                AbstractNodeRef::BorrowedRc(focus_node)
+            }
+        } else {
+            AbstractNodeRef::None
+        }
     }
 
     /// Internal.  Checks if the `TrieRef` is valid, which is a prerequisite to see if it's pointing
@@ -232,6 +266,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefBo
     fn val(&self) -> Option<&V> {
         self.get_val()
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        self.get_val_at(path)
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefBorrowed<'_, V, A> {
@@ -274,6 +311,19 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
             OpaqueAbstractNodeRef(AbstractNodeRef::None)
         }
     }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+        if self.is_valid() {
+            OpaqueAbstractNodeRef(TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.unwrap(),
+                || self.get_val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).into_focus())
+        } else {
+            OpaqueAbstractNodeRef(AbstractNodeRef::None)
+        }
+    }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
         if self.is_valid() {
             let node_key = self.node_key();
@@ -311,6 +361,19 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyV
             None
         }
     }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'a V> {
+        if self.is_valid() {
+            TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.unwrap(),
+                || self.get_val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).get_val()
+        } else {
+            None
+        }
+    }
 }
 
 impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for TrieRefBorrowed<'a, V, A> {
@@ -320,9 +383,15 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyS
             let path = path.as_ref();
             let node_key = self.node_key();
             if node_key.len() > 0 {
-                Self::new_with_key_and_path_in(self.focus_node.unwrap(), None, node_key, path, self.alloc.clone())
+                Self::new_with_key_and_path_in(self.focus_node.unwrap(), || None, node_key, path, self.alloc.clone())
             } else {
-                Self::new_with_key_and_path_in(self.focus_node.unwrap(), self.get_val(), &[], path, self.alloc.clone())
+                Self::new_with_key_and_path_in(
+                    self.focus_node.unwrap(),
+                    || self.get_val(),
+                    &[],
+                    path,
+                    self.alloc.clone(),
+                )
             }
         } else {
             Self::new_invalid_in(self.alloc.clone())
@@ -577,6 +646,19 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefOw
             None
         }
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        if self.is_valid() {
+            TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.as_ref().unwrap(),
+                || self.val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).get_val()
+        } else {
+            None
+        }
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefOwned<V, A> {
@@ -615,6 +697,19 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
             } else {
                 OpaqueAbstractNodeRef(AbstractNodeRef::BorrowedRc(&self.focus_node.as_ref().unwrap()))
             }
+        } else {
+            OpaqueAbstractNodeRef(AbstractNodeRef::None)
+        }
+    }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+        if self.is_valid() {
+            OpaqueAbstractNodeRef(TrieRefBorrowed::new_with_key_and_path_in(
+                self.focus_node.as_ref().unwrap(),
+                || self.val(),
+                self.node_key(),
+                path.as_ref(),
+                self.alloc.clone(),
+            ).into_focus())
         } else {
             OpaqueAbstractNodeRef(AbstractNodeRef::None)
         }
@@ -749,6 +844,12 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRef<'
             TrieRef::Owned(trie_ref) => trie_ref.val(),
         }
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        match self {
+            TrieRef::Borrowed(trie_ref) => trie_ref.val_at(path),
+            TrieRef::Owned(trie_ref) => trie_ref.val_at(path),
+        }
+    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRef<'_, V, A> {
@@ -787,6 +888,12 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.get_focus(),
             TrieRef::Owned(trie_ref) => trie_ref.get_focus(),
+        }
+    }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+        match self {
+            TrieRef::Borrowed(trie_ref) => trie_ref.get_focus_at(path),
+            TrieRef::Owned(trie_ref) => trie_ref.get_focus_at(path),
         }
     }
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
@@ -1027,5 +1134,86 @@ mod tests {
         assert_eq!(map.get_val_at(b"path"), None);
 
         assert_eq!(tr.val(), Some(&42));
+    }
+
+    #[test]
+    fn trie_ref_val_at_test() {
+        fn assert_val_at<T: ZipperValues<i32>>(trie_ref: T) {
+            assert_eq!(trie_ref.val(), None);
+            assert_eq!(trie_ref.val_at(b"root:a:new_a"), Some(&10));
+            assert_eq!(trie_ref.val_at(b"root:a:nested:deep"), Some(&11));
+            assert_eq!(trie_ref.val_at(b"root:b:missing"), None);
+        }
+
+        let mut borrowed_map = PathMap::<i32>::new();
+        borrowed_map.set_val_at(b"root:a:new_a", 10);
+        borrowed_map.set_val_at(b"root:a:nested:deep", 11);
+        borrowed_map.set_val_at(b"root:c:new_c", 30);
+        assert_val_at(borrowed_map.trie_ref_at_path(b""));
+
+        let mut owned_map = PathMap::<i32>::new();
+        owned_map.set_val_at(b"root:a:new_a", 10);
+        owned_map.set_val_at(b"root:a:nested:deep", 11);
+        owned_map.set_val_at(b"root:c:new_c", 30);
+        let owned = match TrieRef::from(owned_map) {
+            TrieRef::Owned(trie_ref) => trie_ref,
+            TrieRef::Borrowed(_) => unreachable!(),
+        };
+        assert_val_at(owned);
+    }
+
+    #[test]
+    fn trie_ref_graft_src_at_test() {
+        fn assert_graft_src_at<S: ZipperInfallibleSubtries<i32>>(src_ref: S) {
+            let mut dst = PathMap::<i32>::new();
+            dst.set_val_at(b"root:p:old_p", 1);
+            dst.set_val_at(b"root:q:old_q", 2);
+            dst.set_val_at(b"root:r:old_r", 3);
+            dst.set_val_at(b"root:s:old_s", 4);
+            dst.set_val_at(b"root:t:old_t", 5);
+
+            dst.write_zipper_at_path(b"root:p").graft_src_at(&src_ref, b"a");
+            dst.write_zipper_at_path(b"root:q").graft_src_at(&src_ref, b"a:nested");
+            dst.write_zipper_at_path(b"root:r").graft_src_at(&src_ref, b"branch:mid");
+            dst.write_zipper_at_path(b"root:s").graft_src_at(&src_ref, b"missing");
+
+            assert_eq!(dst.get_val_at(b"root:p:old_p"), None);
+            assert_eq!(dst.get_val_at(b"root:p:new_a"), Some(&10));
+            assert_eq!(dst.get_val_at(b"root:p:nested:deep"), Some(&11));
+            assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), None);
+            assert_eq!(dst.get_val_at(b"root:p:c:new_c"), None);
+
+            assert_eq!(dst.get_val_at(b"root:q:old_q"), None);
+            assert_eq!(dst.get_val_at(b"root:q:deep"), Some(&11));
+            assert_eq!(dst.get_val_at(b"root:q:new_a"), None);
+
+            assert_eq!(dst.get_val_at(b"root:r:old_r"), None);
+            assert_eq!(dst.get_val_at(b"root:r:leaf"), Some(&40));
+            assert_eq!(dst.get_val_at(b"root:r:deep"), None);
+
+            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
+            assert_eq!(dst.get_val_at(b"root:s"), None);
+            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
+
+            assert_eq!(dst.get_val_at(b"root:t:old_t"), Some(&5));
+        }
+
+        let mut borrowed_src = PathMap::<i32>::new();
+        borrowed_src.set_val_at(b"root:a:new_a", 10);
+        borrowed_src.set_val_at(b"root:a:nested:deep", 11);
+        borrowed_src.set_val_at(b"root:branch:mid:leaf", 40);
+        borrowed_src.set_val_at(b"root:c:new_c", 30);
+        assert_graft_src_at(borrowed_src.trie_ref_at_path(b"root:"));
+
+        let mut owned_src = PathMap::<i32>::new();
+        owned_src.set_val_at(b"root:a:new_a", 10);
+        owned_src.set_val_at(b"root:a:nested:deep", 11);
+        owned_src.set_val_at(b"root:branch:mid:leaf", 40);
+        owned_src.set_val_at(b"root:c:new_c", 30);
+        let owned = match TrieRef::from(owned_src) {
+            TrieRef::Owned(trie_ref) => trie_ref,
+            TrieRef::Borrowed(_) => unreachable!(),
+        };
+        assert_graft_src_at(owned.trie_ref_at_path(b"root:"));
     }
 }

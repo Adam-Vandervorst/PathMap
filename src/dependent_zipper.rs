@@ -241,6 +241,13 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             self.primary.val()
         }
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        if let Some(idx) = self.factor_idx(true) {
+            self.secondary[idx].val_at(path)
+        } else {
+            self.primary.val_at(path)
+        }
+    }
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperReadOnlyValues<'trie, V>
@@ -255,6 +262,13 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             self.secondary[idx].get_val()
         } else {
             self.primary.get_val()
+        }
+    }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'trie V> {
+        if let Some(idx) = self.factor_idx(true) {
+            self.secondary[idx].get_val_at(path)
+        } else {
+            self.primary.get_val_at(path)
         }
     }
 }

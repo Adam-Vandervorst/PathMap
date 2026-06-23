@@ -98,6 +98,16 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A>
 {
 }
 
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A>
+    for ReadZipperOwned<V, A>
+{
+}
+
+impl<Z, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A> for PrefixZipper<'_, Z> where
+    Z: ZipperInfallibleSubtries<V, A> + ZipperSubtries<V, A> + ZipperConcrete + ZipperMoving
+{
+}
+
 /// Performs an ordered join (least upper bound) of two radix-256 tries using zipper traversal.
 ///
 /// This function merges two tries by simultaneously traversing them in lexicographic order,
@@ -1475,7 +1485,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, range);
+        out.graft_masked_branches(z, range, false)
     }
 
     #[inline]
@@ -1490,7 +1500,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, ByteMask::FULL);
+        out.graft_masked_branches(z, ByteMask::FULL, false)
     }
 }
 
@@ -1565,7 +1575,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
         Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, ByteMask::FULL);
+        out.graft_masked_branches(z, ByteMask::FULL, false);
     }
 }
 
@@ -1640,7 +1650,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
         Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        out.graft_children(z, range);
+        out.graft_masked_branches(z, range, false);
     }
 
     #[inline]
@@ -1660,7 +1670,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
         Out: ZipperWriting<V, A>,
     {
         if mask == 1 {
-            out.graft_children(z, range);
+            out.graft_masked_branches(z, range, false)
         }
     }
 
@@ -1760,6 +1770,8 @@ mod zipper_algebra_poly {
     pub(super) enum SomeMutRefZ<'a, 'trie, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> {
         RZ(&'a mut ReadZipperUntracked<'trie, 'path, V, A>),
         RZT(&'a mut ReadZipperTracked<'trie, 'path, V, A>),
+        PZRZ(&'a mut PrefixZipper<'a, ReadZipperUntracked<'trie, 'path, V, A>>),
+        PZRZT(&'a mut PrefixZipper<'a, ReadZipperTracked<'trie, 'path, V, A>>),
     }
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A>
@@ -1769,6 +1781,8 @@ mod zipper_algebra_poly {
             match self {
                 SomeMutRefZ::RZ(inner) => inner.make_map(),
                 SomeMutRefZ::RZT(inner) => inner.make_map(),
+                SomeMutRefZ::PZRZ(inner) => inner.make_map(),
+                SomeMutRefZ::PZRZT(inner) => inner.make_map(),
             }
         }
 
@@ -1776,6 +1790,8 @@ mod zipper_algebra_poly {
             match self {
                 SomeMutRefZ::RZ(inner) => inner.get_trie_ref(),
                 SomeMutRefZ::RZT(inner) => inner.get_trie_ref(),
+                SomeMutRefZ::PZRZ(inner) => inner.get_trie_ref(),
+                SomeMutRefZ::PZRZT(inner) => inner.get_trie_ref(),
             }
         }
 
@@ -1783,6 +1799,17 @@ mod zipper_algebra_poly {
             match self {
                 SomeMutRefZ::RZ(inner) => inner.get_focus(),
                 SomeMutRefZ::RZT(inner) => inner.get_focus(),
+                SomeMutRefZ::PZRZ(inner) => inner.get_focus(),
+                SomeMutRefZ::PZRZT(inner) => inner.get_focus(),
+            }
+        }
+
+        fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+            match self {
+                SomeMutRefZ::RZ(inner) => inner.get_focus_at(path),
+                SomeMutRefZ::RZT(inner) => inner.get_focus_at(path),
+                SomeMutRefZ::PZRZ(inner) => inner.get_focus_at(path),
+                SomeMutRefZ::PZRZT(inner) => inner.get_focus_at(path),
             }
         }
 
@@ -1790,6 +1817,8 @@ mod zipper_algebra_poly {
             match self {
                 SomeMutRefZ::RZ(inner) => inner.try_borrow_focus(),
                 SomeMutRefZ::RZT(inner) => inner.try_borrow_focus(),
+                SomeMutRefZ::PZRZ(inner) => inner.try_borrow_focus(),
+                SomeMutRefZ::PZRZT(inner) => inner.try_borrow_focus(),
             }
         }
     }

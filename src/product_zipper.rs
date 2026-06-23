@@ -15,7 +15,7 @@ pub struct ProductZipper<'factor_z, 'trie, V: Clone + Send + Sync, A: Allocator 
     /// which is conceptually the same as the end-point of each indexed factor
     factor_paths: Vec<usize>,
     /// We need to hang onto the zippers for the life of this object, so their trackers stay alive
-    source_zippers: Vec<Box<dyn ZipperSubtries<V, A> + 'factor_z>>
+    source_zippers: Vec<Box<dyn Zipper + 'factor_z>>
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ProductZipper<'_, '_, V, A> {
@@ -54,7 +54,7 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
         //Get the core out of the primary zipper
         //This unwrap won't fail because all the types that implement `ZipperMoving` have cores
         let core_z = primary_z.take_core().unwrap();
-        source_zippers.push(Box::new(primary_z) as Box<dyn ZipperSubtries<V, A>>);
+        source_zippers.push(Box::new(primary_z) as Box<dyn Zipper>);
 
         //Get TrieRefs for the remaining zippers
         for other_z in other_z_iter {
@@ -77,7 +77,7 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
         //Get the core out of the primary zipper
         //This unwrap won't fail because all the types that implement `ZipperMoving` have cores
         let core_z = primary_z.take_core().unwrap();
-        source_zippers.push(Box::new(primary_z) as Box<dyn ZipperSubtries<V, A>>);
+        source_zippers.push(Box::new(primary_z) as Box<dyn Zipper>);
 
         Self{z: core_z, factor_paths: Vec::new(), secondaries: vec![], source_zippers}
     }
@@ -307,6 +307,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperValues<V> for ProductZipper<'_, 'trie, V, A> {
     fn val(&self) -> Option<&V> {
         unsafe{ self.z.get_val() }
+    }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        unsafe{ self.z.get_val_at(path) }
     }
 }
 
@@ -559,6 +562,13 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValues<V>
             self.primary.val()
         }
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        if let Some(idx) = self.factor_idx(true) {
+            self.secondary[idx].val_at(path)
+        } else {
+            self.primary.val_at(path)
+        }
+    }
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyValues<'trie, V>
@@ -573,6 +583,13 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyValues<'trie, V>
             self.secondary[idx].get_val()
         } else {
             self.primary.get_val()
+        }
+    }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'trie V> {
+        if let Some(idx) = self.factor_idx(true) {
+            self.secondary[idx].get_val_at(path)
+        } else {
+            self.primary.get_val_at(path)
         }
     }
 }
