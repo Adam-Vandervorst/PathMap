@@ -1362,25 +1362,33 @@ where
 }
 
 // small micro-helpers
-#[inline(always)]
-fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
-    while bits != 0 {
-        let i = bits.trailing_zeros() as usize;
-        bits &= bits - 1;
-        f(i);
+struct ActiveBits(u64);
+
+impl Iterator for ActiveBits {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0 == 0 {
+            return None;
+        }
+
+        let i = self.0.trailing_zeros() as usize;
+        self.0 &= self.0 - 1;
+        Some(i)
     }
 }
 
-#[inline]
-fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
-    (0..N).filter(move |i| (active >> i) & 1 != 0)
+#[inline(always)]
+fn active_bits(active: u64) -> ActiveBits {
+    ActiveBits(active)
 }
 
 fn only_active<'a, T, const N: usize>(
     ts: &'a [T; N],
     active: u64,
 ) -> impl Iterator<Item = (usize, &'a T)> {
-    active_bits::<N>(active).map(|i| (i, &ts[i]))
+    active_bits(active).map(|i| (i, &ts[i]))
 }
 
 #[inline(always)]
@@ -1518,7 +1526,7 @@ where
             let mut frontier = 0u64;
             let mut next = None;
 
-            for i in active_bits::<N>(active) {
+            for i in active_bits(active) {
                 if let Some(b) = bytes[i] {
                     match min {
                         None => {
@@ -1558,7 +1566,7 @@ where
                         out.descend_to_byte(a);
 
                         // descend and refresh masks and indices
-                        for_each_bit(active, |i| {
+                        active_bits(active).for_each(|i| {
                             zs[i].descend_to_byte(a);
                         });
 
@@ -1570,7 +1578,7 @@ where
                             }
                             P::on_id(z0, cnt, out);
 
-                            for_each_bit(active, |i| {
+                            active_bits(active).for_each(|i| {
                                 zs[i].ascend_byte();
                                 bytes[i] = masks[i].next_bit(a);
                             });
@@ -1582,7 +1590,7 @@ where
                             out.set_val(v);
                         }
 
-                        for_each_bit(active, |i| {
+                        active_bits(active).for_each(|i| {
                             masks[i] = zs[i].child_mask();
                             bytes[i] = masks[i].indexed_bit::<true>(0);
                         });
@@ -1645,13 +1653,13 @@ where
                                 }),
                                 _ => {
                                     // descend all active in the frontier
-                                    for_each_bit(frontier, |i| zs[i].descend_to_byte(a));
+                                    active_bits(frontier).for_each(|i| zs[i].descend_to_byte(a));
 
                                     // recursive call with SAME array, smaller mask
                                     zipper_merge_n_mono::<P, V, Z, Out, A, N>(zs, frontier, out);
 
                                     //ascend
-                                    for_each_bit(frontier, |i| {
+                                    active_bits(frontier).for_each(|i| {
                                         zs[i].ascend_byte();
                                     });
                                 }
@@ -1661,7 +1669,7 @@ where
                         }
 
                         // advance indices
-                        for_each_bit(frontier, |i| {
+                        active_bits(frontier).for_each(|i| {
                             bytes[i] = masks[i].next_bit(a);
                         });
                     }
@@ -1678,7 +1686,7 @@ where
             .expect("non-empty path when k > 0");
 
         // ascend
-        for_each_bit(active, |i| {
+        active_bits(active).for_each(|i| {
             let mut z = &mut zs[i];
             z.ascend_byte();
             masks[i] = z.child_mask();
@@ -2105,7 +2113,7 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
     {
         let mut global = ByteMask::EMPTY;
 
-        for_each_bit(active, |i| {
+        active_bits(active).for_each(|i| {
             let m = clause_mask(zs, &clauses[i]);
 
             clause_masks[i] = m;
@@ -2191,13 +2199,13 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                 let mut participating = 0u64;
 
                 // descend participating clauses
-                for_each_bit(active, |i| {
+                active_bits(active).for_each(|i| {
                     if clause_masks[i].test_bit(byte) {
                         sub_active |= 1 << i;
                         participating |= clauses[i].members();
                     }
                 });
-                for_each_bit(participating, |i| {
+                active_bits(participating).for_each(|i| {
                     zs[i].descend_to_byte(byte);
                 });
 
@@ -2224,7 +2232,7 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                 zipper_merge_dnf_branch(zs, clauses, sub_active, out);
 
                 // ascend
-                for_each_bit(participating, |i| {
+                active_bits(participating).for_each(|i| {
                     zs[i].ascend_byte();
                 });
 
@@ -2246,11 +2254,11 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                 .expect("non-empty path at depth > 0");
 
             let mut active_zippers = 0;
-            for_each_bit(active, |i| {
+            active_bits(active).for_each(|i| {
                 active_zippers |= clauses[i].members();
             });
 
-            for_each_bit(active_zippers, |i| {
+            active_bits(active_zippers).for_each(|i| {
                 zs[i].ascend_byte();
             });
             out.ascend_byte();
