@@ -1371,16 +1371,37 @@ fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
     }
 }
 
-#[inline]
-fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
-    (0..N).filter(move |i| (active >> i) & 1 != 0)
+struct ActiveRefs<'a, T, const N: usize> {
+    bits: u64,
+    xs: &'a [T; N],
 }
 
-fn only_active<'a, T, const N: usize>(
-    ts: &'a [T; N],
-    active: u64,
-) -> impl Iterator<Item = (usize, &'a T)> {
-    active_bits::<N>(active).map(|i| (i, &ts[i]))
+impl<'a, T, const N: usize> Iterator for ActiveRefs<'a, T, N> {
+    type Item = &'a T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bits == 0 {
+            return None;
+        }
+
+        let i = self.bits.trailing_zeros() as usize;
+        self.bits &= self.bits - 1;
+
+        Some(&self.xs[i])
+    }
+}
+
+fn active_refs<T, const N: usize>(xs: &[T; N], bits: u64) -> ActiveRefs<T, N> {
+    assert!(bits >> N == 0);
+    ActiveRefs { bits, xs }
+}
+
+#[inline(always)]
+fn first_active<T, const N: usize>(ts: &[T; N], active: u64) -> &T {
+    debug_assert_ne!(active, 0);
+    let i0 = active.trailing_zeros() as usize;
+    &ts[i0]
 }
 
 #[inline(always)]
@@ -1388,6 +1409,35 @@ fn first_active_mut<T, const N: usize>(ts: &mut [T; N], active: u64) -> &mut T {
     debug_assert_ne!(active, 0);
     let i0 = active.trailing_zeros() as usize;
     &mut ts[i0]
+}
+
+#[inline(always)]
+fn with_k<const K: usize, T, R>(
+    xs: &mut [T],
+    mut bits: u64,
+    f: impl FnOnce([&mut T; K]) -> R,
+) -> R {
+    debug_assert!(bits.count_ones() as usize >= K);
+
+    // collect raw pointers first (safe)
+    let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
+
+    let mut i = 0;
+    while i < K {
+        let idx = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
+        i += 1;
+    }
+
+    // SAFETY:
+    // - indices are distinct (bitmask)
+    // - derived from same slice
+
+    // should be zero-cost after inlining
+    let refs = unsafe { ptrs.map(|p| &mut *p) };
+
+    f(refs)
 }
 
 // - The function is fully monomorphized over `Z` and `N` and uses a bitmask (`active`)
@@ -1416,47 +1466,18 @@ where
         V: Clone + 'a,
         Z: ZipperValues<V>,
     {
-        only_active(zs, active).map(|(_, z)| lift(z.val()))
+        active_refs(zs, active).map(|z| lift(z.val()))
     }
 
     fn all_active_share<Z, const N: usize>(zs: &[Z; N], active: u64) -> bool
     where
         Z: ZipperConcrete,
     {
-        let mut iter = only_active(zs, active).map(|(_, z)| z.shared_node_id());
+        let mut iter = active_refs(zs, active).map(|z| z.shared_node_id());
         match iter.next() {
             Some(Some(first)) => iter.all(|next| next.is_some_and(|snid| snid == first)),
             _ => false,
         }
-    }
-
-    #[inline(always)]
-    fn with_k<const K: usize, T, R>(
-        xs: &mut [T],
-        mut bits: u64,
-        f: impl FnOnce([&mut T; K]) -> R,
-    ) -> R {
-        debug_assert!(bits.count_ones() as usize >= K);
-
-        // collect raw pointers first (safe)
-        let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
-
-        let mut i = 0;
-        while i < K {
-            let idx = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
-            i += 1;
-        }
-
-        // SAFETY:
-        // - indices are distinct (bitmask)
-        // - derived from same slice
-
-        // should be zero-cost after inlining
-        let refs = unsafe { ptrs.map(|p| &mut *p) };
-
-        f(refs)
     }
 
     // check for node-sharing first
@@ -1477,10 +1498,10 @@ where
 
     let mut bytes = [None; N];
     let mut masks = [ByteMask::EMPTY; N];
-    for (i, z) in only_active(zs, active) {
-        masks[i] = z.child_mask();
+    for_each_bit(active, |i| {
+        masks[i] = zs[i].child_mask();
         bytes[i] = masks[i].indexed_bit::<true>(0);
-    }
+    });
 
     // At each node, the algorithm:
     //
@@ -1511,7 +1532,7 @@ where
             let mut frontier = 0u64;
             let mut next = None;
 
-            for i in active_bits::<N>(active) {
+            for_each_bit(active, |i| {
                 if let Some(b) = bytes[i] {
                     match min {
                         None => {
@@ -1534,9 +1555,12 @@ where
                         }
                     }
                 }
-            }
+            });
 
-            debug_assert!(frontier <= active);
+            unsafe {
+                // SAFETY: frontier can be at most (1 | 1 << 1 | 1 << 2 | .. | 1 << (popcount(active)))
+                std::hint::assert_unchecked(frontier <= active);
+            }
 
             match min {
                 None => {
@@ -1683,22 +1707,374 @@ where
     }
 }
 
-pub fn zipper_merge_dnf<V, Z, Out, A, const M: usize>(clauses: &mut [&mut [Z]; M], out: &mut Out)
-where
+/// A conjunction clause in a Disjunctive Normal Form (DNF) expression.
+///
+/// A clause is represented as a bitmask over a fixed universe of `N` input
+/// zippers. Bit `i` is set iff zipper `i` participates in the conjunction.
+///
+/// For example, for `N = 4`:
+///
+/// ```text
+/// {0,2}  => 0b0101
+/// {1,3}  => 0b1010
+/// ```
+///
+/// The DNF expression
+///
+/// ```text
+/// (x₀ ∧ x₂) ∨ (x₁ ∧ x₃)
+/// ```
+///
+/// can therefore be represented as:
+///
+/// ```ignore
+/// [
+///     Clause::<4>::from_indices([0, 2]),
+///     Clause::<4>::from_indices([1, 3]),
+/// ]
+/// ```
+///
+/// All indices are validated at construction time, guaranteeing that no bit
+/// outside the range `[0, N)` is ever set.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct Clause<const N: usize> {
+    members: u64,
+}
+
+impl<const N: usize> Clause<N> {
+    pub const EMPTY: Self = Self { members: 0 };
+    pub const FULL: Self = Self {
+        members: if N == 64 { u64::MAX } else { (1u64 << N) - 1 },
+    };
+
+    /// Creates a clause from a raw bitmask.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mask references a zipper index greater than or equal to `N`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<4>::from_mask(0b0101);
+    /// ```
+    #[inline]
+    pub const fn from_mask(mask: u64) -> Self {
+        assert!(N > 0 && N <= 64);
+        assert!(mask >> N == 0);
+
+        Self { members: mask }
+    }
+
+    /// Creates a clause containing exactly one zipper.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<8>::singleton(3);
+    /// ```
+    ///
+    /// corresponds to:
+    ///
+    /// ```text
+    /// x₃
+    /// ```
+    #[inline]
+    pub const fn singleton(i: usize) -> Self {
+        assert!(i < N);
+        Self::from_mask(1 << i)
+    }
+
+    /// Creates a clause from a collection of zipper indices.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<5>::new(&[0, 2, 4]);
+    /// ```
+    ///
+    /// corresponds to:
+    ///
+    /// ```text
+    /// x₀ ∧ x₂ ∧ x₄
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if any index is greater than or equal to `N`.
+    #[inline]
+    pub fn new(indices: &[usize]) -> Self {
+        let mut mask = 0;
+
+        for &i in indices {
+            assert!(i < N);
+            mask |= 1u64 << i;
+        }
+
+        Self::from_mask(mask)
+    }
+
+    pub const fn pair(i: usize, j: usize) -> Self {
+        assert!(i < N);
+        assert!(j < N);
+
+        Self::from_mask((1u64 << i) | (1u64 << j))
+    }
+
+    /// Creates a clause from a collection of zipper indices.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let clause = Clause::<5>::from_indices([0, 2, 4]);
+    /// ```
+    ///
+    /// corresponds to:
+    ///
+    /// ```text
+    /// x₀ ∧ x₂ ∧ x₄
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if any index is greater than or equal to `N`.
+    pub const fn from_indices<const K: usize>(indices: [usize; K]) -> Self {
+        let mut mask = 0u64;
+        let mut i = 0;
+
+        while i < K {
+            let idx = indices[i];
+
+            assert!(idx < N);
+
+            mask |= 1u64 << idx;
+            i += 1;
+        }
+
+        Self::from_mask(mask)
+    }
+
+    /// Returns the internal membership bitmask.
+    ///
+    /// Bit `i` is set iff zipper `i` participates in this clause.
+    ///
+    /// This operation is constant-time.
+    #[inline(always)]
+    pub const fn members(self) -> u64 {
+        debug_assert!(self.members >> N == 0);
+        self.members
+    }
+
+    pub const fn len(self) -> usize {
+        self.members.count_ones() as usize
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.members == 0
+    }
+}
+
+/// Constructs a [`Clause`] using zipper indices.
+///
+/// # Examples
+///
+/// ```ignore
+/// let clause = clause![0, 2, 4];
+/// ```
+///
+/// which is equivalent to:
+///
+/// ```ignore
+/// Clause::<N>::from_indices([0, 2, 4])
+/// ```
+///
+/// This macro is primarily intended for constructing DNF expressions in a
+/// concise and readable form.
+///
+/// ```ignore
+/// let dnf = [
+///     clause![0, 1],
+///     clause![0, 2],
+///     clause![1, 2],
+/// ];
+/// ```
+#[macro_export]
+macro_rules! clause {
+    ($($i:expr),+ $(,)?) => {
+        $crate::Clause::from_indices([$($i),+])
+    };
+}
+
+/// Constructs a DNF expression as an array of [`Clause`] values.
+///
+/// Each inner bracket denotes a conjunction clause, specified by the
+/// indices of the participating zippers.
+///
+/// # Examples
+///
+/// Majority-of-three:
+///
+/// ```ignore
+/// let dnf = dnf![
+///     [0, 1],
+///     [0, 2],
+///     [1, 2],
+/// ];
+/// ```
+///
+/// corresponds to:
+///
+/// ```text
+/// (x₀ ∧ x₁)
+/// ∨ (x₀ ∧ x₂)
+/// ∨ (x₁ ∧ x₂)
+/// ```
+///
+/// A larger example:
+///
+/// ```ignore
+/// let dnf = dnf![
+///     [0],
+///     [1, 2],
+///     [0, 3, 4],
+/// ];
+/// ```
+///
+/// corresponds to:
+///
+/// ```text
+/// x₀
+/// ∨ (x₁ ∧ x₂)
+/// ∨ (x₀ ∧ x₃ ∧ x₄)
+/// ```
+///
+/// The resulting value can be passed directly to [`zipper_merge_dnf`]:
+///
+/// ```ignore
+/// let clauses = dnf![
+///     [0, 1],
+///     [0, 2],
+///     [1, 2],
+/// ];
+///
+/// zipper_merge_dnf::<_, _, _, _, 3, 3>(
+///     &mut [x, y, z],
+///     clauses,
+///     out,
+/// );
+/// ```
+///
+/// # Expansion
+///
+/// ```ignore
+/// dnf![
+///     [0, 1],
+///     [2, 3],
+/// ]
+/// ```
+///
+/// expands approximately to:
+///
+/// ```ignore
+/// [
+///     Clause::from_indices([0, 1]),
+///     Clause::from_indices([2, 3]),
+/// ]
+/// ```
+#[macro_export]
+macro_rules! dnf {
+    (
+        $(
+            [$($idx:expr),*]
+        ),* $(,)?
+    ) => {
+        [
+            $(
+                Clause::from_indices([$($idx),*])
+            ),*
+        ]
+    };
+}
+
+/// Evaluates a monotone Boolean expression in Disjunctive Normal Form (DNF)
+/// over a collection of input zippers.
+///
+/// Each clause represents a conjunction (`Meet`) of selected input zippers,
+/// while the final result is the disjunction (`Join`) of all clauses:
+///
+/// ```text
+/// (Clause₀) ∨ (Clause₁) ∨ ... ∨ (Clauseₘ)
+/// ```
+///
+/// where each clause is interpreted as:
+///
+/// ```text
+/// xᵢ ∧ xⱼ ∧ ...
+/// ```
+///
+/// The algorithm traverses the input tries simultaneously using zipper
+/// operations and emits the resulting trie into `out`.
+///
+/// # Example
+///
+/// Majority-of-three can be expressed as:
+///
+/// ```text
+/// (x ∧ y) ∨ (x ∧ z) ∨ (y ∧ z)
+/// ```
+///
+/// ```ignore
+/// let clauses = [
+///     clause![0, 1],
+///     clause![0, 2],
+///     clause![1, 2],
+/// ];
+///
+/// zipper_merge_dnf::<_, _, _, _, 3, 3>(
+///     &mut [x, y, z],
+///     clauses,
+///     out,
+/// );
+/// ```
+///
+/// # Complexity
+///
+/// The traversal is output-sensitive and explores only trie regions that are
+/// reachable through at least one active clause.
+///
+/// Whenever all currently active clauses descend through the same byte, the
+/// algorithm performs an iterative tail descent without recursion. Recursive
+/// calls occur only when the active clause set splits.
+///
+/// # Optimizations
+///
+/// * Single active clauses are dispatched to specialized meet
+///   implementations (`zipper_meet`, `zipper_meet3`, `zipper_merge4`, ...).
+/// * Zippers shared between multiple clauses are descended only once.
+/// * Long common paths are traversed iteratively without recursion.
+///
+/// # Panics
+///
+/// Panics if `N == 0`, `M == 0`, or either exceeds 64.
+pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
+    zs: &mut [Z; N],
+    clauses: [Clause<N>; M],
+    out: &mut Out,
+) where
     V: Lattice + Clone + Send + Sync + Unpin,
     A: Allocator,
     Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
     #[inline(always)]
-    fn clause_mask<Z>(zs: &[Z]) -> ByteMask
+    fn clause_mask<Z, const N: usize>(zs: &[Z; N], clause: &Clause<N>) -> ByteMask
     where
         Z: Zipper,
     {
-        if zs.is_empty() {
+        if clause.is_empty() {
             return ByteMask::EMPTY;
         };
-        zs.iter()
+        active_refs(zs, clause.members())
             .try_fold(ByteMask::FULL, |mut mask, z| {
                 mask &= z.child_mask();
                 if mask.is_empty_mask() {
@@ -1711,27 +2087,32 @@ where
     }
 
     #[inline(always)]
-    fn clause_value<V, Z>(zs: &[Z]) -> Option<V>
+    fn clause_value<V, Z, const N: usize>(zs: &[Z; N], clause: &Clause<N>) -> Option<V>
     where
         V: Lattice + Clone,
         Z: ZipperValues<V>,
     {
-        Meet::combine_n(zs.iter().map(|z| lift(z.val())))
+        Meet::combine_n(active_refs(zs, clause.members()).map(|z| lift(z.val())))
     }
 
-    fn active_clauses_value<V, Z, const M: usize>(clauses: &[&mut [Z]; M], active: u64) -> Option<V>
+    fn active_clauses_value<V, Z, const N: usize, const M: usize>(
+        zs: &[Z; N],
+        clauses: &[Clause<N>; M],
+        active: u64,
+    ) -> Option<V>
     where
         V: Lattice + Clone,
         Z: ZipperValues<V>,
     {
         Join::combine_n(
-            only_active(clauses, active).map(|(_, zs)| clause_value(zs).map(Cow::Owned)),
+            active_refs(clauses, active).map(|clause| clause_value(zs, clause).map(Cow::Owned)),
         )
     }
 
     #[inline(always)]
-    fn compute_masks<Z, const M: usize>(
-        clauses: &[&mut [Z]; M],
+    fn compute_masks<Z, const N: usize, const M: usize>(
+        zs: &[Z; N],
+        clauses: &[Clause<N>; M],
         active: u64,
         clause_masks: &mut [ByteMask; M],
     ) -> ByteMask
@@ -1740,18 +2121,19 @@ where
     {
         let mut global = ByteMask::EMPTY;
 
-        for (i, zs) in only_active(clauses, active) {
-            let m = clause_mask(zs);
+        for_each_bit(active, |i| {
+            let m = clause_mask(zs, &clauses[i]);
 
             clause_masks[i] = m;
             global |= m;
-        }
+        });
 
         global
     }
 
-    fn zipper_merge_dnf_branch<V, Z, Out, A, const M: usize>(
-        clauses: &mut [&mut [Z]; M],
+    fn zipper_merge_dnf_branch<V, Z, Out, A, const N: usize, const M: usize>(
+        zs: &mut [Z; N],
+        clauses: &[Clause<N>; M],
         active: u64,
         out: &mut Out,
     ) where
@@ -1766,25 +2148,32 @@ where
         // Single clause fast path
         // -------------------------------------------------
         if active.count_ones() == 1 {
-            let single_clause = first_active_mut(clauses, active);
-            match single_clause {
-                [z0] => {
+            let single_clause = first_active(clauses, active);
+            match single_clause.len() {
+                1 => {
+                    let z0 = first_active_mut(zs, single_clause.members());
                     if let Some(v) = z0.val() {
                         out.set_val(v.clone());
                     }
                     Meet::on_id(z0, 1, out);
                     return;
                 }
-                [z0, z1] => {
-                    zipper_meet(z0, z1, out);
+                2 => {
+                    with_k::<2, _, _>(zs, single_clause.members(), |[z0, z1]| {
+                        zipper_meet(z0, z1, out);
+                    });
                     return;
                 }
-                [z0, z1, z2] => {
-                    zipper_meet3(z0, z1, z2, out);
+                3 => {
+                    with_k::<3, _, _>(zs, single_clause.members(), |[z0, z1, z2]| {
+                        zipper_meet3(z0, z1, z2, out);
+                    });
                     return;
                 }
-                [z0, z1, z2, z3] => {
-                    zipper_merge4::<Meet, V, Z, Z, Z, Z, Out, A>(z0, z1, z2, z3, out);
+                4 => {
+                    with_k::<4, _, _>(zs, single_clause.members(), |[z0, z1, z2, z3]| {
+                        zipper_merge4::<Meet, V, Z, Z, Z, Z, Out, A>(z0, z1, z2, z3, out);
+                    });
                     return;
                 }
                 _ => {} // do nothing special
@@ -1798,14 +2187,14 @@ where
         // Emit values
         // -------------------------------------------------
 
-        if let Some(v) = active_clauses_value(clauses, active) {
+        if let Some(v) = active_clauses_value(zs, clauses, active) {
             out.set_val(v);
         }
         // -------------------------------------------------
         // Compute clause masks
         // -------------------------------------------------
 
-        let mut global = compute_masks(clauses, active, &mut clause_masks);
+        let mut global = compute_masks(zs, clauses, active, &mut clause_masks);
         let mut next = global.indexed_bit::<true>(0);
         'descend: loop {
             // -------------------------------------------------
@@ -1815,16 +2204,22 @@ where
                 out.descend_to_byte(byte);
 
                 let mut sub_active = 0u64;
+                let mut participating = 0u64;
 
                 // descend participating clauses
                 for_each_bit(active, |i| {
                     if clause_masks[i].test_bit(byte) {
                         sub_active |= 1 << i;
-
-                        for z in clauses[i].iter_mut() {
-                            z.descend_to_byte(byte);
-                        }
+                        participating |= clauses[i].members();
                     }
+                });
+                unsafe {
+                    // SAFETY: The value of particpating preserves the invariant as c_1 | .. | c_i,
+                    // where c_x >> N == 0
+                    std::hint::assert_unchecked(participating >> N == 0);
+                }
+                for_each_bit(participating, |i| {
+                    zs[i].descend_to_byte(byte);
                 });
 
                 // -------------------------------------------------
@@ -1834,11 +2229,11 @@ where
                 if sub_active == active {
                     depth += 1;
 
-                    if let Some(v) = active_clauses_value(clauses, active) {
+                    if let Some(v) = active_clauses_value(zs, clauses, active) {
                         out.set_val(v);
                     }
 
-                    global = compute_masks(clauses, active, &mut clause_masks);
+                    global = compute_masks(zs, clauses, active, &mut clause_masks);
                     next = global.indexed_bit::<true>(0);
                     continue 'descend;
                 }
@@ -1847,13 +2242,11 @@ where
                 // Branching recursion
                 // -------------------------------------------------
 
-                zipper_merge_dnf_branch(clauses, sub_active, out);
+                zipper_merge_dnf_branch(zs, clauses, sub_active, out);
 
                 // ascend
-                for_each_bit(sub_active, |i| {
-                    for z in clauses[i].iter_mut() {
-                        z.ascend_byte();
-                    }
+                for_each_bit(participating, |i| {
+                    zs[i].ascend_byte();
                 });
 
                 out.ascend_byte();
@@ -1868,30 +2261,70 @@ where
                 break;
             }
 
-            let byte_from = first_active_mut(clauses, active)
-                .first()
-                .and_then(|z| z.path().last().copied())
+            let byte_from = *first_active(zs, first_active(clauses, active).members())
+                .path()
+                .last()
                 .expect("non-empty path at depth > 0");
 
+            let mut active_zippers = 0;
             for_each_bit(active, |i| {
-                for z in clauses[i].iter_mut() {
-                    z.ascend_byte();
-                }
+                active_zippers |= clauses[i].members();
             });
 
+            for_each_bit(active_zippers, |i| {
+                zs[i].ascend_byte();
+            });
             out.ascend_byte();
 
             depth -= 1;
 
             // recompute masks after ascent
-            global = compute_masks(clauses, active, &mut clause_masks);
+            global = compute_masks(zs, clauses, active, &mut clause_masks);
             // resume sibling traversal
             next = global.next_bit(byte_from);
         }
     }
 
-    debug_assert!(M > 0 && M <= 64);
-    zipper_merge_dnf_branch(clauses, ((1 << M) - 1), out);
+    assert!(N > 0 && N <= 64);
+    assert!(M > 0 && M <= 64);
+    zipper_merge_dnf_branch(zs, &clauses, ((1 << M) - 1), out);
+}
+
+/// Computes the majority (2-of-3) combination of three zippers.
+///
+/// A value is present in the result iff it is present in at least two
+/// of the three inputs.
+///
+/// Algebraically:
+///
+/// ```text
+/// maj(a, b, c)
+///   = (a ∧ b)
+///   ∨ (a ∧ c)
+///   ∨ (b ∧ c)
+/// ```
+///
+/// This operation is monotone and can be expressed as a Disjunctive
+/// Normal Form (DNF) evaluated by [`zipper_merge_dnf`].
+///
+/// The implementation reuses the DNF merge engine rather than performing
+/// a specialized traversal.
+///
+/// This is the lattice analogue of the Boolean majority function.
+pub fn zipper_majority<V, Z, Out, A>(x: Z, y: Z, z: Z, out: &mut Out)
+where
+    V: Lattice + Clone + Send + Sync + Unpin,
+    A: Allocator,
+    Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    const MAJORITY: [Clause<3>; 3] = [
+        Clause::from_mask(0b011), // x ∧ y
+        Clause::from_mask(0b101), // x ∧ z
+        Clause::from_mask(0b110), // y ∧ z
+    ];
+
+    zipper_merge_dnf(&mut [x, y, z], MAJORITY, out);
 }
 
 // ==================== JOIN ====================
@@ -2647,8 +3080,8 @@ mod tests {
         'x,
         T: IntoIterator<Item = &'x (&'x [u8], u64)>,
         F: for<'a> FnOnce(
-            &mut ReadZipperUntracked<'a, 'x, u64>,
-            &mut ReadZipperUntracked<'a, 'x, u64>,
+            ReadZipperUntracked<'a, 'x, u64>,
+            ReadZipperUntracked<'a, 'x, u64>,
             &mut WriteZipperUntracked<'a, 'x, u64>,
         ),
     >(
@@ -2664,7 +3097,7 @@ mod tests {
         let mut rhs = right.read_zipper();
         let mut out = result.write_zipper();
 
-        op(&mut lhs, &mut rhs, &mut out);
+        op(lhs, rhs, &mut out);
 
         assert_trie(expected.into_iter().copied(), result);
     }
@@ -2673,9 +3106,9 @@ mod tests {
         'x,
         T: IntoIterator<Item = &'x (&'x [u8], u64)>,
         F: for<'a> FnOnce(
-            &mut ReadZipperUntracked<'a, 'x, u64>,
-            &mut ReadZipperUntracked<'a, 'x, u64>,
-            &mut ReadZipperUntracked<'a, 'x, u64>,
+            ReadZipperUntracked<'a, 'x, u64>,
+            ReadZipperUntracked<'a, 'x, u64>,
+            ReadZipperUntracked<'a, 'x, u64>,
             &mut WriteZipperUntracked<'a, 'x, u64>,
         ),
     >(
@@ -2692,7 +3125,7 @@ mod tests {
         let mut rhs = right.read_zipper();
         let mut out = result.write_zipper();
 
-        op(&mut lhs, &mut mid, &mut rhs, &mut out);
+        op(lhs, mid, rhs, &mut out);
 
         assert_trie(expected.into_iter().copied(), result);
     }
@@ -3215,7 +3648,7 @@ mod tests {
             check2(
                 &DISJOINT_PATHS,
                 &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
-                |lhs, rhs, out| lhs.join(rhs, out),
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
             );
         }
 
@@ -3224,7 +3657,7 @@ mod tests {
             check3(
                 &DISJOINT_PATHS_3,
                 &[DISJOINT_PATHS_3.0, DISJOINT_PATHS_3.1, DISJOINT_PATHS_3.2].concat(),
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3250,7 +3683,7 @@ mod tests {
             check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
-                |lhs, rhs, out| lhs.join(rhs, out),
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
             );
         }
 
@@ -3264,7 +3697,7 @@ mod tests {
                     PATHS_WITH_SHARED_PREFIX_3.2,
                 ]
                 .concat(),
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3290,7 +3723,7 @@ mod tests {
             check2(
                 &INTERLEAVING_PATHS,
                 &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
-                |lhs, rhs, out| lhs.join(rhs, out),
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
             );
         }
 
@@ -3304,7 +3737,7 @@ mod tests {
                     INTERLEAVING_PATHS_3.2,
                 ]
                 .concat(),
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3327,9 +3760,11 @@ mod tests {
 
         #[test]
         fn test_one_side_empty_at_many_levels() {
-            check2(&ONE_SIDED_PATHS, ONE_SIDED_PATHS.0, |lhs, rhs, out| {
-                lhs.join(rhs, out)
-            });
+            check2(
+                &ONE_SIDED_PATHS,
+                ONE_SIDED_PATHS.0,
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
+            );
         }
 
         #[test]
@@ -3337,7 +3772,7 @@ mod tests {
             check3(
                 &ONE_SIDED_PATHS_3,
                 ONE_SIDED_PATHS_3.0,
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3355,7 +3790,7 @@ mod tests {
             check2(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.0,
-                |lhs, rhs, out| lhs.join(rhs, out),
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
             );
         }
 
@@ -3364,7 +3799,7 @@ mod tests {
             check3(
                 &ALMOST_IDENTICAL_PATHS_3,
                 ALMOST_IDENTICAL_PATHS_3.0,
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3379,8 +3814,12 @@ mod tests {
 
         #[test]
         fn test_one_side_empty() {
-            check2(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.join(rhs, out));
-            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.join(rhs, out));
+            check2(&LHS_EMPTY, LHS_EMPTY.1, |mut lhs, mut rhs, out| {
+                lhs.join(&mut rhs, out)
+            });
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |mut lhs, mut rhs, out| {
+                lhs.join(&mut rhs, out)
+            });
         }
 
         #[test]
@@ -3388,17 +3827,17 @@ mod tests {
             check3(
                 &LHS_EMPTY_3,
                 &[LHS_EMPTY_3.1, LHS_EMPTY_3.2].concat(),
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
             check3(
                 &MID_EMPTY,
                 &[MID_EMPTY.0, MID_EMPTY.2].concat(),
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
             check3(
                 &RHS_EMPTY_3,
                 &[RHS_EMPTY_3.0, RHS_EMPTY_3.1].concat(),
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3454,7 +3893,7 @@ mod tests {
             check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
-                |lhs, rhs, out| lhs.join(rhs, out),
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
             );
         }
 
@@ -3472,7 +3911,7 @@ mod tests {
             check3(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
                 expected,
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3505,7 +3944,7 @@ mod tests {
             check2(
                 &ZIGZAG_PATHS,
                 &[ZIGZAG_PATHS.0, ZIGZAG_PATHS.1].concat(),
-                |lhs, rhs, out| lhs.join(rhs, out),
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
             );
         }
 
@@ -3514,7 +3953,7 @@ mod tests {
             check3(
                 &ZIGZAG_PATHS_3,
                 &[ZIGZAG_PATHS_3.0, ZIGZAG_PATHS_3.1, ZIGZAG_PATHS_3.2].concat(),
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3523,7 +3962,7 @@ mod tests {
             check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
-                |lhs, rhs, out| lhs.join(rhs, out),
+                |mut lhs, mut rhs, out| lhs.join(&mut rhs, out),
             );
         }
 
@@ -3532,7 +3971,7 @@ mod tests {
             check3(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.0,
-                |lhs, mid, rhs, out| zipper_join3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_join3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -3555,15 +3994,15 @@ mod tests {
 
         #[test]
         fn test_disjoint() {
-            check2(&DISJOINT_PATHS, [], |lhs, rhs, out| {
-                lhs.meet(rhs, out);
+            check2(&DISJOINT_PATHS, [], |mut lhs, mut rhs, out| {
+                lhs.meet(&mut rhs, out);
             });
         }
 
         #[test]
         fn test_disjoint3() {
-            check3(&DISJOINT_PATHS_3, [], |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out);
+            check3(&DISJOINT_PATHS_3, [], |mut lhs, mut mid, mut rhs, out| {
+                zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
             });
         }
 
@@ -3578,16 +4017,20 @@ mod tests {
 
         #[test]
         fn test_deep_shared_prefix_then_split() {
-            check2(&PATHS_WITH_SHARED_PREFIX, [], |lhs, rhs, out| {
-                lhs.meet(rhs, out);
+            check2(&PATHS_WITH_SHARED_PREFIX, [], |mut lhs, mut rhs, out| {
+                lhs.meet(&mut rhs, out);
             });
         }
 
         #[test]
         fn test_deep_shared_prefix_then_split3() {
-            check3(&PATHS_WITH_SHARED_PREFIX_3, [], |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out);
-            });
+            check3(
+                &PATHS_WITH_SHARED_PREFIX_3,
+                [],
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3601,16 +4044,20 @@ mod tests {
 
         #[test]
         fn test_interleaving_paths() {
-            check2(&INTERLEAVING_PATHS, [], |lhs, rhs, out| {
-                lhs.meet(rhs, out);
+            check2(&INTERLEAVING_PATHS, [], |mut lhs, mut rhs, out| {
+                lhs.meet(&mut rhs, out);
             });
         }
 
         #[test]
         fn test_interleaving_paths3() {
-            check3(&INTERLEAVING_PATHS_3, [], |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out);
-            });
+            check3(
+                &INTERLEAVING_PATHS_3,
+                [],
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3629,17 +4076,21 @@ mod tests {
                 (&[0x00, 0x01, 0x02, 0x03], 3),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
             ];
-            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
-                lhs.meet(rhs, out);
+            check2(&ONE_SIDED_PATHS, expected, |mut lhs, mut rhs, out| {
+                lhs.meet(&mut rhs, out);
             });
         }
 
         #[test]
         fn test_one_side_empty_at_many_levels3() {
             let expected: Paths = &[(&[0x00], 0)];
-            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out);
-            });
+            check3(
+                &ONE_SIDED_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3656,16 +4107,22 @@ mod tests {
             check2(
                 &ALMOST_IDENTICAL_PATHS,
                 ALMOST_IDENTICAL_PATHS.1,
-                |lhs, rhs, out| lhs.meet(rhs, out),
+                |mut lhs, mut rhs, out| {
+                    lhs.meet(&mut rhs, out);
+                },
             );
         }
 
         #[test]
         fn test_almost_identical_paths3() {
             let expected: Paths = &[(b"abcdefg", 0), (b"1", 4), (b"4", 7), (b"5", 8)];
-            check3(&ALMOST_IDENTICAL_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out);
-            });
+            check3(
+                &ALMOST_IDENTICAL_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3680,20 +4137,24 @@ mod tests {
 
         #[test]
         fn test_one_side_empty() {
-            check2(&LHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
-            check2(&RHS_EMPTY, [], |lhs, rhs, out| lhs.meet(rhs, out));
+            check2(&LHS_EMPTY, [], |mut lhs, mut rhs, out| {
+                lhs.meet(&mut rhs, out);
+            });
+            check2(&RHS_EMPTY, [], |mut lhs, mut rhs, out| {
+                lhs.meet(&mut rhs, out);
+            });
         }
 
         #[test]
         fn test_one_side_empty3() {
-            check3(&LHS_EMPTY_3, [], |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out)
+            check3(&LHS_EMPTY_3, [], |mut lhs, mut mid, mut rhs, out| {
+                zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
             });
-            check3(&MID_EMPTY, [], |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out)
+            check3(&MID_EMPTY, [], |mut lhs, mut mid, mut rhs, out| {
+                zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
             });
-            check3(&RHS_EMPTY_3, [], |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out)
+            check3(&RHS_EMPTY_3, [], |mut lhs, mut mid, mut rhs, out| {
+                zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
             });
         }
 
@@ -3722,7 +4183,9 @@ mod tests {
             check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
-                |lhs, rhs, out| lhs.meet(rhs, out),
+                |mut lhs, mut rhs, out| {
+                    lhs.meet(&mut rhs, out);
+                },
             );
         }
 
@@ -3732,7 +4195,9 @@ mod tests {
             check3(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
                 expected,
-                |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
+                },
             );
         }
 
@@ -3749,17 +4214,21 @@ mod tests {
         #[test]
         fn test_zigzag() {
             let expected: Paths = &[(&[2, 1], 2), (&[3], 3)];
-            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
-                lhs.meet(rhs, out);
+            check2(&ZIGZAG_PATHS, expected, |mut lhs, mut rhs, out| {
+                lhs.meet(&mut rhs, out);
             });
         }
 
         #[test]
         fn test_zigzag3() {
             let expected: Paths = &[(&[2, 1], 2)];
-            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_meet3(lhs, mid, rhs, out)
-            });
+            check3(
+                &ZIGZAG_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3767,7 +4236,9 @@ mod tests {
             check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
-                |lhs, rhs, out| lhs.meet(rhs, out),
+                |mut lhs, mut rhs, out| {
+                    lhs.meet(&mut rhs, out);
+                },
             );
         }
 
@@ -3776,7 +4247,9 @@ mod tests {
             check3(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
-                |lhs, mid, rhs, out| zipper_meet3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_meet3(&mut lhs, &mut mid, &mut rhs, out);
+                },
             );
         }
 
@@ -3799,9 +4272,13 @@ mod tests {
 
         #[test]
         fn test_disjoint() {
-            check2(&DISJOINT_PATHS, DISJOINT_PATHS.0, |lhs, rhs, out| {
-                lhs.subtract(rhs, out);
-            });
+            check2(
+                &DISJOINT_PATHS,
+                DISJOINT_PATHS.0,
+                |mut lhs, mut rhs, out| {
+                    lhs.subtract(&mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3809,8 +4286,8 @@ mod tests {
             check3(
                 &DISJOINT_PATHS_3,
                 DISJOINT_PATHS_3.0,
-                |lhs, mid, rhs, out| {
-                    zipper_subtract3(lhs, mid, rhs, out);
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
                 },
             );
         }
@@ -3829,7 +4306,9 @@ mod tests {
             check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 PATHS_WITH_SHARED_PREFIX.0,
-                |lhs, rhs, out| lhs.subtract(rhs, out),
+                |mut lhs, mut rhs, out| {
+                    lhs.subtract(&mut rhs, out);
+                },
             );
         }
 
@@ -3838,8 +4317,8 @@ mod tests {
             check3(
                 &PATHS_WITH_SHARED_PREFIX_3,
                 PATHS_WITH_SHARED_PREFIX_3.0,
-                |lhs, mid, rhs, out| {
-                    zipper_subtract3(lhs, mid, rhs, out);
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
                 },
             );
         }
@@ -3858,7 +4337,9 @@ mod tests {
             check2(
                 &INTERLEAVING_PATHS,
                 INTERLEAVING_PATHS.0,
-                |lhs, rhs, out| lhs.subtract(rhs, out),
+                |mut lhs, mut rhs, out| {
+                    lhs.subtract(&mut rhs, out);
+                },
             );
         }
 
@@ -3867,8 +4348,8 @@ mod tests {
             check3(
                 &INTERLEAVING_PATHS_3,
                 INTERLEAVING_PATHS_3.0,
-                |lhs, mid, rhs, out| {
-                    zipper_subtract3(lhs, mid, rhs, out);
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
                 },
             );
         }
@@ -3895,8 +4376,8 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
-            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
-                lhs.subtract(rhs, out)
+            check2(&ONE_SIDED_PATHS, expected, |mut lhs, mut rhs, out| {
+                lhs.subtract(&mut rhs, out);
             });
         }
 
@@ -3913,9 +4394,13 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
-            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_subtract3(lhs, mid, rhs, out);
-            });
+            check3(
+                &ONE_SIDED_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3939,16 +4424,24 @@ mod tests {
         #[test]
         fn test_almost_identical_paths() {
             let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
-            check2(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
-                lhs.subtract(rhs, out)
-            });
+            check2(
+                &ALMOST_IDENTICAL_PATHS,
+                expected,
+                |mut lhs, mut rhs, out| {
+                    lhs.subtract(&mut rhs, out);
+                },
+            );
         }
 
         #[test]
         fn test_almost_identical_paths3() {
-            check3(&ALMOST_IDENTICAL_PATHS_3, [], |lhs, mid, rhs, out| {
-                zipper_subtract3(lhs, mid, rhs, out);
-            });
+            check3(
+                &ALMOST_IDENTICAL_PATHS_3,
+                [],
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -3962,23 +4455,29 @@ mod tests {
 
         #[test]
         fn test_one_side_empty() {
-            check2(&LHS_EMPTY, [], |lhs, rhs, out| lhs.subtract(rhs, out));
-            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| {
-                lhs.subtract(rhs, out)
+            check2(&LHS_EMPTY, [], |mut lhs, mut rhs, out| {
+                lhs.subtract(&mut rhs, out);
+            });
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |mut lhs, mut rhs, out| {
+                lhs.subtract(&mut rhs, out);
             });
         }
 
         #[test]
         fn test_one_side_empty3() {
-            check3(&LHS_EMPTY_3, [], |lhs, mid, rhs, out| {
-                zipper_subtract3(lhs, mid, rhs, out);
+            check3(&LHS_EMPTY_3, [], |mut lhs, mut mid, mut rhs, out| {
+                zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
             });
-            check3(&MID_EMPTY, MID_EMPTY.0, |lhs, mid, rhs, out| {
-                zipper_subtract3(lhs, mid, rhs, out);
+            check3(&MID_EMPTY, MID_EMPTY.0, |mut lhs, mut mid, mut rhs, out| {
+                zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
             });
-            check3(&RHS_EMPTY_3, RHS_EMPTY_3.0, |lhs, mid, rhs, out| {
-                zipper_subtract3(lhs, mid, rhs, out);
-            });
+            check3(
+                &RHS_EMPTY_3,
+                RHS_EMPTY_3.0,
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -4005,7 +4504,9 @@ mod tests {
             check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN.0,
-                |lhs, rhs, out| lhs.subtract(rhs, out),
+                |mut lhs, mut rhs, out| {
+                    lhs.subtract(&mut rhs, out);
+                },
             );
         }
 
@@ -4014,8 +4515,8 @@ mod tests {
             check3(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
                 PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3.0,
-                |lhs, mid, rhs, out| {
-                    zipper_subtract3(lhs, mid, rhs, out);
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
                 },
             );
         }
@@ -4038,17 +4539,21 @@ mod tests {
                 (&[4], 4),
                 (&[4, 3, 2, 1], 5),
             ];
-            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| {
-                lhs.subtract(rhs, out)
+            check2(&ZIGZAG_PATHS, expected, |mut lhs, mut rhs, out| {
+                lhs.subtract(&mut rhs, out);
             });
         }
 
         #[test]
         fn test_zigzag3() {
             let expected: Paths = &[(&[1, 1], 0), (&[3, 2, 1], 4), (&[4], 4)];
-            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_subtract3(lhs, mid, rhs, out);
-            });
+            check3(
+                &ZIGZAG_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
+                },
+            );
         }
 
         #[test]
@@ -4056,7 +4561,9 @@ mod tests {
             check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
-                |lhs, rhs, out| lhs.subtract(rhs, out),
+                |mut lhs, mut rhs, out| {
+                    lhs.subtract(&mut rhs, out);
+                },
             );
         }
 
@@ -4065,8 +4572,8 @@ mod tests {
             check3(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.0,
-                |lhs, mid, rhs, out| {
-                    zipper_subtract3(lhs, mid, rhs, out);
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_subtract3(&mut lhs, &mut mid, &mut rhs, out);
                 },
             );
         }
@@ -4093,7 +4600,7 @@ mod tests {
             check2(
                 &DISJOINT_PATHS,
                 &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
-                |lhs, rhs, out| lhs.xor(rhs, out),
+                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
             );
         }
 
@@ -4102,7 +4609,7 @@ mod tests {
             check3(
                 &DISJOINT_PATHS_3,
                 &[DISJOINT_PATHS_3.0, DISJOINT_PATHS_3.1, DISJOINT_PATHS_3.2].concat(),
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -4128,7 +4635,7 @@ mod tests {
             check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
-                |lhs, rhs, out| lhs.xor(rhs, out),
+                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
             );
         }
 
@@ -4142,7 +4649,7 @@ mod tests {
                     PATHS_WITH_SHARED_PREFIX_3.2,
                 ]
                 .concat(),
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -4168,7 +4675,7 @@ mod tests {
             check2(
                 &INTERLEAVING_PATHS,
                 &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
-                |lhs, rhs, out| lhs.xor(rhs, out),
+                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
             );
         }
 
@@ -4182,7 +4689,7 @@ mod tests {
                     INTERLEAVING_PATHS_3.2,
                 ]
                 .concat(),
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -4214,8 +4721,8 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04], 7),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
-            check2(&ONE_SIDED_PATHS, expected, |lhs, rhs, out| {
-                lhs.xor(rhs, out)
+            check2(&ONE_SIDED_PATHS, expected, |mut lhs, mut rhs, out| {
+                lhs.xor(&mut rhs, out)
             });
         }
 
@@ -4230,9 +4737,11 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04], 7),
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
-            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_xor3(lhs, mid, rhs, out)
-            });
+            check3(
+                &ONE_SIDED_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+            );
         }
 
         #[test]
@@ -4253,17 +4762,21 @@ mod tests {
         #[test]
         fn test_almost_identical_paths() {
             let expected: Paths = &[(b"hijklmnop", 1), (b"2", 5), (b"3", 6)];
-            check2(&ALMOST_IDENTICAL_PATHS, expected, |lhs, rhs, out| {
-                lhs.xor(rhs, out)
-            });
+            check2(
+                &ALMOST_IDENTICAL_PATHS,
+                expected,
+                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+            );
         }
 
         #[test]
         fn test_almost_identical_paths3() {
             let expected: Paths = &[(b"abcdefg", 0), (b"1", 4), (b"4", 7), (b"5", 8)];
-            check3(&ALMOST_IDENTICAL_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_xor3(lhs, mid, rhs, out)
-            });
+            check3(
+                &ALMOST_IDENTICAL_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+            );
         }
 
         #[test]
@@ -4278,8 +4791,12 @@ mod tests {
 
         #[test]
         fn test_one_side_empty() {
-            check2(&LHS_EMPTY, LHS_EMPTY.1, |lhs, rhs, out| lhs.xor(rhs, out));
-            check2(&RHS_EMPTY, RHS_EMPTY.0, |lhs, rhs, out| lhs.xor(rhs, out));
+            check2(&LHS_EMPTY, LHS_EMPTY.1, |mut lhs, mut rhs, out| {
+                lhs.xor(&mut rhs, out)
+            });
+            check2(&RHS_EMPTY, RHS_EMPTY.0, |mut lhs, mut rhs, out| {
+                lhs.xor(&mut rhs, out)
+            });
         }
 
         #[test]
@@ -4287,17 +4804,17 @@ mod tests {
             check3(
                 &LHS_EMPTY_3,
                 &[LHS_EMPTY_3.1, LHS_EMPTY_3.2].concat(),
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
             check3(
                 &MID_EMPTY,
                 &[MID_EMPTY.0, MID_EMPTY.2].concat(),
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
             check3(
                 &RHS_EMPTY_3,
                 &[RHS_EMPTY_3.0, RHS_EMPTY_3.1].concat(),
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -4352,7 +4869,7 @@ mod tests {
             check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
-                |lhs, rhs, out| lhs.xor(rhs, out),
+                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
             );
         }
 
@@ -4370,7 +4887,7 @@ mod tests {
             check3(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
                 expected,
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -4410,7 +4927,9 @@ mod tests {
                 (&[3, 4], 4),
                 (&[4, 3], 5),
             ];
-            check2(&ZIGZAG_PATHS, expected, |lhs, rhs, out| lhs.xor(rhs, out));
+            check2(&ZIGZAG_PATHS, expected, |mut lhs, mut rhs, out| {
+                lhs.xor(&mut rhs, out)
+            });
         }
 
         #[test]
@@ -4426,16 +4945,20 @@ mod tests {
                 (&[3, 2, 1, 0], 3),
                 (&[4, 3, 2, 1, 0], 4),
             ];
-            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
-                zipper_xor3(lhs, mid, rhs, out)
-            });
+            check3(
+                &ZIGZAG_PATHS_3,
+                expected,
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+            );
         }
 
         #[test]
         fn test_root_values() {
-            check2(&PATHS_WITH_ROOT_VALS_AND_CHILDREN, &[], |lhs, rhs, out| {
-                lhs.xor(rhs, out)
-            });
+            check2(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
+                &[],
+                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+            );
         }
 
         #[test]
@@ -4443,7 +4966,7 @@ mod tests {
             check3(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.2,
-                |lhs, mid, rhs, out| zipper_xor3(lhs, mid, rhs, out),
+                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
             );
         }
 
@@ -4581,7 +5104,9 @@ mod tests {
     }
 
     mod dnf {
-        use crate::experimental::zipper_algebra::{zipper_join3, zipper_meet3, zipper_merge_dnf};
+        use crate::experimental::zipper_algebra::{
+            Clause, zipper_join3, zipper_meet3, zipper_merge_dnf,
+        };
 
         use super::*;
 
@@ -4601,7 +5126,7 @@ mod tests {
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
-            zipper_merge_dnf(&mut [&mut [&mut z1, &mut z2, &mut z3]], &mut out);
+            zipper_merge_dnf(&mut [&mut z1, &mut z2, &mut z3], [Clause::FULL], &mut out);
 
             let mut expected = PathMap::new();
             {
@@ -4627,7 +5152,12 @@ mod tests {
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
             zipper_merge_dnf(
-                &mut [&mut [&mut z1], &mut [&mut z2], &mut [&mut z3]],
+                &mut [&mut z1, &mut z2, &mut z3],
+                [
+                    Clause::singleton(0),
+                    Clause::singleton(1),
+                    Clause::singleton(2),
+                ],
                 &mut out,
             );
 
@@ -4648,16 +5178,15 @@ mod tests {
             let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
             let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
 
+            let mut z1 = trie1.read_zipper();
             let mut z2 = trie2.read_zipper();
             let mut z3 = trie3.read_zipper();
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
             zipper_merge_dnf(
-                &mut [
-                    &mut [&mut trie1.read_zipper(), &mut z2],
-                    &mut [&mut trie1.read_zipper(), &mut z3],
-                ],
+                &mut [z1, z2, z3],
+                [Clause::from_mask(0b011), Clause::from_mask(0b101)],
                 &mut out,
             );
             let expected = trie1.meet(&trie2.join(&trie3));
@@ -4677,10 +5206,8 @@ mod tests {
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
             zipper_merge_dnf(
-                &mut [
-                    &mut [&mut z1, &mut trie2.read_zipper()],
-                    &mut [&mut trie2.read_zipper(), &mut z3],
-                ],
+                &mut [z1, z2, z3],
+                [Clause::from_mask(0b011), Clause::from_mask(0b110)],
                 &mut out,
             );
             let expected = trie2.meet(&trie1.join(&trie3));
@@ -4693,15 +5220,15 @@ mod tests {
             let mut trie2 = PathMap::from_iter(SMALL_TRIE_2);
             let mut trie3 = PathMap::from_iter(SMALL_TRIE_3);
 
+            let mut z1 = trie1.read_zipper();
+            let mut z2 = trie2.read_zipper();
             let mut z3 = trie3.read_zipper();
 
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
             zipper_merge_dnf(
-                &mut [
-                    &mut [&mut trie1.read_zipper(), &mut trie2.read_zipper(), &mut z3],
-                    &mut [&mut trie1.read_zipper(), &mut trie2.read_zipper()],
-                ],
+                &mut [z1, z2, z3],
+                [Clause::FULL, Clause::from_indices([0, 1])],
                 &mut out,
             );
             let expected = trie2.meet(&trie1);
@@ -4738,20 +5265,119 @@ mod tests {
             let a_shallow_chain = prefixed(&trie2.read_zipper(), a);
             let a_branching = prefixed(&trie3.read_zipper(), a);
 
-            let mut z3 = trie3.read_zipper();
-
             let mut result = PathMap::new();
             let mut out = result.write_zipper();
             zipper_merge_dnf(
                 &mut [
-                    &mut [&mut a_deep_chain.read_zipper()],
-                    &mut [&mut a_shallow_chain.read_zipper()],
-                    &mut [&mut a_branching.read_zipper()],
+                    a_deep_chain.read_zipper(),
+                    a_shallow_chain.read_zipper(),
+                    a_branching.read_zipper(),
+                ],
+                [
+                    Clause::singleton(0),
+                    Clause::singleton(1),
+                    Clause::singleton(2),
                 ],
                 &mut out,
             );
             let expected = a_deep_chain.join(&a_shallow_chain.join(&a_branching));
             assert_trie(expected, result);
+        }
+    }
+
+    mod maj {
+        use super::*;
+        use crate::experimental::zipper_algebra::zipper_majority;
+
+        #[test]
+        fn test_disjoint() {
+            check3(&DISJOINT_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_deep_shared_prefix_then_split() {
+            check3(&PATHS_WITH_SHARED_PREFIX_3, [], |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_interleaving_paths() {
+            check3(&INTERLEAVING_PATHS_3, [], |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_one_side_empty_at_many_levels() {
+            let expected: Paths = &[
+                (&[0x00], 0),
+                (&[0x00, 0x01, 0x02], 2),
+                (&[0x00, 0x01, 0x02, 0x03], 3),
+                (&[0x01, 0x02, 0x03, 0x04, 0x05], 8),
+            ];
+            check3(&ONE_SIDED_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out);
+            });
+        }
+
+        #[test]
+        fn test_almost_identical_paths() {
+            check3(
+                &ALMOST_IDENTICAL_PATHS_3,
+                ALMOST_IDENTICAL_PATHS_3.0,
+                |lhs, mid, rhs, out| {
+                    zipper_majority(lhs, mid, rhs, out);
+                },
+            );
+        }
+
+        #[test]
+        fn test_one_side_empty() {
+            check3(&LHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out)
+            });
+            check3(&MID_EMPTY, [], |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out)
+            });
+            check3(&RHS_EMPTY_3, [], |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_exact_overlap_divergent_subtries() {
+            let expected: Paths = &[(&[1, 2, 3], 0)];
+            check3(
+                &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
+                expected,
+                |lhs, mid, rhs, out| zipper_majority(lhs, mid, rhs, out),
+            );
+        }
+
+        #[test]
+        fn test_zigzag() {
+            let expected: Paths = &[
+                (&[2, 1], 2),
+                (&[1], 0),
+                (&[2], 1),
+                (&[3], 3),
+                (&[4, 3, 2, 1], 5),
+            ];
+            check3(&ZIGZAG_PATHS_3, expected, |lhs, mid, rhs, out| {
+                zipper_majority(lhs, mid, rhs, out)
+            });
+        }
+
+        #[test]
+        fn test_root_values() {
+            check3(
+                &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
+                PATHS_WITH_ROOT_VALS_AND_CHILDREN.0,
+                |lhs, mid, rhs, out| zipper_majority(lhs, mid, rhs, out),
+            );
         }
     }
 }
