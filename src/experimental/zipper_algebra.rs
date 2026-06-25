@@ -1557,7 +1557,10 @@ where
                 }
             });
 
-            debug_assert!(frontier <= active);
+            unsafe {
+                // SAFETY: frontier can be at most (1 | 1 << 1 | 1 << 2 | .. | 1 << (popcount(active)))
+                std::hint::assert_unchecked(frontier <= active);
+            }
 
             match min {
                 None => {
@@ -2210,6 +2213,11 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                         participating |= clauses[i].members();
                     }
                 });
+                unsafe {
+                    // SAFETY: The value of particpating preserves the invariant as c_1 | .. | c_i,
+                    // where c_x >> N == 0
+                    std::hint::assert_unchecked(participating >> N == 0);
+                }
                 for_each_bit(participating, |i| {
                     zs[i].descend_to_byte(byte);
                 });
