@@ -1371,16 +1371,30 @@ fn for_each_bit(mut bits: u64, mut f: impl FnMut(usize)) {
     }
 }
 
-#[inline]
-fn active_bits<const N: usize>(active: u64) -> impl Iterator<Item = usize> {
-    (0..N).filter(move |i| (active >> i) & 1 != 0)
+struct ActiveRefs<'a, T, const N: usize> {
+    bits: u64,
+    xs: &'a [T; N],
 }
 
-fn only_active<'a, T, const N: usize>(
-    ts: &'a [T; N],
-    active: u64,
-) -> impl Iterator<Item = (usize, &'a T)> {
-    active_bits::<N>(active).map(|i| (i, &ts[i]))
+impl<'a, T, const N: usize> Iterator for ActiveRefs<'a, T, N> {
+    type Item = &'a T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bits == 0 {
+            return None;
+        }
+
+        let i = self.bits.trailing_zeros() as usize;
+        self.bits &= self.bits - 1;
+
+        Some(&self.xs[i])
+    }
+}
+
+fn active_refs<T, const N: usize>(xs: &[T; N], bits: u64) -> ActiveRefs<T, N> {
+    assert!(bits >> N == 0);
+    ActiveRefs { bits, xs }
 }
 
 #[inline(always)]
@@ -1452,14 +1466,14 @@ where
         V: Clone + 'a,
         Z: ZipperValues<V>,
     {
-        only_active(zs, active).map(|(_, z)| lift(z.val()))
+        active_refs(zs, active).map(|z| lift(z.val()))
     }
 
     fn all_active_share<Z, const N: usize>(zs: &[Z; N], active: u64) -> bool
     where
         Z: ZipperConcrete,
     {
-        let mut iter = only_active(zs, active).map(|(_, z)| z.shared_node_id());
+        let mut iter = active_refs(zs, active).map(|z| z.shared_node_id());
         match iter.next() {
             Some(Some(first)) => iter.all(|next| next.is_some_and(|snid| snid == first)),
             _ => false,
@@ -1484,10 +1498,10 @@ where
 
     let mut bytes = [None; N];
     let mut masks = [ByteMask::EMPTY; N];
-    for (i, z) in only_active(zs, active) {
-        masks[i] = z.child_mask();
+    for_each_bit(active, |i| {
+        masks[i] = zs[i].child_mask();
         bytes[i] = masks[i].indexed_bit::<true>(0);
-    }
+    });
 
     // At each node, the algorithm:
     //
@@ -1518,7 +1532,7 @@ where
             let mut frontier = 0u64;
             let mut next = None;
 
-            for i in active_bits::<N>(active) {
+            for_each_bit(active, |i| {
                 if let Some(b) = bytes[i] {
                     match min {
                         None => {
@@ -1541,7 +1555,7 @@ where
                         }
                     }
                 }
-            }
+            });
 
             debug_assert!(frontier <= active);
 
@@ -2057,8 +2071,8 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
         if clause.is_empty() {
             return ByteMask::EMPTY;
         };
-        only_active(zs, clause.members())
-            .try_fold(ByteMask::FULL, |mut mask, (_, z)| {
+        active_refs(zs, clause.members())
+            .try_fold(ByteMask::FULL, |mut mask, z| {
                 mask &= z.child_mask();
                 if mask.is_empty_mask() {
                     None
@@ -2075,7 +2089,7 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
         V: Lattice + Clone,
         Z: ZipperValues<V>,
     {
-        Meet::combine_n(only_active(zs, clause.members()).map(|(_, z)| lift(z.val())))
+        Meet::combine_n(active_refs(zs, clause.members()).map(|z| lift(z.val())))
     }
 
     fn active_clauses_value<V, Z, const N: usize, const M: usize>(
@@ -2088,8 +2102,7 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
         Z: ZipperValues<V>,
     {
         Join::combine_n(
-            only_active(clauses, active)
-                .map(|(_, clause)| clause_value(zs, clause).map(Cow::Owned)),
+            active_refs(clauses, active).map(|clause| clause_value(zs, clause).map(Cow::Owned)),
         )
     }
 
