@@ -29,7 +29,7 @@ pub use zipper_algebra_poly::ZipperMergeF;
 /// without visiting unrelated regions.
 ///
 /// Each method delegates to a corresponding free function ([`zipper_join`],
-/// [`zipper_meet`], [`zipper_subtract`], [`zipper_xor`]), preserving their performance
+/// [`zipper_meet`], [`zipper_subtract`], [`zipper_sym_diff`]), preserving their performance
 /// characteristics and semantics.
 ///
 /// # Semantics
@@ -57,7 +57,7 @@ pub use zipper_algebra_poly::ZipperMergeF;
 /// - [`zipper_join`]
 /// - [`zipper_meet`]
 /// - [`zipper_subtract`]
-/// - [`zipper_xor`]
+/// - [`zipper_sym_diff`]
 pub trait ZipperAlgebraExt<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>:
     ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving + Sized
 {
@@ -92,13 +92,13 @@ pub trait ZipperAlgebraExt<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>:
     }
 
     #[inline]
-    fn xor<ZR, Out>(&mut self, rhs: &mut ZR, out: &mut Out)
+    fn sym_diff<ZR, Out>(&mut self, rhs: &mut ZR, out: &mut Out)
     where
         V: DistributiveLattice + Lattice,
         ZR: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
         Out: ZipperWriting<V, A>,
     {
-        zipper_xor(self, rhs, out);
+        zipper_sym_diff(self, rhs, out);
     }
 }
 
@@ -393,7 +393,7 @@ pub fn zipper_subtract3<V, ZL, ZM, ZR, Out, A>(
 ///
 /// The traversal logic is identical to [`zipper_join`]. Only the value
 /// combination operation differs.
-pub fn zipper_xor<V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
+pub fn zipper_sym_diff<V, ZL, ZR, Out, A>(lhs: &mut ZL, rhs: &mut ZR, out: &mut Out)
 where
     V: DistributiveLattice + Lattice + Clone + Send + Sync,
     A: Allocator,
@@ -401,18 +401,22 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    zipper_merge::<Xor, V, ZL, ZR, Out, A>(lhs, rhs, out);
+    zipper_merge::<SymDiff, V, ZL, ZR, Out, A>(lhs, rhs, out);
 }
 
 /// Performs a symmetric difference (XOR) of three radix-256 tries using zipper traversal.
-/// That is, it performs: (`lhs` △ `mid`) △ `rhs`, where `△` = [`zipper_xor`]
+/// That is, it performs: (`lhs` △ `mid`) △ `rhs`, where `△` = [`zipper_sym_diff`]
 ///
 /// # See also
 ///
-/// [`zipper_xor`]
+/// [`zipper_sym_diff`]
 ///
-pub fn zipper_xor3<V, ZL, ZM, ZR, Out, A>(lhs: &mut ZL, mid: &mut ZM, rhs: &mut ZR, out: &mut Out)
-where
+pub fn zipper_sym_diff3<V, ZL, ZM, ZR, Out, A>(
+    lhs: &mut ZL,
+    mid: &mut ZM,
+    rhs: &mut ZR,
+    out: &mut Out,
+) where
     V: DistributiveLattice + Lattice + Clone + Send + Sync,
     A: Allocator,
     ZL: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
@@ -420,7 +424,7 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
-    zipper_merge3::<Xor, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
+    zipper_merge3::<SymDiff, V, ZL, ZM, ZR, Out, A>(lhs, mid, rhs, out);
 }
 
 trait MergePolicy<V: Clone + Send + Sync> {
@@ -1351,14 +1355,14 @@ where
 ///
 /// As with join, large disjoint subtries are copied without traversal whenever
 /// possible.
-pub fn zipper_n_xor<V, Z, Out, A, const N: usize>(zs: &mut [Z; N], out: &mut Out)
+pub fn zipper_n_sym_diff<V, Z, Out, A, const N: usize>(zs: &mut [Z; N], out: &mut Out)
 where
     V: Lattice + DistributiveLattice + Clone + Send + Sync + Unpin,
     Z: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
     A: Allocator,
 {
-    zipper_merge_n_mono::<Xor, _, _, _, _, _>(zs, (1 << N) - 1, out);
+    zipper_merge_n_mono::<SymDiff, _, _, _, _, _>(zs, (1 << N) - 1, out);
 }
 
 // small micro-helpers
@@ -2585,8 +2589,8 @@ fn subtract_impl<'a, V: DistributiveLattice + Clone>(
 
 // ==================== XOR ====================
 
-struct Xor;
-impl<V: Clone + Send + Sync> MergePolicy<V> for Xor {
+struct SymDiff;
+impl<V: Clone + Send + Sync> MergePolicy<V> for SymDiff {
     #[inline(always)]
     fn on_single<Z, Out, A>(z: &mut Z, _mask: u64, range: ByteMask, out: &mut Out)
     where
@@ -2617,7 +2621,7 @@ impl<V: Clone + Send + Sync> MergePolicy<V> for Xor {
     }
 }
 
-impl<V: Lattice + DistributiveLattice + Clone> ValuePolicy<V> for Xor {
+impl<V: Lattice + DistributiveLattice + Clone> ValuePolicy<V> for SymDiff {
     fn combine_impl<'a>(l: Option<Cow<'a, V>>, r: Option<Cow<'a, V>>) -> Option<Cow<'a, V>> {
         match (l, r) {
             (None, x) | (x, None) => x,
@@ -2778,12 +2782,12 @@ mod zipper_algebra_poly {
 
         /// Performs an N-way ordered symmetric difference of radix-256 trie zippers using a stackless traversal.
         ///
-        /// This function generalizes pairwise [`super::zipper_xor`] to an arbitrary number of input tries,
-        fn xor_n(self, out: &mut Out)
+        /// This function generalizes pairwise [`super::zipper_sym_diff`] to an arbitrary number of input tries,
+        fn sym_diff_n(self, out: &mut Out)
         where
             V: Lattice + DistributiveLattice,
         {
-            self.merge_n::<super::Xor>(out);
+            self.merge_n::<super::SymDiff>(out);
         }
 
         fn merge_n<P>(self, out: &mut Out)
@@ -3021,24 +3025,24 @@ mod zipper_algebra_poly {
 }
 
     /// Performs an N-ary zipper symmetric difference by borrowing all inputs mutably
-    /// and forwarding them to [`ZipperMergeF::xor_n`].
+    /// and forwarding them to [`ZipperMergeF::sym_diff_n`].
     ///
     /// # Example
     /// ```ignore
-    /// zipper_xor_n!(z1, z2, z3 => out);
+    /// zipper_sym_diff_n!(z1, z2, z3 => out);
     /// ```
     ///
     /// Expands roughly to:
     /// ```ignore
-    /// (&mut z1, &mut z2, &mut z3).xor_n(&mut out)
+    /// (&mut z1, &mut z2, &mut z3).sym_diff_n(&mut out)
     /// ```
     ///
     /// # See also
-    /// [`ZipperMergeF::xor_n`]
+    /// [`ZipperMergeF::sym_diff_n`]
     #[macro_export]
-    macro_rules! zipper_xor_n {
+    macro_rules! zipper_sym_diff_n {
     ( $($z:ident),+ => $out:ident ) => {{
-        ( $( &mut $z ),+ ).xor_n(&mut $out)
+        ( $( &mut $z ),+ ).sym_diff_n(&mut $out)
     }};
 }
 }
@@ -4591,16 +4595,16 @@ mod tests {
     mod xor {
         use super::*;
         use crate::experimental::zipper_algebra::{
-            ZipperAlgebraExt, ZipperMergeF, zipper_join, zipper_xor3,
+            ZipperAlgebraExt, ZipperMergeF, zipper_join, zipper_sym_diff3,
         };
-        use crate::zipper_xor_n;
+        use crate::zipper_sym_diff_n;
 
         #[test]
         fn test_disjoint() {
             check2(
                 &DISJOINT_PATHS,
                 &[DISJOINT_PATHS.0, DISJOINT_PATHS.1].concat(),
-                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+                |mut lhs, mut rhs, out| lhs.sym_diff(&mut rhs, out),
             );
         }
 
@@ -4609,7 +4613,9 @@ mod tests {
             check3(
                 &DISJOINT_PATHS_3,
                 &[DISJOINT_PATHS_3.0, DISJOINT_PATHS_3.1, DISJOINT_PATHS_3.2].concat(),
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4626,7 +4632,7 @@ mod tests {
                     DISJOINT_PATHS_N[5],
                 ]
                 .concat(),
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -4635,7 +4641,7 @@ mod tests {
             check2(
                 &PATHS_WITH_SHARED_PREFIX,
                 &[PATHS_WITH_SHARED_PREFIX.0, PATHS_WITH_SHARED_PREFIX.1].concat(),
-                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+                |mut lhs, mut rhs, out| lhs.sym_diff(&mut rhs, out),
             );
         }
 
@@ -4649,7 +4655,9 @@ mod tests {
                     PATHS_WITH_SHARED_PREFIX_3.2,
                 ]
                 .concat(),
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4666,7 +4674,7 @@ mod tests {
                     PATHS_WITH_SHARED_PREFIX_N[5],
                 ]
                 .concat(),
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -4675,7 +4683,7 @@ mod tests {
             check2(
                 &INTERLEAVING_PATHS,
                 &[INTERLEAVING_PATHS.0, INTERLEAVING_PATHS.1].concat(),
-                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+                |mut lhs, mut rhs, out| lhs.sym_diff(&mut rhs, out),
             );
         }
 
@@ -4689,7 +4697,9 @@ mod tests {
                     INTERLEAVING_PATHS_3.2,
                 ]
                 .concat(),
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4706,7 +4716,7 @@ mod tests {
                     INTERLEAVING_PATHS_N[5],
                 ]
                 .concat(),
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -4722,7 +4732,7 @@ mod tests {
                 (&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 9),
             ];
             check2(&ONE_SIDED_PATHS, expected, |mut lhs, mut rhs, out| {
-                lhs.xor(&mut rhs, out)
+                lhs.sym_diff(&mut rhs, out)
             });
         }
 
@@ -4740,7 +4750,9 @@ mod tests {
             check3(
                 &ONE_SIDED_PATHS_3,
                 expected,
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4755,7 +4767,7 @@ mod tests {
             checkn(
                 &ONE_SIDED_PATHS_N,
                 expected,
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -4765,7 +4777,7 @@ mod tests {
             check2(
                 &ALMOST_IDENTICAL_PATHS,
                 expected,
-                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+                |mut lhs, mut rhs, out| lhs.sym_diff(&mut rhs, out),
             );
         }
 
@@ -4775,7 +4787,9 @@ mod tests {
             check3(
                 &ALMOST_IDENTICAL_PATHS_3,
                 expected,
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4785,17 +4799,17 @@ mod tests {
             checkn(
                 &ALMOST_IDENTICAL_PATHS_N,
                 expected,
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
         #[test]
         fn test_one_side_empty() {
             check2(&LHS_EMPTY, LHS_EMPTY.1, |mut lhs, mut rhs, out| {
-                lhs.xor(&mut rhs, out)
+                lhs.sym_diff(&mut rhs, out)
             });
             check2(&RHS_EMPTY, RHS_EMPTY.0, |mut lhs, mut rhs, out| {
-                lhs.xor(&mut rhs, out)
+                lhs.sym_diff(&mut rhs, out)
             });
         }
 
@@ -4804,17 +4818,23 @@ mod tests {
             check3(
                 &LHS_EMPTY_3,
                 &[LHS_EMPTY_3.1, LHS_EMPTY_3.2].concat(),
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
             check3(
                 &MID_EMPTY,
                 &[MID_EMPTY.0, MID_EMPTY.2].concat(),
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
             check3(
                 &RHS_EMPTY_3,
                 &[RHS_EMPTY_3.0, RHS_EMPTY_3.1].concat(),
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4830,7 +4850,7 @@ mod tests {
                     LHS_EMPTY_N[5],
                 ]
                 .concat(),
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
             checkn(
                 &MID_EMPTY_N,
@@ -4842,7 +4862,7 @@ mod tests {
                     MID_EMPTY_N[5],
                 ]
                 .concat(),
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
             checkn(
                 &RHS_EMPTY_N,
@@ -4854,7 +4874,7 @@ mod tests {
                     RHS_EMPTY_N[4],
                 ]
                 .concat(),
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -4869,7 +4889,7 @@ mod tests {
             check2(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN,
                 expected,
-                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+                |mut lhs, mut rhs, out| lhs.sym_diff(&mut rhs, out),
             );
         }
 
@@ -4887,7 +4907,9 @@ mod tests {
             check3(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_3,
                 expected,
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4910,7 +4932,7 @@ mod tests {
             checkn(
                 &PATHS_WITH_SAME_PREFIX_DIFFERENT_CHILDREN_N,
                 expected,
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
 
@@ -4928,7 +4950,7 @@ mod tests {
                 (&[4, 3], 5),
             ];
             check2(&ZIGZAG_PATHS, expected, |mut lhs, mut rhs, out| {
-                lhs.xor(&mut rhs, out)
+                lhs.sym_diff(&mut rhs, out)
             });
         }
 
@@ -4948,7 +4970,9 @@ mod tests {
             check3(
                 &ZIGZAG_PATHS_3,
                 expected,
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4957,7 +4981,7 @@ mod tests {
             check2(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN,
                 &[],
-                |mut lhs, mut rhs, out| lhs.xor(&mut rhs, out),
+                |mut lhs, mut rhs, out| lhs.sym_diff(&mut rhs, out),
             );
         }
 
@@ -4966,7 +4990,9 @@ mod tests {
             check3(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN_3,
                 PATHS_WITH_ROOT_VALS_AND_CHILDREN_3.2,
-                |mut lhs, mut mid, mut rhs, out| zipper_xor3(&mut lhs, &mut mid, &mut rhs, out),
+                |mut lhs, mut mid, mut rhs, out| {
+                    zipper_sym_diff3(&mut lhs, &mut mid, &mut rhs, out)
+                },
             );
         }
 
@@ -4975,7 +5001,7 @@ mod tests {
             checkn(
                 &PATHS_WITH_ROOT_VALS_AND_CHILDREN_N,
                 &[],
-                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_xor_n!(z0, z1, z2, z3, z4, z5 => out),
+                |[mut z0, mut z1, mut z2, mut z3, mut z4, mut z5], mut out| zipper_sym_diff_n!(z0, z1, z2, z3, z4, z5 => out),
             );
         }
     }
