@@ -123,6 +123,25 @@ impl<V: Clone + Send + Sync + Unpin> PathMap<V, GlobalAlloc> {
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
+    /// Whether `self` and `other` share the same root node by pointer (O(1)).
+    /// PathMap is copy-on-write, so a map and a clone of it stay `same_trie`
+    /// until one is mutated: any insert or removal replaces the root node with a
+    /// fresh allocation. A `true` result therefore proves the trie's node
+    /// structure has not changed relative to `other`. Because `other` (typically
+    /// a cheap COW clone kept as a snapshot) holds the old root alive, its
+    /// address cannot be reused while the snapshot exists, so this is free of the
+    /// ABA pointer-reuse hazard. Root VALUES (the empty-key entry) are not
+    /// compared; callers that key a cache on subtree contents do not touch it.
+    #[inline]
+    pub fn same_trie(&self, other: &Self) -> bool {
+        let a = unsafe { &*self.root.get() };
+        let b = unsafe { &*other.root.get() };
+        match (a, b) {
+            (None, None) => true,
+            (Some(x), Some(y)) => x.ptr_eq(y),
+            _ => false,
+        }
+    }
     #[inline]
     pub(crate) fn root(&self) -> Option<&TrieNodeODRc<V, A>> {
         unsafe{ &*self.root.get() }.as_ref()
@@ -1454,3 +1473,30 @@ mod tests {
 //GOAT, Consider refactor of zipper traits.  `WriteZipper` -> `PathWriter`.  Zipper is split into the zipper
 // movement traits and a `PathReader` trait.  Then `PathWriter` and `PathReader` can both be implemented on
 // the map, and we can get rid of duplicate methods like `graft_map`
+
+#[cfg(test)]
+mod same_trie_tests {
+    use crate::PathMap;
+    #[test]
+    fn same_trie_tracks_cow_mutation() {
+        let mut m: PathMap<()> = PathMap::new();
+        m.insert(b"(edge a b)", ());
+        let snap = m.clone();                       // COW clone shares the root
+        assert!(m.same_trie(&snap), "a clone shares the root");
+        m.insert(b"(edge b c)", ());                // mutation CoW-replaces the root
+        assert!(!m.same_trie(&snap), "a write must change the root identity");
+        let snap2 = m.clone();
+        assert!(m.same_trie(&snap2));
+        m.remove(b"(edge b c)");
+        assert!(!m.same_trie(&snap2), "a removal must change the root identity");
+        // two independently-built equal maps are NOT the same trie (different roots)
+        let mut n: PathMap<()> = PathMap::new();
+        n.insert(b"(edge a b)", ());
+        // n and snap have equal CONTENT but distinct roots
+        assert!(!n.same_trie(&snap));
+        // empty vs empty
+        let e1: PathMap<()> = PathMap::new();
+        let e2: PathMap<()> = PathMap::new();
+        assert!(e1.same_trie(&e2), "two empty maps share the None root");
+    }
+}
