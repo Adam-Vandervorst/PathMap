@@ -1423,23 +1423,23 @@ fn with_k<const K: usize, T, R>(
 ) -> R {
     debug_assert!(bits.count_ones() as usize >= K);
 
-    // collect raw pointers first (safe)
-    let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
-
+    // Extract the K distinct active indices from the bitmask, then take K
+    // disjoint &mut into the slice with the safe checked API. The previous
+    // version built raw pointers via `xs.as_mut_ptr().add(idx)` inside the
+    // loop, but each `as_mut_ptr()` re-borrowed `xs` and invalidated the
+    // pointers from earlier iterations under Stacked Borrows (a real UB Miri
+    // flags). `get_disjoint_mut` proves distinctness + in-bounds and hands
+    // back the disjoint references; for small K its check is negligible.
+    let mut indices = [0usize; K];
     let mut i = 0;
     while i < K {
-        let idx = bits.trailing_zeros() as usize;
+        indices[i] = bits.trailing_zeros() as usize;
         bits &= bits - 1;
-        ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
         i += 1;
     }
-
-    // SAFETY:
-    // - indices are distinct (bitmask)
-    // - derived from same slice
-
-    // should be zero-cost after inlining
-    let refs = unsafe { ptrs.map(|p| &mut *p) };
+    let refs = xs
+        .get_disjoint_mut(indices)
+        .expect("active bitmask indices are distinct and in bounds");
 
     f(refs)
 }
