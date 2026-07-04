@@ -195,3 +195,56 @@ pub fn print_traversal<'a, V: 'a + Clone + Unpin, Z: ZipperIteration + Clone>(zi
         println!("{:?}", zipper.path());
     }
 }
+/// Copy-on-write write-path counters
+///
+/// Every structural write goes through `TrieNodeODRc::make_unique`, which either finds the node
+/// unshared (cheap) or clones it (the copy-on-write cost).  These counters expose that split, so
+/// a workload's write amplification can be measured directly:
+///
+/// ```
+/// # use pathmap::PathMap;
+/// pathmap::counters::reset_cow_counters();
+/// let mut map: PathMap<usize> = PathMap::new();
+/// map.set_val_at(b"hello", 42);
+/// let shared = map.clone();
+/// map.set_val_at(b"help", 43); // writing while `shared` aliases the trie forces clones
+/// let counters = pathmap::counters::cow_counters();
+/// assert!(counters.cow_clones >= 1);
+/// assert!(counters.cow_clones <= counters.make_unique_calls);
+/// # drop(shared);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CowCounters {
+    /// Number of times a write required a unique reference to a node
+    pub make_unique_calls: usize,
+    /// How many of those calls found the node shared and cloned it
+    pub cow_clones: usize,
+}
+
+static MAKE_UNIQUE_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static COW_CLONES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Returns a snapshot of the counters accumulated since the last [reset_cow_counters]
+pub fn cow_counters() -> CowCounters {
+    use core::sync::atomic::Ordering::Relaxed;
+    CowCounters {
+        make_unique_calls: MAKE_UNIQUE_CALLS.load(Relaxed),
+        cow_clones: COW_CLONES.load(Relaxed),
+    }
+}
+
+/// Resets the copy-on-write counters to zero
+pub fn reset_cow_counters() {
+    use core::sync::atomic::Ordering::Relaxed;
+    MAKE_UNIQUE_CALLS.store(0, Relaxed);
+    COW_CLONES.store(0, Relaxed);
+}
+
+/// Internal. Records one `make_unique` call and whether it had to clone
+pub(crate) fn record_make_unique(cloned: bool) {
+    use core::sync::atomic::Ordering::Relaxed;
+    MAKE_UNIQUE_CALLS.fetch_add(1, Relaxed);
+    if cloned {
+        COW_CLONES.fetch_add(1, Relaxed);
+    }
+}

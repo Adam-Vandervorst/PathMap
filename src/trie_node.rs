@@ -3048,6 +3048,9 @@ mod opaque_dyn_rc_trie_node {
             let (ptr, _tag) = self.ptr.get_raw_parts();
 
             if unsafe{ &*ptr }.compare_exchange(1, 0, Acquire, Relaxed).is_err() {
+                #[cfg(feature = "counters")]
+                crate::counters::record_make_unique(true);
+
                 // Another pointer exists, so we must clone.
                 let cloned_node = self.as_tagged().clone_self();
 
@@ -3055,6 +3058,9 @@ mod opaque_dyn_rc_trie_node {
                 *self = cloned_node;
 
             } else {
+                #[cfg(feature = "counters")]
+                crate::counters::record_make_unique(false);
+
                 // We were the sole reference so bump back up the  ref count.
                 unsafe{ &*ptr }.store(1, Release);
             }
