@@ -1,11 +1,13 @@
 use crate::PathMap;
-use crate::zipper::{*, zipper_priv::ZipperPriv};
+use crate::zipper::*;
 use crate::trie_node::{TaggedNodeRef, TrieNode};
 
 /// Example usage of counters
 ///
 /// ```
-/// pathmap::counters::print_traversal(&map.read_zipper());
+/// # let mut map: pathmap::PathMap<usize> = pathmap::PathMap::new();
+/// # map.set_val_at(b"example", 0);
+/// pathmap::counters::print_traversal::<usize, _>(&map.read_zipper());
 /// let counters = pathmap::counters::Counters::count_ocupancy(&map);
 /// counters.print_histogram_by_depth();
 /// counters.print_run_length_histogram();
