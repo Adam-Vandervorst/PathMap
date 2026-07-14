@@ -572,7 +572,6 @@ where
                 Some(lhs_byte) => match rhs_next {
                     Some(rhs_byte) if lhs_byte < rhs_byte => {
                         P::on_left_only(ByteMask::from_range(lhs_byte..rhs_byte), &mut lhs_grafts);
-                        // lhs_grafts |=
                         lhs_next = (lhs_mask & ByteMask::from_range(rhs_byte..)).next_bit(0);
                     }
                     Some(rhs_byte) if lhs_byte > rhs_byte => {
@@ -2371,10 +2370,10 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
             match single_clause.len() {
                 1 => {
                     let z0 = first_active_mut(zs, single_clause.members());
+                    Meet::on_id(z0, 1, out);
                     if let Some(v) = z0.val() {
                         out.set_val(v.clone());
                     }
-                    Meet::on_id(z0, 1, out);
                     return;
                 }
                 2 => {
