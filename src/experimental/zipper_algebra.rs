@@ -535,10 +535,10 @@ where
     }
     // check for node-sharing first
     if check_sharing(lhs, rhs) {
+        P::on_id(lhs, 2, out);
         if let Some(v) = P::combine_n_times(lift(lhs.val()), 2) {
             out.set_val(v);
         }
-        P::on_id(lhs, 2, out);
         return;
     }
 
@@ -595,10 +595,10 @@ where
                         // optimization - if both zippers share the node after descend, we can skip
                         // further descend and continue merging
                         if check_sharing(lhs, rhs) {
+                            P::on_id(lhs, 2, out);
                             if let Some(v) = P::combine_n_times(lift(lhs.val()), 2) {
                                 out.set_val(v);
                             }
-                            P::on_id(lhs, 2, out);
 
                             rhs.ascend_byte();
                             rhs_next = rhs_mask.next_bit(lhs_byte);
@@ -762,10 +762,10 @@ where
 
     // check for node-sharing first
     if all_share(lhs, mid, rhs) {
+        P::on_id(lhs, 3, out);
         if let Some(v) = P::combine_n_times(lift(lhs.val()), 3) {
             out.set_val(v);
         }
-        P::on_id(lhs, 3, out);
         return;
     }
 
@@ -899,10 +899,10 @@ where
 
                         //structural sharing check
                         if all_share(lhs, mid, rhs) {
+                            P::on_id(lhs, 3, out);
                             if let Some(v) = P::combine_n_times(lift(lhs.val()), 3) {
                                 out.set_val(v);
                             }
-                            P::on_id(lhs, 3, out);
 
                             rhs.ascend_byte();
                             r = rhs_mask.next_bit(min);
@@ -1056,10 +1056,10 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
 
     // check for node-sharing first
     if all_share(z0, z1, z2, z3) {
+        P::on_id(z0, 4, out);
         if let Some(v) = P::combine_n_times(lift(z0.val()), 4) {
             out.set_val(v);
         }
-        P::on_id(z0, 4, out);
         return;
     }
 
@@ -1134,10 +1134,10 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
 
                     // check structural sharing
                     if all_share(z0, z1, z2, z3) {
+                        P::on_id(z0, 4, out);
                         if let Some(v) = P::combine_n_times(lift(z0.val()), 4) {
                             out.set_val(v);
                         }
-                        P::on_id(z0, 4, out);
 
                         z3.ascend_byte();
                         b3 = m3.next_bit(min);
@@ -1699,10 +1699,10 @@ where
     if all_active_share(zs, active) {
         let z0 = first_active_mut(zs, active);
         let n = active.count_ones() as usize;
+        P::on_id(z0, n, out);
         if let Some(v) = P::combine_n_times(lift(z0.val()), n) {
             out.set_val(v);
         }
-        P::on_id(z0, n, out);
         return;
     }
 
@@ -1800,10 +1800,10 @@ where
                         // check structural sharing first
                         if all_active_share(zs, active) {
                             let z0 = first_active_mut(zs, active);
+                            P::on_id(z0, cnt, out);
                             if let Some(v) = P::combine_n_times(lift(z0.val()), cnt) {
                                 out.set_val(v);
                             }
-                            P::on_id(z0, cnt, out);
 
                             for_each_bit(active, |i| {
                                 zs[i].ascend_byte();
@@ -5191,28 +5191,34 @@ mod tests {
 
     const FOR_MERKLEIZATION: Paths = &[
         // X
+        (&[0b100000], 100),
         (&[0b100000, 0b00, 0b0001], 1),
         (&[0b100000, 0b00, 0b0011], 2),
         (&[0b100000, 0b00, 0b0111], 3),
         (&[0b100000, 0b00, 0b1111], 4),
+        (&[0b010000], 100),
         (&[0b010000, 0b00, 0b0001], 1),
         (&[0b010000, 0b00, 0b0011], 2),
         (&[0b010000, 0b00, 0b0111], 3),
         (&[0b010000, 0b00, 0b1111], 4),
         // Y
+        (&[0b001000], 200),
         (&[0b001000, 0b01, 0b0001], 5),
         (&[0b001000, 0b01, 0b0011], 6),
         (&[0b001000, 0b01, 0b0111], 7),
         (&[0b001000, 0b01, 0b1111], 8),
+        (&[0b000100], 200),
         (&[0b000100, 0b01, 0b0001], 5),
         (&[0b000100, 0b01, 0b0011], 6),
         (&[0b000100, 0b01, 0b0111], 7),
         (&[0b000100, 0b01, 0b1111], 8),
         // Z
+        (&[0b000010], 300),
         (&[0b000010, 0b11, 0b0001], 9),
         (&[0b000010, 0b11, 0b0011], 10),
         (&[0b000010, 0b11, 0b0111], 11),
         (&[0b000010, 0b11, 0b1111], 12),
+        (&[0b000001], 300),
         (&[0b000001, 0b11, 0b0001], 9),
         (&[0b000001, 0b11, 0b0011], 10),
         (&[0b000001, 0b11, 0b0111], 11),
@@ -5257,6 +5263,7 @@ mod tests {
         let mut w0 = result0.write_zipper();
         zipper_join(&mut r1, &mut r2, &mut w0);
         let expected0: Paths = &[
+            (&[], 300),
             (&[0b11, 0b0001], 9),
             (&[0b11, 0b0011], 10),
             (&[0b11, 0b0111], 11),
@@ -5278,6 +5285,7 @@ mod tests {
         let mut w1 = result1.write_zipper();
         zipper_meet_n!(r31, r32, r33, r41, r42, r43 => w1);
         let expected1: Paths = &[
+            (&[0b0], 200),
             (&[0b0, 0b01, 0b0001], 5),
             (&[0b0, 0b01, 0b0011], 6),
             (&[0b0, 0b01, 0b0111], 7),
@@ -5300,10 +5308,12 @@ mod tests {
         let mut w2 = result2.write_zipper();
         zipper_join_n!(r51, r52, r53, r54, r61, r62, r63 => w2);
         let expected2: Paths = &[
+            (&[0b0], 100),
             (&[0b0, 0b00, 0b0001], 1),
             (&[0b0, 0b00, 0b0011], 2),
             (&[0b0, 0b00, 0b0111], 3),
             (&[0b0, 0b00, 0b1111], 4),
+            (&[0b1], 100),
             (&[0b1, 0b00, 0b0001], 1),
             (&[0b1, 0b00, 0b0011], 2),
             (&[0b1, 0b00, 0b0111], 3),
