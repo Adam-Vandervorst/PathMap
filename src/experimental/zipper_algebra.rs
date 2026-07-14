@@ -429,31 +429,16 @@ pub fn zipper_sym_diff3<V, ZL, ZM, ZR, Out, A>(
 
 trait MergePolicy<V: Clone + Send + Sync> {
     #[inline]
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        Self::on_single(z, 0b01, range, out);
+    fn on_left_only(range: ByteMask, combined_mask: &mut ByteMask) {
+        Self::on_single(0b01, range, combined_mask);
     }
 
     #[inline]
-    fn on_right_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        Self::on_single(z, 0b10, range, out);
+    fn on_right_only(range: ByteMask, combined_mask: &mut ByteMask) {
+        Self::on_single(0b10, range, combined_mask);
     }
 
-    fn on_single<Z, Out, A>(z: &mut Z, mask: u64, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>;
-
+    fn on_single(mask: u64, range: ByteMask, combined_mask: &mut ByteMask);
     fn descend_on_some_equal(mask: u64) -> bool;
 
     fn on_id<Z, Out, A>(z: &mut Z, n: usize, out: &mut Out)
@@ -515,6 +500,31 @@ where
     ZR: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
+    #[inline]
+    fn flush_grafts<V, ZL, ZR, Out, A>(
+        lhs: &ZL,
+        lhs_grafts: &mut ByteMask,
+        rhs: &ZR,
+        rhs_grafts: &mut ByteMask,
+        out: &mut Out,
+    ) where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        ZL: ZipperInfallibleSubtries<V, A>,
+        ZR: ZipperInfallibleSubtries<V, A>,
+        Out: ZipperWriting<V, A>,
+    {
+        if *lhs_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(lhs, *lhs_grafts, false);
+            *lhs_grafts = ByteMask::EMPTY;
+        }
+
+        if *rhs_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(rhs, *rhs_grafts, false);
+            *rhs_grafts = ByteMask::EMPTY;
+        }
+    }
+
     fn check_sharing<ZL, ZR>(lhs: &ZL, rhs: &ZR) -> bool
     where
         ZL: ZipperConcrete,
@@ -542,6 +552,10 @@ where
     let mut rhs_mask = rhs.child_mask();
     let mut lhs_next = lhs_mask.indexed_bit::<true>(0);
     let mut rhs_next = rhs_mask.indexed_bit::<true>(0);
+    // These masks accumulate subtries that can be grafted directly at the
+    // current level. They are flushed before descending or leaving the level.
+    let mut lhs_grafts = ByteMask::EMPTY;
+    let mut rhs_grafts = ByteMask::EMPTY;
 
     // At each node, the algorithm treats the sets of child edges of `lhs` and `rhs` as two sorted
     // sequences and performs a merge-like traversal:
@@ -557,14 +571,21 @@ where
             match lhs_next {
                 Some(lhs_byte) => match rhs_next {
                     Some(rhs_byte) if lhs_byte < rhs_byte => {
-                        P::on_left_only(lhs, ByteMask::from_range(lhs_byte..rhs_byte), out);
+                        P::on_left_only(ByteMask::from_range(lhs_byte..rhs_byte), &mut lhs_grafts);
+                        // lhs_grafts |=
                         lhs_next = (lhs_mask & ByteMask::from_range(rhs_byte..)).next_bit(0);
                     }
                     Some(rhs_byte) if lhs_byte > rhs_byte => {
-                        P::on_right_only(rhs, ByteMask::from_range(rhs_byte..lhs_byte), out);
+                        P::on_right_only(ByteMask::from_range(rhs_byte..lhs_byte), &mut rhs_grafts);
                         rhs_next = (rhs_mask & ByteMask::from_range(lhs_byte..)).next_bit(0);
                     }
                     Some(rhs_byte) => {
+                        /*
+                         * The accumulated grafts belong to the current node.
+                         * Flush them before moving all three zippers to the
+                         * common child.
+                         */
+                        flush_grafts(lhs, &mut lhs_grafts, rhs, &mut rhs_grafts, out);
                         // equal → descend
                         out.descend_to_byte(lhs_byte);
 
@@ -602,19 +623,25 @@ where
                         continue 'merge_level;
                     }
                     None => {
-                        P::on_left_only(lhs, ByteMask::from_range(lhs_byte..), out);
+                        P::on_left_only(ByteMask::from_range(lhs_byte..), &mut lhs_grafts);
                         break 'merge_level;
                     }
                 },
                 None => match rhs_next {
                     Some(rhs_byte) => {
-                        P::on_right_only(rhs, ByteMask::from_range(rhs_byte..), out);
+                        P::on_right_only(ByteMask::from_range(rhs_byte..), &mut rhs_grafts);
                         break 'merge_level;
                     }
                     None => break 'merge_level,
                 },
             }
         }
+
+        /*
+         * All overlapping children of the current node have been processed.
+         * Perform the deferred grafts before leaving this level.
+         */
+        flush_grafts(lhs, &mut lhs_grafts, rhs, &mut rhs_grafts, out);
 
         // If we are at root and no deeper recursion pending, we're done
         if k == 0 {
@@ -687,6 +714,39 @@ where
         out.ascend_byte();
     }
 
+    #[inline]
+    fn flush_grafts<V, ZL, ZM, ZR, Out, A>(
+        lhs: &ZL,
+        lhs_grafts: &mut ByteMask,
+        mid: &ZM,
+        mid_grafts: &mut ByteMask,
+        rhs: &ZR,
+        rhs_grafts: &mut ByteMask,
+        out: &mut Out,
+    ) where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        ZL: ZipperInfallibleSubtries<V, A>,
+        ZM: ZipperInfallibleSubtries<V, A>,
+        ZR: ZipperInfallibleSubtries<V, A>,
+        Out: ZipperWriting<V, A>,
+    {
+        if *lhs_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(lhs, *lhs_grafts, false);
+            *lhs_grafts = ByteMask::EMPTY;
+        }
+
+        if *mid_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(mid, *mid_grafts, false);
+            *mid_grafts = ByteMask::EMPTY;
+        }
+
+        if *rhs_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(rhs, *rhs_grafts, false);
+            *rhs_grafts = ByteMask::EMPTY;
+        }
+    }
+
     fn all_share<ZL, ZM, ZR>(lhs: &ZL, mid: &ZM, rhs: &ZR) -> bool
     where
         ZL: ZipperConcrete,
@@ -721,6 +781,11 @@ where
     let mut l = lhs_mask.indexed_bit::<true>(0);
     let mut m = mid_mask.indexed_bit::<true>(0);
     let mut r = rhs_mask.indexed_bit::<true>(0);
+    // These masks accumulate subtries that can be grafted directly at the
+    // current level. They are flushed before descending or leaving the level.
+    let mut lhs_grafts = ByteMask::EMPTY;
+    let mut mid_grafts = ByteMask::EMPTY;
+    let mut rhs_grafts = ByteMask::EMPTY;
 
     'ascend: loop {
         'merge_level: loop {
@@ -748,30 +813,42 @@ where
                     L => {
                         cmp_swap(&mut b, &mut c);
                         if let Some(next) = b {
-                            P::on_single(lhs, L as u64, ByteMask::from_range(min..next), out);
+                            P::on_single(
+                                L as u64,
+                                ByteMask::from_range(min..next),
+                                &mut lhs_grafts,
+                            );
                             l = (lhs_mask & ByteMask::from_range(next..)).next_bit(0);
                         } else {
-                            P::on_single(lhs, L as u64, ByteMask::from_range(min..), out);
+                            P::on_single(L as u64, ByteMask::from_range(min..), &mut lhs_grafts);
                             break 'merge_level;
                         }
                     }
                     M => {
                         cmp_swap(&mut b, &mut c);
                         if let Some(next) = b {
-                            P::on_single(mid, M as u64, ByteMask::from_range(min..next), out);
+                            P::on_single(
+                                M as u64,
+                                ByteMask::from_range(min..next),
+                                &mut mid_grafts,
+                            );
                             m = (mid_mask & ByteMask::from_range(next..)).next_bit(0);
                         } else {
-                            P::on_single(mid, M as u64, ByteMask::from_range(min..), out);
+                            P::on_single(M as u64, ByteMask::from_range(min..), &mut mid_grafts);
                             break 'merge_level;
                         }
                     }
                     R => {
                         cmp_swap(&mut b, &mut c);
                         if let Some(next) = b {
-                            P::on_single(rhs, R as u64, ByteMask::from_range(min..next), out);
+                            P::on_single(
+                                R as u64,
+                                ByteMask::from_range(min..next),
+                                &mut rhs_grafts,
+                            );
                             r = (rhs_mask & ByteMask::from_range(next..)).next_bit(0);
                         } else {
-                            P::on_single(rhs, R as u64, ByteMask::from_range(min..), out);
+                            P::on_single(R as u64, ByteMask::from_range(min..), &mut rhs_grafts);
                             break 'merge_level;
                         }
                     }
@@ -799,6 +876,21 @@ where
                     }
                     // full 3-way
                     LMR => {
+                        /*
+                         * The accumulated grafts belong to the current node.
+                         * Flush them before moving all four zippers to the
+                         * common child.
+                         */
+                        flush_grafts(
+                            lhs,
+                            &mut lhs_grafts,
+                            mid,
+                            &mut mid_grafts,
+                            rhs,
+                            &mut rhs_grafts,
+                            out,
+                        );
+
                         out.descend_to_byte(min);
 
                         lhs.descend_to_byte(min);
@@ -845,6 +937,20 @@ where
             }
         }
 
+        /*
+         * All overlapping children of the current node have been processed.
+         * Perform the deferred grafts before leaving this level.
+         */
+        flush_grafts(
+            lhs,
+            &mut lhs_grafts,
+            mid,
+            &mut mid_grafts,
+            rhs,
+            &mut rhs_grafts,
+            out,
+        );
+
         // If we are at root and no deeper recursion pending, we're done
         if k == 0 {
             break 'ascend;
@@ -890,6 +996,47 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
     Z3: ZipperInfallibleSubtries<V, A> + ZipperConcrete + ZipperMoving,
     Out: ZipperWriting<V, A>,
 {
+    #[inline]
+    fn flush_grafts<V, Z0, Z1, Z2, Z3, Out, A>(
+        z0: &Z0,
+        z0_grafts: &mut ByteMask,
+        z1: &Z1,
+        z1_grafts: &mut ByteMask,
+        z2: &Z2,
+        z2_grafts: &mut ByteMask,
+        z3: &Z3,
+        z3_grafts: &mut ByteMask,
+        out: &mut Out,
+    ) where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        Z0: ZipperInfallibleSubtries<V, A>,
+        Z1: ZipperInfallibleSubtries<V, A>,
+        Z2: ZipperInfallibleSubtries<V, A>,
+        Z3: ZipperInfallibleSubtries<V, A>,
+        Out: ZipperWriting<V, A>,
+    {
+        if *z0_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(z0, *z0_grafts, false);
+            *z0_grafts = ByteMask::EMPTY;
+        }
+
+        if *z1_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(z1, *z1_grafts, false);
+            *z1_grafts = ByteMask::EMPTY;
+        }
+
+        if *z2_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(z2, *z2_grafts, false);
+            *z2_grafts = ByteMask::EMPTY;
+        }
+
+        if *z3_grafts != ByteMask::EMPTY {
+            out.graft_masked_branches(z3, *z3_grafts, false);
+            *z3_grafts = ByteMask::EMPTY;
+        }
+    }
+
     fn all_share<Z0, Z1, Z2, Z3>(z0: &Z0, z1: &Z1, z2: &Z2, z3: &Z3) -> bool
     where
         Z0: ZipperConcrete,
@@ -933,6 +1080,11 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
     let mut b2 = m2.indexed_bit::<true>(0);
     let mut b3 = m3.indexed_bit::<true>(0);
 
+    let mut z0_grafts = ByteMask::EMPTY;
+    let mut z1_grafts = ByteMask::EMPTY;
+    let mut z2_grafts = ByteMask::EMPTY;
+    let mut z3_grafts = ByteMask::EMPTY;
+
     'ascend: loop {
         'merge_level: loop {
             // min selection
@@ -962,6 +1114,17 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
 
                 // full match
                 if frontier == 0b1111 {
+                    flush_grafts(
+                        z0,
+                        &mut z0_grafts,
+                        z1,
+                        &mut z1_grafts,
+                        z2,
+                        &mut z2_grafts,
+                        z3,
+                        &mut z3_grafts,
+                        out,
+                    );
                     out.descend_to_byte(min);
 
                     z0.descend_to_byte(min);
@@ -1015,37 +1178,53 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                     match frontier {
                         0b0001 => {
                             if let Some(next) = b {
-                                P::on_single(z0, 0b0001, ByteMask::from_range(min..next), out);
+                                P::on_single(
+                                    0b0001,
+                                    ByteMask::from_range(min..next),
+                                    &mut z0_grafts,
+                                );
                                 b0 = (m0 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
-                                P::on_single(z0, 0b0001, ByteMask::from_range(min..), out);
+                                P::on_single(0b0001, ByteMask::from_range(min..), &mut z0_grafts);
                                 break 'merge_level;
                             }
                         }
                         0b0010 => {
                             if let Some(next) = b {
-                                P::on_single(z1, 0b0010, ByteMask::from_range(min..next), out);
+                                P::on_single(
+                                    0b0010,
+                                    ByteMask::from_range(min..next),
+                                    &mut z1_grafts,
+                                );
                                 b1 = (m1 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
-                                P::on_single(z1, 0b0010, ByteMask::from_range(min..), out);
+                                P::on_single(0b0010, ByteMask::from_range(min..), &mut z1_grafts);
                                 break 'merge_level;
                             }
                         }
                         0b0100 => {
                             if let Some(next) = b {
-                                P::on_single(z2, 0b0100, ByteMask::from_range(min..next), out);
+                                P::on_single(
+                                    0b0100,
+                                    ByteMask::from_range(min..next),
+                                    &mut z2_grafts,
+                                );
                                 b2 = (m2 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
-                                P::on_single(z2, 0b0100, ByteMask::from_range(min..), out);
+                                P::on_single(0b0100, ByteMask::from_range(min..), &mut z2_grafts);
                                 break 'merge_level;
                             }
                         }
                         0b1000 => {
                             if let Some(next) = b {
-                                P::on_single(z3, 0b1000, ByteMask::from_range(min..next), out);
+                                P::on_single(
+                                    0b1000,
+                                    ByteMask::from_range(min..next),
+                                    &mut z3_grafts,
+                                );
                                 b3 = (m3 & ByteMask::from_range(next..)).next_bit(0);
                             } else {
-                                P::on_single(z3, 0b1000, ByteMask::from_range(min..), out);
+                                P::on_single(0b1000, ByteMask::from_range(min..), &mut z3_grafts);
                                 break 'merge_level;
                             }
                         }
@@ -1154,6 +1333,18 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
                 break 'merge_level;
             }
         }
+
+        flush_grafts(
+            z0,
+            &mut z0_grafts,
+            z1,
+            &mut z1_grafts,
+            z2,
+            &mut z2_grafts,
+            z3,
+            &mut z3_grafts,
+            out,
+        );
 
         // If we are at root and no deeper recursion pending, we're done
         if k == 0 {
@@ -1473,6 +1664,26 @@ where
         active_refs(zs, active).map(|z| lift(z.val()))
     }
 
+    #[inline]
+    fn flush_active_grafts<V, Z, Out, A, const N: usize>(
+        zs: &[Z; N],
+        grafts: &mut [ByteMask; N],
+        active: u64,
+        out: &mut Out,
+    ) where
+        V: Clone + Send + Sync,
+        A: Allocator,
+        Z: ZipperInfallibleSubtries<V, A>,
+        Out: ZipperWriting<V, A>,
+    {
+        for_each_bit(active, |i| {
+            if grafts[i] != ByteMask::EMPTY {
+                out.graft_masked_branches(&zs[i], grafts[i], false);
+                grafts[i] = ByteMask::EMPTY;
+            }
+        });
+    }
+
     fn all_active_share<Z, const N: usize>(zs: &[Z; N], active: u64) -> bool
     where
         Z: ZipperConcrete,
@@ -1506,6 +1717,7 @@ where
         masks[i] = zs[i].child_mask();
         bytes[i] = masks[i].indexed_bit::<true>(0);
     });
+    let mut grafts = [ByteMask::EMPTY; N];
 
     // At each node, the algorithm:
     //
@@ -1576,6 +1788,8 @@ where
 
                     // - Case A: full match (frontier == all bits)
                     if frontier == active {
+                        flush_active_grafts(zs, &mut grafts, active, out);
+
                         out.descend_to_byte(a);
 
                         // descend and refresh masks and indices
@@ -1617,11 +1831,11 @@ where
                         let i = frontier.trailing_zeros() as usize;
                         match next {
                             None => {
-                                P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..), out);
+                                P::on_single(frontier, ByteMask::from_range(a..), &mut grafts[i]);
                                 break 'merge_level;
                             }
                             Some(b) => {
-                                P::on_single(&mut zs[i], frontier, ByteMask::from_range(a..b), out);
+                                P::on_single(frontier, ByteMask::from_range(a..b), &mut grafts[i]);
                                 // advance
                                 bytes[i] = (masks[i] & ByteMask::from_range(b..)).next_bit(0);
                             }
@@ -1689,6 +1903,7 @@ where
                 }
             }
         }
+        flush_active_grafts(zs, &mut grafts, active, out);
 
         if (k == 0) {
             break 'ascend;
@@ -2335,14 +2550,9 @@ where
 
 struct Join;
 impl<V: Clone + Send + Sync> MergePolicy<V> for Join {
-    #[inline]
-    fn on_single<Z, Out, A>(z: &mut Z, _mask: u64, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        out.graft_masked_branches(z, range, false)
+    #[inline(always)]
+    fn on_single(_mask: u64, range: ByteMask, combined_mask: &mut ByteMask) {
+        *combined_mask |= range;
     }
 
     #[inline]
@@ -2394,13 +2604,7 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Join {
 struct Meet;
 impl<V: Clone + Send + Sync> MergePolicy<V> for Meet {
     #[inline(always)]
-    fn on_single<Z, Out, A>(_z: &mut Z, _mask: u64, _range: ByteMask, _out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-    }
+    fn on_single(_mask: u64, _range: ByteMask, _: &mut ByteMask) {}
 
     #[inline(always)]
     fn descend_on_some_equal(_mask: u64) -> bool {
@@ -2493,34 +2697,18 @@ fn meet_impl<'a, V: Lattice + Clone>(a: Cow<'a, V>, b: Cow<'a, V>) -> Option<Cow
 
 struct Subtract;
 impl<V: Clone + Send + Sync> MergePolicy<V> for Subtract {
-    #[inline]
-    fn on_left_only<Z, Out, A>(z: &mut Z, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        out.graft_masked_branches(z, range, false);
+    #[inline(always)]
+    fn on_left_only(range: ByteMask, combined_mask: &mut ByteMask) {
+        *combined_mask |= range;
     }
 
-    #[inline]
-    fn on_right_only<Z, Out, A>(_z: &mut Z, _range: ByteMask, _out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-    }
+    #[inline(always)]
+    fn on_right_only(_range: ByteMask, _: &mut ByteMask) {}
 
-    #[inline]
-    fn on_single<Z, Out, A>(z: &mut Z, mask: u64, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
+    #[inline(always)]
+    fn on_single(mask: u64, range: ByteMask, combined_mask: &mut ByteMask) {
         if mask == 1 {
-            out.graft_masked_branches(z, range, false)
+            *combined_mask |= range
         }
     }
 
@@ -2592,13 +2780,8 @@ fn subtract_impl<'a, V: DistributiveLattice + Clone>(
 struct SymDiff;
 impl<V: Clone + Send + Sync> MergePolicy<V> for SymDiff {
     #[inline(always)]
-    fn on_single<Z, Out, A>(z: &mut Z, _mask: u64, range: ByteMask, out: &mut Out)
-    where
-        A: Allocator,
-        Z: ZipperInfallibleSubtries<V, A> + ZipperMoving,
-        Out: ZipperWriting<V, A>,
-    {
-        out.graft_masked_branches(z, range, false)
+    fn on_single(_mask: u64, range: ByteMask, combined_mask: &mut ByteMask) {
+        *combined_mask |= range;
     }
 
     #[inline(always)]
