@@ -2662,6 +2662,33 @@ mod tests {
         }
     }
 
+    /// Regression test: `get_val_at` must return `None` for a byte that is
+    /// absent from a branch's child mask, rather than reading the wrong
+    /// sibling (byte below the mask range) or walking past the last sibling
+    /// (byte above the mask range, which subtract-overflow panics in debug).
+    #[test]
+    fn test_act_get_absent_branch_byte() {
+        // Single-char keys force a branch root with children on {b'b', b'd', b'f'}.
+        let items: [(&str, u64); 3] = [("b", 1), ("d", 2), ("f", 3)];
+        let btm = PathMap::from_iter(items.iter().copied());
+        let act = ArenaCompactTree::from_zipper(btm.read_zipper(), |&v| v);
+
+        // Present keys still resolve correctly.
+        for (k, v) in items {
+            assert_eq!(act.get_val_at(k), Some(v), "present key {k}");
+        }
+
+        // Absent bytes below, between, and above the child mask range.
+        // b'a' is below the minimum child (would have read the first sibling),
+        // b'g'/b'z' are above the maximum (would have walked past the last).
+        for absent in ["a", "c", "e", "g", "z"] {
+            assert_eq!(act.get_val_at(absent), None, "absent byte {absent}");
+        }
+
+        // Absent path that descends one present child then diverges.
+        assert_eq!(act.get_val_at("bx"), None);
+    }
+
     #[test]
     fn test_act_round_trip() {
         let path_vals = PATHS.iter().enumerate()
