@@ -123,17 +123,22 @@ impl<V: Clone + Send + Sync + Unpin> PathMap<V, GlobalAlloc> {
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
-    /// Whether `self` and `other` share the same root node by pointer (O(1)).
-    /// PathMap is copy-on-write, so a map and a clone of it stay `same_trie`
-    /// until one is mutated: any insert or removal replaces the root node with a
-    /// fresh allocation. A `true` result therefore proves the trie's node
-    /// structure has not changed relative to `other`. Because `other` (typically
-    /// a cheap COW clone kept as a snapshot) holds the old root alive, its
-    /// address cannot be reused while the snapshot exists, so this is free of the
-    /// ABA pointer-reuse hazard. Root VALUES (the empty-key entry) are not
-    /// compared; callers that key a cache on subtree contents do not touch it.
+    /// Returns whether both maps have the same root node pointer, or both have no root node.
+    ///
+    /// NOTE: This is root pointer identity, not logical or structural equality.
+    /// Two separately built maps with the same contents return `false`.
+    ///
+    /// A `true` result means neither map has a root value and both maps share the
+    /// same root node state. If either map has a root value, this returns `false`
+    /// because root values are stored outside the root node, which keeps `true`
+    /// implying the same contents.
     #[inline]
-    pub fn same_trie(&self, other: &Self) -> bool {
+    pub fn root_ptr_eq(&self, other: &Self) -> bool {
+        if unsafe { &*self.root_val.get() }.is_some()
+            || unsafe { &*other.root_val.get() }.is_some()
+        {
+            return false;
+        }
         let a = unsafe { &*self.root.get() };
         let b = unsafe { &*other.root.get() };
         match (a, b) {
@@ -1475,28 +1480,40 @@ mod tests {
 // the map, and we can get rid of duplicate methods like `graft_map`
 
 #[cfg(test)]
-mod same_trie_tests {
+mod root_ptr_eq_tests {
     use crate::PathMap;
     #[test]
-    fn same_trie_tracks_cow_mutation() {
+    fn root_ptr_eq_tracks_cow_mutation() {
         let mut m: PathMap<()> = PathMap::new();
         m.insert(b"(edge a b)", ());
         let snap = m.clone();                       // COW clone shares the root
-        assert!(m.same_trie(&snap), "a clone shares the root");
+        assert!(m.root_ptr_eq(&snap), "a clone shares the root");
         m.insert(b"(edge b c)", ());                // mutation CoW-replaces the root
-        assert!(!m.same_trie(&snap), "a write must change the root identity");
+        assert!(!m.root_ptr_eq(&snap), "a write must change the root identity");
         let snap2 = m.clone();
-        assert!(m.same_trie(&snap2));
+        assert!(m.root_ptr_eq(&snap2));
         m.remove(b"(edge b c)");
-        assert!(!m.same_trie(&snap2), "a removal must change the root identity");
+        assert!(!m.root_ptr_eq(&snap2), "a removal must change the root identity");
         // two independently-built equal maps are NOT the same trie (different roots)
         let mut n: PathMap<()> = PathMap::new();
         n.insert(b"(edge a b)", ());
         // n and snap have equal CONTENT but distinct roots
-        assert!(!n.same_trie(&snap));
+        assert!(!n.root_ptr_eq(&snap));
         // empty vs empty
         let e1: PathMap<()> = PathMap::new();
         let e2: PathMap<()> = PathMap::new();
-        assert!(e1.same_trie(&e2), "two empty maps share the None root");
+        assert!(e1.root_ptr_eq(&e2), "two empty maps share the None root");
+    }
+
+    #[test]
+    fn root_ptr_eq_is_false_when_a_root_value_differs() {
+        let mut m = PathMap::<u64>::new();
+        m.set_val_at(b"a", 1);
+        let mut snap = m.clone();
+        snap.set_val_at(b"", 99);
+        assert!(snap.get(b"" as &[u8]).is_some());
+        assert!(m.get(b"" as &[u8]).is_none());
+        assert!(!m.root_ptr_eq(&snap));
+        assert!(!snap.root_ptr_eq(&m));
     }
 }
