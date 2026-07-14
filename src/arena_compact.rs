@@ -132,6 +132,11 @@ const MAX_VARINT_SIZE: usize = 9;
 
 const U64_SIZE: usize = core::mem::size_of::<u64>();
 
+/// Size of the trailer that [`ArenaCompactTree::merge_zipper_into_file`]
+/// appends after each merge: two little-endian `u64`s,
+/// `[previous_suffix, previous_root]` (see [`ArenaCompactTree::root_history`]).
+const ROOT_TRAILER_SIZE: usize = 2 * U64_SIZE;
+
 /// File magic signature
 pub const MAGIC_LENGTH: usize = 8;
 // Changes:
@@ -679,6 +684,45 @@ where Storage: AsRef<[u8]>
         (self.get_node(root_id).0, root_id)
     }
 
+    /// The chain of historical roots recorded in the file, newest first.
+    ///
+    /// Each [`ArenaCompactTree::merge_zipper_into_file`] appends a
+    /// [`ROOT_TRAILER_SIZE`]-byte trailer `[previous_suffix, previous_root]`
+    /// capturing the root that was live just before that merge, so the roots
+    /// form a singly-linked list: the current root (at [`MAGIC_LENGTH`]) is the
+    /// head, and each trailer's `previous_root` points back to the prior one,
+    /// with `previous_suffix` giving the file offset of that root's own trailer.
+    ///
+    /// Walking stops at the base file, whose trailing zero padding reads back as
+    /// a zero `previous_root`. A file that has never been merged therefore yields
+    /// a single element: its current root.
+    ///
+    /// The `previous_suffix` field is written for future use (chaining and
+    /// suffix reclamation); this reader only follows it to enumerate roots.
+    pub fn root_history(&self) -> Vec<NodeId> {
+        let data = self.storage.as_ref();
+        let (_, root_id) = self.get_root();
+        let mut roots = vec![root_id];
+        // The most recent merge's trailer, if any, occupies the final bytes.
+        let mut off = data.len().saturating_sub(ROOT_TRAILER_SIZE);
+        while off >= MAGIC_LENGTH + U64_SIZE && off + ROOT_TRAILER_SIZE <= data.len() {
+            let suffix_buf: [u8; U64_SIZE] = data[off..][..U64_SIZE].try_into().unwrap();
+            let root_buf: [u8; U64_SIZE] = data[off + U64_SIZE..][..U64_SIZE].try_into().unwrap();
+            let previous_suffix = u64::from_le_bytes(suffix_buf);
+            let previous_root = u64::from_le_bytes(root_buf);
+            // A base file ends in zero padding, so its final u64 is zero.
+            if previous_root == 0 {
+                break;
+            }
+            roots.push(NodeId(previous_root));
+            if previous_suffix == 0 {
+                break;
+            }
+            off = previous_suffix as usize;
+        }
+        roots
+    }
+
     /// Find existing [LineId] that contains provided line `data`
     ///
     /// This is done by calculating the hash of the data, and storing it in a map.
@@ -1215,6 +1259,10 @@ impl ArenaCompactTree<Mmap> {
     /// runs, which the format requires to be contiguous) are appended, and
     /// the root offset at byte 8 is rewritten to the new root.
     ///
+    /// Each merge also appends a `[previous_suffix, previous_root]` trailer
+    /// recording the pre-merge root, chaining the roots into a singly-linked
+    /// list that [`Self::root_history`] walks.
+    ///
     /// Where both tries hold a value on the same path, the zipper's value
     /// wins. If the zipper adds nothing, the file is left untouched.
     ///
@@ -1258,6 +1306,19 @@ impl ArenaCompactTree<Mmap> {
         let root_buf: [u8; U64_SIZE] = old[MAGIC_LENGTH..][..U64_SIZE].try_into().unwrap();
         let root_id = NodeId(u64::from_le_bytes(root_buf));
 
+        // Was the old file itself produced by a merge? A base file ends with the
+        // zero padding, so its final u64 is zero; a merged file records a
+        // non-zero `previous_root` there. When it is a merged file, its trailer
+        // begins `ROOT_TRAILER_SIZE` bytes from the end, and the new trailer's
+        // `previous_suffix` links back to it, extending the root chain.
+        let old_len = old.len();
+        let old_prev_root: [u8; U64_SIZE] = old[old_len - U64_SIZE..].try_into().unwrap();
+        let previous_suffix = if u64::from_le_bytes(old_prev_root) != 0 {
+            (old_len - ROOT_TRAILER_SIZE) as u64
+        } else {
+            0
+        };
+
         let mut out = BufWriter::with_capacity(DUMPER_BUFFER_SIZE, file);
         out.seek(SeekFrom::End(0))?;
         let mut merger = ZipperMerger {
@@ -1272,8 +1333,12 @@ impl ArenaCompactTree<Mmap> {
         let (merged, changed) = merger.merge_node(root_id)?;
         if changed {
             let new_root = merger.push_merged(merged)?;
-            // Maintain the trailing-padding invariant for the appended data
-            merger.out.write_all(&[0; MAX_VARINT_SIZE - 1])?;
+            // Append the `[previous_suffix, previous_root]` trailer. It records
+            // the pre-merge root so the roots form a walkable linked list (see
+            // `root_history`), and its `ROOT_TRAILER_SIZE` bytes also satisfy
+            // the trailing-padding invariant the varint reader relies on.
+            merger.out.write_all(&previous_suffix.to_le_bytes())?;
+            merger.out.write_all(&root_id.0.to_le_bytes())?;
             merger.out.seek(SeekFrom::Start(MAGIC_LENGTH as u64))?;
             merger.out.write_all(&new_root.0.to_le_bytes())?;
         }
@@ -2831,8 +2896,10 @@ mod tests {
     fn test_act_merge_repeated_and_act_source() {
         // Several merge waves over an LCG key soup; the last wave merges from
         // an ACT zipper instead of a PathMap zipper.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("waves.act");
+        // Written under the project's `tests/` dir so the merged file can be inspected.
+        let tests_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let file = tests_dir.join("act_merge.act");
         let mut state: u64 = 0x1234_5678_9abc_def0;
         let mut next = move || {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -2877,6 +2944,17 @@ mod tests {
 
             let items: Vec<(&str, u64)> = expect.iter().map(|(k, v)| (k.as_str(), *v)).collect();
             assert_act_content(&merged, &items);
+
+            // The root chain grows by one per merge: the base root plus one
+            // recorded root for each merge performed so far. Roots are appended,
+            // so newest-first they strictly decrease in file offset, and the head
+            // is the live root at the header.
+            let history = merged.root_history();
+            assert_eq!(history.len(), wave_idx + 2, "root history length");
+            assert_eq!(history[0], merged.get_root().1, "history head is live root");
+            for pair in history.windows(2) {
+                assert!(pair[0].0 > pair[1].0, "roots must be newest-first: {history:?}");
+            }
         }
     }
 
