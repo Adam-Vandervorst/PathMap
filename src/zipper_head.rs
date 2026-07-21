@@ -155,11 +155,9 @@ crate::impl_name_only_debug!(
 /// `ZipperHeadOwned` is useful when managing the lifetime of an ordinary `ZipperHead` is unwieldy, as
 /// often occurs in multi-threaded situations.
 ///
-/// TODO: `ZipperHeadOwned` should be benchmarked against an ordinary `ZipperHead` to see how much
-/// performance is lost.  There is a `Mutex` in `ZipperHeadOwned` so that it can be `Sync`, while the
-/// ordinary `ZipperHead` uses an `UnsafeCell`.  However in a scenario where all the zipper-creation
-/// activity was happening from the same thread, it's unclear how much cost in involved locking an
-/// unlocking the mutex.
+/// Benchmark note: `benches/zipper_head_owned.rs` compares same-thread read creation and write
+/// creation/cleanup against ordinary `ZipperHead`. The owned head pays for a `Mutex` so it can be
+/// `Sync`, while ordinary `ZipperHead` uses an `UnsafeCell`.
 pub struct ZipperHeadOwned<V: Clone + Send + Sync + 'static, A: Allocator + 'static = GlobalAlloc> {
     z: std::sync::Mutex<WriteZipperOwned<V, A>>,
     tracker_paths: SharedTrackerPaths,
