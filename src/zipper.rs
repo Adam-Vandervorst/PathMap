@@ -1283,7 +1283,6 @@ pub(crate) const EXPECTED_DEPTH: usize = 16;
 pub(crate) const EXPECTED_PATH_LEN: usize = 64;
 
 pub(crate) mod read_zipper_core {
-    use crate::trie_node::*;
     use crate::PathMap;
     use crate::zipper::*;
 
