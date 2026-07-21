@@ -303,8 +303,32 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         unsafe{ self.values.get_unchecked_mut(ix) }
     }
 
+    // ------ IterToken format for ByteNode ------
+    // Iter tokens pack the next byte position to inspect with the corresponding index into `values`.
+    // The low 9 bits store one more than the last returned byte, or 0 before iteration starts.  The
+    // upper bits store the index of the next CoFree in `values`, avoiding a `mask.index_of` recompute
+    // on every item.  `iter_token_for_path` computes the values index once for the requested path.
+    const ITER_TOKEN_BYTE_BITS: u64 = 9;
+    const ITER_TOKEN_BYTE_MASK: IterToken = (1 << Self::ITER_TOKEN_BYTE_BITS) - 1;
+
     #[inline(always)]
-    fn next_iter_byte_from(&self, start: IterToken) -> Option<u8> {
+    fn iter_token(next_byte: u16, values_idx: u16) -> IterToken {
+        (values_idx as IterToken) << Self::ITER_TOKEN_BYTE_BITS | next_byte as IterToken
+    }
+
+    #[inline(always)]
+    fn iter_token_next_byte(token: IterToken) -> u16 {
+        (token & Self::ITER_TOKEN_BYTE_MASK) as u16
+    }
+
+    #[inline(always)]
+    fn iter_token_values_idx(token: IterToken) -> usize {
+        (token >> Self::ITER_TOKEN_BYTE_BITS) as usize
+    }
+
+    #[inline(always)]
+    fn next_iter_item_from(&self, token: IterToken) -> Option<(u8, usize)> {
+        let start = Self::iter_token_next_byte(token);
         if start >= 256 {
             return None;
         }
@@ -314,7 +338,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         loop {
             let word = unsafe { *self.mask.0.get_unchecked(word_idx) } & (!0u64 << bit_idx);
             if word != 0 {
-                return Some((word_idx as u8) * 64 + word.trailing_zeros() as u8);
+                return Some(((word_idx as u8) * 64 + word.trailing_zeros() as u8, Self::iter_token_values_idx(token)));
             }
 
             word_idx += 1;
@@ -946,24 +970,29 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
     #[inline(always)]
     fn new_iter_token(&self) -> IterToken {
-        0
+        Self::iter_token(0, 0)
     }
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
         if key.len() != 1 {
             self.new_iter_token()
         } else {
-            unsafe { *key.get_unchecked(0) as IterToken + 1 }
+            let key_byte = unsafe{ *key.get_unchecked(0) };
+            let mut values_idx = self.mask.index_of(key_byte);
+            if self.mask.test_bit(key_byte) {
+                values_idx += 1;
+            }
+            Self::iter_token(key_byte as u16 + 1, values_idx as u16)
         }
     }
     #[inline(always)]
     fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
-        let Some(k) = self.next_iter_byte_from(token) else {
+        let Some((k, values_idx)) = self.next_iter_item_from(token) else {
             return (NODE_ITER_FINISHED, &[], None, None);
         };
 
-        let next_token = k as IterToken + 1;
-        let cf = unsafe { self.get_unchecked(k) };
+        let next_token = Self::iter_token(k as u16 + 1, values_idx as u16 + 1);
+        let cf = unsafe{ self.values.get_unchecked(values_idx) };
         let k = k as usize;
         (next_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
     }
@@ -2410,4 +2439,16 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
         }
     }
     assert_eq!(visited_after_127, [128, 191, 192, 255]);
+
+    let mut token = node.iter_token_for_path(&[65]);
+    let mut visited_after_missing_65 = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(Some(&path[0]), value);
+            visited_after_missing_65.push(path[0]);
+        }
+    }
+    assert_eq!(visited_after_missing_65, [127, 128, 191, 192, 255]);
 }

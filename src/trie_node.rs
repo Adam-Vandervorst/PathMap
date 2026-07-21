@@ -185,11 +185,19 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// Returns `true` if the node contains no children nor values, otherwise false
     fn node_is_empty(&self) -> bool;
 
-    /// Generates a new iter token, to iterate the children and values contained within this node.
-    /// The token is a node-local cursor.  It only needs to represent the next position to inspect within
-    /// the current node, not an arbitrary path through the trie, so 64 bits are enough: the ByteNode keeps
-    /// one more than the last path byte returned (or 0 at the start) and recomputes the remaining mask from
-    /// the node itself, rather than caching the mask word inside the token.
+    /// Generates a new iter token, to iterate the children and values contained within this node
+    ///
+    /// The iter token is a node-local cursor.  It must represent any position within a node type, and
+    /// should involve a minimum of computation to advance to the next position, but it does not need to
+    /// encode an arbitrary path through the trie.
+    ///
+    /// To the more general question of whether 64 bits will be enough for any possible future node
+    /// structure, currently MAX_NODE_KEY_BYTES is limited to 48, but there is no limit on the branching
+    /// factor within that node.  So even 128 bits would be insufficient to encode all paths in theory.
+    /// However a fixed-size node structure has a physical limit on its complexity.  If we assume we will
+    /// limit a node to 4KB, 12 bits is enough to address any byte within that physical structure, so there
+    /// is probably some clever encoding that can address any position that it could contain, using 64 bits,
+    /// with a reasonable time and memory-fetch overhead.
     fn new_iter_token(&self) -> IterToken;
 
     /// Generates an iter token that can be passed to [Self::next_items] to continue iteration from the
