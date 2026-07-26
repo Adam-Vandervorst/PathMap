@@ -110,6 +110,15 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             alloc,
         }
     }
+    #[inline(always)]
+    fn slot_in_word(mask_word: u64, word_base: usize, bit_idx: u32) -> usize {
+        let preceding_bits = if bit_idx == 0 {
+            0
+        } else {
+            (1u64 << bit_idx) - 1
+        };
+        word_base + (mask_word & preceding_bits).count_ones() as usize
+    }
     #[inline]
     pub fn reserve_capacity(&mut self, additional: usize) {
         self.values.reserve(additional)
@@ -301,6 +310,52 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         let ix = self.mask.index_of(k) as usize;
         // println!("pos ix {} {} {:b}", pos, ix, self.mask);
         unsafe{ self.values.get_unchecked_mut(ix) }
+    }
+
+    // ------ IterToken format for ByteNode ------
+    // Iter tokens pack the next byte position to inspect with the corresponding index into `values`.
+    // The low 9 bits store one more than the last returned byte, or 0 before iteration starts.  The
+    // upper bits store the index of the next CoFree in `values`, avoiding a `mask.index_of` recompute
+    // on every item.  `iter_token_for_path` computes the values index once for the requested path.
+    const ITER_TOKEN_BYTE_BITS: u64 = 9;
+    const ITER_TOKEN_BYTE_MASK: IterToken = (1 << Self::ITER_TOKEN_BYTE_BITS) - 1;
+
+    #[inline(always)]
+    fn iter_token(next_byte: u16, values_idx: u16) -> IterToken {
+        (values_idx as IterToken) << Self::ITER_TOKEN_BYTE_BITS | next_byte as IterToken
+    }
+
+    #[inline(always)]
+    fn iter_token_next_byte(token: IterToken) -> u16 {
+        (token & Self::ITER_TOKEN_BYTE_MASK) as u16
+    }
+
+    #[inline(always)]
+    fn iter_token_values_idx(token: IterToken) -> usize {
+        (token >> Self::ITER_TOKEN_BYTE_BITS) as usize
+    }
+
+    #[inline(always)]
+    fn next_iter_item_from(&self, token: IterToken) -> Option<(u8, usize)> {
+        let start = Self::iter_token_next_byte(token);
+        if start >= 256 {
+            return None;
+        }
+
+        let mut word_idx = (start >> 6) as usize;
+        let mut bit_idx = (start & 0x3F) as u32;
+        loop {
+            let word = unsafe { *self.mask.0.get_unchecked(word_idx) } & (!0u64 << bit_idx);
+            if word != 0 {
+                return Some(((word_idx as u8) * 64 + word.trailing_zeros() as u8, Self::iter_token_values_idx(token)));
+            }
+
+            word_idx += 1;
+            if word_idx == 4 {
+                return None;
+            }
+            bit_idx = 0;
+        }
     }
 
     #[inline]
@@ -923,49 +978,32 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         self.values.len() == 0
     }
     #[inline(always)]
-    fn new_iter_token(&self) -> u128 {
-        self.mask.0[0] as u128
+    fn new_iter_token(&self) -> IterToken {
+        Self::iter_token(0, 0)
     }
     #[inline(always)]
-    fn iter_token_for_path(&self, key: &[u8]) -> u128 {
+    fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
         if key.len() != 1 {
             self.new_iter_token()
         } else {
-            let k = *unsafe{ key.get_unchecked(0) } as usize;
-            let idx = (k & 0b11000000) >> 6;
-            let bit_i = k & 0b00111111;
-            debug_assert!(idx < 4);
-            let mask: u64 = if bit_i+1 < 64 {
-                (0xFFFFFFFFFFFFFFFF << bit_i+1) & unsafe{ self.mask.0.get_unchecked(idx) }
-            } else {
-                0
-            };
-            ((idx as u128) << 64) | (mask as u128)
+            let key_byte = unsafe{ *key.get_unchecked(0) };
+            let mut values_idx = self.mask.index_of(key_byte);
+            if self.mask.test_bit(key_byte) {
+                values_idx += 1;
+            }
+            Self::iter_token(key_byte as u16 + 1, values_idx as u16)
         }
     }
     #[inline(always)]
-    fn next_items(&self, token: u128) -> (u128, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
-        let mut i = (token >> 64) as u8;
-        let mut w = token as u64;
-        loop {
-            if w != 0 {
-                let wi = w.trailing_zeros() as u8;
-                w ^= 1u64 << wi;
-                let k = i*64 + wi;
+    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+        let Some((k, values_idx)) = self.next_iter_item_from(token) else {
+            return (NODE_ITER_FINISHED, &[], None, None);
+        };
 
-                let new_token = ((i as u128) << 64) | (w as u128);
-                let cf = unsafe{ self.get_unchecked(k) };
-                let k = k as usize;
-                return (new_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
-
-            } else if i < 3 {
-                i += 1;
-
-                w = unsafe { *self.mask.0.get_unchecked(i as usize) };
-            } else {
-                return (NODE_ITER_FINISHED, &[], None, None)
-            }
-        }
+        let next_token = Self::iter_token(k as u16 + 1, values_idx as u16 + 1);
+        let cf = unsafe{ self.values.get_unchecked(values_idx) };
+        let k = k as usize;
+        (next_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
     }
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
         //Discussion: These two implementations do the same thing but with a slightly different ordering of
@@ -2107,10 +2145,8 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
     }
 
     fn pmeet(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> {
-        // TODO this technically doesn't need to calculate and iterate over jm
-        // iterating over mm and calculating m such that the following suffices
-        // c_{self,other} += popcnt(m & {self,other})
-        let jm: ByteMask = self.mask | other.mask;
+        // Iterate the overlap mask directly. Slot indexes are recovered with
+        // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
 
         let mut is_identity = self.mask == mm;
@@ -2122,58 +2158,55 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         let mut v = ValuesVec::with_capacity_in(len, self.alloc.clone());
         let new_v = v.v.spare_capacity_mut();
 
-        let mut l = 0;
-        let mut r = 0;
         let mut c = 0;
+        let mut self_word_base = 0;
+        let mut other_word_base = 0;
 
         for i in 0..4 {
-            let mut lm = jm.0[i];
+            let self_word = self.mask.0[i];
+            let other_word = other.mask.0[i];
+            let mut lm = mm.0[i];
             while lm != 0 {
                 let index = lm.trailing_zeros();
+                let l = Self::slot_in_word(self_word, self_word_base, index);
+                let r = Self::slot_in_word(other_word, other_word_base, index);
 
-                if ((1u64 << index) & mm.0[i]) != 0 {
-                    //This runs for cofrees that exist in both nodes
-
-                    let lv = unsafe { self.values.get_unchecked(l) };
-                    let rv = unsafe { other.values.get_unchecked(r) };
-                    match lv.pmeet(rv) {
-                        AlgebraicResult::None => {
-                            is_counter_identity = false;
+                //This runs for cofrees that exist in both nodes
+                let lv = unsafe { self.values.get_unchecked(l) };
+                let rv = unsafe { other.values.get_unchecked(r) };
+                match lv.pmeet(rv) {
+                    AlgebraicResult::None => {
+                        is_counter_identity = false;
+                        is_identity = false;
+                        mm.0[i] ^= 1u64 << index;
+                    },
+                    AlgebraicResult::Identity(mask) => {
+                        debug_assert!((mask & SELF_IDENT > 0) || (mask & COUNTER_IDENT > 0));
+                        if mask & SELF_IDENT == 0 {
                             is_identity = false;
-                            mm.0[i] ^= 1u64 << index;
-                        },
-                        AlgebraicResult::Identity(mask) => {
-                            debug_assert!((mask & SELF_IDENT > 0) || (mask & COUNTER_IDENT > 0));
-                            if mask & SELF_IDENT == 0 {
-                                is_identity = false;
-                            }
-                            if mask & COUNTER_IDENT == 0 {
-                                is_counter_identity = false;
-                            }
-                            if mask & SELF_IDENT > 0 {
-                                unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
-                            } else {
-                                let new_cf = Cf::from_cf(rv.clone());
-                                unsafe { new_v.get_unchecked_mut(c).write(new_cf) };
-                            }
-                            c += 1;
-                        },
-                        AlgebraicResult::Element(jv) => {
-                            is_identity = false;
+                        }
+                        if mask & COUNTER_IDENT == 0 {
                             is_counter_identity = false;
-                            unsafe { new_v.get_unchecked_mut(c).write(jv) };
-                            c += 1;
-                        },
-                    }
-                    l += 1;
-                    r += 1;
-                } else if ((1u64 << index) & self.mask.0[i]) != 0 {
-                    l += 1;
-                } else {
-                    r += 1;
+                        }
+                        if mask & SELF_IDENT > 0 {
+                            unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
+                        } else {
+                            let new_cf = Cf::from_cf(rv.clone());
+                            unsafe { new_v.get_unchecked_mut(c).write(new_cf) };
+                        }
+                        c += 1;
+                    },
+                    AlgebraicResult::Element(jv) => {
+                        is_identity = false;
+                        is_counter_identity = false;
+                        unsafe { new_v.get_unchecked_mut(c).write(jv) };
+                        c += 1;
+                    },
                 }
                 lm ^= 1u64 << index;
             }
+            self_word_base += self_word.count_ones() as usize;
+            other_word_base += other_word.count_ones() as usize;
         }
 
         unsafe{ v.v.set_len(c); }
@@ -2286,13 +2319,10 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V,
 // `other` be differently parameterized types
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> {
     fn prestrict<OtherCf: CoFree<V=V, A=A>>(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> where Self: Sized {
-        let mut is_identity = true;
-
-        // TODO this technically doesn't need to calculate and iterate over jm
-        // iterating over mm and calculating m such that the following suffices
-        // c_{self,other} += popcnt(m & {self,other})
-        let jm: ByteMask = self.mask | other.mask;
+        // Iterate the overlap mask directly. Slot indexes are recovered with
+        // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
+        let mut is_identity = self.mask == mm && other.mask == mm;
 
         let mmc = [mm.0[0].count_ones(), mm.0[1].count_ones(), mm.0[2].count_ones(), mm.0[3].count_ones()];
 
@@ -2300,48 +2330,43 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         let mut v = ValuesVec::with_capacity_in(len, self.alloc.clone());
         let new_v = v.v.spare_capacity_mut();
 
-        let mut l = 0;
-        let mut r = 0;
         let mut c = 0;
+        let mut self_word_base = 0;
+        let mut other_word_base = 0;
 
         for i in 0..4 {
-            let mut lm = jm.0[i];
+            let self_word = self.mask.0[i];
+            let other_word = other.mask.0[i];
+            let mut lm = mm.0[i];
             while lm != 0 {
                 let index = lm.trailing_zeros();
+                let l = Self::slot_in_word(self_word, self_word_base, index);
+                let r = Self::slot_in_word(other_word, other_word_base, index);
 
-                if ((1u64 << index) & mm.0[i]) != 0 {
-                    let lv = unsafe { self.values.get_unchecked(l) };
-                    let rv = unsafe { other.values.get_unchecked(r) };
-                    // println!("dense prestrict {}", index as usize + i*64);
+                let lv = unsafe { self.values.get_unchecked(l) };
+                let rv = unsafe { other.values.get_unchecked(r) };
+                // println!("dense prestrict {}", index as usize + i*64);
 
-                    match lv.prestrict(rv) {
-                        AlgebraicResult::None => {
-                            is_identity = false;
-                            mm.0[i] ^= 1u64 << index;
-                        }
-                        AlgebraicResult::Identity(mask) => {
-                            debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
-                            unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
-                            c += 1;
-                        },
-                        AlgebraicResult::Element(jv) => {
-                            is_identity = false;
-                            unsafe { new_v.get_unchecked_mut(c).write(jv) };
-                            c += 1;
-                        },
+                match lv.prestrict(rv) {
+                    AlgebraicResult::None => {
+                        is_identity = false;
+                        mm.0[i] ^= 1u64 << index;
                     }
-                    l += 1;
-                    r += 1;
-                } else {
-                    is_identity = false;
-                    if ((1u64 << index) & self.mask.0[i]) != 0 {
-                        l += 1;
-                    } else {
-                        r += 1;
-                    }
+                    AlgebraicResult::Identity(mask) => {
+                        debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
+                        unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
+                        c += 1;
+                    },
+                    AlgebraicResult::Element(jv) => {
+                        is_identity = false;
+                        unsafe { new_v.get_unchecked_mut(c).write(jv) };
+                        c += 1;
+                    },
                 }
                 lm ^= 1u64 << index;
             }
+            self_word_base += self_word.count_ones() as usize;
+            other_word_base += other_word.count_ones() as usize;
         }
 
         unsafe{ v.v.set_len(c); }
@@ -2377,4 +2402,49 @@ fn bit_siblings() {
     assert_eq!(0, bit_sibling(0, 1, true));
     assert_eq!(63, bit_sibling(63, 1u64 << 63, false));
     assert_eq!(63, bit_sibling(63, 1u64 << 63, true));
+}
+
+#[test]
+fn byte_node_iter_token_crosses_mask_word_boundaries() {
+    let mut node = DenseByteNode::new_in(crate::alloc::global_alloc());
+    for byte in [0, 63, 64, 127, 128, 191, 192, 255] {
+        node.set_val(byte, byte);
+    }
+
+    let mut token = node.new_iter_token();
+    let mut visited = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(path.len(), 1);
+            assert_eq!(Some(&path[0]), value);
+            visited.push(path[0]);
+        }
+    }
+    assert_eq!(visited, [0, 63, 64, 127, 128, 191, 192, 255]);
+
+    let mut token = node.iter_token_for_path(&[127]);
+    let mut visited_after_127 = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(Some(&path[0]), value);
+            visited_after_127.push(path[0]);
+        }
+    }
+    assert_eq!(visited_after_127, [128, 191, 192, 255]);
+
+    let mut token = node.iter_token_for_path(&[65]);
+    let mut visited_after_missing_65 = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(Some(&path[0]), value);
+            visited_after_missing_65.push(path[0]);
+        }
+    }
+    assert_eq!(visited_after_missing_65, [127, 128, 191, 192, 255]);
 }
