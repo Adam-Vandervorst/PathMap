@@ -2071,7 +2071,11 @@ pub(crate) mod read_zipper_core {
                     let (_key_len, focus_node) = parent.node_get_child(self.parent_key()).unwrap();
                     focus_node.refcount() > 1
                 } else {
-                    false //root
+                    match &self.root_node {
+                        OwnedOrBorrowed::Owned(root) => root.refcount() > 1,
+                        OwnedOrBorrowed::Borrowed(root) => root.refcount() > 1,
+                        OwnedOrBorrowed::None => false,
+                    }
                 }
             }
         }
@@ -4754,6 +4758,19 @@ mod tests {
             }
         }
         assert_eq!(shared_cnt, l0_keys.len() + l0_keys.len() * l1_keys.len());
+    }
+
+    #[test]
+    fn read_zipper_is_shared_at_shared_root() {
+        let mut map: PathMap<()> = PathMap::new();
+        map.set_val_at(b"a", ());
+        let snapshot = map.clone();
+
+        let zipper = map.read_zipper();
+        assert!(zipper.at_root());
+        assert!(zipper.is_shared());
+        assert!(zipper.shared_node_id().is_some());
+        assert!(snapshot.is_shared());
     }
 
     /// This behavior is a bit counter-intuitive, but it is correct.
