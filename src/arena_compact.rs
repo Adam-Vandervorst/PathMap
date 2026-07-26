@@ -1358,6 +1358,193 @@ impl ArenaCompactTree<Mmap> {
     }
 }
 
+/// A single in-construction trie node used by [ACTOutputStream]
+///
+/// One frame exists per byte of the most recently pushed path. A frame
+/// accumulates completed child subtrees (in ascending byte order, which the
+/// sorted input guarantees) until the input stream moves past it, at which
+/// point it is sealed and written to the arena.
+struct StreamFrame {
+    /// Bytes of the children attached so far
+    mask: ByteMask,
+    /// Completed child nodes, parallel to the set bits of `mask` (ascending)
+    children: Vec<Node>,
+    /// Value at this node, if the exact path was pushed
+    value: Option<u64>,
+}
+
+impl StreamFrame {
+    fn empty() -> Self {
+        StreamFrame {
+            mask: ByteMask::EMPTY,
+            children: Vec::new(),
+            value: None,
+        }
+    }
+
+    /// A frame with no children and no value is a pure pass-through and can
+    /// be folded into a line node instead of becoming a branch node
+    fn is_passthrough(&self) -> bool {
+        self.mask.is_empty_mask() && self.value.is_none()
+    }
+}
+
+/// Builds an [ArenaCompactTree] on disk from a stream of ordered paths.
+///
+/// Paths must be pushed in strictly increasing lexicographic (byte) order.
+/// Memory usage is bounded by the longest path pushed (plus the line-reuse
+/// cache), so this can build tries far larger than available RAM.
+///
+/// # Examples
+/// ```
+/// use pathmap::arena_compact::ACTOutputStream;
+/// # fn main() -> std::io::Result<()> {
+/// let dir = tempfile::tempdir()?;
+/// let file = dir.path().join("file.act");
+/// let mut b = ACTOutputStream::new(&file)?;
+/// b.push("123")?;
+/// b.push("124")?;
+/// let tree = b.finish()?;
+/// assert_eq!(tree.get_val_at("123"), Some(0));
+/// assert_eq!(tree.get_val_at("124"), Some(0));
+/// assert_eq!(tree.get_val_at("125"), None);
+/// # Ok(())
+/// # }
+/// ```
+pub struct ACTOutputStream {
+    act: ArenaCompactTree<FileDumper>,
+    /// `stack[d]` is the in-construction node at depth `d` along `prev_path`;
+    /// `stack[0]` is the root
+    stack: Vec<StreamFrame>,
+    /// The most recently pushed path
+    prev_path: Vec<u8>,
+    /// Number of paths pushed so far
+    count: u64,
+}
+
+impl ACTOutputStream {
+    /// Create (or truncate) the file at `path` and start streaming a trie into it
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        Ok(ACTOutputStream {
+            act: ArenaCompactTree::<FileDumper>::open(path)?,
+            stack: Vec::from([StreamFrame::empty()]),
+            prev_path: Vec::new(),
+            count: 0,
+        })
+    }
+
+    /// Add `path` to the trie with a value of `0`
+    ///
+    /// Paths must arrive in strictly increasing lexicographic order,
+    /// otherwise an [InvalidInput](std::io::ErrorKind::InvalidInput) error
+    /// is returned. A path that extends the previous one (e.g. `"ab"` after
+    /// `"a"`) is fine; both keep their values.
+    pub fn push(&mut self, path: impl AsRef<[u8]>) -> Result<(), std::io::Error> {
+        self.push_val(path, 0)
+    }
+
+    /// Add `path` to the trie with the given `value`
+    ///
+    /// See [push](Self::push) for the ordering requirements.
+    pub fn push_val(
+        &mut self, path: impl AsRef<[u8]>, value: u64,
+    ) -> Result<(), std::io::Error> {
+        let path = path.as_ref();
+        if self.count > 0 && path <= &self.prev_path[..] {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "paths must be pushed in strictly increasing order",
+            ));
+        }
+        let common = find_prefix_overlap(path, &self.prev_path);
+        self.collapse_to(common)?;
+        for _ in common..path.len() {
+            self.stack.push(StreamFrame::empty());
+        }
+        self.stack.last_mut().unwrap().value = Some(value);
+        self.prev_path.truncate(common);
+        self.prev_path.extend_from_slice(&path[common..]);
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Seal every frame deeper than `target`, writing completed subtrees to
+    /// the arena and attaching them as children of the frame at `target`
+    fn collapse_to(&mut self, target: usize) -> Result<(), std::io::Error> {
+        while self.stack.len() - 1 > target {
+            let top = self.stack.len() - 1;
+            let frame = self.stack.pop().unwrap();
+            let node = self.seal(frame)?;
+            // Fold pure pass-through ancestors into a line segment
+            while self.stack.len() - 1 > target
+                && self.stack.last().unwrap().is_passthrough()
+            {
+                self.stack.pop();
+            }
+            let start = self.stack.len() - 1;
+            // `prev_path[start]` goes into the parent's mask; if the chain is
+            // longer, the remaining bytes become line data
+            let node = if top - start >= 2 {
+                let mut line = NodeLine::empty();
+                line.path = self.act.add_path(&self.prev_path[start + 1..top])?;
+                match node {
+                    Node::Branch(branch) if branch.bytemask.is_empty_mask() => {
+                        line.value = branch.value;
+                    }
+                    node => {
+                        line.child = Some(self.act.push(&node)?);
+                    }
+                }
+                Node::Line(line)
+            } else {
+                node
+            };
+            let parent = self.stack.last_mut().unwrap();
+            parent.mask.set_bit(self.prev_path[start]);
+            parent.children.push(node);
+        }
+        Ok(())
+    }
+
+    /// Write `frame`'s children to the arena (contiguously, so that
+    /// `first_child` suffices to address them) and return the branch node
+    fn seal(&mut self, frame: StreamFrame) -> Result<Node, std::io::Error> {
+        let mut first_child: Option<NodeId> = None;
+        for child in frame.children.iter() {
+            let id = self.act.push(child)?;
+            first_child = first_child.or(Some(id));
+        }
+        Ok(Node::Branch(NodeBranch {
+            bytemask: frame.mask,
+            first_child,
+            value: frame.value,
+        }))
+    }
+
+    /// Seal the remaining frames, write the root, and flush to disk
+    ///
+    /// Returns the finished tree, memory-mapped from the written file.
+    pub fn finish(mut self) -> Result<ArenaCompactTree<Mmap>, std::io::Error> {
+        self.collapse_to(0)?;
+        let root_frame = self.stack.pop().unwrap();
+        let root = self.seal(root_frame)?;
+        self.act.set_root(&root)?;
+        self.act.finalize()?;
+        let ArenaCompactTree { storage, counters, .. } = self.act;
+        let file = storage.buf_writer.into_inner()?;
+        let memmap = unsafe { Mmap::map(&file) }?;
+        Ok(ArenaCompactTree {
+            position: memmap.as_ref().len() as u64,
+            storage: memmap,
+            line_map: Default::default(),
+            lines: Default::default(),
+            hasher: Default::default(),
+            value: Cell::new(0),
+            counters,
+        })
+    }
+}
+
 /// A merged subtree: either an existing node reused as-is, or a freshly
 /// built node (whose descendants have already been appended).
 enum Merged {
@@ -2956,6 +3143,102 @@ mod tests {
                 assert!(pair[0].0 > pair[1].0, "roots must be newest-first: {history:?}");
             }
         }
+    }
+
+    #[test]
+    fn test_act_output_stream() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        use crate::zipper::ZipperReadOnlyValues;
+        let mut paths = PATHS.to_vec();
+        paths.sort();
+
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("stream.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        for (idx, path) in paths.iter().enumerate() {
+            out.push_val(path, idx as u64)?;
+        }
+        let tree = out.finish()?;
+        for (idx, path) in paths.iter().enumerate() {
+            assert_eq!(tree.get_val_at(path), Some(idx as u64));
+        }
+        assert_eq!(tree.get_val_at("arr"), None);
+        assert_eq!(tree.get_val_at("arrows"), None);
+
+        // The streamed tree must enumerate the same paths/values as one
+        // built through the catamorphism
+        let btm = PathMap::from_iter(
+            paths.iter().enumerate().map(|(idx, path)| (path, idx as u64)));
+        let act = ArenaCompactTree::from_zipper(btm.read_zipper(), |&v| v);
+        let mut cata_zipper = act.read_zipper_u64();
+        let mut stream_zipper = tree.read_zipper_u64();
+        loop {
+            let cata_next = cata_zipper.to_next_val();
+            let stream_next = stream_zipper.to_next_val();
+            assert_eq!(cata_next, stream_next);
+            assert_eq!(cata_zipper.path(), stream_zipper.path());
+            assert_eq!(cata_zipper.get_val(), stream_zipper.get_val());
+            if !cata_next {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_act_output_stream_prefixes() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("prefixes.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        // Empty path, paths extending previous ones, and a long chain
+        let paths: &[&str] = &["", "a", "ab", "abc", "abcdefgh", "b"];
+        for (idx, path) in paths.iter().enumerate() {
+            out.push_val(path, idx as u64)?;
+        }
+        let tree = out.finish()?;
+        for (idx, path) in paths.iter().enumerate() {
+            assert_eq!(tree.get_val_at(path), Some(idx as u64), "path={path:?}");
+        }
+        assert_eq!(tree.get_val_at("abcd"), None);
+        assert_eq!(tree.get_val_at("ba"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_act_output_stream_wide_branch() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("wide.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        // 256 children at the root exercises the child-mask encoding
+        for byte in 0..=255_u8 {
+            out.push_val([byte], byte as u64)?;
+        }
+        let tree = out.finish()?;
+        for byte in 0..=255_u8 {
+            assert_eq!(tree.get_val_at([byte]), Some(byte as u64));
+        }
+        assert_eq!(tree.get_val_at([0, 0]), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_act_output_stream_rejects_unordered() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("unordered.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        out.push("bcd")?;
+        assert!(out.push("bcd").is_err(), "duplicates must be rejected");
+        assert!(out.push("abc").is_err(), "out-of-order must be rejected");
+        assert!(out.push("b").is_err(), "prefix of previous is out-of-order");
+        out.push("bce")?;
+        let tree = out.finish()?;
+        assert_eq!(tree.get_val_at("bcd"), Some(0));
+        assert_eq!(tree.get_val_at("bce"), Some(0));
+        assert_eq!(tree.get_val_at("abc"), None);
+        Ok(())
     }
 
     #[test]
