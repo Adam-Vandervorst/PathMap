@@ -1720,3 +1720,20 @@ mod tests {
 // BitfieldLattice should be implemented on bool
 // Make monad types that can implement these traits on all prim types
 // Make a "convertable_to" trait across all prim types
+
+// GOAT, TEST TODO:  A fuzz test for some of the algebraic operations (join, meet, subtract) across all
+// different path configurations and operation orderings.
+
+// Envisioned Implementation:
+// 1. Create `set_a` of N values (e.g. integers 0..100) and assign a pseudorandom path to each element
+// 2. Create `set_b` of M values and assign a different pseudorandom path to each element
+// 3. Compose pseudorandom subsets of `set_a` and `set_b` and put them into HashSets
+// 4. Put corresponding concatenated paths (Cartesian product) into PathMaps.
+// 5. Select an operation to perform, and do the same operation to both the HashSets contining simple
+// indices and to the PathMaps.  And validate the results match
+// 6. Loop back to 3, continuing to choose additional operations to perform.
+
+// The reason behind the cartesian product (concatenated paths) is because the chances of getting overlap
+// beyond the first couple bytes of a random path are very slim.  The Cartesian product appraoch
+// means we are likely to get large common prefixes followed by splits deep in the trie, which will
+// exercise the code more thoroughly.
