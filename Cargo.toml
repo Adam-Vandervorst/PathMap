@@ -76,10 +76,6 @@ tempfile = "3.19.1"
 pasture-core = "0.5.0" # For pointcloud benchmark
 pasture-io = "0.5.0" # For pointcloud benchmark
 
-[[test]]
-name = "cow_counters"
-required-features = ["counters"]
-
 [[bench]]
 name = "superdense_keys"
 harness = false
