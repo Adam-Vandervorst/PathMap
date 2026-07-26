@@ -1545,6 +1545,12 @@ impl ACTOutputStream {
     }
 }
 
+#[cfg(feature="nightly")]
+#[path="arena_compact_nightly.rs"]
+mod arena_compact_nightly;
+#[cfg(feature="nightly")]
+pub use arena_compact_nightly::*;
+
 /// A merged subtree: either an existing node reused as-is, or a freshly
 /// built node (whose descendants have already been appended).
 enum Merged {
@@ -3265,6 +3271,111 @@ mod tests {
             format!("('{path}' {val:?} {bm:?}\n{children})")
         });
         assert_eq!(btm_value, act_value);
+        Ok(())
+    }
+
+    /// A deterministic pseudo-random `PathMap`
+    ///
+    /// The small alphabet and short paths make prefixes collide heavily, so
+    /// the trie mixes branch nodes, line nodes, and values on interior paths.
+    /// Paths are never empty: `.paths` carries no root value, so an empty path
+    /// would show up as a round-trip difference that says nothing about ACT.
+    #[cfg(any(feature = "serialization", feature = "nightly"))]
+    fn random_pathmap(seed: u64, count: usize) -> PathMap<u64> {
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        const ALPHABET: &[u8] = b"abcde";
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut map = PathMap::new();
+        for idx in 0..count {
+            let len = rng.random_range(1..12);
+            let path: Vec<u8> = (0..len)
+                .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())]).collect();
+            map.set_val_at(&path[..], idx as u64);
+        }
+        map
+    }
+
+    /// Asserts that `tree` holds exactly the paths and values of `map`
+    #[cfg(any(feature = "serialization", feature = "nightly"))]
+    fn assert_act_matches_map(map: &PathMap<u64>, tree: &ArenaCompactTree<super::Mmap>) {
+        let mut map_zipper = map.read_zipper();
+        let mut act_zipper = tree.read_zipper_u64();
+        loop {
+            let map_next = map_zipper.to_next_val();
+            assert_eq!(map_next, act_zipper.to_next_val());
+            assert_eq!(map_zipper.path(), act_zipper.path());
+            assert_eq!(map_zipper.val().copied(), act_zipper.val().copied());
+            if !map_next { break }
+        }
+    }
+
+    /// `PathMap` -> `.paths` -> `.act`, checking the tree that comes out the
+    /// far end against the map that went in
+    #[cfg(all(feature = "serialization", not(miri)))] // miri really hates the zlib-ng-sys C API
+    #[test]
+    fn test_act_paths_round_trip() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        use crate::paths_serialization::{for_each_deserialized_path, serialize_paths_with_auxdata};
+
+        let map = random_pathmap(0xAC7_0001, 5000);
+
+        // `.paths` stores no values, so the aux-data callback collects them on
+        // the side, indexed by the order the paths were written in
+        let mut paths_data = Vec::new();
+        let mut values = Vec::new();
+        let ser = serialize_paths_with_auxdata(
+            map.read_zipper(), &mut paths_data,
+            |idx, _path, val: &u64| { assert_eq!(values.len(), idx); values.push(*val) })?;
+        assert_eq!(ser.path_count, map.val_count());
+
+        // The deserializer replays paths in the order the zipper produced
+        // them, i.e. strictly increasing, which is exactly what the streaming
+        // ACT builder requires
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("round_trip.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        let de = for_each_deserialized_path(
+            &paths_data[..], |idx, path| out.push_val(path, values[idx]))?;
+        let tree = out.finish()?;
+        assert_eq!(de.path_count, ser.path_count);
+
+        assert_act_matches_map(&map, &tree);
+        Ok(())
+    }
+
+    /// The same build, driven through [act_serialization_sink_with_vals]
+    ///
+    /// The producer owns its paths, which is what the sink's resume type
+    /// requires: one lifetime is fixed for every path the coroutine is fed.
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn test_act_serialization_sink() -> Result<(), std::io::Error> {
+        use std::ops::{Coroutine, CoroutineState};
+        use std::pin::pin;
+        use super::{ACTOutputStream, act_serialization_sink_with_vals};
+
+        let map = random_pathmap(0xAC7_0002, 5000);
+        let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(map.val_count());
+        let mut zipper = map.read_zipper();
+        while zipper.to_next_val() {
+            items.push((zipper.path().to_vec(), *zipper.val().unwrap()));
+        }
+
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("sink.act");
+        let mut sink = pin!(act_serialization_sink_with_vals(ACTOutputStream::new(&file)?));
+        for (path, val) in items.iter() {
+            match sink.as_mut().resume(Some((&path[..], *val))) {
+                CoroutineState::Yielded(()) => {}
+                CoroutineState::Complete(res) => { res?; panic!("sink ended early") }
+            }
+        }
+        let tree = match sink.as_mut().resume(None) {
+            CoroutineState::Complete(res) => res?,
+            CoroutineState::Yielded(()) => panic!("`None` must end the stream"),
+        };
+
+        assert_act_matches_map(&map, &tree);
         Ok(())
     }
 }
