@@ -160,6 +160,26 @@ fn superdense_meet(bencher: Bencher, n: u64) {
     });
 }
 
+/// This is the success case for dense meet's intersection-mask walk: both
+/// nodes have many children, but only a small fraction of those children are
+/// present in both nodes.
+#[divan::bench(args = [1000, 2000, 4000, 8000, 16000, 32000])]
+fn superdense_meet_low_overlap(bencher: Bencher, n: u64) {
+    let overlap = n / 16;
+    let offset = n - overlap;
+
+    let mut l: PathMap<u64> = PathMap::new();
+    for i in 0..n { l.set_val_at(prefix_key(&i), i); }
+    let mut r: PathMap<u64> = PathMap::new();
+    for i in offset..(offset + n) { r.set_val_at(prefix_key(&i), i); }
+
+    let mut intersection: PathMap<u64> = PathMap::new();
+    bencher.bench_local(|| {
+        *black_box(&mut intersection) = l.meet(black_box(&r));
+    });
+    assert_eq!(intersection.val_count(), overlap as usize);
+}
+
 /// This tests the performance of the meet op when there are already some shared nodes between the maps
 #[divan::bench(args = [1000, 2000, 4000, 8000, 16000, 32000])]
 fn superdense_meet_after_join(bencher: Bencher, n: u64) {

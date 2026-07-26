@@ -110,6 +110,15 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             alloc,
         }
     }
+    #[inline(always)]
+    fn slot_in_word(mask_word: u64, word_base: usize, bit_idx: u32) -> usize {
+        let preceding_bits = if bit_idx == 0 {
+            0
+        } else {
+            (1u64 << bit_idx) - 1
+        };
+        word_base + (mask_word & preceding_bits).count_ones() as usize
+    }
     #[inline]
     pub fn reserve_capacity(&mut self, additional: usize) {
         self.values.reserve(additional)
@@ -2136,10 +2145,8 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
     }
 
     fn pmeet(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> {
-        // TODO this technically doesn't need to calculate and iterate over jm
-        // iterating over mm and calculating m such that the following suffices
-        // c_{self,other} += popcnt(m & {self,other})
-        let jm: ByteMask = self.mask | other.mask;
+        // Iterate the overlap mask directly. Slot indexes are recovered with
+        // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
 
         let mut is_identity = self.mask == mm;
@@ -2151,58 +2158,55 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         let mut v = ValuesVec::with_capacity_in(len, self.alloc.clone());
         let new_v = v.v.spare_capacity_mut();
 
-        let mut l = 0;
-        let mut r = 0;
         let mut c = 0;
+        let mut self_word_base = 0;
+        let mut other_word_base = 0;
 
         for i in 0..4 {
-            let mut lm = jm.0[i];
+            let self_word = self.mask.0[i];
+            let other_word = other.mask.0[i];
+            let mut lm = mm.0[i];
             while lm != 0 {
                 let index = lm.trailing_zeros();
+                let l = Self::slot_in_word(self_word, self_word_base, index);
+                let r = Self::slot_in_word(other_word, other_word_base, index);
 
-                if ((1u64 << index) & mm.0[i]) != 0 {
-                    //This runs for cofrees that exist in both nodes
-
-                    let lv = unsafe { self.values.get_unchecked(l) };
-                    let rv = unsafe { other.values.get_unchecked(r) };
-                    match lv.pmeet(rv) {
-                        AlgebraicResult::None => {
-                            is_counter_identity = false;
+                //This runs for cofrees that exist in both nodes
+                let lv = unsafe { self.values.get_unchecked(l) };
+                let rv = unsafe { other.values.get_unchecked(r) };
+                match lv.pmeet(rv) {
+                    AlgebraicResult::None => {
+                        is_counter_identity = false;
+                        is_identity = false;
+                        mm.0[i] ^= 1u64 << index;
+                    },
+                    AlgebraicResult::Identity(mask) => {
+                        debug_assert!((mask & SELF_IDENT > 0) || (mask & COUNTER_IDENT > 0));
+                        if mask & SELF_IDENT == 0 {
                             is_identity = false;
-                            mm.0[i] ^= 1u64 << index;
-                        },
-                        AlgebraicResult::Identity(mask) => {
-                            debug_assert!((mask & SELF_IDENT > 0) || (mask & COUNTER_IDENT > 0));
-                            if mask & SELF_IDENT == 0 {
-                                is_identity = false;
-                            }
-                            if mask & COUNTER_IDENT == 0 {
-                                is_counter_identity = false;
-                            }
-                            if mask & SELF_IDENT > 0 {
-                                unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
-                            } else {
-                                let new_cf = Cf::from_cf(rv.clone());
-                                unsafe { new_v.get_unchecked_mut(c).write(new_cf) };
-                            }
-                            c += 1;
-                        },
-                        AlgebraicResult::Element(jv) => {
-                            is_identity = false;
+                        }
+                        if mask & COUNTER_IDENT == 0 {
                             is_counter_identity = false;
-                            unsafe { new_v.get_unchecked_mut(c).write(jv) };
-                            c += 1;
-                        },
-                    }
-                    l += 1;
-                    r += 1;
-                } else if ((1u64 << index) & self.mask.0[i]) != 0 {
-                    l += 1;
-                } else {
-                    r += 1;
+                        }
+                        if mask & SELF_IDENT > 0 {
+                            unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
+                        } else {
+                            let new_cf = Cf::from_cf(rv.clone());
+                            unsafe { new_v.get_unchecked_mut(c).write(new_cf) };
+                        }
+                        c += 1;
+                    },
+                    AlgebraicResult::Element(jv) => {
+                        is_identity = false;
+                        is_counter_identity = false;
+                        unsafe { new_v.get_unchecked_mut(c).write(jv) };
+                        c += 1;
+                    },
                 }
                 lm ^= 1u64 << index;
             }
+            self_word_base += self_word.count_ones() as usize;
+            other_word_base += other_word.count_ones() as usize;
         }
 
         unsafe{ v.v.set_len(c); }
@@ -2315,13 +2319,10 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V,
 // `other` be differently parameterized types
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> {
     fn prestrict<OtherCf: CoFree<V=V, A=A>>(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> where Self: Sized {
-        let mut is_identity = true;
-
-        // TODO this technically doesn't need to calculate and iterate over jm
-        // iterating over mm and calculating m such that the following suffices
-        // c_{self,other} += popcnt(m & {self,other})
-        let jm: ByteMask = self.mask | other.mask;
+        // Iterate the overlap mask directly. Slot indexes are recovered with
+        // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
+        let mut is_identity = self.mask == mm && other.mask == mm;
 
         let mmc = [mm.0[0].count_ones(), mm.0[1].count_ones(), mm.0[2].count_ones(), mm.0[3].count_ones()];
 
@@ -2329,48 +2330,43 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         let mut v = ValuesVec::with_capacity_in(len, self.alloc.clone());
         let new_v = v.v.spare_capacity_mut();
 
-        let mut l = 0;
-        let mut r = 0;
         let mut c = 0;
+        let mut self_word_base = 0;
+        let mut other_word_base = 0;
 
         for i in 0..4 {
-            let mut lm = jm.0[i];
+            let self_word = self.mask.0[i];
+            let other_word = other.mask.0[i];
+            let mut lm = mm.0[i];
             while lm != 0 {
                 let index = lm.trailing_zeros();
+                let l = Self::slot_in_word(self_word, self_word_base, index);
+                let r = Self::slot_in_word(other_word, other_word_base, index);
 
-                if ((1u64 << index) & mm.0[i]) != 0 {
-                    let lv = unsafe { self.values.get_unchecked(l) };
-                    let rv = unsafe { other.values.get_unchecked(r) };
-                    // println!("dense prestrict {}", index as usize + i*64);
+                let lv = unsafe { self.values.get_unchecked(l) };
+                let rv = unsafe { other.values.get_unchecked(r) };
+                // println!("dense prestrict {}", index as usize + i*64);
 
-                    match lv.prestrict(rv) {
-                        AlgebraicResult::None => {
-                            is_identity = false;
-                            mm.0[i] ^= 1u64 << index;
-                        }
-                        AlgebraicResult::Identity(mask) => {
-                            debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
-                            unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
-                            c += 1;
-                        },
-                        AlgebraicResult::Element(jv) => {
-                            is_identity = false;
-                            unsafe { new_v.get_unchecked_mut(c).write(jv) };
-                            c += 1;
-                        },
+                match lv.prestrict(rv) {
+                    AlgebraicResult::None => {
+                        is_identity = false;
+                        mm.0[i] ^= 1u64 << index;
                     }
-                    l += 1;
-                    r += 1;
-                } else {
-                    is_identity = false;
-                    if ((1u64 << index) & self.mask.0[i]) != 0 {
-                        l += 1;
-                    } else {
-                        r += 1;
-                    }
+                    AlgebraicResult::Identity(mask) => {
+                        debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
+                        unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
+                        c += 1;
+                    },
+                    AlgebraicResult::Element(jv) => {
+                        is_identity = false;
+                        unsafe { new_v.get_unchecked_mut(c).write(jv) };
+                        c += 1;
+                    },
                 }
                 lm ^= 1u64 << index;
             }
+            self_word_base += self_word.count_ones() as usize;
+            other_word_base += other_word.count_ones() as usize;
         }
 
         unsafe{ v.v.set_len(c); }
