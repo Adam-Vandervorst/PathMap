@@ -123,30 +123,6 @@ impl<V: Clone + Send + Sync + Unpin> PathMap<V, GlobalAlloc> {
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
-    /// Returns whether both maps have the same root node pointer, or both have no root node.
-    ///
-    /// NOTE: This is root pointer identity, not logical or structural equality.
-    /// Two separately built maps with the same contents return `false`.
-    ///
-    /// A `true` result means neither map has a root value and both maps share the
-    /// same root node state. If either map has a root value, this returns `false`
-    /// because root values are stored outside the root node, which keeps `true`
-    /// implying the same contents.
-    #[inline]
-    pub fn root_ptr_eq(&self, other: &Self) -> bool {
-        if unsafe { &*self.root_val.get() }.is_some()
-            || unsafe { &*other.root_val.get() }.is_some()
-        {
-            return false;
-        }
-        let a = unsafe { &*self.root.get() };
-        let b = unsafe { &*other.root.get() };
-        match (a, b) {
-            (None, None) => true,
-            (Some(x), Some(y)) => x.ptr_eq(y),
-            _ => false,
-        }
-    }
     #[inline]
     pub(crate) fn root(&self) -> Option<&TrieNodeODRc<V, A>> {
         unsafe{ &*self.root.get() }.as_ref()
@@ -619,6 +595,21 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
             *self.root.get_mut() = Some(new_root);
         }
         result
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for PathMap<V, A> {
+    #[inline]
+    fn shared_node_id(&self) -> Option<u64> {
+        if self.root_val().is_some() || !self.is_shared() {
+            return None;
+        }
+        self.root().map(|root| root.shared_node_id())
+    }
+
+    #[inline]
+    fn is_shared(&self) -> bool {
+        self.root().is_some_and(|root| root.refcount() > 1)
     }
 }
 
@@ -1473,47 +1464,54 @@ mod tests {
         let result_map = map.meet(&all_but_root_map);
         assert_eq!(result_map.iter().count(), 2);
     }
+
+    #[test]
+    fn path_map_is_zipper_concrete_at_root() {
+        use crate::zipper::ZipperConcrete;
+
+        let mut map: PathMap<()> = PathMap::new();
+        map.insert(b"a", ());
+        let snapshot = map.clone();
+
+        assert!(map.is_shared());
+        let shared_id = map.shared_node_id();
+        assert_eq!(shared_id, snapshot.shared_node_id());
+
+        map.insert(b"b", ());
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot.is_shared());
+        assert_eq!(snapshot.shared_node_id(), None);
+
+        let snapshot_after_insert = map.clone();
+        assert!(map.is_shared());
+        assert_eq!(map.shared_node_id(), snapshot_after_insert.shared_node_id());
+
+        map.remove(b"b");
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot_after_insert.is_shared());
+        assert_eq!(snapshot_after_insert.shared_node_id(), None);
+
+        let mut with_root_value = snapshot.clone();
+        with_root_value.insert(b"", ());
+        assert!(with_root_value.is_shared());
+        assert_eq!(with_root_value.shared_node_id(), None);
+
+        let mut independent = PathMap::new();
+        independent.insert(b"a", ());
+        assert!(!independent.is_shared());
+        assert_eq!(independent.shared_node_id(), None);
+
+        let empty_a: PathMap<()> = PathMap::new();
+        let empty_b: PathMap<()> = PathMap::new();
+        assert!(!empty_a.is_shared());
+        assert!(!empty_b.is_shared());
+        assert_eq!(empty_a.shared_node_id(), None);
+        assert_eq!(empty_b.shared_node_id(), None);
+    }
 }
 
 //GOAT, Consider refactor of zipper traits.  `WriteZipper` -> `PathWriter`.  Zipper is split into the zipper
 // movement traits and a `PathReader` trait.  Then `PathWriter` and `PathReader` can both be implemented on
 // the map, and we can get rid of duplicate methods like `graft_map`
-
-#[cfg(test)]
-mod root_ptr_eq_tests {
-    use crate::PathMap;
-    #[test]
-    fn root_ptr_eq_tracks_cow_mutation() {
-        let mut m: PathMap<()> = PathMap::new();
-        m.insert(b"(edge a b)", ());
-        let snap = m.clone();                       // COW clone shares the root
-        assert!(m.root_ptr_eq(&snap), "a clone shares the root");
-        m.insert(b"(edge b c)", ());                // mutation CoW-replaces the root
-        assert!(!m.root_ptr_eq(&snap), "a write must change the root identity");
-        let snap2 = m.clone();
-        assert!(m.root_ptr_eq(&snap2));
-        m.remove(b"(edge b c)");
-        assert!(!m.root_ptr_eq(&snap2), "a removal must change the root identity");
-        // two independently-built equal maps are NOT the same trie (different roots)
-        let mut n: PathMap<()> = PathMap::new();
-        n.insert(b"(edge a b)", ());
-        // n and snap have equal CONTENT but distinct roots
-        assert!(!n.root_ptr_eq(&snap));
-        // empty vs empty
-        let e1: PathMap<()> = PathMap::new();
-        let e2: PathMap<()> = PathMap::new();
-        assert!(e1.root_ptr_eq(&e2), "two empty maps share the None root");
-    }
-
-    #[test]
-    fn root_ptr_eq_is_false_when_a_root_value_differs() {
-        let mut m = PathMap::<u64>::new();
-        m.set_val_at(b"a", 1);
-        let mut snap = m.clone();
-        snap.set_val_at(b"", 99);
-        assert!(snap.get(b"" as &[u8]).is_some());
-        assert!(m.get(b"" as &[u8]).is_none());
-        assert!(!m.root_ptr_eq(&snap));
-        assert!(!snap.root_ptr_eq(&m));
-    }
-}
