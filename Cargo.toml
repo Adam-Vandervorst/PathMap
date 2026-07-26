@@ -130,6 +130,9 @@ harness = false
 
 [[bench]]
 name = "byte_mask"
+harness = false
+
+[[bench]]
 name = "zipper_head_owned"
 harness = false
 
