@@ -4770,6 +4770,7 @@ mod tests {
         assert!(zipper.at_root());
         assert!(zipper.is_shared());
         assert!(zipper.shared_node_id().is_some());
+        assert_eq!(zipper.shared_node_id(), snapshot.shared_node_id());
         assert!(snapshot.is_shared());
     }
 

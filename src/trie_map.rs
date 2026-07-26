@@ -604,7 +604,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for PathMap<V,
         if self.root_val().is_some() || !self.is_shared() {
             return None;
         }
-        self.root().map(|root| root.shared_node_id())
+        self.root().map(|root| root.as_tagged().shared_node_id())
     }
 
     #[inline]
