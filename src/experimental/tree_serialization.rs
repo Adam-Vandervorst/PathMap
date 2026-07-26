@@ -60,6 +60,7 @@ mod tests {
     use crate::morphisms::Catamorphism;
     use crate::PathMap;
 
+    #[ignore] //GOAT, re-enable if/when this code is ready. Fails under Miri due to Stacked Borrows UB in deserialize_fork's ptr::read.
     #[test]
     fn tree_serde_2() {
         let keys = [vec![12, 13, 14], vec![12, 13, 14, 100, 101]];

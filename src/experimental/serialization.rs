@@ -986,33 +986,45 @@ mod test {
   use super::*;
   use std::sync::Arc;
 
-  fn write_serialized_fixture(dir : &tempfile::TempDir, name : &str, data : &[u8])->PathBuf {
-    let path = dir.path().join(name);
+  fn write_serialized_fixture(name : &str, data : &[u8])->Option<PathBuf> {
+    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
+      Ok(manifest_dir) => manifest_dir,
+      _ => {
+        #[cfg(not(miri))]
+        panic!("Test should be running under Cargo");
+        return None;
+      }
+    };
+    let dir = PathBuf::from(manifest_dir).join(".tmp");
+    let _ = std::fs::create_dir(&dir);
+    let path = dir.join(name);
     std::fs::write(&path, data).unwrap();
-    path
+    Some(path)
   }
 
   #[test]
   fn deserialize_rejects_malformed_records() {
-    let temp_dir = tempfile::tempdir().unwrap();
-
-    let bad_tag = write_serialized_fixture(&temp_dir, "bad_tag.data", b"header\n? bad\n");
+    let Some(bad_tag) = write_serialized_fixture("serialization_bad_tag.data", b"header\n? bad\n") else {
+      return;
+    };
     let err = deserialize_file::<Arc<[u8]>>(&bad_tag, |b| Arc::<[u8]>::from(b)).unwrap_err();
     assert!(err.to_string().contains("expected `<tag byte><space>`"));
 
-    let odd_path_hex = write_serialized_fixture(&temp_dir, "odd_path_hex.data", b"header\np A\n");
+    let Some(odd_path_hex) = write_serialized_fixture("serialization_odd_path_hex.data", b"header\np A\n") else {
+      return;
+    };
     let err = deserialize_file::<Arc<[u8]>>(&odd_path_hex, |b| Arc::<[u8]>::from(b)).unwrap_err();
     assert!(err.to_string().contains("expected path"));
   }
 
   #[test]
   fn deserialize_rejects_forward_offsets_without_panic() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let path = write_serialized_fixture(
-      &temp_dir,
-      "forward_offset.data",
+    let Some(path) = write_serialized_fixture(
+      "serialization_forward_offset.data",
       b"header\nP x0000000000000001x0000000000000002\n"
-    );
+    ) else {
+      return;
+    };
 
     let err = deserialize_file::<Arc<[u8]>>(&path, |b| Arc::<[u8]>::from(b)).unwrap_err();
     assert!(err.to_string().contains("offset out of bounds"));

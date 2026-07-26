@@ -4,6 +4,11 @@ use pathmap::PathMap;
 
 type KeySet = BTreeSet<Vec<u8>>;
 
+#[cfg(not(miri))]
+const FIXED_WIDTH_KEYS: u64 = 72;
+#[cfg(miri)]
+const FIXED_WIDTH_KEYS: u64 = 12;
+
 fn next_u64(state: &mut u64) -> u64 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)
@@ -14,7 +19,7 @@ fn next_u64(state: &mut u64) -> u64 {
 fn fixed_width_set(seed: u64, salt: u64) -> KeySet {
     let mut state = seed ^ salt;
     let mut keys = KeySet::new();
-    for ordinal in 0..72_u64 {
+    for ordinal in 0..FIXED_WIDTH_KEYS {
         let mut key = vec![0_u8; 8];
         for byte in &mut key {
             *byte = (next_u64(&mut state) >> 32) as u8;
@@ -70,7 +75,12 @@ fn set_from_map(map: &PathMap<()>) -> KeySet {
 
 #[test]
 fn seeded_prefix_free_algebra_matches_btreeset_oracle() {
-    for seed in 0_u64..256 {
+    #[cfg(not(miri))]
+    const SEEDS: u64 = 256;
+    #[cfg(miri)]
+    const SEEDS: u64 = 1;
+
+    for seed in 0_u64..SEEDS {
         let a = fixed_width_set(seed, 0x243f_6a88_85a3_08d3);
         let b = fixed_width_set(seed, 0x1319_8a2e_0370_7344);
         let c = fixed_width_set(seed, 0xa409_3822_299f_31d0);
@@ -115,7 +125,12 @@ fn seeded_prefix_free_algebra_matches_btreeset_oracle() {
 
 #[test]
 fn cloned_prefix_heavy_maps_are_logically_isolated_under_mutation() {
-    for seed in 0_u64..128 {
+    #[cfg(not(miri))]
+    const SEEDS: u64 = 128;
+    #[cfg(miri)]
+    const SEEDS: u64 = 4;
+
+    for seed in 0_u64..SEEDS {
         let original_set = prefix_heavy_set(seed, 0x082e_fa98_ec4e_6c89);
         let original = map_from_set(&original_set);
         let mut changed = original.clone();
@@ -155,7 +170,12 @@ fn prefix_valued_meet_is_associative_seed_44() {
 fn seeded_prefix_heavy_dual_distributivity_matches_btreeset_oracle() {
     // Seeds 10, 77, and 287 are focused regressions for CoFree identity
     // operand selection and mixed value/onward-link exhaustiveness.
-    for seed in 0_u64..512 {
+    #[cfg(not(miri))]
+    const SEEDS: u64 = 512;
+    #[cfg(miri)]
+    const SEEDS: u64 = 2;
+
+    for seed in 0_u64..SEEDS {
         let a = prefix_heavy_set(seed, 0x243f_6a88_85a3_08d3);
         let b = prefix_heavy_set(seed, 0x1319_8a2e_0370_7344);
         let c = prefix_heavy_set(seed, 0xa409_3822_299f_31d0);
