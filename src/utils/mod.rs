@@ -134,6 +134,13 @@ impl ByteMask {
         self.0
     }
     /// Create an iterator over every byte, in ascending order
+    ///
+    /// DEVELOPER NOTE: This iterator owns a copy of the 256-bit mask and clears bits as it advances.
+    /// A cursor design that borrows the `ByteMask` is possible, reducing iterator state from the 32-byte mask plus word
+    /// cursor down to a mask reference and the cursor padded to a word.
+    /// However, because the borrowed cursor cannot clear the source mask, each `next` call has to rebuild
+    /// a shifted word mask to hide already-visited bits.  Benchmarks showed that fixed per-item cost more
+    /// than doubled iteration overhead when the current owned iterator fits in registers.
     #[inline]
     pub fn iter(&self) -> ByteMaskIter {
         ByteMaskIter::from(self.0)

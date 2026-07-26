@@ -303,6 +303,52 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         unsafe{ self.values.get_unchecked_mut(ix) }
     }
 
+    // ------ IterToken format for ByteNode ------
+    // Iter tokens pack the next byte position to inspect with the corresponding index into `values`.
+    // The low 9 bits store one more than the last returned byte, or 0 before iteration starts.  The
+    // upper bits store the index of the next CoFree in `values`, avoiding a `mask.index_of` recompute
+    // on every item.  `iter_token_for_path` computes the values index once for the requested path.
+    const ITER_TOKEN_BYTE_BITS: u64 = 9;
+    const ITER_TOKEN_BYTE_MASK: IterToken = (1 << Self::ITER_TOKEN_BYTE_BITS) - 1;
+
+    #[inline(always)]
+    fn iter_token(next_byte: u16, values_idx: u16) -> IterToken {
+        (values_idx as IterToken) << Self::ITER_TOKEN_BYTE_BITS | next_byte as IterToken
+    }
+
+    #[inline(always)]
+    fn iter_token_next_byte(token: IterToken) -> u16 {
+        (token & Self::ITER_TOKEN_BYTE_MASK) as u16
+    }
+
+    #[inline(always)]
+    fn iter_token_values_idx(token: IterToken) -> usize {
+        (token >> Self::ITER_TOKEN_BYTE_BITS) as usize
+    }
+
+    #[inline(always)]
+    fn next_iter_item_from(&self, token: IterToken) -> Option<(u8, usize)> {
+        let start = Self::iter_token_next_byte(token);
+        if start >= 256 {
+            return None;
+        }
+
+        let mut word_idx = (start >> 6) as usize;
+        let mut bit_idx = (start & 0x3F) as u32;
+        loop {
+            let word = unsafe { *self.mask.0.get_unchecked(word_idx) } & (!0u64 << bit_idx);
+            if word != 0 {
+                return Some(((word_idx as u8) * 64 + word.trailing_zeros() as u8, Self::iter_token_values_idx(token)));
+            }
+
+            word_idx += 1;
+            if word_idx == 4 {
+                return None;
+            }
+            bit_idx = 0;
+        }
+    }
+
     #[inline]
     fn is_empty(&self) -> bool {
         self.mask.is_empty_mask()
@@ -923,49 +969,32 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         self.values.len() == 0
     }
     #[inline(always)]
-    fn new_iter_token(&self) -> u128 {
-        self.mask.0[0] as u128
+    fn new_iter_token(&self) -> IterToken {
+        Self::iter_token(0, 0)
     }
     #[inline(always)]
-    fn iter_token_for_path(&self, key: &[u8]) -> u128 {
+    fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
         if key.len() != 1 {
             self.new_iter_token()
         } else {
-            let k = *unsafe{ key.get_unchecked(0) } as usize;
-            let idx = (k & 0b11000000) >> 6;
-            let bit_i = k & 0b00111111;
-            debug_assert!(idx < 4);
-            let mask: u64 = if bit_i+1 < 64 {
-                (0xFFFFFFFFFFFFFFFF << bit_i+1) & unsafe{ self.mask.0.get_unchecked(idx) }
-            } else {
-                0
-            };
-            ((idx as u128) << 64) | (mask as u128)
+            let key_byte = unsafe{ *key.get_unchecked(0) };
+            let mut values_idx = self.mask.index_of(key_byte);
+            if self.mask.test_bit(key_byte) {
+                values_idx += 1;
+            }
+            Self::iter_token(key_byte as u16 + 1, values_idx as u16)
         }
     }
     #[inline(always)]
-    fn next_items(&self, token: u128) -> (u128, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
-        let mut i = (token >> 64) as u8;
-        let mut w = token as u64;
-        loop {
-            if w != 0 {
-                let wi = w.trailing_zeros() as u8;
-                w ^= 1u64 << wi;
-                let k = i*64 + wi;
+    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+        let Some((k, values_idx)) = self.next_iter_item_from(token) else {
+            return (NODE_ITER_FINISHED, &[], None, None);
+        };
 
-                let new_token = ((i as u128) << 64) | (w as u128);
-                let cf = unsafe{ self.get_unchecked(k) };
-                let k = k as usize;
-                return (new_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
-
-            } else if i < 3 {
-                i += 1;
-
-                w = unsafe { *self.mask.0.get_unchecked(i as usize) };
-            } else {
-                return (NODE_ITER_FINISHED, &[], None, None)
-            }
-        }
+        let next_token = Self::iter_token(k as u16 + 1, values_idx as u16 + 1);
+        let cf = unsafe{ self.values.get_unchecked(values_idx) };
+        let k = k as usize;
+        (next_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
     }
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
         //Discussion: These two implementations do the same thing but with a slightly different ordering of
@@ -2377,4 +2406,49 @@ fn bit_siblings() {
     assert_eq!(0, bit_sibling(0, 1, true));
     assert_eq!(63, bit_sibling(63, 1u64 << 63, false));
     assert_eq!(63, bit_sibling(63, 1u64 << 63, true));
+}
+
+#[test]
+fn byte_node_iter_token_crosses_mask_word_boundaries() {
+    let mut node = DenseByteNode::new_in(crate::alloc::global_alloc());
+    for byte in [0, 63, 64, 127, 128, 191, 192, 255] {
+        node.set_val(byte, byte);
+    }
+
+    let mut token = node.new_iter_token();
+    let mut visited = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(path.len(), 1);
+            assert_eq!(Some(&path[0]), value);
+            visited.push(path[0]);
+        }
+    }
+    assert_eq!(visited, [0, 63, 64, 127, 128, 191, 192, 255]);
+
+    let mut token = node.iter_token_for_path(&[127]);
+    let mut visited_after_127 = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(Some(&path[0]), value);
+            visited_after_127.push(path[0]);
+        }
+    }
+    assert_eq!(visited_after_127, [128, 191, 192, 255]);
+
+    let mut token = node.iter_token_for_path(&[65]);
+    let mut visited_after_missing_65 = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(Some(&path[0]), value);
+            visited_after_missing_65.push(path[0]);
+        }
+    }
+    assert_eq!(visited_after_missing_65, [127, 128, 191, 192, 255]);
 }

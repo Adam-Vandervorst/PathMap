@@ -129,6 +129,7 @@ name = "graft_masked_branches"
 harness = false
 
 [[bench]]
+name = "byte_mask"
 name = "zipper_head_owned"
 harness = false
 

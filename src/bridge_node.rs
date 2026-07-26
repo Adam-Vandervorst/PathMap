@@ -398,11 +398,11 @@ impl<V: Clone + Send + Sync> TrieNode<V> for BridgeNode<V> {
         self.is_empty()
     }
     #[inline(always)]
-    fn new_iter_token(&self) -> u128 {
+    fn new_iter_token(&self) -> IterToken {
         0
     }
     #[inline(always)]
-    fn iter_token_for_path(&self, key: &[u8]) -> (u128, &[u8]) {
+    fn iter_token_for_path(&self, key: &[u8]) -> (IterToken, &[u8]) {
         let node_key = self.key();
         if key.len() <= node_key.len() {
             let short_key = &node_key[..key.len()];
@@ -416,7 +416,7 @@ impl<V: Clone + Send + Sync> TrieNode<V> for BridgeNode<V> {
         (NODE_ITER_FINISHED, &[])
     }
     #[inline(always)]
-    fn next_items(&self, token: u128) -> (u128, &[u8], Option<&TrieNodeODRc<V>>, Option<&V>) {
+    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V>>, Option<&V>) {
         if token == 0 {
             let node_key = self.key();
             if self.is_used_child() {
