@@ -1535,7 +1535,12 @@ mod tests {
 
     #[test]
     fn seeded_hash_map_operations_match_nested_set_oracle() {
-        for seed in 0..256 {
+        #[cfg(miri)]
+        const SEEDS: u64 = 1;
+        #[cfg(not(miri))]
+        const SEEDS: u64 = 256;
+
+        for seed in 0..SEEDS {
             let a = generated_nested_map(seed, 0x243f_6a88_85a3_08d3);
             let b = generated_nested_map(seed, 0x1319_8a2e_0370_7344);
             let c = generated_nested_map(seed, 0xa409_3822_299f_31d0);
