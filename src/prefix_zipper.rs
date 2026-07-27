@@ -677,6 +677,7 @@ crate::zipper::impl_zipper_debug!(
 mod tests {
     use super::PrefixZipper;
     use crate::trie_map::PathMap;
+    use crate::zipper::Zipper;
     use crate::zipper::ZipperMoving;
     use crate::zipper::ZipperAbsolutePath;
     use crate::zipper::ZipperReadOnlyValues;
@@ -761,5 +762,26 @@ mod tests {
         assert_eq!(rz.get_val_at(b"prefix"), Some(&0));
         assert_eq!(rz.val_at(b"prefoo"), None);
         assert_eq!(rz.get_val_at(b"prefoo"), None);
+    }
+
+    /// `descend_until` must return `true` whenever the focus moved.  When the zipper is positioned
+    /// within its prefix, consuming the remainder of the prefix *is* a movement, even when the
+    /// wrapped source zipper cannot descend any further from its own root.
+    #[test]
+    fn prefix_zipper_descend_until_within_prefix() {
+        //`PATHS1` branches at its root (between `0` and `1`), so the source zipper's `descend_until`
+        // returns `false` without moving
+        let map = PathMap::from_iter(PATHS1.iter().map(|&x| x));
+        assert!(map.read_zipper().child_count() > 1, "source must branch at its root");
+
+        let mut rz = PrefixZipper::new(b"prefix", map.read_zipper());
+        assert_eq!(rz.path(), b"");
+
+        let moved = rz.descend_until();
+
+        //The focus advanced across the whole prefix...
+        assert_eq!(rz.path(), b"prefix");
+        //...so `descend_until` must report that it moved
+        assert_eq!(moved, true);
     }
 }
