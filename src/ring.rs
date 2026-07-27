@@ -1193,7 +1193,7 @@ set_dist_lattice!(HashSet<K>);
 
 #[cfg(test)]
 mod tests {
-    use super::{AlgebraicResult, AlgebraicStatus, SetLattice, COUNTER_IDENT, SELF_IDENT};
+    use super::{AlgebraicResult, SetLattice, COUNTER_IDENT, SELF_IDENT};
     use crate::ring::{DistributiveLattice, Lattice};
     use std::collections::{HashMap, HashSet};
     use std::fmt::Debug;
