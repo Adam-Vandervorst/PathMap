@@ -1498,6 +1498,15 @@ mod tests {
         assert!(with_root_value.is_shared());
         assert_eq!(with_root_value.shared_node_id(), None);
 
+        // Root values live outside the root node, and inserting at the empty key goes through
+        // `set_root_val` without touching `root`, so these two maps share a root node while
+        // holding different contents. Asserted as a pair in both directions because that is the
+        // shape of the regression: a node-only identity check reports them the same.
+        assert!(snapshot.is_shared());
+        assert!(snapshot.shared_node_id().is_some());
+        assert_ne!(snapshot.shared_node_id(), with_root_value.shared_node_id());
+        assert_ne!(with_root_value.shared_node_id(), snapshot.shared_node_id());
+
         let mut independent = PathMap::new();
         independent.insert(b"a", ());
         assert!(!independent.is_shared());
