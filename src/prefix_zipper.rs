@@ -437,13 +437,18 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         if self.position.is_invalid() {
             return false;
         }
-        if let Some(prefixed_depth) = self.position.prefixed_depth() {
+        //Consuming the remainder of the prefix is itself a movement, so it must be reflected in the
+        // return value even when the source zipper can't descend any further
+        let descended_prefix = if let Some(prefixed_depth) = self.position.prefixed_depth() {
             self.path.extend_from_slice(&self.prefix[self.origin_depth + prefixed_depth..]);
             self.position = PrefixPos::Source;
-        }
+            true
+        } else {
+            false
+        };
         let len_before = self.source.path().len();
         if !self.source.descend_until() {
-            return false;
+            return descended_prefix;
         }
         let path = self.source.path();
         self.path.extend_from_slice(&path[len_before..]);
