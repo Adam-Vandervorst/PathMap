@@ -7,7 +7,7 @@
 //!
 
 use maybe_dangling::MaybeDangling;
-use fast_slice_utils::find_prefix_overlap;
+use fast_slice_utils::{find_prefix_overlap, starts_with};
 
 use crate::alloc::{Allocator, GlobalAlloc};
 use crate::utils::ByteMask;
@@ -1687,8 +1687,13 @@ pub(crate) mod read_zipper_core {
             let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token);
 
             if new_tok != NODE_ITER_FINISHED {
-                let byte_idx = self.node_key().len();
-                if byte_idx >= key_bytes.len() {
+                let node_key = self.node_key();
+                let byte_idx = node_key.len();
+                //`iter_token_for_path` positions a lower-bound cursor, so when the focus is on a
+                // non-existent path the item we get back may belong to a sibling.  Descending into
+                // it would splice a foreign byte onto the focus, so only descend when the item
+                // actually continues the path we're on.
+                if byte_idx >= key_bytes.len() || !starts_with(key_bytes, node_key) {
                     debug_assert!(self.is_regularized());
                     return false; //We can't go any deeper down this path
                 }
@@ -3053,6 +3058,12 @@ pub(crate) mod zipper_moving_tests {
                 }
 
                 #[test]
+                fn [<$z_name _zipper_dangling_descend_test>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_DANGLING_DESCEND_TEST_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_dangling_descend_test)
+                }
+
+                #[test]
                 fn [<$z_name _zipper_indexed_bytes_test1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_INDEXED_BYTE_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_indexed_bytes_test1)
@@ -3309,6 +3320,26 @@ pub(crate) mod zipper_moving_tests {
     }
 
     // A wide shallow trie
+    pub const ZIPPER_DANGLING_DESCEND_TEST_KEYS: &[&[u8]] = &[b"b", b"bqqq"];
+
+    /// `descend_first_byte` must agree with `descend_indexed_byte(0)`, including when the focus
+    /// sits on a non-existent (dangling) path, where there are no children to descend into
+    pub fn zipper_dangling_descend_test<Z: ZipperMoving>(mut zip: Z) {
+        //Descend to a path that doesn't exist in the trie.  `b"bq"` exists as a prefix of
+        // `b"bqqq"`, but `b"bb"` does not.
+        zip.descend_to(b"bb");
+        assert_eq!(zip.path_exists(), false);
+        assert_eq!(zip.child_count(), 0);
+
+        //With no children, `descend_indexed_byte(0)` is out of range and must not move
+        assert_eq!(zip.descend_indexed_byte(0), false);
+        assert_eq!(zip.path(), b"bb");
+
+        //`descend_first_byte` is documented to behave identically to `descend_indexed_byte(0)`
+        assert_eq!(zip.descend_first_byte(), false);
+        assert_eq!(zip.path(), b"bb");
+    }
+
     pub const ZIPPER_INDEXED_BYTE_TEST1_KEYS: &[&[u8]] = &[b"0", b"1", b"2", b"3", b"4", b"5", b"6"];
 
     pub fn zipper_indexed_bytes_test1<Z: ZipperMoving>(mut zip: Z) {
