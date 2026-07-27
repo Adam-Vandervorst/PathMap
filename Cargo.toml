@@ -128,6 +128,19 @@ harness = false
 name = "graft_masked_branches"
 harness = false
 
+[[bench]]
+name = "byte_mask"
+harness = false
+
+[[bench]]
+name = "zipper_head_owned"
+harness = false
+
+[[bench]]
+name = "act_paths"
+harness = false
+required-features = ["arena_compact", "serialization"]
+
 [workspace]
 members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests"]
 resolver = "2"

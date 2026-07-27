@@ -1283,7 +1283,6 @@ pub(crate) const EXPECTED_DEPTH: usize = 16;
 pub(crate) const EXPECTED_PATH_LEN: usize = 64;
 
 pub(crate) mod read_zipper_core {
-    use crate::trie_node::*;
     use crate::PathMap;
     use crate::zipper::*;
 
@@ -1311,12 +1310,12 @@ pub(crate) mod read_zipper_core {
         focus_node: MiriWrapper<TaggedNodeRef<'a, V, A>>,
         /// An iter token corresponding to the location of the `node_key` within the `focus_node`, or NODE_ITER_INVALID
         /// if iteration is not in-process
-        focus_iter_token: u128,
+        focus_iter_token: IterToken,
         /// Stores the entire path from the root node, including the bytes from `root_key`
         prefix_buf: Vec<u8>,
         /// Stores a stack of parent node references.  Does not include the focus_node
         /// The tuple contains: `(node_ref, iter_token, key_offset_in_prefix_buf)`
-        ancestors: Vec<(TaggedNodeRef<'a, V, A>, u128, usize)>,
+        ancestors: Vec<(TaggedNodeRef<'a, V, A>, IterToken, usize)>,
         pub(crate) alloc: A,
     }
 
@@ -2071,7 +2070,11 @@ pub(crate) mod read_zipper_core {
                     let (_key_len, focus_node) = parent.node_get_child(self.parent_key()).unwrap();
                     focus_node.refcount() > 1
                 } else {
-                    false //root
+                    match &self.root_node {
+                        OwnedOrBorrowed::Owned(root) => root.refcount() > 1,
+                        OwnedOrBorrowed::Borrowed(root) => root.refcount() > 1,
+                        OwnedOrBorrowed::None => false,
+                    }
                 }
             }
         }
@@ -4754,6 +4757,20 @@ mod tests {
             }
         }
         assert_eq!(shared_cnt, l0_keys.len() + l0_keys.len() * l1_keys.len());
+    }
+
+    #[test]
+    fn read_zipper_is_shared_at_shared_root() {
+        let mut map: PathMap<()> = PathMap::new();
+        map.set_val_at(b"a", ());
+        let snapshot = map.clone();
+
+        let zipper = map.read_zipper();
+        assert!(zipper.at_root());
+        assert!(zipper.is_shared());
+        assert!(zipper.shared_node_id().is_some());
+        assert_eq!(zipper.shared_node_id(), snapshot.shared_node_id());
+        assert!(snapshot.is_shared());
     }
 
     /// This behavior is a bit counter-intuitive, but it is correct.

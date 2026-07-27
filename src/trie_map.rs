@@ -598,6 +598,21 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     }
 }
 
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for PathMap<V, A> {
+    #[inline]
+    fn shared_node_id(&self) -> Option<u64> {
+        if self.root_val().is_some() || !self.is_shared() {
+            return None;
+        }
+        self.root().map(|root| root.as_tagged().shared_node_id())
+    }
+
+    #[inline]
+    fn is_shared(&self) -> bool {
+        self.root().is_some_and(|root| root.refcount() > 1)
+    }
+}
+
 
 #[cfg(feature = "old_cursor")]
 impl<V: Clone + Send + Sync + Unpin> PathMap<V> {
@@ -1448,6 +1463,61 @@ mod tests {
         //Validate meet with all_but_root removes it
         let result_map = map.meet(&all_but_root_map);
         assert_eq!(result_map.iter().count(), 2);
+    }
+
+    #[test]
+    fn path_map_is_zipper_concrete_at_root() {
+        use crate::zipper::ZipperConcrete;
+
+        let mut map: PathMap<()> = PathMap::new();
+        map.insert(b"a", ());
+        let snapshot = map.clone();
+
+        assert!(map.is_shared());
+        let shared_id = map.shared_node_id();
+        assert_eq!(shared_id, snapshot.shared_node_id());
+
+        map.insert(b"b", ());
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot.is_shared());
+        assert_eq!(snapshot.shared_node_id(), None);
+
+        let snapshot_after_insert = map.clone();
+        assert!(map.is_shared());
+        assert_eq!(map.shared_node_id(), snapshot_after_insert.shared_node_id());
+
+        map.remove(b"b");
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot_after_insert.is_shared());
+        assert_eq!(snapshot_after_insert.shared_node_id(), None);
+
+        let mut with_root_value = snapshot.clone();
+        with_root_value.insert(b"", ());
+        assert!(with_root_value.is_shared());
+        assert_eq!(with_root_value.shared_node_id(), None);
+
+        // Root values live outside the root node, and inserting at the empty key goes through
+        // `set_root_val` without touching `root`, so these two maps share a root node while
+        // holding different contents. Asserted as a pair in both directions because that is the
+        // shape of the regression: a node-only identity check reports them the same.
+        assert!(snapshot.is_shared());
+        assert!(snapshot.shared_node_id().is_some());
+        assert_ne!(snapshot.shared_node_id(), with_root_value.shared_node_id());
+        assert_ne!(with_root_value.shared_node_id(), snapshot.shared_node_id());
+
+        let mut independent = PathMap::new();
+        independent.insert(b"a", ());
+        assert!(!independent.is_shared());
+        assert_eq!(independent.shared_node_id(), None);
+
+        let empty_a: PathMap<()> = PathMap::new();
+        let empty_b: PathMap<()> = PathMap::new();
+        assert!(!empty_a.is_shared());
+        assert!(!empty_b.is_shared());
+        assert_eq!(empty_a.shared_node_id(), None);
+        assert_eq!(empty_b.shared_node_id(), None);
     }
 }
 

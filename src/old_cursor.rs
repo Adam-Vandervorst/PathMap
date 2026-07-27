@@ -249,7 +249,7 @@ impl <'a, V : Clone + Send + Sync> Iterator for ByteTrieNodeIter<'a, V> {
 
 pub struct PathMapCursor<'a, V: Clone + Send + Sync> {
     prefix_buf: Vec<u8>,
-    btnis: Vec<(TaggedNodeRef<'a, V, GlobalAlloc>, u128, usize)>,
+    btnis: Vec<(TaggedNodeRef<'a, V, GlobalAlloc>, IterToken, usize)>,
 }
 
 impl <'a, V : Clone + Send + Sync + Unpin> PathMapCursor<'a, V> {

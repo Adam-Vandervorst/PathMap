@@ -132,6 +132,11 @@ const MAX_VARINT_SIZE: usize = 9;
 
 const U64_SIZE: usize = core::mem::size_of::<u64>();
 
+/// Size of the trailer that [`ArenaCompactTree::merge_zipper_into_file`]
+/// appends after each merge: two little-endian `u64`s,
+/// `[previous_suffix, previous_root]` (see [`ArenaCompactTree::root_history`]).
+const ROOT_TRAILER_SIZE: usize = 2 * U64_SIZE;
+
 /// File magic signature
 pub const MAGIC_LENGTH: usize = 8;
 // Changes:
@@ -679,6 +684,45 @@ where Storage: AsRef<[u8]>
         (self.get_node(root_id).0, root_id)
     }
 
+    /// The chain of historical roots recorded in the file, newest first.
+    ///
+    /// Each [`ArenaCompactTree::merge_zipper_into_file`] appends a
+    /// [`ROOT_TRAILER_SIZE`]-byte trailer `[previous_suffix, previous_root]`
+    /// capturing the root that was live just before that merge, so the roots
+    /// form a singly-linked list: the current root (at [`MAGIC_LENGTH`]) is the
+    /// head, and each trailer's `previous_root` points back to the prior one,
+    /// with `previous_suffix` giving the file offset of that root's own trailer.
+    ///
+    /// Walking stops at the base file, whose trailing zero padding reads back as
+    /// a zero `previous_root`. A file that has never been merged therefore yields
+    /// a single element: its current root.
+    ///
+    /// The `previous_suffix` field is written for future use (chaining and
+    /// suffix reclamation); this reader only follows it to enumerate roots.
+    pub fn root_history(&self) -> Vec<NodeId> {
+        let data = self.storage.as_ref();
+        let (_, root_id) = self.get_root();
+        let mut roots = vec![root_id];
+        // The most recent merge's trailer, if any, occupies the final bytes.
+        let mut off = data.len().saturating_sub(ROOT_TRAILER_SIZE);
+        while off >= MAGIC_LENGTH + U64_SIZE && off + ROOT_TRAILER_SIZE <= data.len() {
+            let suffix_buf: [u8; U64_SIZE] = data[off..][..U64_SIZE].try_into().unwrap();
+            let root_buf: [u8; U64_SIZE] = data[off + U64_SIZE..][..U64_SIZE].try_into().unwrap();
+            let previous_suffix = u64::from_le_bytes(suffix_buf);
+            let previous_root = u64::from_le_bytes(root_buf);
+            // A base file ends in zero padding, so its final u64 is zero.
+            if previous_root == 0 {
+                break;
+            }
+            roots.push(NodeId(previous_root));
+            if previous_suffix == 0 {
+                break;
+            }
+            off = previous_suffix as usize;
+        }
+        roots
+    }
+
     /// Find existing [LineId] that contains provided line `data`
     ///
     /// This is done by calculating the hash of the data, and storing it in a map.
@@ -731,6 +775,9 @@ where Storage: AsRef<[u8]>
                 Node::Branch(node) => {
                     if path.is_empty() {
                         return node.value;
+                    }
+                    if !node.bytemask.test_bit(path[0]) {
+                        return None;
                     }
                     let first_child = node.first_child?;
                     let idx = node.bytemask.index_of(path[0]) as usize;
@@ -1199,6 +1246,653 @@ fn dump_arena_tree<V, Z, F, P>(
     let _root_id = arena.set_root(&root)?;
     arena.finalize().unwrap();
     Ok(arena)
+}
+
+impl ArenaCompactTree<Mmap> {
+    /// Merge a zipper's trie into the existing ACT file at `path`, appending
+    /// only the new data and updating the root pointer.
+    ///
+    /// The old file contents are never rewritten: since all node references
+    /// are backward relative offsets, appended nodes can point into the
+    /// existing arena, and subtrees the zipper does not touch are shared
+    /// byte-for-byte. Only the nodes along changed paths (plus their sibling
+    /// runs, which the format requires to be contiguous) are appended, and
+    /// the root offset at byte 8 is rewritten to the new root.
+    ///
+    /// Each merge also appends a `[previous_suffix, previous_root]` trailer
+    /// recording the pre-merge root, chaining the roots into a singly-linked
+    /// list that [`Self::root_history`] walks.
+    ///
+    /// Where both tries hold a value on the same path, the zipper's value
+    /// wins. If the zipper adds nothing, the file is left untouched.
+    ///
+    /// Returns the updated tree, memory-mapped from the merged file.
+    ///
+    /// # Examples
+    /// ```
+    /// use pathmap::{PathMap, arena_compact::ArenaCompactTree};
+    /// # fn main() -> std::io::Result<()> {
+    /// let dir = tempfile::tempdir()?;
+    /// let file = dir.path().join("merge.act");
+    /// let base = PathMap::from_iter([("apple", 1u64), ("banana", 2)]);
+    /// let act = ArenaCompactTree::from_zipper(base.read_zipper(), |&v| v);
+    /// std::fs::write(&file, act.get_data())?;
+    ///
+    /// let update = PathMap::from_iter([("apricot", 3u64), ("banana", 20)]);
+    /// let merged = ArenaCompactTree::merge_zipper_into_file(
+    ///     &file, update.read_zipper(), |&v| v)?;
+    /// assert_eq!(merged.get_val_at("apple"), Some(1));
+    /// assert_eq!(merged.get_val_at("apricot"), Some(3));
+    /// assert_eq!(merged.get_val_at("banana"), Some(20)); // zipper value wins
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn merge_zipper_into_file<V, Z, F, P>(
+        path: P, zipper: Z, map_val: F,
+    ) -> Result<Self, std::io::Error>
+    where
+        Z: Zipper + ZipperMoving + ZipperValues<V>,
+        F: Fn(&V) -> u64,
+        P: AsRef<Path>,
+    {
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        let old_map = unsafe { Mmap::map(&file) }?;
+        let old = old_map.as_ref();
+        if old.len() < MAGIC_LENGTH + U64_SIZE + MAX_VARINT_SIZE
+            || &old[..MAGIC_LENGTH] != &COMPACT_TREE_MAGIC
+        {
+            return Err(std::io::Error::other("Invalid file magic"));
+        }
+        let root_buf: [u8; U64_SIZE] = old[MAGIC_LENGTH..][..U64_SIZE].try_into().unwrap();
+        let root_id = NodeId(u64::from_le_bytes(root_buf));
+
+        // Was the old file itself produced by a merge? A base file ends with the
+        // zero padding, so its final u64 is zero; a merged file records a
+        // non-zero `previous_root` there. When it is a merged file, its trailer
+        // begins `ROOT_TRAILER_SIZE` bytes from the end, and the new trailer's
+        // `previous_suffix` links back to it, extending the root chain.
+        let old_len = old.len();
+        let old_prev_root: [u8; U64_SIZE] = old[old_len - U64_SIZE..].try_into().unwrap();
+        let previous_suffix = if u64::from_le_bytes(old_prev_root) != 0 {
+            (old_len - ROOT_TRAILER_SIZE) as u64
+        } else {
+            0
+        };
+
+        let mut out = BufWriter::with_capacity(DUMPER_BUFFER_SIZE, file);
+        out.seek(SeekFrom::End(0))?;
+        let mut merger = ZipperMerger {
+            old,
+            out,
+            position: old.len() as u64,
+            zipper,
+            map_val,
+            counters: Counters::default(),
+            _marker: PhantomData,
+        };
+        let (merged, changed) = merger.merge_node(root_id)?;
+        if changed {
+            let new_root = merger.push_merged(merged)?;
+            // Append the `[previous_suffix, previous_root]` trailer. It records
+            // the pre-merge root so the roots form a walkable linked list (see
+            // `root_history`), and its `ROOT_TRAILER_SIZE` bytes also satisfy
+            // the trailing-padding invariant the varint reader relies on.
+            merger.out.write_all(&previous_suffix.to_le_bytes())?;
+            merger.out.write_all(&root_id.0.to_le_bytes())?;
+            merger.out.seek(SeekFrom::Start(MAGIC_LENGTH as u64))?;
+            merger.out.write_all(&new_root.0.to_le_bytes())?;
+        }
+        let ZipperMerger { out, counters, .. } = merger;
+        let file = out.into_inner()?;
+        drop(old_map);
+        let memmap = unsafe { Mmap::map(&file) }?;
+        Ok(Self {
+            position: memmap.as_ref().len() as u64,
+            storage: memmap,
+            line_map: Default::default(),
+            lines: Default::default(),
+            hasher: Default::default(),
+            value: Cell::new(0),
+            counters,
+        })
+    }
+}
+
+/// A single in-construction trie node used by [ACTOutputStream]
+///
+/// One frame exists per byte of the most recently pushed path. A frame
+/// accumulates completed child subtrees (in ascending byte order, which the
+/// sorted input guarantees) until the input stream moves past it, at which
+/// point it is sealed and written to the arena.
+struct StreamFrame {
+    /// Bytes of the children attached so far
+    mask: ByteMask,
+    /// Completed child nodes, parallel to the set bits of `mask` (ascending)
+    children: Vec<Node>,
+    /// Value at this node, if the exact path was pushed
+    value: Option<u64>,
+}
+
+impl StreamFrame {
+    fn empty() -> Self {
+        StreamFrame {
+            mask: ByteMask::EMPTY,
+            children: Vec::new(),
+            value: None,
+        }
+    }
+
+    /// A frame with no children and no value is a pure pass-through and can
+    /// be folded into a line node instead of becoming a branch node
+    fn is_passthrough(&self) -> bool {
+        self.mask.is_empty_mask() && self.value.is_none()
+    }
+}
+
+/// Builds an [ArenaCompactTree] on disk from a stream of ordered paths.
+///
+/// Paths must be pushed in strictly increasing lexicographic (byte) order.
+/// Memory usage is bounded by the longest path pushed (plus the line-reuse
+/// cache), so this can build tries far larger than available RAM.
+///
+/// # Examples
+/// ```
+/// use pathmap::arena_compact::ACTOutputStream;
+/// # fn main() -> std::io::Result<()> {
+/// let dir = tempfile::tempdir()?;
+/// let file = dir.path().join("file.act");
+/// let mut b = ACTOutputStream::new(&file)?;
+/// b.push("123")?;
+/// b.push("124")?;
+/// let tree = b.finish()?;
+/// assert_eq!(tree.get_val_at("123"), Some(0));
+/// assert_eq!(tree.get_val_at("124"), Some(0));
+/// assert_eq!(tree.get_val_at("125"), None);
+/// # Ok(())
+/// # }
+/// ```
+pub struct ACTOutputStream {
+    act: ArenaCompactTree<FileDumper>,
+    /// `stack[d]` is the in-construction node at depth `d` along `prev_path`;
+    /// `stack[0]` is the root
+    stack: Vec<StreamFrame>,
+    /// The most recently pushed path
+    prev_path: Vec<u8>,
+    /// Number of paths pushed so far
+    count: u64,
+}
+
+impl ACTOutputStream {
+    /// Create (or truncate) the file at `path` and start streaming a trie into it
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        Ok(ACTOutputStream {
+            act: ArenaCompactTree::<FileDumper>::open(path)?,
+            stack: Vec::from([StreamFrame::empty()]),
+            prev_path: Vec::new(),
+            count: 0,
+        })
+    }
+
+    /// Add `path` to the trie with a value of `0`
+    ///
+    /// Paths must arrive in strictly increasing lexicographic order,
+    /// otherwise an [InvalidInput](std::io::ErrorKind::InvalidInput) error
+    /// is returned. A path that extends the previous one (e.g. `"ab"` after
+    /// `"a"`) is fine; both keep their values.
+    pub fn push(&mut self, path: impl AsRef<[u8]>) -> Result<(), std::io::Error> {
+        self.push_val(path, 0)
+    }
+
+    /// Add `path` to the trie with the given `value`
+    ///
+    /// See [push](Self::push) for the ordering requirements.
+    pub fn push_val(
+        &mut self, path: impl AsRef<[u8]>, value: u64,
+    ) -> Result<(), std::io::Error> {
+        let path = path.as_ref();
+        if self.count > 0 && path <= &self.prev_path[..] {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "paths must be pushed in strictly increasing order",
+            ));
+        }
+        let common = find_prefix_overlap(path, &self.prev_path);
+        self.collapse_to(common)?;
+        for _ in common..path.len() {
+            self.stack.push(StreamFrame::empty());
+        }
+        self.stack.last_mut().unwrap().value = Some(value);
+        self.prev_path.truncate(common);
+        self.prev_path.extend_from_slice(&path[common..]);
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Seal every frame deeper than `target`, writing completed subtrees to
+    /// the arena and attaching them as children of the frame at `target`
+    fn collapse_to(&mut self, target: usize) -> Result<(), std::io::Error> {
+        while self.stack.len() - 1 > target {
+            let top = self.stack.len() - 1;
+            let frame = self.stack.pop().unwrap();
+            let node = self.seal(frame)?;
+            // Fold pure pass-through ancestors into a line segment
+            while self.stack.len() - 1 > target
+                && self.stack.last().unwrap().is_passthrough()
+            {
+                self.stack.pop();
+            }
+            let start = self.stack.len() - 1;
+            // `prev_path[start]` goes into the parent's mask; if the chain is
+            // longer, the remaining bytes become line data
+            let node = if top - start >= 2 {
+                let mut line = NodeLine::empty();
+                line.path = self.act.add_path(&self.prev_path[start + 1..top])?;
+                match node {
+                    Node::Branch(branch) if branch.bytemask.is_empty_mask() => {
+                        line.value = branch.value;
+                    }
+                    node => {
+                        line.child = Some(self.act.push(&node)?);
+                    }
+                }
+                Node::Line(line)
+            } else {
+                node
+            };
+            let parent = self.stack.last_mut().unwrap();
+            parent.mask.set_bit(self.prev_path[start]);
+            parent.children.push(node);
+        }
+        Ok(())
+    }
+
+    /// Write `frame`'s children to the arena (contiguously, so that
+    /// `first_child` suffices to address them) and return the branch node
+    fn seal(&mut self, frame: StreamFrame) -> Result<Node, std::io::Error> {
+        let mut first_child: Option<NodeId> = None;
+        for child in frame.children.iter() {
+            let id = self.act.push(child)?;
+            first_child = first_child.or(Some(id));
+        }
+        Ok(Node::Branch(NodeBranch {
+            bytemask: frame.mask,
+            first_child,
+            value: frame.value,
+        }))
+    }
+
+    /// Seal the remaining frames, write the root, and flush to disk
+    ///
+    /// Returns the finished tree, memory-mapped from the written file.
+    pub fn finish(mut self) -> Result<ArenaCompactTree<Mmap>, std::io::Error> {
+        self.collapse_to(0)?;
+        let root_frame = self.stack.pop().unwrap();
+        let root = self.seal(root_frame)?;
+        self.act.set_root(&root)?;
+        self.act.finalize()?;
+        let ArenaCompactTree { storage, counters, .. } = self.act;
+        let file = storage.buf_writer.into_inner()?;
+        let memmap = unsafe { Mmap::map(&file) }?;
+        Ok(ArenaCompactTree {
+            position: memmap.as_ref().len() as u64,
+            storage: memmap,
+            line_map: Default::default(),
+            lines: Default::default(),
+            hasher: Default::default(),
+            value: Cell::new(0),
+            counters,
+        })
+    }
+}
+
+#[cfg(feature="nightly")]
+#[path="arena_compact_nightly.rs"]
+mod arena_compact_nightly;
+#[cfg(feature="nightly")]
+pub use arena_compact_nightly::*;
+
+/// A merged subtree: either an existing node reused as-is, or a freshly
+/// built node (whose descendants have already been appended).
+enum Merged {
+    /// Reuse the old subtree at this id. When placed into a sibling run the
+    /// node itself is shallow-copied (the format requires siblings to be
+    /// contiguous), but everything below it stays shared with the old file.
+    Reuse(NodeId),
+    /// A new node to append; references old and new data by absolute id.
+    Fresh(Node),
+}
+
+/// State for [ArenaCompactTree::merge_zipper_into_file]: reads the old arena
+/// through `old`, appends through `out`, and walks `zipper` in lockstep with
+/// the old trie. Every merge method returns the zipper to its entry position.
+struct ZipperMerger<'a, V, Z, F> {
+    old: &'a [u8],
+    out: BufWriter<File>,
+    /// Append position: the absolute offset the next object will get
+    position: u64,
+    zipper: Z,
+    map_val: F,
+    counters: Counters,
+    _marker: PhantomData<fn(&V) -> u64>,
+}
+
+impl<'a, V, Z, F> ZipperMerger<'a, V, Z, F>
+where
+    Z: Zipper + ZipperMoving + ZipperValues<V>,
+    F: Fn(&V) -> u64,
+{
+    fn old_node(&self, id: NodeId) -> (Node, usize) {
+        read_node(&self.old[id.0 as usize..], id)
+    }
+
+    fn old_line(&self, id: LineId) -> &'a [u8] {
+        let old: &'a [u8] = self.old;
+        let start = &old[id.0 as usize..];
+        let (len, off) = read_varint_u64(start);
+        &start[off..off + len as usize]
+    }
+
+    /// The zipper's value at its current focus, mapped to `u64`
+    fn z_val(&self) -> Option<u64> {
+        self.zipper.val().map(|v| (self.map_val)(v))
+    }
+
+    /// Append a node; all ids it references must be below `self.position`
+    fn push_fresh(&mut self, node: &Node) -> Result<NodeId, std::io::Error> {
+        let node_id = NodeId(self.position);
+        let mut cursor = std::io::Cursor::new([0; MAX_BRANCH_NODE_SIZE]);
+        match node {
+            Node::Branch(branch) => {
+                ArenaCompactTree::<Vec<u8>>::write_node(
+                    &mut cursor, branch, node_id, &mut self.counters)?;
+            }
+            Node::Line(line) => {
+                ArenaCompactTree::<Vec<u8>>::write_line(
+                    &mut cursor, line, node_id, &mut self.counters)?;
+            }
+        }
+        let len = cursor.position();
+        self.out.write_all(&cursor.get_ref()[..len as usize])?;
+        self.position += len;
+        Ok(node_id)
+    }
+
+    /// Append a merged child as part of a sibling run. `Reuse` becomes a
+    /// shallow copy: same value/mask/line, child pointers into the old file.
+    fn push_merged(&mut self, merged: Merged) -> Result<NodeId, std::io::Error> {
+        match merged {
+            Merged::Fresh(node) => self.push_fresh(&node),
+            Merged::Reuse(id) => {
+                let (node, _) = self.old_node(id);
+                self.push_fresh(&node)
+            }
+        }
+    }
+
+    /// Append line data, returning its id
+    fn add_line_data(&mut self, data: &[u8]) -> Result<LineId, std::io::Error> {
+        debug_assert!(!data.is_empty());
+        let line_id = LineId(self.position);
+        let lenlen = push_varint_u64(&mut self.out, data.len() as u64)?;
+        self.out.write_all(data)?;
+        self.position += (lenlen + data.len()) as u64;
+        Ok(line_id)
+    }
+
+    /// Merge the zipper's current position with the old node `id`.
+    /// Returns the merged subtree and whether anything changed; when nothing
+    /// changed, nothing has been appended and the old node is reused.
+    fn merge_node(&mut self, id: NodeId) -> Result<(Merged, bool), std::io::Error> {
+        match self.old_node(id).0 {
+            Node::Branch(branch) => self.merge_branch(id, branch),
+            Node::Line(line) => match self.merge_line_from(&line, 0)? {
+                Some(merged) => Ok((merged, true)),
+                None => Ok((Merged::Reuse(id), false)),
+            },
+        }
+    }
+
+    fn merge_branch(
+        &mut self, id: NodeId, branch: NodeBranch,
+    ) -> Result<(Merged, bool), std::io::Error> {
+        let z_mask = self.zipper.child_mask();
+        let value = self.z_val().or(branch.value);
+        let mut changed = value != branch.value;
+
+        // Ids of the old children (siblings are stored sequentially)
+        let mut old_kids = Vec::with_capacity(branch.bytemask.count_bits());
+        if let Some(first) = branch.first_child {
+            let mut cur = first;
+            for _ in 0..branch.bytemask.count_bits() {
+                old_kids.push(cur);
+                let (_, len) = self.old_node(cur);
+                cur = NodeId(cur.0 + len as u64);
+            }
+        }
+
+        let union = branch.bytemask.or(&z_mask);
+        let mut children: Vec<Merged> = Vec::with_capacity(union.count_bits());
+        let mut old_idx = 0;
+        for byte in union.iter() {
+            let in_old = branch.bytemask.test_bit(byte);
+            let in_new = z_mask.test_bit(byte);
+            if in_old {
+                let child_id = old_kids[old_idx];
+                old_idx += 1;
+                if in_new {
+                    self.zipper.descend_to_byte(byte);
+                    let (merged, child_changed) = self.merge_node(child_id)?;
+                    self.zipper.ascend_byte();
+                    changed |= child_changed;
+                    children.push(merged);
+                } else {
+                    children.push(Merged::Reuse(child_id));
+                }
+            } else {
+                changed = true;
+                self.zipper.descend_to_byte(byte);
+                let node = self.fresh_subtree()?;
+                self.zipper.ascend_byte();
+                children.push(Merged::Fresh(node));
+            }
+        }
+        if !changed {
+            return Ok((Merged::Reuse(id), false));
+        }
+        let mut first_child = None;
+        for child in children {
+            let child_id = self.push_merged(child)?;
+            first_child = first_child.or(Some(child_id));
+        }
+        let node = NodeBranch { bytemask: union, first_child, value };
+        Ok((Merged::Fresh(Node::Branch(node)), true))
+    }
+
+    /// Merge the zipper (positioned `k` bytes into `line`'s segment) with the
+    /// remainder of the line. Returns `None` when the zipper adds nothing
+    /// (in which case nothing has been appended).
+    fn merge_line_from(
+        &mut self, line: &NodeLine, k: usize,
+    ) -> Result<Option<Merged>, std::io::Error> {
+        let data = self.old_line(line.path);
+        let len = data.len();
+        // Scan forward while the zipper follows the segment exactly
+        let mut j = k;
+        while j < len && self.z_val().is_none() && {
+            let z_mask = self.zipper.child_mask();
+            z_mask.count_bits() == 1 && z_mask.test_bit(data[j])
+        } {
+            self.zipper.descend_to_byte(data[j]);
+            j += 1;
+        }
+
+        let inner: Option<Merged> = if j == len {
+            // Reached the end of the segment
+            if let Some(child) = line.child {
+                let (merged, child_changed) = self.merge_node(child)?;
+                child_changed.then_some(merged)
+            } else {
+                // Old leaf; the zipper may update the value or extend below
+                let z_mask = self.zipper.child_mask();
+                let value = self.z_val().or(line.value);
+                if value == line.value && z_mask.is_empty_mask() {
+                    None
+                } else {
+                    let mut fresh = Vec::with_capacity(z_mask.count_bits());
+                    for byte in z_mask.iter() {
+                        self.zipper.descend_to_byte(byte);
+                        fresh.push(self.fresh_subtree()?);
+                        self.zipper.ascend_byte();
+                    }
+                    let mut first_child = None;
+                    for node in &fresh {
+                        let child_id = self.push_fresh(node)?;
+                        first_child = first_child.or(Some(child_id));
+                    }
+                    let node = NodeBranch { bytemask: z_mask, first_child, value };
+                    Some(Merged::Fresh(Node::Branch(node)))
+                }
+            }
+        } else {
+            // The zipper diverges at segment offset `j`
+            let b_old = data[j];
+            let z_mask = self.zipper.child_mask();
+            let z_val = self.z_val();
+            let matched = z_mask.test_bit(b_old);
+            let cont: Option<Merged> = if matched {
+                self.zipper.descend_to_byte(b_old);
+                let merged = self.merge_line_from(line, j + 1)?;
+                self.zipper.ascend_byte();
+                merged
+            } else {
+                None
+            };
+            let extras = z_mask.count_bits() - (matched as usize);
+            if z_val.is_none() && extras == 0 && cont.is_none() {
+                None
+            } else {
+                // Build a branch at offset `j`: the old segment continuation
+                // plus whatever the zipper adds here
+                let mut cont = Some(match cont {
+                    Some(merged) => merged,
+                    None => self.tail_child(line, data, j + 1)?,
+                });
+                let mut mask = z_mask;
+                mask.set_bit(b_old);
+                let mut children: Vec<Merged> = Vec::with_capacity(mask.count_bits());
+                for byte in mask.iter() {
+                    if byte == b_old {
+                        children.push(cont.take().unwrap());
+                    } else {
+                        self.zipper.descend_to_byte(byte);
+                        let node = self.fresh_subtree()?;
+                        self.zipper.ascend_byte();
+                        children.push(Merged::Fresh(node));
+                    }
+                }
+                let mut first_child = None;
+                for child in children {
+                    let child_id = self.push_merged(child)?;
+                    first_child = first_child.or(Some(child_id));
+                }
+                let node = NodeBranch { bytemask: mask, first_child, value: z_val };
+                Some(Merged::Fresh(Node::Branch(node)))
+            }
+        };
+
+        self.zipper.ascend(j - k);
+        let Some(inner) = inner else { return Ok(None) };
+        if j == k {
+            return Ok(Some(inner));
+        }
+        // Wrap the merged node in a line for the matched prefix data[k..j];
+        // reuse the old line data when the whole segment matched.
+        let path_id = if k == 0 && j == len {
+            line.path
+        } else {
+            self.add_line_data(&data[k..j])?
+        };
+        let node = match inner {
+            Merged::Fresh(Node::Branch(branch)) if branch.bytemask.is_empty_mask() => {
+                Node::Line(NodeLine { path: path_id, value: branch.value, child: None })
+            }
+            inner => {
+                let child_id = self.push_merged(inner)?;
+                Node::Line(NodeLine { path: path_id, value: None, child: Some(child_id) })
+            }
+        };
+        Ok(Some(Merged::Fresh(node)))
+    }
+
+    /// The old, unmerged continuation of `line` from segment offset `k`,
+    /// packaged so it can sit in a new sibling run
+    fn tail_child(
+        &mut self, line: &NodeLine, data: &[u8], k: usize,
+    ) -> Result<Merged, std::io::Error> {
+        if k == data.len() {
+            Ok(match line.child {
+                Some(child) => Merged::Reuse(child),
+                None => Merged::Fresh(Node::Branch(NodeBranch {
+                    bytemask: ByteMask::EMPTY,
+                    first_child: None,
+                    value: line.value,
+                })),
+            })
+        } else {
+            let path_id = self.add_line_data(&data[k..])?;
+            Ok(Merged::Fresh(Node::Line(NodeLine {
+                path: path_id,
+                value: if line.child.is_none() { line.value } else { None },
+                child: line.child,
+            })))
+        }
+    }
+
+    /// Serialize the zipper's current subtree (absent from the old trie),
+    /// compressing single-child chains into line nodes. Descendants are
+    /// appended; the returned node is pushed by the caller's sibling run.
+    fn fresh_subtree(&mut self) -> Result<Node, std::io::Error> {
+        let mut segment: Vec<u8> = Vec::new();
+        loop {
+            if self.z_val().is_some() {
+                break;
+            }
+            let mask = self.zipper.child_mask();
+            if mask.count_bits() != 1 {
+                break;
+            }
+            let byte = mask.iter().next().unwrap();
+            segment.push(byte);
+            self.zipper.descend_to_byte(byte);
+        }
+        let value = self.z_val();
+        let mask = self.zipper.child_mask();
+        let mut children = Vec::with_capacity(mask.count_bits());
+        for byte in mask.iter() {
+            self.zipper.descend_to_byte(byte);
+            children.push(self.fresh_subtree()?);
+            self.zipper.ascend_byte();
+        }
+        let mut first_child = None;
+        for child in &children {
+            let child_id = self.push_fresh(child)?;
+            first_child = first_child.or(Some(child_id));
+        }
+        let branch = NodeBranch { bytemask: mask, first_child, value };
+        let node = if segment.is_empty() {
+            Node::Branch(branch)
+        } else {
+            let path_id = self.add_line_data(&segment)?;
+            if mask.is_empty_mask() {
+                Node::Line(NodeLine { path: path_id, value, child: None })
+            } else {
+                let child_id = self.push_fresh(&Node::Branch(branch))?;
+                Node::Line(NodeLine { path: path_id, value: None, child: Some(child_id) })
+            }
+        };
+        self.zipper.ascend(segment.len());
+        Ok(node)
+    }
 }
 
 /*
@@ -2226,6 +2920,33 @@ mod tests {
         }
     }
 
+    /// Regression test: `get_val_at` must return `None` for a byte that is
+    /// absent from a branch's child mask, rather than reading the wrong
+    /// sibling (byte below the mask range) or walking past the last sibling
+    /// (byte above the mask range, which subtract-overflow panics in debug).
+    #[test]
+    fn test_act_get_absent_branch_byte() {
+        // Single-char keys force a branch root with children on {b'b', b'd', b'f'}.
+        let items: [(&str, u64); 3] = [("b", 1), ("d", 2), ("f", 3)];
+        let btm = PathMap::from_iter(items.iter().copied());
+        let act = ArenaCompactTree::from_zipper(btm.read_zipper(), |&v| v);
+
+        // Present keys still resolve correctly.
+        for (k, v) in items {
+            assert_eq!(act.get_val_at(k), Some(v), "present key {k}");
+        }
+
+        // Absent bytes below, between, and above the child mask range.
+        // b'a' is below the minimum child (would have read the first sibling),
+        // b'g'/b'z' are above the maximum (would have walked past the last).
+        for absent in ["a", "c", "e", "g", "z"] {
+            assert_eq!(act.get_val_at(absent), None, "absent byte {absent}");
+        }
+
+        // Absent path that descends one present child then diverges.
+        assert_eq!(act.get_val_at("bx"), None);
+    }
+
     #[test]
     fn test_act_round_trip() {
         let path_vals = PATHS.iter().enumerate()
@@ -2257,6 +2978,275 @@ mod tests {
         assert_eq!(btm_value, act_value);
     }
 
+    fn build_act_file(path: &std::path::Path, items: &[(&str, u64)]) {
+        let btm = PathMap::from_iter(items.iter().map(|&(k, v)| (k, v)));
+        let act = ArenaCompactTree::from_zipper(btm.read_zipper(), |&v| v);
+        std::fs::write(path, act.get_data()).unwrap();
+    }
+
+    /// Assert `act` holds exactly `items` (no duplicates in `items`),
+    /// both by point lookups and by an ordered walk.
+    fn assert_act_content(act: &super::ACTMmap, items: &[(&str, u64)]) {
+        for &(k, v) in items {
+            assert_eq!(act.get_val_at(k), Some(v), "key {k}");
+        }
+        let btm = PathMap::from_iter(items.iter().map(|&(k, v)| (k, v)));
+        let mut bz = btm.read_zipper();
+        let mut az = act.read_zipper_u64();
+        loop {
+            let more_b = bz.to_next_val();
+            let more_a = az.to_next_val();
+            assert_eq!(more_b, more_a, "walks end together");
+            assert_eq!(bz.path(), az.path());
+            assert_eq!(bz.val().copied(), az.val().copied());
+            if !more_a {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_act_merge_zipper_into_file() {
+        use super::MAGIC_LENGTH;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("merge.act");
+        let base: &[(&str, u64)] = &[
+            ("arrow", 1), ("bow", 2), ("roman", 3), ("romane", 4),
+            ("rubicon", 5), ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaab", 6),
+        ];
+        let add: &[(&str, u64)] = &[
+            ("bow", 20),                            // value conflict -> zipper wins
+            ("rom", 7),                             // value inside a line segment
+            ("romanus", 8),                         // splits the line under "roman"
+            ("rub", 9), ("rubble", 10),             // diverges inside the "rubicon" line
+            ("zebra", 11),                          // fresh subtree at the root
+            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaab", 6),  // identical entry (unchanged subtree)
+            ("arrowhead", 12),                      // extends an existing leaf
+        ];
+        build_act_file(&file, base);
+        let before = std::fs::read(&file).unwrap();
+
+        let add_map = PathMap::from_iter(add.iter().map(|&(k, v)| (k, v)));
+        let merged = ArenaCompactTree::merge_zipper_into_file(
+            &file, add_map.read_zipper(), |&v| v).unwrap();
+
+        // Append-only: everything except the root pointer is byte-identical
+        let after = std::fs::read(&file).unwrap();
+        assert!(after.len() > before.len(), "merge must append");
+        assert_eq!(&after[..MAGIC_LENGTH], &before[..MAGIC_LENGTH]);
+        assert_eq!(&after[MAGIC_LENGTH + 8..before.len()], &before[MAGIC_LENGTH + 8..]);
+
+        assert_act_content(&merged, &[
+            ("arrow", 1), ("arrowhead", 12), ("bow", 20), ("rom", 7),
+            ("roman", 3), ("romane", 4), ("romanus", 8), ("rub", 9),
+            ("rubble", 10), ("rubicon", 5), ("zebra", 11),
+            ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaab", 6),
+        ]);
+        for absent in ["row", "arrowh", "arrowheads", "zebr", "zebras", "romanu"] {
+            assert_eq!(merged.get_val_at(absent), None, "absent {absent}");
+        }
+    }
+
+    #[test]
+    fn test_act_merge_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("noop.act");
+        let base: &[(&str, u64)] = &[
+            ("arrow", 1), ("bow", 2), ("roman", 3), ("romane", 4), ("rubicon", 5),
+        ];
+        build_act_file(&file, base);
+        let before = std::fs::read(&file).unwrap();
+
+        // A subset with identical values adds nothing
+        let subset = PathMap::from_iter([("bow", 2u64), ("romane", 4)]);
+        let merged = ArenaCompactTree::merge_zipper_into_file(
+            &file, subset.read_zipper(), |&v| v).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), before, "no-op merge must not touch the file");
+        assert_act_content(&merged, base);
+    }
+
+    #[test]
+    fn test_act_merge_wide_branch() {
+        // Merging into a >=32-child branch exercises the mask encoding
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wide.act");
+        let evens: Vec<Vec<u8>> = (0..=254u16).step_by(2).map(|b| vec![b as u8]).collect();
+        let odds: Vec<Vec<u8>> = (1..=255u16).step_by(2).map(|b| vec![b as u8]).collect();
+        let base_map = PathMap::from_iter(evens.iter().map(|k| (k, 1u64)));
+        let act = ArenaCompactTree::from_zipper(base_map.read_zipper(), |&v| v);
+        std::fs::write(&file, act.get_data()).unwrap();
+
+        let add_map = PathMap::from_iter(odds.iter().map(|k| (k, 2u64)));
+        let merged = ArenaCompactTree::merge_zipper_into_file(
+            &file, add_map.read_zipper(), |&v| v).unwrap();
+        for b in 0..=255u8 {
+            assert_eq!(merged.get_val_at([b]), Some(1 + (b & 1) as u64), "byte {b}");
+        }
+        assert_eq!(merged.get_val_at([0, 0]), None);
+    }
+
+    #[test]
+    fn test_act_merge_repeated_and_act_source() {
+        // Several merge waves over an LCG key soup; the last wave merges from
+        // an ACT zipper instead of a PathMap zipper.
+        // Written under the project's `tests/` dir so the merged file can be inspected.
+        let tests_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let file = tests_dir.join("act_merge.act");
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state >> 33
+        };
+        let mut make_wave = |n: usize| -> Vec<(String, u64)> {
+            (0..n).map(|_| {
+                let r = next();
+                // small alphabet + variable length -> shared prefixes and line splits
+                let len = 1 + (r % 12) as usize;
+                let key: String = (0..len)
+                    .map(|i| (b'a' + ((r >> (i * 2)) & 0x3) as u8) as char)
+                    .collect();
+                (key, r % 1000)
+            }).collect()
+        };
+
+        let wave0 = make_wave(200);
+        let base_map: PathMap<u64> = wave0.iter().map(|(k, v)| (k, *v)).collect();
+        let act = ArenaCompactTree::from_zipper(base_map.read_zipper(), |&v| v);
+        std::fs::write(&file, act.get_data()).unwrap();
+
+        let mut expect: std::collections::HashMap<String, u64> =
+            wave0.into_iter().collect();
+        for wave_idx in 0..3 {
+            let wave = make_wave(300);
+            let wave_map: PathMap<u64> = wave.iter().map(|(k, v)| (k, *v)).collect();
+            let before = std::fs::read(&file).unwrap();
+            let merged = if wave_idx < 2 {
+                ArenaCompactTree::merge_zipper_into_file(
+                    &file, wave_map.read_zipper(), |&v| v).unwrap()
+            } else {
+                // final wave: merge from an ACT zipper (ACT -> ACT merge)
+                let wave_act = ArenaCompactTree::from_zipper(wave_map.read_zipper(), |&v| v);
+                ArenaCompactTree::merge_zipper_into_file(
+                    &file, wave_act.read_zipper_u64(), |&v| v).unwrap()
+            };
+            // PathMap::from_iter and HashMap::extend agree: later entries win
+            expect.extend(wave.into_iter());
+            let after = std::fs::read(&file).unwrap();
+            assert_eq!(&after[16..before.len()], &before[16..], "append-only violated");
+
+            let items: Vec<(&str, u64)> = expect.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            assert_act_content(&merged, &items);
+
+            // The root chain grows by one per merge: the base root plus one
+            // recorded root for each merge performed so far. Roots are appended,
+            // so newest-first they strictly decrease in file offset, and the head
+            // is the live root at the header.
+            let history = merged.root_history();
+            assert_eq!(history.len(), wave_idx + 2, "root history length");
+            assert_eq!(history[0], merged.get_root().1, "history head is live root");
+            for pair in history.windows(2) {
+                assert!(pair[0].0 > pair[1].0, "roots must be newest-first: {history:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_act_output_stream() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        use crate::zipper::ZipperReadOnlyValues;
+        let mut paths = PATHS.to_vec();
+        paths.sort();
+
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("stream.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        for (idx, path) in paths.iter().enumerate() {
+            out.push_val(path, idx as u64)?;
+        }
+        let tree = out.finish()?;
+        for (idx, path) in paths.iter().enumerate() {
+            assert_eq!(tree.get_val_at(path), Some(idx as u64));
+        }
+        assert_eq!(tree.get_val_at("arr"), None);
+        assert_eq!(tree.get_val_at("arrows"), None);
+
+        // The streamed tree must enumerate the same paths/values as one
+        // built through the catamorphism
+        let btm = PathMap::from_iter(
+            paths.iter().enumerate().map(|(idx, path)| (path, idx as u64)));
+        let act = ArenaCompactTree::from_zipper(btm.read_zipper(), |&v| v);
+        let mut cata_zipper = act.read_zipper_u64();
+        let mut stream_zipper = tree.read_zipper_u64();
+        loop {
+            let cata_next = cata_zipper.to_next_val();
+            let stream_next = stream_zipper.to_next_val();
+            assert_eq!(cata_next, stream_next);
+            assert_eq!(cata_zipper.path(), stream_zipper.path());
+            assert_eq!(cata_zipper.get_val(), stream_zipper.get_val());
+            if !cata_next {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_act_output_stream_prefixes() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("prefixes.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        // Empty path, paths extending previous ones, and a long chain
+        let paths: &[&str] = &["", "a", "ab", "abc", "abcdefgh", "b"];
+        for (idx, path) in paths.iter().enumerate() {
+            out.push_val(path, idx as u64)?;
+        }
+        let tree = out.finish()?;
+        for (idx, path) in paths.iter().enumerate() {
+            assert_eq!(tree.get_val_at(path), Some(idx as u64), "path={path:?}");
+        }
+        assert_eq!(tree.get_val_at("abcd"), None);
+        assert_eq!(tree.get_val_at("ba"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_act_output_stream_wide_branch() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("wide.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        // 256 children at the root exercises the child-mask encoding
+        for byte in 0..=255_u8 {
+            out.push_val([byte], byte as u64)?;
+        }
+        let tree = out.finish()?;
+        for byte in 0..=255_u8 {
+            assert_eq!(tree.get_val_at([byte]), Some(byte as u64));
+        }
+        assert_eq!(tree.get_val_at([0, 0]), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_act_output_stream_rejects_unordered() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("unordered.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        out.push("bcd")?;
+        assert!(out.push("bcd").is_err(), "duplicates must be rejected");
+        assert!(out.push("abc").is_err(), "out-of-order must be rejected");
+        assert!(out.push("b").is_err(), "prefix of previous is out-of-order");
+        out.push("bce")?;
+        let tree = out.finish()?;
+        assert_eq!(tree.get_val_at("bcd"), Some(0));
+        assert_eq!(tree.get_val_at("bce"), Some(0));
+        assert_eq!(tree.get_val_at("abc"), None);
+        Ok(())
+    }
+
     #[test]
     fn test_act_mmap() -> Result<(), std::io::Error> {
         use tempfile::NamedTempFile;
@@ -2281,6 +3271,111 @@ mod tests {
             format!("('{path}' {val:?} {bm:?}\n{children})")
         });
         assert_eq!(btm_value, act_value);
+        Ok(())
+    }
+
+    /// A deterministic pseudo-random `PathMap`
+    ///
+    /// The small alphabet and short paths make prefixes collide heavily, so
+    /// the trie mixes branch nodes, line nodes, and values on interior paths.
+    /// Paths are never empty: `.paths` carries no root value, so an empty path
+    /// would show up as a round-trip difference that says nothing about ACT.
+    #[cfg(any(feature = "serialization", feature = "nightly"))]
+    fn random_pathmap(seed: u64, count: usize) -> PathMap<u64> {
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        const ALPHABET: &[u8] = b"abcde";
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut map = PathMap::new();
+        for idx in 0..count {
+            let len = rng.random_range(1..12);
+            let path: Vec<u8> = (0..len)
+                .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())]).collect();
+            map.set_val_at(&path[..], idx as u64);
+        }
+        map
+    }
+
+    /// Asserts that `tree` holds exactly the paths and values of `map`
+    #[cfg(any(feature = "serialization", feature = "nightly"))]
+    fn assert_act_matches_map(map: &PathMap<u64>, tree: &ArenaCompactTree<super::Mmap>) {
+        let mut map_zipper = map.read_zipper();
+        let mut act_zipper = tree.read_zipper_u64();
+        loop {
+            let map_next = map_zipper.to_next_val();
+            assert_eq!(map_next, act_zipper.to_next_val());
+            assert_eq!(map_zipper.path(), act_zipper.path());
+            assert_eq!(map_zipper.val().copied(), act_zipper.val().copied());
+            if !map_next { break }
+        }
+    }
+
+    /// `PathMap` -> `.paths` -> `.act`, checking the tree that comes out the
+    /// far end against the map that went in
+    #[cfg(all(feature = "serialization", not(miri)))] // miri really hates the zlib-ng-sys C API
+    #[test]
+    fn test_act_paths_round_trip() -> Result<(), std::io::Error> {
+        use super::ACTOutputStream;
+        use crate::paths_serialization::{for_each_deserialized_path, serialize_paths_with_auxdata};
+
+        let map = random_pathmap(0xAC7_0001, 5000);
+
+        // `.paths` stores no values, so the aux-data callback collects them on
+        // the side, indexed by the order the paths were written in
+        let mut paths_data = Vec::new();
+        let mut values = Vec::new();
+        let ser = serialize_paths_with_auxdata(
+            map.read_zipper(), &mut paths_data,
+            |idx, _path, val: &u64| { assert_eq!(values.len(), idx); values.push(*val) })?;
+        assert_eq!(ser.path_count, map.val_count());
+
+        // The deserializer replays paths in the order the zipper produced
+        // them, i.e. strictly increasing, which is exactly what the streaming
+        // ACT builder requires
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("round_trip.act");
+        let mut out = ACTOutputStream::new(&file)?;
+        let de = for_each_deserialized_path(
+            &paths_data[..], |idx, path| out.push_val(path, values[idx]))?;
+        let tree = out.finish()?;
+        assert_eq!(de.path_count, ser.path_count);
+
+        assert_act_matches_map(&map, &tree);
+        Ok(())
+    }
+
+    /// The same build, driven through [act_serialization_sink_with_vals]
+    ///
+    /// The producer owns its paths, which is what the sink's resume type
+    /// requires: one lifetime is fixed for every path the coroutine is fed.
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn test_act_serialization_sink() -> Result<(), std::io::Error> {
+        use std::ops::{Coroutine, CoroutineState};
+        use std::pin::pin;
+        use super::{ACTOutputStream, act_serialization_sink_with_vals};
+
+        let map = random_pathmap(0xAC7_0002, 5000);
+        let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(map.val_count());
+        let mut zipper = map.read_zipper();
+        while zipper.to_next_val() {
+            items.push((zipper.path().to_vec(), *zipper.val().unwrap()));
+        }
+
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("sink.act");
+        let mut sink = pin!(act_serialization_sink_with_vals(ACTOutputStream::new(&file)?));
+        for (path, val) in items.iter() {
+            match sink.as_mut().resume(Some((&path[..], *val))) {
+                CoroutineState::Yielded(()) => {}
+                CoroutineState::Complete(res) => { res?; panic!("sink ended early") }
+            }
+        }
+        let tree = match sink.as_mut().resume(None) {
+            CoroutineState::Complete(res) => res?,
+            CoroutineState::Yielded(()) => panic!("`None` must end the stream"),
+        };
+
+        assert_act_matches_map(&map, &tree);
         Ok(())
     }
 }
