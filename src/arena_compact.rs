@@ -2517,6 +2517,11 @@ where Storage: AsRef<[u8]>
     /// Returns `true` if the zipper cannot ascend further, otherwise returns `false`
     fn at_root(&self) -> bool { self.path.len() <= self.origin_depth }
 
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> {
+        self.path.last().cloned()
+    }
+
     /// Resets the zipper's focus back to the root
     fn reset(&mut self) {
         // self.ascend(self.path.len() - self.origin_depth);

@@ -46,6 +46,8 @@ impl ZipperPathBuffer for FullZipper {
 
 impl ZipperMoving for FullZipper {
     fn at_root(&self) -> bool { self.path.len() == 0 }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.clear() }
     fn path(&self) -> &[u8] { &self.path[..] }
     fn val_count(&self) -> usize { usize::MAX/2 } // usize::MAX is a dangerous default for overflow
@@ -117,6 +119,8 @@ impl Zipper for NullZipper {
 
 impl ZipperMoving for NullZipper {
     fn at_root(&self) -> bool { true }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> { None }
     fn reset(&mut self) {}
     fn path(&self) -> &[u8] { &[] }
     fn val_count(&self) -> usize { 0 }

@@ -355,6 +355,11 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         }
     }
 
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> {
+        self.path.last().cloned()
+    }
+
     fn reset(&mut self) {
         self.prepare_buffers();
         self.path.truncate(self.origin_depth);
@@ -463,7 +468,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         if !self.source.to_next_sibling_byte() {
             return false;
         }
-        let byte = *self.source.path().last().unwrap();
+        let byte = self.source.focus_byte().unwrap();
         *self.path.last_mut().unwrap() = byte;
         true
     }
@@ -476,7 +481,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         if !self.source.to_prev_sibling_byte() {
             return false;
         }
-        let byte = *self.source.path().last().unwrap();
+        let byte = self.source.focus_byte().unwrap();
         *self.path.last_mut().unwrap() = byte;
         true
     }

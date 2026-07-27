@@ -143,6 +143,13 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
         self.a.at_root() || self.b.at_root()
     }
 
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> {
+        let byte = self.a.focus_byte();
+        debug_assert_eq!(byte, self.b.focus_byte());
+        byte
+    }
+
     fn reset(&mut self) {
         self.a.reset();
         self.b.reset();

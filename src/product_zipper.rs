@@ -165,6 +165,10 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
     fn at_root(&self) -> bool {
         self.path().len() == 0
     }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> {
+        self.z.focus_byte()
+    }
     fn reset(&mut self) {
         self.factor_paths.clear();
         self.z.reset()
@@ -484,7 +488,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> bool {
-        let Some(&byte) = self.path().last() else {
+        let Some(byte) = self.focus_byte() else {
             return false;
         };
         assert!(self.ascend(1), "must ascend");
@@ -660,6 +664,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
 {
     fn at_root(&self) -> bool {
         self.path().is_empty()
+    }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> {
+        self.primary.focus_byte()
     }
     fn reset(&mut self) {
         self.factor_paths.clear();

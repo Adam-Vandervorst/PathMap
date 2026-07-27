@@ -137,6 +137,21 @@ pub trait ZipperMoving: Zipper {
         self.path().len() == 0
     }
 
+    /// Returns the byte that was last descended to reach the zipper's focus, or `None` if that
+    /// byte is unavailable
+    ///
+    /// After a movement that descends one byte, such as [`descend_to_byte`](ZipperMoving::descend_to_byte)
+    /// or [`descend_first_byte`](ZipperMoving::descend_first_byte), this returns that byte.
+    ///
+    /// When [`at_root`](ZipperMoving::at_root) returns `true`, the return value is unspecified.  A
+    /// zipper that retains knowledge of the trie upstream of its root may return the byte leading
+    /// to its root, while a zipper without that knowledge, or one rooted at the trie root, returns
+    /// `None`.  Therefore a `Some` return must not be interpreted to mean the zipper has descended,
+    /// and callers needing that distinction must consult [`at_root`](ZipperMoving::at_root).
+    fn focus_byte(&self) -> Option<u8> {
+        self.path().last().cloned()
+    }
+
     /// Resets the zipper's focus back to its root
     fn reset(&mut self) {
         while !self.at_root() {
@@ -368,8 +383,8 @@ pub trait ZipperMoving: Zipper {
     /// This method is equivalent to calling [ZipperMoving::ascend] with `1`, followed by [ZipperMoving::descend_indexed_byte]
     /// where the index passed is 1 more than the index of the current focus position.
     fn to_next_sibling_byte(&mut self) -> bool {
-        let cur_byte = match self.path().last() {
-            Some(byte) => *byte,
+        let cur_byte = match self.focus_byte() {
+            Some(byte) => byte,
             None => return false
         };
         if !self.ascend_byte() {
@@ -397,8 +412,8 @@ pub trait ZipperMoving: Zipper {
     /// This method is equivalent to calling [Self::ascend] with `1`, followed by [Self::descend_indexed_byte]
     /// where the index passed is 1 less than the index of the current focus position.
     fn to_prev_sibling_byte(&mut self) -> bool {
-        let cur_byte = match self.path().last() {
-            Some(byte) => *byte,
+        let cur_byte = match self.focus_byte() {
+            Some(byte) => byte,
             None => return false
         };
         if !self.ascend_byte() {
@@ -834,6 +849,7 @@ macro_rules! zipper_impl_lens {
     };
     (ZipperMoving $s: ident => $e:expr) => {
         fn at_root(&$s) -> bool { $e.at_root() }
+        #[inline] fn focus_byte(&$s) -> Option<u8> { $e.focus_byte() }
         fn reset(&mut $s) { $e.reset() }
         #[inline] fn path(&$s) -> &[u8] { $e.path() }
         fn val_count(&$s) -> usize { $e.val_count() }
@@ -1555,6 +1571,11 @@ pub(crate) mod read_zipper_core {
     impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ReadZipperCore<'trie, '_, V, A> {
         fn at_root(&self) -> bool {
             self.prefix_buf.len() <= self.origin_path.len()
+        }
+
+        #[inline]
+        fn focus_byte(&self) -> Option<u8> {
+            self.prefix_buf.last().cloned()
         }
 
         fn reset(&mut self) {

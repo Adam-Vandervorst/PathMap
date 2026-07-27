@@ -468,6 +468,13 @@ fn derive_poly_zipper_with_traits(
                     }
                 }
 
+                #[inline]
+                fn focus_byte(&self) -> Option<u8> {
+                    match self {
+                        #(#variant_arms => inner.focus_byte(),)*
+                    }
+                }
+
                 fn val_count(&self) -> usize {
                     match self {
                         #(#variant_arms => inner.val_count(),)*

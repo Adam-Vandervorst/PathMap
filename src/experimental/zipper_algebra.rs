@@ -647,7 +647,7 @@ where
             break 'ascend;
         }
 
-        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
+        let byte_from = lhs.focus_byte().expect("non-empty path when k > 0");
 
         rhs.ascend_byte();
         rhs_mask = rhs.child_mask();
@@ -955,7 +955,7 @@ where
             break 'ascend;
         }
 
-        let byte_from = *lhs.path().last().expect("non-empty path when k > 0");
+        let byte_from = lhs.focus_byte().expect("non-empty path when k > 0");
 
         rhs.ascend_byte();
         rhs_mask = rhs.child_mask();
@@ -1350,7 +1350,7 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
             break 'ascend;
         }
 
-        let byte_from = *z0.path().last().expect("non-empty path when k > 0");
+        let byte_from = z0.focus_byte().expect("non-empty path when k > 0");
 
         z0.ascend_byte();
         m0 = z0.child_mask();
@@ -1904,9 +1904,8 @@ where
         if (k == 0) {
             break 'ascend;
         }
-        let byte_from = *first_active_mut(zs, active)
-            .path()
-            .last()
+        let byte_from = first_active_mut(zs, active)
+            .focus_byte()
             .expect("non-empty path when k > 0");
 
         // ascend
@@ -2476,9 +2475,8 @@ pub fn zipper_merge_dnf<V, Z, Out, A, const N: usize, const M: usize>(
                 break;
             }
 
-            let byte_from = *first_active(zs, first_active(clauses, active).members())
-                .path()
-                .last()
+            let byte_from = first_active(zs, first_active(clauses, active).members())
+                .focus_byte()
                 .expect("non-empty path at depth > 0");
 
             let mut active_zippers = 0;

@@ -52,6 +52,12 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
+    fn focus_byte(&self) -> Option<u8> {
+        let a = self.a.focus_byte();
+        let b = self.b.focus_byte();
+        assert_eq!(a, b);
+        a
+    }
     fn reset(&mut self) {
         self.a.reset();
         self.b.reset();
