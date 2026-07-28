@@ -1762,47 +1762,43 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         //Removing a value is one of the ways a node can be left holding two onward children
         // under one key, so check the node over on the way out
         let result = (|| {
-        if self.is_used_value_0() {
-            let node_key_0 = unsafe{ self.key_unchecked::<0>() };
-            if node_key_0 == key {
-                if prune {
-                    return Some(self.take_payload::<0>().unwrap().into_val())
-                } else {
-                    //If the other slot already keeps this path, then just remove the value
-                    let node_key_1 = unsafe{ self.key_unchecked::<1>() };
-                    let overlap = find_prefix_overlap(node_key_0, node_key_1);
-                    if node_key_0.len() == overlap {
+            if self.is_used_value_0() {
+                let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                if node_key_0 == key {
+                    if prune {
                         return Some(self.take_payload::<0>().unwrap().into_val())
                     } else {
-                        //Otherwise, turn the value into an empty node
-                        return Some(self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        //If the other slot already keeps this path, then just remove the value
+                        let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+                        let overlap = find_prefix_overlap(node_key_0, node_key_1);
+                        if node_key_0.len() == overlap {
+                            return Some(self.take_payload::<0>().unwrap().into_val())
+                        } else {
+                            //Otherwise, turn the value into an empty node
+                            return Some(self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        }
                     }
                 }
             }
-        }
-        if self.is_used_value_1() {
-            let node_key_1 = unsafe{ self.key_unchecked::<1>() };
-            if node_key_1 == key {
-                if prune {
-                    return Some(self.take_payload::<1>().unwrap().into_val())
-                } else {
-                    //If the other slot already keeps this path, then just remove the value.
-                    // Leaving a sentinel here would give the node two onward children under
-                    // the same key, which is ambiguous: `node_get_child` would resolve the
-                    // byte to slot_0 while `next_items` resolves it to the empty sentinel in
-                    // slot_1, and iteration would walk into nothing.
-                    let node_key_0 = unsafe{ self.key_unchecked::<0>() };
-                    let overlap = find_prefix_overlap(node_key_1, node_key_0);
-                    if node_key_1.len() == overlap {
+            if self.is_used_value_1() {
+                let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+                if node_key_1 == key {
+                    if prune {
                         return Some(self.take_payload::<1>().unwrap().into_val())
                     } else {
-                        //Otherwise, turn the value into an empty node
-                        return Some(self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        //If the other slot already keeps this path, then remove the value
+                        let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                        let overlap = find_prefix_overlap(node_key_1, node_key_0);
+                        if node_key_1.len() == overlap {
+                            return Some(self.take_payload::<1>().unwrap().into_val())
+                        } else {
+                            //Otherwise, turn the value into an empty node
+                            return Some(self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        }
                     }
                 }
             }
-        }
-        None
+            None
         })();
         debug_assert!(validate_node(self));
         result
@@ -2082,19 +2078,14 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                             return (Some(key0[key.len()]), None)
                         }
                     }
-                    //Both slots hold the same key, which happens when one of them holds the value
-                    // at that key and the other holds the onward child.  The byte is the same either
-                    // way, but the child can be in either slot, so check both before giving up on it
-                    // (`node_get_child` does the same).
-                    if key.len() + 1 == key0.len() {
-                        if self.is_child_ptr::<0>() {
-                            return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<0>().as_tagged()) })
-                        }
-                        if self.is_child_ptr::<1>() {
-                            return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<1>().as_tagged()) })
-                        }
+                    //If we get here, we know both slots hold the same single-byte key, which means one of them holds
+                    // a value and the other holds the onward child.  So we have to check both
+                    if self.is_child_ptr::<0>() {
+                        return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<0>().as_tagged()) })
                     }
-                    return (Some(key0[key.len()]), None)
+                    if self.is_child_ptr::<1>() {
+                        return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<1>().as_tagged()) })
+                    }
                 }
                 if starts_with(key1, key) && key1.len() > key.len() {
                     if key.len() + 1 == key1.len() && self.is_child_ptr::<1>() {
