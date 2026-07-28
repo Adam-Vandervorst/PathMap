@@ -1622,7 +1622,11 @@ fn with_k<const K: usize, T, R>(
         bits &= bits - 1;
         i += 1;
     }
-    let refs = unsafe{ xs.get_disjoint_unchecked_mut(indices) };
+    // SAFETY: `bits` is a mask of active zipper indices, so every set bit is
+    // less than `xs.len()`. Each iteration removes the lowest set bit before
+    // selecting the next one, therefore `indices` contains exactly K distinct
+    // in-bounds indices.
+    let refs = unsafe { xs.get_disjoint_unchecked_mut(indices) };
 
     f(refs)
 }
