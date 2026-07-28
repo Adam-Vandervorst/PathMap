@@ -39,6 +39,16 @@ pub(crate) const KEY_BYTES_CNT: usize = 42;
 #[cfg(not(feature = "slim_ptrs"))]
 pub(crate) const KEY_BYTES_CNT: usize = 14;
 
+// Only the slim_ptrs layout is asserted. The not(slim_ptrs) TrieNodeODRc has no
+// empty-sentinel representation yet (`new_empty`/`is_empty`/`make_unique`/`==`
+// exist only on the slim variant; the allocator prevents a free sentinel for the
+// Arc form, the open design in the note at trie_node.rs on TaggedNodeRefMut's
+// EmptyNode arm), so that configuration does not compile and its size cannot be
+// asserted until the sentinel design lands.
+#[cfg(all(feature = "slim_ptrs", target_arch = "x86_64", not(miri)))]
+const _: [(); core::mem::size_of::<LineListNode<[u8; 1024], crate::alloc::GlobalAlloc>>()] =
+    [(); 64];
+
 const SLOT_0_USED_MASK: u16 = 1 << 15;
 const SLOT_1_USED_MASK: u16 = 1 << 14;
 const BOTH_SLOTS_USED_MASK: u16 = SLOT_0_USED_MASK | SLOT_1_USED_MASK;

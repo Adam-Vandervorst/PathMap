@@ -1613,23 +1613,20 @@ fn with_k<const K: usize, T, R>(
 ) -> R {
     debug_assert!(bits.count_ones() as usize >= K);
 
-    // collect raw pointers first (safe)
-    let mut ptrs: [*mut T; K] = [std::ptr::null_mut(); K];
-
+    // Extract the K distinct active indices from the bitmask, then take K
+    // disjoint &mut into the slice.
+    let mut indices = [0usize; K];
     let mut i = 0;
     while i < K {
-        let idx = bits.trailing_zeros() as usize;
+        indices[i] = bits.trailing_zeros() as usize;
         bits &= bits - 1;
-        ptrs[i] = unsafe { xs.as_mut_ptr().add(idx) };
         i += 1;
     }
-
-    // SAFETY:
-    // - indices are distinct (bitmask)
-    // - derived from same slice
-
-    // should be zero-cost after inlining
-    let refs = unsafe { ptrs.map(|p| &mut *p) };
+    // SAFETY: `bits` is a mask of active zipper indices, so every set bit is
+    // less than `xs.len()`. Each iteration removes the lowest set bit before
+    // selecting the next one, therefore `indices` contains exactly K distinct
+    // in-bounds indices.
+    let refs = unsafe { xs.get_disjoint_unchecked_mut(indices) };
 
     f(refs)
 }
