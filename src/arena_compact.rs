@@ -2862,7 +2862,7 @@ where Storage: AsRef<[u8]>
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
     use crate::{
-        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues}
+        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperPath, ZipperValues}
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,
