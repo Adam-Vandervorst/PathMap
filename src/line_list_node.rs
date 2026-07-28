@@ -3401,7 +3401,7 @@ mod tests {
     #[test]
     fn test_nth_child_from_key_val_and_child_share_key() {
         use crate::PathMap;
-        use crate::zipper::{ZipperMoving, ZipperValues, ZipperWriting, Zipper};
+        use crate::zipper::{ZipperMoving, ZipperPath, ZipperValues, ZipperWriting, Zipper};
 
         // Grafting puts the child in slot 0; the value added afterwards lands
         // in slot 1 under the same key.  (Insertion alone builds the mirror
