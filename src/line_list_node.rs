@@ -1759,6 +1759,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         })
     }
     fn node_remove_val(&mut self, key: &[u8], prune: bool) -> Option<V> {
+        //Removing a value is one of the ways a node can be left holding two onward children
+        // under one key, so check the node over on the way out
+        let result = (|| {
         if self.is_used_value_0() {
             let node_key_0 = unsafe{ self.key_unchecked::<0>() };
             if node_key_0 == key {
@@ -1783,12 +1786,26 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 if prune {
                     return Some(self.take_payload::<1>().unwrap().into_val())
                 } else {
-                    //Turn the value into an empty node
-                    return Some(self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                    //If the other slot already keeps this path, then just remove the value.
+                    // Leaving a sentinel here would give the node two onward children under
+                    // the same key, which is ambiguous: `node_get_child` would resolve the
+                    // byte to slot_0 while `next_items` resolves it to the empty sentinel in
+                    // slot_1, and iteration would walk into nothing.
+                    let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                    let overlap = find_prefix_overlap(node_key_1, node_key_0);
+                    if node_key_1.len() == overlap {
+                        return Some(self.take_payload::<1>().unwrap().into_val())
+                    } else {
+                        //Otherwise, turn the value into an empty node
+                        return Some(self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                    }
                 }
             }
         }
         None
+        })();
+        debug_assert!(validate_node(self));
+        result
     }
 
     #[inline]
@@ -2775,6 +2792,14 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
+    //Two slots may share a key (that is how a value and the onward child at the same path are
+    // stored) but only one of them may be the onward child, otherwise the byte leads to two
+    // different subtries and every accessor is free to pick a different one
+    if node.is_used_child_0() && node.is_used_child_1() && key0 == key1 {
+        println!("Invalid node - two onward children under the same key. {node:?}");
+        panic!()
+    }
+
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
         println!("Invalid node - duplicated prefix too long. {node:?}");
@@ -3377,13 +3402,16 @@ mod tests {
         use crate::PathMap;
         use crate::zipper::{ZipperMoving, ZipperValues, ZipperWriting, Zipper};
 
-        // Grafting builds the shape: "a" ends up with a value and children
-        let leaf = PathMap::from_iter([("", 9u64), ("x", 1)]);
+        // Grafting puts the child in slot 0; the value added afterwards lands
+        // in slot 1 under the same key.  (Insertion alone builds the mirror
+        // image, which is the arrangement the buggy code expected.)
+        let leaf = PathMap::from_iter([("x", 1u64)]);
         let mut map = PathMap::<u64>::new();
-        for prefix in [b"a".as_slice(), b"aa"] {
-            let mut wz = map.write_zipper_at_path(prefix);
+        {
+            let mut wz = map.write_zipper_at_path(b"a");
             wz.graft(&leaf.read_zipper());
         }
+        map.set_val_at(b"a", 9);
 
         let mut by_index = map.read_zipper();
         assert!(by_index.descend_indexed_byte(0));
@@ -3392,7 +3420,7 @@ mod tests {
 
         assert_eq!(by_index.path(), by_path.path());
         assert_eq!(by_index.val(), Some(&9));
-        assert_eq!(by_path.child_count(), 2, "\"a\" has children 'a' and 'x'");
+        assert_eq!(by_path.child_count(), 1, "\"a\" has the child 'x'");
         assert_eq!(by_index.child_count(), by_path.child_count());
         assert_eq!(by_index.child_mask(), by_path.child_mask());
     }
