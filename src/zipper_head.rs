@@ -829,7 +829,7 @@ mod tests {
         let mut wz = zh.write_zipper_at_exclusive_path(&[3, 194, 22]).unwrap();
 
         assert_eq!(rz.val(), None);
-        assert!(rz.descend_first_byte());
+        assert!(rz.descend_first_byte().is_some());
         assert_eq!(rz.val(), Some(&()));
 
         assert_eq!(wz.val(), None);
@@ -837,7 +837,7 @@ mod tests {
 
         rz.reset();
         assert_eq!(rz.val(), None);
-        assert!(rz.descend_first_byte());
+        assert!(rz.descend_first_byte().is_some());
         assert_eq!(rz.val(), Some(&()));
 
         drop(wz);
@@ -859,7 +859,7 @@ mod tests {
         let mut wz = zh.write_zipper_at_exclusive_path(&[3, 194, 22]).unwrap();
 
         assert_eq!(rz.val(), None);
-        assert!(rz.descend_first_byte());
+        assert!(rz.descend_first_byte().is_some());
         assert_eq!(rz.val(), Some(&1004));
 
         assert_eq!(rz2.val(), Some(&1003));
@@ -1021,7 +1021,7 @@ mod tests {
         assert_eq!(z.child_count(), 0);
         assert_eq!(z.child_mask(), ByteMask::EMPTY);
         assert_eq!(z.path_exists(), true);
-        assert_eq!(z.to_next_sibling_byte(), false);
+        assert_eq!(z.to_next_sibling_byte(), None);
         assert_eq!(z.ascend_byte(), false);
 
         // Test creating a zipper at a path that doesn't exist
@@ -1029,7 +1029,7 @@ mod tests {
         assert_eq!(z2.val(), None);
         assert_eq!(z2.child_count(), 0);
         assert_eq!(z2.child_mask(), ByteMask::EMPTY);
-        assert_eq!(z2.to_next_sibling_byte(), false);
+        assert_eq!(z2.to_next_sibling_byte(), None);
         assert_eq!(z2.ascend_byte(), false);
 
         //Conceptually this should be `false`, but the act of creating the ReadZipper currently creates
@@ -1049,28 +1049,28 @@ mod tests {
         // Create a zipper and test to make sure it behaves properly
         let mut z = zh.read_zipper_at_path(b"A").unwrap();
         assert_eq!(z.val(), Some(&24));
-        assert_eq!(z.to_next_sibling_byte(), false);
+        assert_eq!(z.to_next_sibling_byte(), None);
         z.descend_until(&mut ());
         assert_eq!(z.path(), b"BCDEFG");
         assert_eq!(z.origin_path(), b"ABCDEFG");
         assert_eq!(z.val(), Some(&42));
-        assert_eq!(z.to_next_sibling_byte(), false);
+        assert_eq!(z.to_next_sibling_byte(), None);
 
         // Create a second zipper and ensure it's valid
         let mut z2 = zh.read_zipper_at_path(z.origin_path()).unwrap();
         assert_eq!(z2.path(), b"");
         assert_eq!(z2.origin_path(), b"ABCDEFG");
         assert_eq!(z2.val(), Some(&42));
-        assert_eq!(z2.to_next_sibling_byte(), false);
+        assert_eq!(z2.to_next_sibling_byte(), None);
 
         // Test the original zipper
         assert_eq!(z.val(), Some(&42));
-        assert_eq!(z.to_next_sibling_byte(), false);
+        assert_eq!(z.to_next_sibling_byte(), None);
         assert_eq!(z.ascend_until(), true);
         assert_eq!(z.path(), b"");
         assert_eq!(z.origin_path(), b"A");
         assert_eq!(z.val(), Some(&24));
-        assert_eq!(z.to_next_sibling_byte(), false);
+        assert_eq!(z.to_next_sibling_byte(), None);
     }
 
     /// Similar test to zipper_headc, but here we are testing to make sure there are no issues when

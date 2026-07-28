@@ -156,10 +156,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     }
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
-    fn to_sibling_byte(&mut self, next: bool) -> bool {
-        let Some(byte) = self.focus_byte() else {
-            return false;
-        };
+    fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        let byte = self.focus_byte()?;
         assert!(self.ascend(1), "must ascend");
         let child_mask = self.child_mask();
         let Some(sibling_byte) = (if next {
@@ -168,10 +166,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             child_mask.prev_bit(byte)
         }) else {
             self.descend_to_byte(byte);
-            return false;
+            return None;
         };
         self.descend_to_byte(sibling_byte);
-        true
+        Some(sibling_byte)
     }
 }
 
@@ -384,16 +382,14 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     fn descend_to_byte(&mut self, k: u8) {
         self.descend_to([k])
     }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
         let mask = self.child_mask();
-        let Some(byte) = mask.indexed_bit::<true>(child_idx) else {
-            return false;
-        };
+        let byte = mask.indexed_bit::<true>(child_idx)?;
         self.descend_to_byte(byte);
-        true
+        Some(byte)
     }
     #[inline]
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
     fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
@@ -417,11 +413,11 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         moved
     }
     #[inline]
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(true)
     }
     #[inline]
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(false)
     }
     fn ascend(&mut self, mut steps: usize) -> bool {

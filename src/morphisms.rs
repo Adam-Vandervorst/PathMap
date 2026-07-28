@@ -465,7 +465,7 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     z.prepare_buffers();
     //Push a stack frame for the root, and start on the first branch off the root
     stack.push(StackFrame::from(&z));
-    if !z.descend_first_byte() {
+    if z.descend_first_byte().is_none() {
         //Empty trie is a special case
         return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path(), &z)
     }
@@ -520,13 +520,14 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
 
             //Position to descend the next child branch
             let descended = z.descend_indexed_byte(stack[frame_idx].child_idx as usize);
-            debug_assert!(descended);
+            debug_assert!(descended.is_some());
         } else {
             //Push a new stack frame for this branch
             Stack::push_state_raw(&mut stack, &mut frame_idx, &z);
 
             //Descend the first child branch
-            z.descend_first_byte();
+            let descended = z.descend_first_byte();
+            debug_assert!(descended.is_some());
         }
     }
 }
@@ -781,7 +782,8 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
             .expect("into_cata stack is emptied before we returned to root");
         // This branch represents the body of the for loop.
         if frame_mut.child_idx < frame_mut.child_cnt {
-            zipper.descend_indexed_byte(frame_mut.child_idx as usize);
+            let descended = zipper.descend_indexed_byte(frame_mut.child_idx as usize);
+            debug_assert!(descended.is_some());
             frame_mut.child_idx += 1;
             frame_mut.child_addr = zipper.shared_node_id();
 
@@ -876,7 +878,8 @@ fn into_cata_jumping_naive<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>
     let mut cache = HashMap::<u64, W>::new();
     let path = z.path().to_vec();
     for ii in 0..child_count {
-        z.descend_indexed_byte(ii);
+        let descended = z.descend_indexed_byte(ii);
+        debug_assert!(descended.is_some());
         let child_addr = z.shared_node_id();
         // Read and reuse value from cache, if exists
         if let Some(cached) = Cache::get(&cache, child_addr) {

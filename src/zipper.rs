@@ -250,30 +250,30 @@ pub trait ZipperMoving: Zipper {
     /// WARNING: The branch represented by a given index is not guaranteed to be stable across modifications
     /// to the trie.  This method should only be used as part of a directed traversal operation, but
     /// index-based paths may not be stored as locations within the trie.
-    fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, idx: usize) -> Option<u8> {
         let mask = self.child_mask();
         let child_byte = match mask.indexed_bit::<true>(idx) {
             Some(byte) => byte,
             None => {
-                return false
+                return None
             }
         };
         self.descend_to_byte(child_byte);
         debug_assert!(self.path_exists());
-        true
+        Some(child_byte)
     }
 
     /// A deprecated alias for [ZipperMoving::descend_indexed_byte]
     #[deprecated] //GOAT-old-names
     fn descend_indexed_branch(&mut self, idx: usize) -> bool {
-        self.descend_indexed_byte(idx)
+        self.descend_indexed_byte(idx).is_some()
     }
 
     /// Descends the zipper's focus one step into the first child branch in a depth-first traversal
     ///
     /// NOTE: This method should have identical behavior to passing `0` to [descend_indexed_byte](ZipperMoving::descend_indexed_byte),
     /// although with less overhead
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
 
@@ -281,9 +281,9 @@ pub trait ZipperMoving: Zipper {
     ///
     /// NOTE: This method should have identical behavior to passing `child_count() - 1` to [descend_indexed_byte](ZipperMoving::descend_indexed_byte),
     /// although with less overhead
-    fn descend_last_byte(&mut self) -> bool {
+    fn descend_last_byte(&mut self) -> Option<u8> {
         let cc = self.child_count();
-        if cc == 0 { false }
+        if cc == 0 { None }
         else { self.descend_indexed_byte( cc- 1) }
     }
 
@@ -298,10 +298,8 @@ pub trait ZipperMoving: Zipper {
         let mut descended = false;
         while self.child_count() == 1 {
             descended = true;
-            if self.descend_first_byte() {
-                if let Some(byte) = self.focus_byte() {
-                    obs.descend_to_byte(byte);
-                }
+            if let Some(byte) = self.descend_first_byte() {
+                obs.descend_to_byte(byte);
             }
             if self.is_val() {
                 break;
@@ -366,24 +364,21 @@ pub trait ZipperMoving: Zipper {
     ///
     /// This method is equivalent to calling [ZipperMoving::ascend] with `1`, followed by [ZipperMoving::descend_indexed_byte]
     /// where the index passed is 1 more than the index of the current focus position.
-    fn to_next_sibling_byte(&mut self) -> bool {
-        let cur_byte = match self.focus_byte() {
-            Some(byte) => byte,
-            None => return false
-        };
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
+        let cur_byte = self.focus_byte()?;
         if !self.ascend_byte() {
-            return false
+            return None
         }
         let mask = self.child_mask();
         match mask.next_bit(cur_byte) {
             Some(byte) => {
                 self.descend_to_byte(byte);
                 debug_assert!(self.path_exists());
-                true
+                Some(byte)
             },
             None => {
                 self.descend_to_byte(cur_byte);
-                false
+                None
             }
         }
     }
@@ -395,25 +390,22 @@ pub trait ZipperMoving: Zipper {
     ///
     /// This method is equivalent to calling [Self::ascend] with `1`, followed by [Self::descend_indexed_byte]
     /// where the index passed is 1 less than the index of the current focus position.
-    fn to_prev_sibling_byte(&mut self) -> bool {
-        let cur_byte = match self.focus_byte() {
-            Some(byte) => byte,
-            None => return false
-        };
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
+        let cur_byte = self.focus_byte()?;
         if !self.ascend_byte() {
-            return false
+            return None
         }
         let mask = self.child_mask();
         match mask.prev_bit(cur_byte) {
             Some(byte) => {
                 self.descend_to_byte(byte);
                 debug_assert!(self.path_exists());
-                true
+                Some(byte)
             },
             None => {
                 self.descend_to_byte(cur_byte);
                 debug_assert!(self.path_exists());
-                false
+                None
             }
         }
     }
@@ -427,13 +419,13 @@ pub trait ZipperMoving: Zipper {
         //If we're at a leaf ascend until we're not and jump to the next sibling
         if self.child_count() == 0 {
             //We can stop ascending when we succeed in moving to a sibling
-            while !self.to_next_sibling_byte() {
+            while self.to_next_sibling_byte().is_none() {
                 if !self.ascend_byte() {
                     return false;
                 }
             }
         } else {
-            return self.descend_first_byte()
+            return self.descend_first_byte().is_some()
         }
         true
     }
@@ -795,7 +787,7 @@ pub trait ZipperIteration: ZipperMoving + ZipperPath {
     /// encountered the root.
     fn to_next_val(&mut self) -> bool {
         loop {
-            if self.descend_first_byte() {
+            if self.descend_first_byte().is_some() {
                 if self.is_val() {
                     return true
                 }
@@ -806,7 +798,7 @@ pub trait ZipperIteration: ZipperMoving + ZipperPath {
                 }
             } else {
                 'ascending: loop {
-                    if self.to_next_sibling_byte() {
+                    if self.to_next_sibling_byte().is_some() {
                         if self.is_val() {
                             return true
                         }
@@ -832,7 +824,7 @@ pub trait ZipperIteration: ZipperMoving + ZipperPath {
     /// position.
     fn descend_last_path(&mut self) -> bool {
         let mut any = false;
-        while self.descend_last_byte() {
+        while self.descend_last_byte().is_some() {
             any = true;
             self.descend_until(&mut ());
         }
@@ -880,18 +872,18 @@ pub trait ZipperIteration: ZipperMoving + ZipperPath {
 fn k_path_default_internal<Z: ZipperMoving + ZipperPath + ?Sized>(z: &mut Z, k: usize, base_idx: usize) -> bool {
     loop {
         if z.path().len() < base_idx + k {
-            while z.descend_first_byte() {
+            while z.descend_first_byte().is_some() {
                 if z.path().len() == base_idx + k { return true }
             }
         }
-        if z.to_next_sibling_byte() {
+        if z.to_next_sibling_byte().is_some() {
             if z.path().len() == base_idx + k { return true }
             continue
         }
         while z.path().len() > base_idx {
             z.ascend_byte();
             if z.path().len() == base_idx { return false }
-            if z.to_next_sibling_byte() { break }
+            if z.to_next_sibling_byte().is_some() { break }
         }
     }
 }
@@ -1072,12 +1064,12 @@ macro_rules! zipper_impl_lens {
         fn descend_to_val<K: AsRef<[u8]>>(&mut $s, k: K) -> usize { $e.descend_to_val(k) }
         fn descend_to_byte(&mut $s, k: u8) { $e.descend_to_byte(k) }
         fn descend_to_existing_byte(&mut $s, k: u8) -> bool { $e.descend_to_existing_byte(k) }
-        fn descend_indexed_byte(&mut $s, child_idx: usize) -> bool { $e.descend_indexed_byte(child_idx) }
-        fn descend_first_byte(&mut $s) -> bool { $e.descend_first_byte() }
+        fn descend_indexed_byte(&mut $s, child_idx: usize) -> Option<u8> { $e.descend_indexed_byte(child_idx) }
+        fn descend_first_byte(&mut $s) -> Option<u8> { $e.descend_first_byte() }
         fn descend_until<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.descend_until(obs) }
         fn descend_until_max_bytes<Obs: PathObserver>(&mut $s, max_bytes: usize, obs: &mut Obs) -> bool { $e.descend_until_max_bytes(max_bytes, obs) }
-        fn to_next_sibling_byte(&mut $s) -> bool { $e.to_next_sibling_byte() }
-        fn to_prev_sibling_byte(&mut $s) -> bool { $e.to_prev_sibling_byte() }
+        fn to_next_sibling_byte(&mut $s) -> Option<u8> { $e.to_next_sibling_byte() }
+        fn to_prev_sibling_byte(&mut $s) -> Option<u8> { $e.to_prev_sibling_byte() }
         fn ascend(&mut $s, steps: usize) -> bool { $e.ascend(steps) }
         fn ascend_byte(&mut $s) -> bool { $e.ascend_byte() }
         fn ascend_until(&mut $s) -> bool { $e.ascend_until() }
@@ -1887,7 +1879,7 @@ pub(crate) mod read_zipper_core {
             }
         }
 
-        fn descend_indexed_byte(&mut self, child_idx: usize) -> bool {
+        fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -1897,18 +1889,18 @@ pub(crate) mod read_zipper_core {
                     self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
                     *self.focus_node = child_node;
                     self.focus_iter_token = NODE_ITER_INVALID;
-                    true
+                    Some(prefix)
                 },
                 (Some(prefix), None) => {
                     self.prefix_buf.push(prefix);
                     self.focus_iter_token = NODE_ITER_INVALID;
-                    true
+                    Some(prefix)
                 },
-                (None, _) => false
+                (None, _) => None
             }
         }
 
-        fn descend_first_byte(&mut self) -> bool {
+        fn descend_first_byte(&mut self) -> Option<u8> {
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
             let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
@@ -1925,10 +1917,11 @@ pub(crate) mod read_zipper_core {
                 // actually continues the path we're on.
                 if byte_idx >= key_bytes.len() || !starts_with(key_bytes, node_key) {
                     debug_assert!(self.is_regularized());
-                    return false; //We can't go any deeper down this path
+                    return None; //We can't go any deeper down this path
                 }
                 self.focus_iter_token = new_tok;
-                self.prefix_buf.push(key_bytes[byte_idx]);
+                let descended_byte = key_bytes[byte_idx];
+                self.prefix_buf.push(descended_byte);
 
                 if key_bytes.len() == byte_idx+1 {
                     match child_node {
@@ -1941,11 +1934,11 @@ pub(crate) mod read_zipper_core {
                     }
                 }
                 debug_assert!(self.is_regularized());
-                true
+                Some(descended_byte)
             } else {
                 self.focus_iter_token = new_tok;
                 debug_assert!(self.is_regularized());
-                false
+                None
             }
         }
 
@@ -2075,10 +2068,10 @@ pub(crate) mod read_zipper_core {
         //     self.focus_node.node_first_val_depth_along_key();
         // }
 
-        fn to_next_sibling_byte(&mut self) -> bool {
+        fn to_next_sibling_byte(&mut self) -> Option<u8> {
             self.prepare_buffers();
             if self.prefix_buf.len() == 0 {
-                return false
+                return None
             }
             debug_assert!(self.is_regularized());
             self.deregularize();
@@ -2089,7 +2082,7 @@ pub(crate) mod read_zipper_core {
 
             if self.focus_iter_token == NODE_ITER_FINISHED {
                 self.regularize();
-                return false
+                return None
             }
 
             let (mut new_tok, mut key_bytes, mut child_node, mut _value) = self.focus_node.next_items(self.focus_iter_token);
@@ -2098,16 +2091,17 @@ pub(crate) mod read_zipper_core {
                 let node_key = self.node_key();
                 if node_key.len() == 0 {
                     self.focus_iter_token = NODE_ITER_INVALID;
-                    return false;
+                    return None;
                 }
                 let fixed_len = node_key.len() - 1;
                 if fixed_len >= key_bytes.len() || key_bytes[..fixed_len] != node_key[..fixed_len] {
                     self.regularize();
-                    return false;
+                    return None;
                 }
 
                 if key_bytes[fixed_len] > node_key[fixed_len] {
-                    *self.prefix_buf.last_mut().unwrap() = key_bytes[node_key.len()-1];
+                    let byte = key_bytes[node_key.len()-1];
+                    *self.prefix_buf.last_mut().unwrap() = byte;
                     self.focus_iter_token = new_tok;
 
                     //If this operation landed us at the end of the path within the node, then we
@@ -2124,7 +2118,7 @@ pub(crate) mod read_zipper_core {
                     }
 
                     debug_assert!(self.is_regularized());
-                    return true
+                    return Some(byte)
                 }
 
                 (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(new_tok);
@@ -2132,10 +2126,10 @@ pub(crate) mod read_zipper_core {
 
             self.focus_iter_token = NODE_ITER_FINISHED;
             self.regularize();
-            false
+            None
         }
 
-        fn to_prev_sibling_byte(&mut self) -> bool {
+        fn to_prev_sibling_byte(&mut self) -> Option<u8> {
             self.to_sibling(false)
         }
 
@@ -2735,7 +2729,7 @@ pub(crate) mod read_zipper_core {
         /// performs about as well as the `to_next_sibling_byte` that is there, but doesn't
         /// update the zipper's iter tokens
         #[inline]
-        fn to_sibling(&mut self, next: bool) -> bool {
+        fn to_sibling(&mut self, next: bool) -> Option<u8> {
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
             if self.node_key().len() != 0 {
@@ -2745,33 +2739,33 @@ pub(crate) mod read_zipper_core {
                         self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
                         *self.focus_node = child_node;
                         self.focus_iter_token = NODE_ITER_INVALID;
-                        true
+                        Some(prefix)
                     },
                     (Some(prefix), None) => {
                         *self.prefix_buf.last_mut().unwrap() = prefix;
-                        true
+                        Some(prefix)
                     },
-                    (None, _) => false
+                    (None, _) => None
                 }
             } else {
                 let mut should_pop = false;
                 let result = match self.ancestors.last() {
-                    None => { false }
+                    None => { None }
                     Some((parent, _iter_tok, _prefix_offset)) => {
                         match parent.get_sibling_of_child(self.parent_key(), next) {
                             (Some(prefix), Some(child_node)) => {
                                 *self.prefix_buf.last_mut().unwrap() = prefix;
                                 *self.focus_node = child_node;
                                 self.focus_iter_token = NODE_ITER_INVALID;
-                                true
+                                Some(prefix)
                             },
                             (Some(prefix), None) => {
                                 *self.prefix_buf.last_mut().unwrap() = prefix;
                                 should_pop = true;
-                                true
+                                Some(prefix)
                             },
                             (None, _) => {
-                                false
+                                None
                             }
                         }
                     }
@@ -3484,30 +3478,30 @@ pub(crate) mod zipper_moving_tests {
         zipper.descend_to(&[b'r']); zipper.descend_to(&[b'o']); zipper.descend_to(&[b'm']); // focus = rom
         zipper.descend_to(&[b'\'']);
         assert!(zipper.path_exists()); // focus = rom'  (' is the lowest byte)
-        assert!(zipper.to_next_sibling_byte()); // focus = roma  (a is the second byte), but we can't actually guarantee whether we land on 'a' or 'u'
+        assert!(zipper.to_next_sibling_byte().is_some()); // focus = roma  (a is the second byte), but we can't actually guarantee whether we land on 'a' or 'u'
         assert_in_list(zipper.path(), &[b"roma", b"romu"]);
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'n']); // both follow-ups romane and romanus have n following a
-        assert!(zipper.to_next_sibling_byte()); // focus = romu  (u is the third byte)
+        assert!(zipper.to_next_sibling_byte().is_some()); // focus = romu  (u is the third byte)
         assert_in_list(zipper.path(), &[b"roma", b"romu"]);
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'l']); // and romu is followed by lus
-        assert!(!zipper.to_next_sibling_byte()); // fails because there were only 3 children ['\'', 'a', 'u']
-        assert!(zipper.to_prev_sibling_byte()); // focus = roma or romu (we stepped back)
+        assert_eq!(zipper.to_next_sibling_byte(), None); // fails because there were only 3 children ['\'', 'a', 'u']
+        assert!(zipper.to_prev_sibling_byte().is_some()); // focus = roma or romu (we stepped back)
         assert_in_list(zipper.path(), &[b"roma", b"romu"]);
-        assert!(zipper.to_prev_sibling_byte()); // focus = rom' (we stepped back to where we began)
+        assert_eq!(zipper.to_prev_sibling_byte(), Some(39)); // focus = rom' (we stepped back to where we began)
         assert_eq!(zipper.path(), b"rom'");
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'i']);
         assert!(zipper.ascend(1)); // focus = rom
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'\'', b'a', b'u']); // all three options we visited
-        assert!(zipper.descend_indexed_byte(0)); // focus = rom'
+        assert_eq!(zipper.descend_indexed_byte(0), Some(39)); // focus = rom'
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'i']);
         assert!(zipper.ascend(1)); // focus = rom
-        assert!(zipper.descend_indexed_byte(1)); // focus = roma
+        assert_eq!(zipper.descend_indexed_byte(1), Some(b'a')); // focus = roma
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'n']);
         assert!(zipper.ascend(1));
-        assert!(zipper.descend_indexed_byte(2)); // focus = romu
+        assert_eq!(zipper.descend_indexed_byte(2), Some(b'u')); // focus = romu
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'l']);
         assert!(zipper.ascend(1));
-        assert!(zipper.descend_indexed_byte(1)); // focus = roma
+        assert_eq!(zipper.descend_indexed_byte(1), Some(b'a')); // focus = roma
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'n']);
         assert!(zipper.ascend(1));
         // ' < a < u
@@ -3576,11 +3570,11 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zip.child_count(), 0);
 
         //With no children, `descend_indexed_byte(0)` is out of range and must not move
-        assert_eq!(zip.descend_indexed_byte(0), false);
+        assert_eq!(zip.descend_indexed_byte(0), None);
         assert_eq!(zip.path(), b"bb");
 
         //`descend_first_byte` is documented to behave identically to `descend_indexed_byte(0)`
-        assert_eq!(zip.descend_first_byte(), false);
+        assert_eq!(zip.descend_first_byte(), None);
         assert_eq!(zip.path(), b"bb");
     }
 
@@ -3590,19 +3584,19 @@ pub(crate) mod zipper_moving_tests {
         zip.descend_to("2");
         assert_eq!(zip.is_val(), true);
         assert_eq!(zip.child_count(), 0);
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.path(), b"2");
 
         zip.reset();
-        assert!(zip.descend_indexed_byte(2));
+        assert_eq!(zip.descend_indexed_byte(2), Some(b'2'));
         assert_eq!(zip.is_val(), true);
         assert_eq!(zip.child_count(), 0);
         assert_eq!(zip.path(), b"2");
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.path(), b"2");
 
         zip.reset();
-        assert!(!zip.descend_indexed_byte(7));
+        assert_eq!(zip.descend_indexed_byte(7), None);
         assert_eq!(zip.is_val(), false);
         assert_eq!(zip.child_count(), 7);
         assert_eq!(zip.path(), b"");
@@ -3616,26 +3610,26 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zip.val(), Some(&()));
         assert_eq!(zip.path(), b"000");
         assert_eq!(zip.child_count(), 0);
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.path(), b"000");
 
         zip.reset();
-        assert!(!zip.descend_indexed_byte(2));
+        assert_eq!(zip.descend_indexed_byte(2), None);
         assert_eq!(zip.child_count(), 2);
-        assert!(zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), Some(b'1'));
         assert_eq!(zip.path(), b"1");
         assert_eq!(zip.val(), None);
         assert_eq!(zip.child_count(), 1);
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.val(), None);
         assert_eq!(zip.path(), b"1");
 
         zip.reset();
-        assert!(zip.descend_indexed_byte(0));
+        assert_eq!(zip.descend_indexed_byte(0), Some(b'0'));
         assert_eq!(zip.path(), b"0");
         assert_eq!(zip.val(), None);
         assert_eq!(zip.child_count(), 1);
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.val(), None);
         assert_eq!(zip.path(), b"0");
     }
@@ -3648,26 +3642,26 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zip.is_val(), true);
         assert_eq!(zip.path(), b"000");
         assert_eq!(zip.child_count(), 0);
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.path(), b"000");
 
         zip.reset();
-        assert!(!zip.descend_indexed_byte(2));
+        assert_eq!(zip.descend_indexed_byte(2), None);
         assert_eq!(zip.child_count(), 2);
-        assert!(zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), Some(b'1'));
         assert_eq!(zip.path(), b"1");
         assert_eq!(zip.is_val(), false);
         assert_eq!(zip.child_count(), 1);
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.is_val(), false);
         assert_eq!(zip.path(), b"1");
 
         zip.reset();
-        assert!(zip.descend_indexed_byte(0));
+        assert_eq!(zip.descend_indexed_byte(0), Some(b'0'));
         assert_eq!(zip.path(), b"0");
         assert_eq!(zip.is_val(), false);
         assert_eq!(zip.child_count(), 1);
-        assert!(!zip.descend_indexed_byte(1));
+        assert_eq!(zip.descend_indexed_byte(1), None);
         assert_eq!(zip.is_val(), false);
         assert_eq!(zip.path(), b"0");
     }
@@ -3880,7 +3874,7 @@ pub(crate) mod zipper_moving_tests {
         //descends a single specific byte using `descend_indexed_byte`. Just for testing. A real user would use `descend_towards`
         fn descend_byte<Z: Zipper + ZipperMoving + ZipperPath>(zipper: &mut Z, byte: u8) {
             for i in 0..zipper.child_count() {
-                assert_eq!(zipper.descend_indexed_byte(i), true);
+                assert!(zipper.descend_indexed_byte(i).is_some());
                 if *zipper.path().last().unwrap() == byte {
                     break
                 } else {
@@ -4064,9 +4058,9 @@ pub(crate) mod zipper_moving_tests {
 
         zipper.descend_to_byte(b'A');
         assert_eq!(zipper.path_exists(), true);
-        assert_eq!(zipper.descend_first_byte(), true);
+        assert_eq!(zipper.descend_first_byte(), Some(b'B'));
         assert_eq!(zipper.path(), b"AB");
-        assert_eq!(zipper.to_next_sibling_byte(), false);
+        assert_eq!(zipper.to_next_sibling_byte(), None);
         assert_eq!(zipper.path(), b"AB");
     }
 
@@ -4074,9 +4068,9 @@ pub(crate) mod zipper_moving_tests {
     pub const ZIPPER_BYTES_ITER_TEST2_PATH: &[u8] = &[2, 194];
 
     pub fn zipper_byte_iter_test2<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
-        assert_eq!(zipper.descend_first_byte(), true);
+        assert_eq!(zipper.descend_first_byte(), Some(1));
         assert_eq!(zipper.path(), &[1]);
-        assert_eq!(zipper.to_next_sibling_byte(), false);
+        assert_eq!(zipper.to_next_sibling_byte(), None);
         assert_eq!(zipper.path(), &[1]);
     }
 
@@ -4085,11 +4079,11 @@ pub(crate) mod zipper_moving_tests {
 
     pub fn zipper_byte_iter_test3<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
         assert_eq!(zipper.path(), &[]);
-        assert_eq!(zipper.descend_first_byte(), true);
+        assert_eq!(zipper.descend_first_byte(), Some(6));
         assert_eq!(zipper.path(), &[6]);
-        assert_eq!(zipper.descend_first_byte(), true);
+        assert_eq!(zipper.descend_first_byte(), Some(193));
         assert_eq!(zipper.path(), &[6, 193]);
-        assert_eq!(zipper.descend_first_byte(), true);
+        assert_eq!(zipper.descend_first_byte(), Some(7));
         assert_eq!(zipper.path(), &[6, 193, 7]);
     }
 
@@ -4098,7 +4092,7 @@ pub(crate) mod zipper_moving_tests {
     pub fn zipper_byte_iter_test4<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
 
         //Check that we end up at the first leaf by depth-first search
-        while zipper.descend_first_byte() {}
+        while zipper.descend_first_byte().is_some() {}
         assert_eq!(zipper.path(), b"ABCDEF");
 
         //Try taking a different branch
@@ -4106,13 +4100,13 @@ pub(crate) mod zipper_moving_tests {
         zipper.descend_to(b"ABC");
         assert!(zipper.path_exists());
         assert_eq!(zipper.path(), b"ABC");
-        assert!(zipper.descend_indexed_byte(1));
+        assert_eq!(zipper.descend_indexed_byte(1), Some(b'd'));
         assert_eq!(zipper.path(), b"ABCd");
-        assert!(zipper.descend_first_byte());
+        assert_eq!(zipper.descend_first_byte(), Some(b'e'));
         assert_eq!(zipper.path(), b"ABCde");
-        assert!(zipper.descend_first_byte());
+        assert_eq!(zipper.descend_first_byte(), Some(b'f'));
         assert_eq!(zipper.path(), b"ABCdef");
-        assert!(!zipper.descend_first_byte());
+        assert_eq!(zipper.descend_first_byte(), None);
     }
 
     pub const ZIPPER_BYTES_ITER_TEST5_KEYS: &[&[u8]] = &[
@@ -4121,23 +4115,23 @@ pub(crate) mod zipper_moving_tests {
         &[2, 197, 97, 120, 255, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 84, 3, 193, 75, 192, 192, 3, 193, 75, 128, 131, 193, 49],
     ];
 
-    pub fn zipper_byte_iter_test5<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+    pub fn zipper_byte_iter_test5<Z: ZipperMoving>(mut zipper: Z) {
 
         let keys = ZIPPER_BYTES_ITER_TEST5_KEYS;
         for i in 0..keys[0].len() {
             zipper.reset();
             zipper.descend_to(&keys[0][..i]);
             if i != 18 && i != 5 {
-                assert_eq!(zipper.to_next_sibling_byte(), false);
+                assert_eq!(zipper.to_next_sibling_byte(), None);
             }
         }
 
         zipper.reset();
         zipper.descend_to([2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 75]);
-        assert_eq!(zipper.to_next_sibling_byte(), true);
+        assert_eq!(zipper.to_next_sibling_byte(), Some(84));
         zipper.reset();
         zipper.descend_to([2, 197, 97, 120, 105]);
-        assert_eq!(zipper.to_next_sibling_byte(), true);
+        assert_eq!(zipper.to_next_sibling_byte(), Some(255));
     }
 
     pub const ZIPPER_VAL_AT_TEST_KEYS: &[&[u8]] = &[
@@ -4353,12 +4347,12 @@ pub(crate) mod zipper_iteration_tests {
     pub fn k_path_test1<'a, Z: ZipperIteration>(mut zipper: Z) {
 
         //This is a cheesy way to encode lengths, but it's is more readable than unprintable chars
-        assert!(zipper.descend_indexed_byte(0));
+        assert!(zipper.descend_indexed_byte(0).is_some());
         let sym_len = usize::from_str_radix(std::str::from_utf8(&[zipper.path()[0]]).unwrap(), 10).unwrap();
         assert_eq!(sym_len, 5);
 
         //Step over the ':' character
-        assert!(zipper.descend_indexed_byte(0));
+        assert!(zipper.descend_indexed_byte(0).is_some());
         assert_eq!(zipper.child_count(), 6);
 
         //Start iterating over all the symbols of length=sym_len
@@ -4468,7 +4462,7 @@ pub(crate) mod zipper_iteration_tests {
         assert!(zipper.path_exists());
         assert_eq!(zipper.descend_first_k_path(1), true);
         assert_eq!(zipper.path(), b"1a");
-        assert_eq!(zipper.descend_indexed_byte(0), true);
+        assert!(zipper.descend_indexed_byte(0).is_some());
         assert_eq!(zipper.path(), b"1a1");
         assert_eq!(zipper.descend_first_k_path(1), true);
         assert_eq!(zipper.path(), b"1a1A");
@@ -4644,7 +4638,7 @@ pub(crate) mod zipper_iteration_tests {
         test_loop(&mut zipper,
             |zipper, path| {
                 for _ in 0..path.len() {
-                    assert!(zipper.descend_first_byte());
+                    assert!(zipper.descend_first_byte().is_some());
                 }
             },
             |zipper, steps| {
@@ -5063,16 +5057,16 @@ mod tests {
         r0.descend_to_byte(0);
         assert_eq!(r0.path_exists(), true);
         let mut r1 = r0.fork_read_zipper();
-        assert_eq!(r1.to_next_sibling_byte(), false);
+        assert_eq!(r1.to_next_sibling_byte(), None);
         assert_eq!(r1.child_mask().0[0], (1<<3) | (1<<4) | (1<<5));
         r1.descend_to_byte(3);
         assert_eq!(r1.path_exists(), true);
         assert_eq!(r1.child_mask().0[0], 0);
-        assert_eq!(r1.to_next_sibling_byte(), true);
+        assert!(r1.to_next_sibling_byte().is_some());
         assert_eq!(r1.origin_path(), &[0, 4]);
         assert_eq!(r1.path(), &[4]);
-        assert_eq!(r1.to_next_sibling_byte(), true);
-        assert_eq!(r1.to_next_sibling_byte(), false);
+        assert!(r1.to_next_sibling_byte().is_some());
+        assert_eq!(r1.to_next_sibling_byte(), None);
     }
 
     #[test]

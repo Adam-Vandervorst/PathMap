@@ -243,12 +243,12 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         }
         descended
     }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
         let result = self.z.descend_indexed_byte(child_idx);
         self.ensure_descend_next_factor();
         result
     }
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         let result = self.z.descend_first_byte();
         self.ensure_descend_next_factor();
         result
@@ -264,7 +264,7 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         }
         moved
     }
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         if self.factor_paths.last().cloned().unwrap_or(0) == self.path().len() {
             self.factor_paths.pop();
         }
@@ -272,7 +272,7 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.ensure_descend_next_factor();
         moved
     }
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         if self.factor_paths.last().cloned().unwrap_or(0) == self.path().len() {
             self.factor_paths.pop();
         }
@@ -490,10 +490,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
     }
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
-    fn to_sibling_byte(&mut self, next: bool) -> bool {
-        let Some(byte) = self.focus_byte() else {
-            return false;
-        };
+    fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        let byte = self.focus_byte()?;
         assert!(self.ascend(1), "must ascend");
         let child_mask = self.child_mask();
         let Some(sibling_byte) = (if next {
@@ -502,10 +500,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
             child_mask.prev_bit(byte)
         }) else {
             self.descend_to_byte(byte);
-            return false;
+            return None;
         };
         self.descend_to_byte(sibling_byte);
-        true
+        Some(sibling_byte)
     }
 }
 
@@ -721,16 +719,14 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
     fn descend_to_byte(&mut self, k: u8) {
         self.descend_to([k])
     }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
         let mask = self.child_mask();
-        let Some(byte) = mask.indexed_bit::<true>(child_idx) else {
-            return false;
-        };
+        let byte = mask.indexed_bit::<true>(child_idx)?;
         self.descend_to_byte(byte);
-        true
+        Some(byte)
     }
     #[inline]
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
     fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
@@ -754,11 +750,11 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
         moved
     }
     #[inline]
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(true)
     }
     #[inline]
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(false)
     }
     fn ascend(&mut self, mut steps: usize) -> bool {
@@ -1270,7 +1266,7 @@ mod tests {
             p.descend_to("abcdefghijklmnopqrstuvwxyzbowfo");
             assert!(p.path_exists());
             assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfo");
-            assert!(p.descend_first_byte());
+            assert!(p.descend_first_byte().is_some());
             assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowfoo");
         }
         {

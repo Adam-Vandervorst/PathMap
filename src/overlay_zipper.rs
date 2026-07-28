@@ -74,11 +74,8 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping>
         BZipper: ZipperMoving + ZipperPath + ZipperValues<BV>,
         Mapping: for<'a> Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>,
 {
-    fn to_sibling(&mut self, next: bool) -> bool {
-        let path = self.path();
-        let Some(&last) = path.last() else {
-            return false;
-        };
+    fn to_sibling(&mut self, next: bool) -> Option<u8> {
+        let last = self.focus_byte()?;
         self.ascend(1);
         let child_mask = self.child_mask();
         let maybe_child = if next {
@@ -88,10 +85,10 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping>
         };
         let Some(child) = maybe_child else {
             self.descend_to_byte(last);
-            return false;
+            return None;
         };
         self.descend_to_byte(child);
-        true
+        Some(child)
     }
 }
 
@@ -211,17 +208,15 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
         self.b.descend_to(&[k]);
     }
 
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
 
-    fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, idx: usize) -> Option<u8> {
         let child_mask = self.child_mask();
-        let Some(byte) = child_mask.indexed_bit::<true>(idx) else {
-            return false;
-        };
+        let byte = child_mask.indexed_bit::<true>(idx)?;
         self.descend_to_byte(byte);
-        true
+        Some(byte)
     }
 
     fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
@@ -343,11 +338,11 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
         asc_a || asc_b
     }
 
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling(true)
     }
 
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling(false)
     }
 }

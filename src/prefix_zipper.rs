@@ -419,18 +419,16 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         self.descend_to([k])
     }
 
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
         let mask = self.child_mask();
-        let Some(byte) = mask.indexed_bit::<true>(child_idx) else {
-            return false;
-        };
+        let byte = mask.indexed_bit::<true>(child_idx)?;
         self.descend_to_byte(byte);
         debug_assert!(self.path_exists());
-        true
+        Some(byte)
     }
 
     #[inline]
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
 
@@ -459,29 +457,23 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
     }
 
     #[inline]
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         if !self.position.is_source() {
-            return false;
+            return None;
         }
-        if !self.source.to_next_sibling_byte() {
-            return false;
-        }
-        let byte = self.source.focus_byte().unwrap();
+        let byte = self.source.to_next_sibling_byte()?;
         *self.path.last_mut().unwrap() = byte;
-        true
+        Some(byte)
     }
 
     #[inline]
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         if !self.position.is_source() {
-            return false;
+            return None;
         }
-        if !self.source.to_prev_sibling_byte() {
-            return false;
-        }
-        let byte = self.source.focus_byte().unwrap();
+        let byte = self.source.to_prev_sibling_byte()?;
         *self.path.last_mut().unwrap() = byte;
-        true
+        Some(byte)
     }
     fn ascend(&mut self, steps: usize) -> bool {
         let ascended = match self.ascend_n(steps) {

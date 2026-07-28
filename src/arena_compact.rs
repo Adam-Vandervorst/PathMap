@@ -2397,26 +2397,29 @@ where Storage: AsRef<[u8]>
         descended
     }
 
-    fn to_sibling(&mut self, next: bool) -> bool {
+    fn to_sibling(&mut self, next: bool) -> Option<u8> {
         let top_frame = self.stack.last().unwrap();
         if self.stack.len() <= 1 || top_frame.node_depth > 0 {
             // can't move to sibling at root, or along the path
-            return false;
+            return None;
         }
         let top2_frame = &self.stack[self.stack.len() - 2];
         let sibling_idx = if next {
             let idx = top2_frame.child_index + 1;
             if idx >= top2_frame.child_count {
-                return false;
+                return None;
             }
             idx
         } else {
             if top2_frame.child_index == 0 {
-                return false;
+                return None;
             }
             top2_frame.child_index - 1
         };
-        self.ascend(1) && self.descend_indexed_byte(sibling_idx)
+        if !self.ascend(1) {
+            return None;
+        }
+        self.descend_indexed_byte(sibling_idx)
     }
 }
 
@@ -2609,34 +2612,37 @@ where Storage: AsRef<[u8]>
     /// WARNING: The branch represented by a given index is not guaranteed to be stable across modifications
     /// to the trie.  This method should only be used as part of a directed traversal operation, but
     /// index-based paths may not be stored as locations within the trie.
-    fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, idx: usize) -> Option<u8> {
         if self.invalid > 0 {
-            return false;
+            return None;
         }
         self.trace_pos();
         let mut child_id: Option<NodeId> = None;
+        let descended_byte;
         match &self.cur_node {
             Node::Line(line) => {
                 let top_frame = self.stack.last_mut().unwrap();
                 let path = self.tree.get_line(line.path);
                 let rest_path = &path[top_frame.node_depth..];
                 if idx != 0 || rest_path.is_empty() {
-                    return false;
+                    return None;
                 }
+                descended_byte = Some(rest_path[0]);
                 self.path.push(rest_path[0]);
                 if let (true, Some(line_child)) = (rest_path.len() == 1, line.child) {
                     child_id = Some(line_child);
                 } else {
                     top_frame.node_depth += 1;
-                    return true;
+                    return descended_byte;
                 }
             }
             Node::Branch(node) => {
                 let top_frame = self.stack.last_mut().unwrap();
                 if idx > top_frame.child_count {
-                    return false;
+                    return None;
                 }
                 let byte = node.bytemask.indexed_bit::<true>(idx);
+                descended_byte = byte;
                 if let Some(byte) = byte {
                     if top_frame.next_id.is_some() && top_frame.child_index + 1 == idx {
                         child_id = top_frame.next_id;
@@ -2656,14 +2662,14 @@ where Storage: AsRef<[u8]>
             self.stack.push(StackFrame::from(&node, child_id));
             self.cur_node = node;
         }
-        child_id.is_some()
+        if child_id.is_some() { descended_byte } else { None }
     }
 
     /// Descends the zipper's focus one step into the first child branch in a depth-first traversal
     ///
     /// NOTE: This method should have identical behavior to passing `0` to [descend_indexed_byte](ZipperMoving::descend_indexed_byte),
     /// although with less overhead
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
 
@@ -2765,12 +2771,12 @@ where Storage: AsRef<[u8]>
     }
 
     #[inline]
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling(true)
     }
 
     #[inline]
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling(false)
     }
 
@@ -2806,7 +2812,7 @@ where Storage: AsRef<[u8]>
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
     fn descend_first_k_path(&mut self, k: usize) -> bool {
         for ii in 0..k {
-            if !self.descend_first_byte() {
+            if self.descend_first_byte().is_none() {
                 self.ascend(ii);
                 return false;
             }
@@ -2843,10 +2849,10 @@ where Storage: AsRef<[u8]>
                 depth -= 1;
                 continue 'outer;
             }
-            assert!(self.descend_indexed_byte(idx));
+            assert!(self.descend_indexed_byte(idx).is_some());
             depth += 1;
             for _ii in 0..k - depth {
-                if !self.descend_first_byte() {
+                if self.descend_first_byte().is_none() {
                     continue 'outer;
                 }
                 depth += 1;

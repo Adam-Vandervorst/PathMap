@@ -56,14 +56,14 @@ impl ZipperMoving for FullZipper {
     fn descend_to_byte(&mut self, k: u8) {
         self.path.push(k);
     }
-    fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, idx: usize) -> Option<u8> {
         assert!(idx < 256);
         self.path.push(idx as u8);
-        true
+        Some(idx as u8)
     }
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.path.push(0);
-        true
+        Some(0)
     }
     fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.path.push(0); // not sure?
@@ -88,8 +88,8 @@ impl ZipperMoving for FullZipper {
     fn ascend_until_branch(&mut self) -> bool {
         self.path.pop().is_some() // not sure? What's the difference with the previous?
     }
-    fn to_next_sibling_byte(&mut self) -> bool { self.to_sibling(true) }
-    fn to_prev_sibling_byte(&mut self) -> bool { self.to_sibling(false) }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { self.to_sibling(true) }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { self.to_sibling(false) }
 }
 
 impl ZipperPath for FullZipper {
@@ -97,16 +97,16 @@ impl ZipperPath for FullZipper {
 }
 
 impl FullZipper {
-    fn to_sibling(&mut self, next: bool) -> bool {
-        if self.path.is_empty() { return false } // right?
+    fn to_sibling(&mut self, next: bool) -> Option<u8> {
+        if self.path.is_empty() { return None } // right?
         if next {
             let last = self.path.last_mut().unwrap();
-            if *last != 255 { *last = *last + 1; true }
-            else { false }
+            if *last != 255 { *last = *last + 1; Some(*last) }
+            else { None }
         } else {
             let first = self.path.first_mut().unwrap();
-            if *first != 0 { *first = *first - 1; true }
-            else { false }
+            if *first != 0 { *first = *first - 1; Some(*first) }
+            else { None }
         }
     }
 }
@@ -129,15 +129,15 @@ impl ZipperMoving for NullZipper {
     fn val_count(&self) -> usize { 0 }
     fn descend_to<K: AsRef<[u8]>>(&mut self, _k: K) {}
     fn descend_to_byte(&mut self, _k: u8) {}
-    fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
-    fn descend_first_byte(&mut self) -> bool { false }
+    fn descend_indexed_byte(&mut self, _idx: usize) -> Option<u8> { None }
+    fn descend_first_byte(&mut self) -> Option<u8> { None }
     fn descend_until<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn ascend(&mut self, _steps: usize) -> bool { false }
     fn ascend_byte(&mut self) -> bool { false }
     fn ascend_until(&mut self) -> bool { false }
     fn ascend_until_branch(&mut self) -> bool { false }
-    fn to_next_sibling_byte(&mut self) -> bool { false }
-    fn to_prev_sibling_byte(&mut self) -> bool { false }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { None }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { None }
 }
 
 impl ZipperPath for NullZipper {

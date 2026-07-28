@@ -43,8 +43,8 @@ impl ZipperMoving for EmptyZipper {
     fn descend_to_byte(&mut self, k: u8) {
         self.path.push(k);
     }
-    fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
-    fn descend_first_byte(&mut self) -> bool { false }
+    fn descend_indexed_byte(&mut self, _idx: usize) -> Option<u8> { None }
+    fn descend_first_byte(&mut self) -> Option<u8> { None }
     fn descend_until<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn ascend(&mut self, steps: usize) -> bool {
         if steps > self.path.len() - self.path_start_idx {
@@ -74,8 +74,8 @@ impl ZipperMoving for EmptyZipper {
     fn ascend_until_branch(&mut self) -> bool {
         self.ascend_until()
     }
-    fn to_next_sibling_byte(&mut self) -> bool { false }
-    fn to_prev_sibling_byte(&mut self) -> bool { false }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { None }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { None }
 }
 
 impl ZipperPath for EmptyZipper {

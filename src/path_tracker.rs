@@ -103,24 +103,15 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
         self.path.push(k);
         self.zipper.descend_to_byte(k)
     }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool {
-        if self.zipper.descend_indexed_byte(child_idx) {
-            //The inner zipper picked the byte, so ask it which one it landed on
-            let byte = self.zipper.focus_byte().expect("descended zipper must have a focus byte");
-            self.path.push(byte);
-            true
-        } else {
-            false
-        }
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
+        let byte = self.zipper.descend_indexed_byte(child_idx)?;
+        self.path.push(byte);
+        Some(byte)
     }
-    fn descend_first_byte(&mut self) -> bool {
-        if self.zipper.descend_first_byte() {
-            let byte = self.zipper.focus_byte().expect("descended zipper must have a focus byte");
-            self.path.push(byte);
-            true
-        } else {
-            false
-        }
+    fn descend_first_byte(&mut self) -> Option<u8> {
+        let byte = self.zipper.descend_first_byte()?;
+        self.path.push(byte);
+        Some(byte)
     }
     fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         //Fan the descended bytes out to our own path buffer as well as the caller's observer
@@ -153,23 +144,15 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
     fn ascend_until_branch(&mut self) -> bool {
         self.ascend_until_cond(false)
     }
-    fn to_next_sibling_byte(&mut self) -> bool {
-        if self.zipper.to_next_sibling_byte() {
-            let byte = self.zipper.focus_byte().expect("moved zipper must have a focus byte");
-            *self.path.last_mut().expect("path must not be empty") = byte;
-            true
-        } else {
-            false
-        }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
+        let byte = self.zipper.to_next_sibling_byte()?;
+        *self.path.last_mut().expect("path must not be empty") = byte;
+        Some(byte)
     }
-    fn to_prev_sibling_byte(&mut self) -> bool {
-        if self.zipper.to_prev_sibling_byte() {
-            let byte = self.zipper.focus_byte().expect("moved zipper must have a focus byte");
-            *self.path.last_mut().expect("path must not be empty") = byte;
-            true
-        } else {
-            false
-        }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
+        let byte = self.zipper.to_prev_sibling_byte()?;
+        *self.path.last_mut().expect("path must not be empty") = byte;
+        Some(byte)
     }
 }
 

@@ -108,7 +108,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         }
         assert_eq!(self.a.path_exists(), self.b.path_exists());
     }
-    fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, idx: usize) -> Option<u8> {
         let a = self.a.descend_indexed_byte(idx);
         let b = self.b.descend_indexed_byte(idx);
         if self.log_moves {
@@ -117,7 +117,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         let a = self.a.descend_first_byte();
         let b = self.b.descend_first_byte();
         if self.log_moves {
@@ -175,7 +175,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let a = self.a.to_next_sibling_byte();
         let b = self.b.to_next_sibling_byte();
         if self.log_moves {
@@ -184,7 +184,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         let a = self.a.to_prev_sibling_byte();
         let b = self.b.to_prev_sibling_byte();
         if self.log_moves {

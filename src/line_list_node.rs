@@ -3415,7 +3415,7 @@ mod tests {
         map.set_val_at(b"a", 9);
 
         let mut by_index = map.read_zipper();
-        assert!(by_index.descend_indexed_byte(0));
+        assert!(by_index.descend_indexed_byte(0).is_some());
         let mut by_path = map.read_zipper();
         by_path.descend_to(b"a");
 
