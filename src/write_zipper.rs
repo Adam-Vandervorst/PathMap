@@ -2826,6 +2826,92 @@ mod tests {
     use crate::trie_node::*;
     use crate::alloc::GlobalAlloc;
 
+    /// Removing a value that shares its key with the onward child must not
+    /// leave a path-preserving sentinel behind: the node would then hold two
+    /// onward children under one key, and the accessors disagree about which
+    /// one the byte leads to.  `node_get_child` picks the real subtrie (so
+    /// `get_val_at`, `descend_to` and `val_count` stay right) while
+    /// `next_items` picks the empty sentinel, so every stepping traversal
+    /// walks into nothing and reports the map as empty.
+    ///
+    /// Grafting is what puts the child in slot 0 and the value in slot 1;
+    /// built by insertion the two are the other way around, which took the
+    /// branch that already had this check.
+    #[test]
+    fn write_zipper_remove_val_beside_child_test() {
+        let leaf: PathMap<u64> = PathMap::from_iter([("x", 1u64)]);
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper_at_path(b"a");
+            wz.graft(&leaf.read_zipper());  //the child at "a" goes to slot 0
+        }
+        map.set_val_at(b"a", 9);            //the value at "a" goes to slot 1
+        assert_eq!(map.val_count(), 2);
+
+        {
+            //`graft` removes the focus value this way when the source has none
+            let mut wz = map.write_zipper_at_path(b"a");
+            assert_eq!(wz.remove_val(false), Some(9));
+        }
+
+        //What the map holds, according to everything except iteration
+        assert_eq!(map.val_count(), 1);
+        assert_eq!(map.get_val_at(b"a"), None);
+        assert_eq!(map.get_val_at(b"ax"), Some(&1));
+
+        let mut visited = vec![];
+        let mut z = map.read_zipper();
+        while z.to_next_val() {
+            visited.push((z.path().to_vec(), *z.val().unwrap()));
+            assert!(visited.len() <= 1, "iteration must terminate");
+        }
+        assert_eq!(visited, vec![(b"ax".to_vec(), 1)],
+            "iteration must visit every value in the map");
+    }
+
+    /// The way the above shows up in practice: grafting into a path *inside*
+    /// an already-grafted subtrie.  `graft` removes the focus value when the
+    /// source has no root value, which is where the sentinel came from.
+    #[cfg(feature = "graft_root_vals")]
+    #[test]
+    fn write_zipper_graft_into_grafted_subtrie_test() {
+        //A leaf whose root carries a value, so grafting it makes a node with a
+        // value and an onward child under the same key
+        let leaf: PathMap<u64> = PathMap::from_iter([("", 9u64), ("x", 1)]);
+        let mut src = PathMap::<u64>::new();
+        {
+            let mut wz = src.write_zipper_at_path(b"a");
+            wz.graft(&leaf.read_zipper());
+        }
+        // src == {"a": 9, "ax": 1}
+
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper_at_path(b"a");
+            wz.graft(&src.read_zipper());
+        }
+        {
+            //the second graft lands inside the subtrie the first one installed
+            let mut wz = map.write_zipper_at_path(b"aa");
+            wz.graft(&src.read_zipper());
+        }
+
+        assert_eq!(map.val_count(), 2);
+        assert_eq!(map.get_val_at(b"aaa"), Some(&9));
+        assert_eq!(map.get_val_at(b"aaax"), Some(&1));
+
+        let mut visited = vec![];
+        let mut z = map.read_zipper();
+        while z.to_next_val() {
+            visited.push((z.path().to_vec(), *z.val().unwrap()));
+            assert!(visited.len() <= 2, "iteration must terminate");
+        }
+        assert_eq!(visited, vec![
+            (b"aaa".to_vec(), 9),
+            (b"aaax".to_vec(), 1),
+        ], "iteration must visit every value in the map");
+    }
+
     #[test]
     fn write_zipper_set_val_test1() {
         let mut map = PathMap::<usize>::new();

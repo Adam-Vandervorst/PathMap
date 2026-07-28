@@ -1769,36 +1769,49 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         })
     }
     fn node_remove_val(&mut self, key: &[u8], prune: bool) -> Option<V> {
-        if self.is_used_value_0() {
-            let node_key_0 = unsafe{ self.key_unchecked::<0>() };
-            if node_key_0 == key {
-                if prune {
-                    return Some(self.take_payload::<0>().unwrap().into_val())
-                } else {
-                    //If the other slot already keeps this path, then just remove the value
-                    let node_key_1 = unsafe{ self.key_unchecked::<1>() };
-                    let overlap = find_prefix_overlap(node_key_0, node_key_1);
-                    if node_key_0.len() == overlap {
+        //Removing a value is one of the ways a node can be left holding two onward children
+        // under one key, so check the node over on the way out
+        let result = (|| {
+            if self.is_used_value_0() {
+                let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                if node_key_0 == key {
+                    if prune {
                         return Some(self.take_payload::<0>().unwrap().into_val())
                     } else {
-                        //Otherwise, turn the value into an empty node
-                        return Some(self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        //If the other slot already keeps this path, then just remove the value
+                        let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+                        let overlap = find_prefix_overlap(node_key_0, node_key_1);
+                        if node_key_0.len() == overlap {
+                            return Some(self.take_payload::<0>().unwrap().into_val())
+                        } else {
+                            //Otherwise, turn the value into an empty node
+                            return Some(self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        }
                     }
                 }
             }
-        }
-        if self.is_used_value_1() {
-            let node_key_1 = unsafe{ self.key_unchecked::<1>() };
-            if node_key_1 == key {
-                if prune {
-                    return Some(self.take_payload::<1>().unwrap().into_val())
-                } else {
-                    //Turn the value into an empty node
-                    return Some(self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+            if self.is_used_value_1() {
+                let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+                if node_key_1 == key {
+                    if prune {
+                        return Some(self.take_payload::<1>().unwrap().into_val())
+                    } else {
+                        //If the other slot already keeps this path, then remove the value
+                        let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                        let overlap = find_prefix_overlap(node_key_1, node_key_0);
+                        if node_key_1.len() == overlap {
+                            return Some(self.take_payload::<1>().unwrap().into_val())
+                        } else {
+                            //Otherwise, turn the value into an empty node
+                            return Some(self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        }
+                    }
                 }
             }
-        }
-        None
+            None
+        })();
+        debug_assert!(validate_node(self));
+        result
     }
 
     #[inline]
@@ -2074,6 +2087,14 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                         } else {
                             return (Some(key0[key.len()]), None)
                         }
+                    }
+                    //If we get here, we know both slots hold the same single-byte key, which means one of them holds
+                    // a value and the other holds the onward child.  So we have to check both
+                    if self.is_child_ptr::<0>() {
+                        return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<0>().as_tagged()) })
+                    }
+                    if self.is_child_ptr::<1>() {
+                        return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<1>().as_tagged()) })
                     }
                 }
                 if starts_with(key1, key) && key1.len() > key.len() {
@@ -2772,6 +2793,14 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
+    //Two slots may share a key (that is how a value and the onward child at the same path are
+    // stored) but only one of them may be the onward child, otherwise the byte leads to two
+    // different subtries and every accessor is free to pick a different one
+    if node.is_used_child_0() && node.is_used_child_1() && key0 == key1 {
+        println!("Invalid node - two onward children under the same key. {node:?}");
+        panic!()
+    }
+
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
         println!("Invalid node - duplicated prefix too long. {node:?}");
@@ -3363,6 +3392,39 @@ mod tests {
         assert_eq!(inner_node.as_tagged().node_get_val(b"anana"), Some(&1));
     }
 
+    /// Regression test: a value and the onward child at the same path are kept
+    /// in the two slots of one node, both under the same key.  In that shape
+    /// `nth_child_from_key` used to look for the child in slot 1 only, and so
+    /// reported "no child node" whenever the child sat in slot 0.  A zipper
+    /// that descended by index then left its focus in the parent node, and
+    /// reported the position as having no children at all.
+    #[test]
+    fn test_nth_child_from_key_val_and_child_share_key() {
+        use crate::PathMap;
+        use crate::zipper::{ZipperMoving, ZipperValues, ZipperWriting, Zipper};
+
+        // Grafting puts the child in slot 0; the value added afterwards lands
+        // in slot 1 under the same key.  (Insertion alone builds the mirror
+        // image, which is the arrangement the buggy code expected.)
+        let leaf = PathMap::from_iter([("x", 1u64)]);
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper_at_path(b"a");
+            wz.graft(&leaf.read_zipper());
+        }
+        map.set_val_at(b"a", 9);
+
+        let mut by_index = map.read_zipper();
+        assert!(by_index.descend_indexed_byte(0));
+        let mut by_path = map.read_zipper();
+        by_path.descend_to(b"a");
+
+        assert_eq!(by_index.path(), by_path.path());
+        assert_eq!(by_index.val(), Some(&9));
+        assert_eq!(by_path.child_count(), 1, "\"a\" has the child 'x'");
+        assert_eq!(by_index.child_count(), by_path.child_count());
+        assert_eq!(by_index.child_mask(), by_path.child_mask());
+    }
 }
 
 //GOAT, merge wrappers for lattice impls on primitives
