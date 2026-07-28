@@ -3425,6 +3425,63 @@ mod tests {
         }
     }
 
+    /// The full 5-byte trie: every one of the 256^5 paths of length 5 carries
+    /// a value.  The source is built by grafting each level under all 256
+    /// bytes, so it is nothing but shared nodes, and the cached builder has to
+    /// fold it into ~1300 nodes.  The plain builder is not run here: it would
+    /// walk 10^12 paths.
+    #[test]
+    fn test_act_from_zipper_cached_full_depth_5() {
+        use crate::{utils::ByteMask, zipper::Zipper};
+        const DEPTH: usize = 5;
+
+        let bytes: [u8; 256] = std::array::from_fn(|b| b as u8);
+        let prefixes: Vec<&[u8]> = bytes.iter().map(std::slice::from_ref).collect();
+        // The leaf's value sits at its root, so grafting it under every byte
+        // DEPTH times over puts a value on every DEPTH-byte path and nowhere
+        // else
+        let map = make_shared_map(&prefixes, DEPTH, PathMap::from_iter([("", 1u64)]));
+        let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
+
+        // Each level is one branch node plus the 256 copies of the level below
+        // it, i.e. ~256 nodes per level (~37KB in all) rather than 256^5 paths
+        assert!(cached.get_data().len() < 64 * 1024,
+            "cached={}B", cached.get_data().len());
+
+        // Every level branches on all 256 bytes, values appear only at DEPTH
+        let mut z = cached.read_zipper_u64();
+        for depth in 0..DEPTH {
+            assert_eq!(z.child_mask(), ByteMask::FULL, "child mask at depth {depth}");
+            assert_eq!(z.val(), None, "value at depth {depth}");
+            assert!(z.descend_to_existing(&[depth as u8]) == 1, "descend at depth {depth}");
+        }
+        assert_eq!(z.child_mask(), ByteMask::EMPTY, "child mask at depth {DEPTH}");
+        assert_eq!(z.val().copied(), Some(1), "value at depth {DEPTH}");
+
+        // Spot check the paths themselves against the source trie: bytes at
+        // both ends of the range and around the byte that splits the mask
+        // words, in every position
+        let sample = [0u8, 1, 63, 64, 65, 127, 128, 254, 255];
+        for a in sample {
+            for b in sample {
+                for c in sample {
+                    let path = [a, b, c, b, a];
+                    assert_eq!(cached.get_val_at(&path), Some(1), "{path:?}");
+                    assert_eq!(map.get_val_at(&path), Some(&1), "source {path:?}");
+                    // ...and nothing above or below a full-depth path
+                    for len in 0..DEPTH {
+                        assert_eq!(cached.get_val_at(&path[..len]), None, "{path:?}[..{len}]");
+                    }
+                    let mut deeper = path.to_vec();
+                    deeper.push(a);
+                    assert_eq!(cached.get_val_at(&deeper), None, "{deeper:?}");
+                    let mut z = cached.read_zipper_u64();
+                    assert_eq!(z.descend_to_existing(&deeper), DEPTH, "descend {deeper:?}");
+                }
+            }
+        }
+    }
+
     /// Node re-use must survive a round trip: reading the re-used tree back
     /// yields the tree the plain builder would have written
     #[test]
