@@ -459,12 +459,22 @@ fn derive_poly_zipper_with_traits(
             quote! {}
         };
         Some(quote! {
-            impl #impl_generics pathmap::zipper::ZipperMoving for #enum_name #ty_generics
+            impl #impl_generics pathmap::zipper::ZipperPath for #enum_name #ty_generics
             #zipper_moving_where
             {
                 fn path(&self) -> &[u8] {
                     match self {
                         #(#variant_arms => inner.path(),)*
+                    }
+                }
+            }
+
+            impl #impl_generics pathmap::zipper::ZipperMoving for #enum_name #ty_generics
+            #zipper_moving_where
+            {
+                fn at_root(&self) -> bool {
+                    match self {
+                        #(#variant_arms => inner.at_root(),)*
                     }
                 }
 

@@ -36,7 +36,6 @@ impl ZipperMoving for EmptyZipper {
     #[inline]
     fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.truncate(self.path_start_idx) }
-    fn path(&self) -> &[u8] { &self.path[self.path_start_idx..] }
     fn val_count(&self) -> usize { 0 }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         self.path.extend_from_slice(k.as_ref());
@@ -46,7 +45,7 @@ impl ZipperMoving for EmptyZipper {
     }
     fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
     fn descend_first_byte(&mut self) -> bool { false }
-    fn descend_until(&mut self) -> bool { false }
+    fn descend_until<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn ascend(&mut self, steps: usize) -> bool {
         if steps > self.path.len() - self.path_start_idx {
             self.reset();
@@ -77,6 +76,10 @@ impl ZipperMoving for EmptyZipper {
     }
     fn to_next_sibling_byte(&mut self) -> bool { false }
     fn to_prev_sibling_byte(&mut self) -> bool { false }
+}
+
+impl ZipperPath for EmptyZipper {
+    fn path(&self) -> &[u8] { &self.path[self.path_start_idx..] }
 }
 
 impl ZipperAbsolutePath for EmptyZipper {

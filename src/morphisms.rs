@@ -474,7 +474,7 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
         //Descend to the next forking point, or leaf
         let mut is_leaf = false;
         while z.child_count() < 2 {
-            if !z.descend_until() {
+            if !z.descend_until(&mut ()) {
                 is_leaf = true;
                 break;
             }
@@ -660,7 +660,7 @@ impl Stack {
     /// This function re-uses allocations for stack frames,
     /// to avoid allocator thrashing.
     pub fn push_state<Z>(&mut self, z: &Z)
-        where Z: Zipper,
+        where Z: Zipper + ZipperPath,
     {
         Self::push_state_raw(&mut self.stack, &mut self.position, z);
     }
@@ -669,7 +669,7 @@ impl Stack {
         stack: &mut Vec<StackFrame>,
         position: &mut usize,
         zipper: &Z)
-        where Z: Zipper,
+        where Z: Zipper + ZipperPath,
     {
         *position = position.wrapping_add(1);
         assert!(*position <= stack.len(),
@@ -687,7 +687,7 @@ where
     V: 'static + Clone + Send + Sync + Unpin,
     W: Default,
     I: IntoIterator<Item=W>,
-    WZ: ZipperWriting<V, A> + zipper::ZipperMoving,
+    WZ: ZipperWriting<V, A> + zipper::ZipperMoving + zipper::ZipperPath,
     CoAlgF: Copy + FnMut(W, &[u8]) -> (&'a [u8], ByteMask, I, Option<V>),
 {
     let (prefix, bm, ws, mv) = coalg_f(w, wz.path());
@@ -796,7 +796,7 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
             // Descend until leaf or branch
             let mut is_leaf = false;
             'descend: while zipper.child_count() < 2 {
-                if !zipper.descend_until() {
+                if !zipper.descend_until(&mut ()) {
                     is_leaf = true;
                     break 'descend;
                 }
@@ -888,7 +888,7 @@ fn into_cata_jumping_naive<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>
 
         // Descend until leaf or branch
         'descend: while z.child_count() < 2 {
-            if !z.descend_until() {
+            if !z.descend_until(&mut ()) {
                 is_leaf = true;
                 break 'descend;
             }

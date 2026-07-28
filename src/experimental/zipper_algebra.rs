@@ -118,7 +118,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A>
 }
 
 impl<Z, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A> for PrefixZipper<'_, Z> where
-    Z: ZipperInfallibleSubtries<V, A> + ZipperSubtries<V, A> + ZipperConcrete + ZipperMoving
+    Z: ZipperInfallibleSubtries<V, A> + ZipperSubtries<V, A> + ZipperConcrete + ZipperMoving + ZipperPath
 {
 }
 

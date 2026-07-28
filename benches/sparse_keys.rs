@@ -94,7 +94,7 @@ fn sparse_descend_until(bencher: Bencher, n: u64) {
             if start > 0 {
                 zipper.descend_to(&key[..start]);
             }
-            if zipper.descend_until() {
+            if zipper.descend_until(&mut ()) {
                 sink += 1;
             }
         }
@@ -126,7 +126,7 @@ fn sparse_descend_until_max_bytes(bencher: Bencher, n: u64) {
             if start > 0 {
                 zipper.descend_to(&key[..start]);
             }
-            if zipper.descend_until_max_bytes(DESCEND_UNTIL_MAX_BYTES) {
+            if zipper.descend_until_max_bytes(DESCEND_UNTIL_MAX_BYTES, &mut ()) {
                 sink += 1;
             }
         }

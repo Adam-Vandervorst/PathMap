@@ -49,7 +49,6 @@ impl ZipperMoving for FullZipper {
     #[inline]
     fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.clear() }
-    fn path(&self) -> &[u8] { &self.path[..] }
     fn val_count(&self) -> usize { usize::MAX/2 } // usize::MAX is a dangerous default for overflow
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         self.path.extend_from_slice(k.as_ref());
@@ -66,8 +65,9 @@ impl ZipperMoving for FullZipper {
         self.path.push(0);
         true
     }
-    fn descend_until(&mut self) -> bool {
+    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.path.push(0); // not sure?
+        obs.descend_to_byte(0);
         true
     }
     fn ascend(&mut self, steps: usize) -> bool {
@@ -90,6 +90,10 @@ impl ZipperMoving for FullZipper {
     }
     fn to_next_sibling_byte(&mut self) -> bool { self.to_sibling(true) }
     fn to_prev_sibling_byte(&mut self) -> bool { self.to_sibling(false) }
+}
+
+impl ZipperPath for FullZipper {
+    fn path(&self) -> &[u8] { &self.path[..] }
 }
 
 impl FullZipper {
@@ -122,19 +126,22 @@ impl ZipperMoving for NullZipper {
     #[inline]
     fn focus_byte(&self) -> Option<u8> { None }
     fn reset(&mut self) {}
-    fn path(&self) -> &[u8] { &[] }
     fn val_count(&self) -> usize { 0 }
     fn descend_to<K: AsRef<[u8]>>(&mut self, _k: K) {}
     fn descend_to_byte(&mut self, _k: u8) {}
     fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
     fn descend_first_byte(&mut self) -> bool { false }
-    fn descend_until(&mut self) -> bool { false }
+    fn descend_until<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn ascend(&mut self, _steps: usize) -> bool { false }
     fn ascend_byte(&mut self) -> bool { false }
     fn ascend_until(&mut self) -> bool { false }
     fn ascend_until_branch(&mut self) -> bool { false }
     fn to_next_sibling_byte(&mut self) -> bool { false }
     fn to_prev_sibling_byte(&mut self) -> bool { false }
+}
+
+impl ZipperPath for NullZipper {
+    fn path(&self) -> &[u8] { &[] }
 }
 
 impl<V: TrieValue, A: Allocator> WriteZipperPriv<V, A> for NullZipper {

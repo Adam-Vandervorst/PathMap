@@ -88,7 +88,8 @@ use crate::{
     utils::{BitMask, ByteMask, find_prefix_overlap},
     zipper::{
         Zipper, ZipperValues, ZipperForking, ZipperAbsolutePath, ZipperIteration,
-        ZipperMoving, ZipperPathBuffer, ZipperReadOnlyValues, ZipperSubtries,
+        ZipperMoving, ZipperPath, ZipperPathBuffer, ZipperReadOnlyValues, ZipperSubtries,
+        PathObserver,
         ZipperConcrete, ZipperReadOnlyConditionalValues, TrieRef
     },
 };
@@ -883,7 +884,7 @@ impl ArenaCompactTree<Vec<u8>> {
     /// let tree1 = ArenaCompactTree::from_zipper(btm.read_zipper(), |_v| 0);
     /// let mut zipper = tree1.read_zipper();
     /// for path in items {
-    ///     use pathmap::zipper::ZipperMoving;
+    ///     use pathmap::zipper::{ZipperMoving, ZipperPath};
     ///     zipper.reset();
     ///     assert!(zipper.descend_to_existing(path) == path.len());
     ///     assert_eq!(zipper.path(), path.as_bytes());
@@ -2128,6 +2129,13 @@ where Storage: AsRef<[u8]>
     }
 }
 
+impl<'tree, Storage, Value> ZipperPath for ACTZipper<'tree, Storage, Value>
+where Storage: AsRef<[u8]>
+{
+    /// Returns the path from the zipper's root to the current focus
+    fn path(&self) -> &[u8] { &self.path[self.origin_depth..] }
+}
+
 impl<'tree, Storage, Value> ZipperAbsolutePath for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
@@ -2533,9 +2541,6 @@ where Storage: AsRef<[u8]>
         self.invalid = 0;
     }
 
-    /// Returns the path from the zipper's root to the current focus
-    fn path(&self) -> &[u8] { &self.path[self.origin_depth..] }
-
     /// Returns the total number of values contained at and below the zipper's focus, including the focus itself
     ///
     /// WARNING: This is not a cheap method. It may have an order-N cost
@@ -2664,7 +2669,7 @@ where Storage: AsRef<[u8]>
 
     /// Descends the zipper's focus until a branch or a value is encountered.  Returns `true` if the focus
     /// moved otherwise returns `false`
-    fn descend_until(&mut self) -> bool {
+    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.trace_pos();
         let mut descended = false;
         'descend: while self.child_count() == 1 {
@@ -2677,6 +2682,7 @@ where Storage: AsRef<[u8]>
                     let line_child_hack = if line.child.is_some() { 1 } else { 0 };
                     top_frame.node_depth += rest_path.len() - line_child_hack;
                     self.path.extend_from_slice(rest_path);
+                    obs.descend_to(rest_path);
                     child_id = line.child;
                     if line.value.is_some() {
                         descended = true;
@@ -2687,6 +2693,7 @@ where Storage: AsRef<[u8]>
                     let Some(byte) = node.bytemask.iter().next()
                         else { break 'descend };
                     self.path.push(byte);
+                    obs.descend_to_byte(byte);
                     child_id = node.first_child;
                 }
             }
@@ -2855,7 +2862,7 @@ where Storage: AsRef<[u8]>
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
     use crate::{
-        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperValues}
+        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues}
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,

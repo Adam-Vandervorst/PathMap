@@ -61,9 +61,10 @@ pub struct PrefixZipper<'prefix, Z> {
     position: PrefixPos,
 }
 
+//TEMPORARY: `ZipperPath` on the source comes off once the `ascend_` methods report their distance
 impl<'prefix, Z>  PrefixZipper<'prefix, Z>
     where
-        Z: ZipperMoving
+        Z: ZipperMoving + ZipperPath
 {
     /// Creates a new `PrefixZipper` wrapping the supplied `source` zipper and prepending the
     /// supplied `prefix`
@@ -282,7 +283,7 @@ impl<'prefix, 'source, Z, V> ZipperReadOnlyConditionalValues<'source, V>
 }
 
 impl<'prefix, Z> ZipperPathBuffer for PrefixZipper<'prefix, Z>
-    where Z: ZipperMoving
+    where Z: ZipperMoving + ZipperPath
 {
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         assert!(self.path.capacity() >= len);
@@ -345,7 +346,7 @@ impl<'prefix, Z> Zipper for PrefixZipper<'prefix, Z>
 
 impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
     where
-        Z: ZipperMoving
+        Z: ZipperMoving + ZipperPath
 {
     fn at_root(&self) -> bool {
         match self.position {
@@ -366,11 +367,6 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         debug_assert_eq!(self.path, &self.prefix[..self.origin_depth]);
         self.source.reset();
         self.set_valid(0);
-    }
-
-    #[inline]
-    fn path(&self) -> &[u8] {
-        &self.path[self.origin_depth..]
     }
 
     fn val_count(&self) -> usize {
@@ -438,21 +434,23 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         self.descend_indexed_byte(0)
     }
 
-    fn descend_until(&mut self) -> bool {
+    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         if self.position.is_invalid() {
             return false;
         }
         //Consuming the remainder of the prefix is itself a movement, so it must be reflected in the
         // return value even when the source zipper can't descend any further
         let descended_prefix = if let Some(prefixed_depth) = self.position.prefixed_depth() {
-            self.path.extend_from_slice(&self.prefix[self.origin_depth + prefixed_depth..]);
+            let prefix_rest = &self.prefix[self.origin_depth + prefixed_depth..];
+            self.path.extend_from_slice(prefix_rest);
+            obs.descend_to(prefix_rest);
             self.position = PrefixPos::Source;
             true
         } else {
             false
         };
         let len_before = self.source.path().len();
-        if !self.source.descend_until() {
+        if !self.source.descend_until(obs) {
             return descended_prefix;
         }
         let path = self.source.path();
@@ -512,6 +510,15 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         };
         self.path.truncate(self.path.len() - ascended);
         true
+    }
+}
+
+impl<'prefix, Z> ZipperPath for PrefixZipper<'prefix, Z>
+    where Z: ZipperMoving + ZipperPath
+{
+    #[inline]
+    fn path(&self) -> &[u8] {
+        &self.path[self.origin_depth..]
     }
 }
 
@@ -690,6 +697,7 @@ mod tests {
     use crate::zipper::Zipper;
     use crate::zipper::ZipperMoving;
     use crate::zipper::ZipperAbsolutePath;
+    use crate::zipper::ZipperPath;
     use crate::zipper::ZipperReadOnlyValues;
     use crate::zipper::ZipperValues;
     const PATHS1: &[(&[u8], u64)] = &[
@@ -787,7 +795,7 @@ mod tests {
         let mut rz = PrefixZipper::new(b"prefix", map.read_zipper());
         assert_eq!(rz.path(), b"");
 
-        let moved = rz.descend_until();
+        let moved = rz.descend_until(&mut ());
 
         //The focus advanced across the whole prefix...
         assert_eq!(rz.path(), b"prefix");

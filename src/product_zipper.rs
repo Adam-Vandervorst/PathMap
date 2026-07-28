@@ -41,7 +41,7 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
     /// an implementation issue, but would be very difficult to fix and may not be worth fixing.
     pub fn new<PrimaryZ, OtherZ, ZipperList>(mut primary_z: PrimaryZ, other_zippers: ZipperList) -> Self
         where
-        PrimaryZ: ZipperMoving + ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperReadOnlySubtries<'trie, V, A> + 'factor_z,
         OtherZ: ZipperSubtries<V, A> + 'factor_z,
         ZipperList: IntoIterator<Item=OtherZ>,
     {
@@ -173,10 +173,6 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.factor_paths.clear();
         self.z.reset()
     }
-    #[inline]
-    fn path(&self) -> &[u8] {
-        self.z.path()
-    }
     fn val_count(&self) -> usize {
         assert!(self.focus_factor() == self.factor_count() - 1);
         self.z.val_count()
@@ -257,10 +253,10 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.ensure_descend_next_factor();
         result
     }
-    fn descend_until(&mut self) -> bool {
+    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         while self.z.child_count() == 1 {
-            moved |= self.z.descend_until();
+            moved |= self.z.descend_until(&mut *obs);
             self.ensure_descend_next_factor();
             if self.z.is_val() {
                 break;
@@ -303,6 +299,13 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         let ascended = self.z.ascend_until_branch();
         self.fix_after_ascend();
         ascended
+    }
+}
+
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPath for ProductZipper<'_, 'trie, V, A> {
+    #[inline]
+    fn path(&self) -> &[u8] {
+        self.z.path()
     }
 }
 
@@ -392,8 +395,8 @@ pub struct ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
 impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving,
-        SecondaryZ: ZipperMoving,
+        PrimaryZ: ZipperMoving + ZipperPath,
+        SecondaryZ: ZipperMoving + ZipperPath,
 {
     /// Creates a new `ProductZipper` from the provided zippers
     pub fn new<ZipperList>(primary: PrimaryZ, other_zippers: ZipperList) -> Self
@@ -511,7 +514,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperAbsolutePath
     where
         V: Clone + Send + Sync,
         PrimaryZ: ZipperAbsolutePath,
-        SecondaryZ: ZipperMoving,
+        SecondaryZ: ZipperMoving + ZipperPath,
 {
     fn origin_path(&self) -> &[u8] { self.primary.origin_path() }
     fn root_prefix_path(&self) -> &[u8] { self.primary.root_prefix_path() }
@@ -521,8 +524,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperConcrete,
-        SecondaryZ: ZipperMoving + ZipperConcrete,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperConcrete,
+        SecondaryZ: ZipperMoving + ZipperPath + ZipperConcrete,
 {
     fn shared_node_id(&self) -> Option<u64> {
         if let Some(idx) = self.factor_idx(true) {
@@ -544,8 +547,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperPathBuffer
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperPathBuffer,
-        SecondaryZ: ZipperMoving + ZipperPathBuffer,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
+        SecondaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
 {
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.primary.prepare_buffers() }
@@ -556,8 +559,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValues<V>
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperValues<V>,
-        SecondaryZ: ZipperMoving + ZipperValues<V>,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperValues<V>,
+        SecondaryZ: ZipperMoving + ZipperPath + ZipperValues<V>,
 {
     fn val(&self) -> Option<&V> {
         if let Some(idx) = self.factor_idx(true) {
@@ -579,8 +582,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyValues<'trie, V>
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
-        SecondaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperReadOnlyValues<'trie, V>,
+        SecondaryZ: ZipperMoving + ZipperPath + ZipperReadOnlyValues<'trie, V>,
 {
     fn get_val(&self) -> Option<&'trie V> {
         if let Some(idx) = self.factor_idx(true) {
@@ -602,8 +605,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyConditionalValues<'trie, V>
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
-        SecondaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperReadOnlyConditionalValues<'trie, V>,
+        SecondaryZ: ZipperMoving + ZipperPath + ZipperReadOnlyConditionalValues<'trie, V>,
 {
     type WitnessT = (PrimaryZ::WitnessT, Vec<SecondaryZ::WitnessT>);
     fn witness<'w>(&self) -> Self::WitnessT {
@@ -623,8 +626,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyConditionalValues<'trie, V>
 impl<'trie, PrimaryZ, SecondaryZ, V> Zipper for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + Zipper,
-        SecondaryZ: ZipperMoving + Zipper,
+        PrimaryZ: ZipperMoving + ZipperPath + Zipper,
+        SecondaryZ: ZipperMoving + ZipperPath + Zipper,
 {
     fn path_exists(&self) -> bool {
         if let Some(idx) = self.factor_idx(true) {
@@ -659,8 +662,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> Zipper for ProductZipperG<'trie, PrimaryZ, 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving,
-        SecondaryZ: ZipperMoving,
+        PrimaryZ: ZipperMoving + ZipperPath,
+        SecondaryZ: ZipperMoving + ZipperPath,
 {
     fn at_root(&self) -> bool {
         self.path().is_empty()
@@ -677,9 +680,6 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
         self.primary.reset();
     }
     #[inline]
-    fn path(&self) -> &[u8] {
-        self.primary.path()
-    }
     fn val_count(&self) -> usize {
         unimplemented!("method will probably get removed")
     }
@@ -733,21 +733,18 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
     fn descend_first_byte(&mut self) -> bool {
         self.descend_indexed_byte(0)
     }
-    fn descend_until(&mut self) -> bool {
+    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         self.enter_factors();
         while self.child_count() == 1 {
             moved |= if let Some(idx) = self.factor_idx(false) {
+                //The primary carries the whole product path, so it has to follow whatever the
+                //secondary descends.  Mirroring the movement keeps it in step without buffering
+                //the bytes.
                 let zipper = &mut self.secondary[idx];
-                let before = zipper.path().len();
-                let rv = zipper.descend_until();
-                let path = zipper.path();
-                if path.len() > before {
-                    self.primary.descend_to(&path[before..]);
-                }
-                rv
+                zipper.descend_until(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
             } else {
-                self.primary.descend_until()
+                self.primary.descend_until(&mut *obs)
             };
             self.enter_factors();
             if self.is_val() {
@@ -790,6 +787,18 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
     #[inline]
     fn ascend_until_branch(&mut self) -> bool {
         self.ascend_cond(false)
+    }
+}
+
+impl<'trie, PrimaryZ, SecondaryZ, V> ZipperPath for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
+    where
+        V: Clone + Send + Sync,
+        PrimaryZ: ZipperMoving + ZipperPath,
+        SecondaryZ: ZipperMoving + ZipperPath,
+{
+    #[inline]
+    fn path(&self) -> &[u8] {
+        self.primary.path()
     }
 }
 
@@ -893,6 +902,7 @@ impl <Z : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIteration> ZipperPr
 impl <Z : Zipper> Zipper for OneFactor<Z> { zipper_impl_lens!(Zipper self => self.z); }
 impl <Z : ZipperAbsolutePath> ZipperAbsolutePath for OneFactor<Z> { zipper_impl_lens!(ZipperAbsolutePath self => self.z); }
 impl <Z : ZipperMoving> ZipperMoving for OneFactor<Z> { zipper_impl_lens!(ZipperMoving self => self.z); }
+impl <Z : ZipperMoving + ZipperPath> ZipperPath for OneFactor<Z> { zipper_impl_lens!(ZipperPath self => self.z); }
 impl <Z : ZipperIteration> ZipperIteration for OneFactor<Z> { zipper_impl_lens!(ZipperIteration self => self.z); }
 impl <V, Z : ZipperValues<V>> ZipperValues<V> for OneFactor<Z> { zipper_impl_lens!(ZipperValues self => self.z); }
 impl <V, Z : ZipperForking<V>> ZipperForking<V> for OneFactor<Z> { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Z: 'a; zipper_impl_lens!(ZipperForking self => self.z); }
@@ -923,6 +933,98 @@ mod tests {
             // --- START OF MACRO GENERATED MOD ---
             pub mod $mod {
                 use super::*;
+    /// Builds a path long enough to span several trie nodes, so a `descend_until` over it is
+    /// reported to a [PathObserver] as several separate segments
+    fn long_path(len: usize) -> Vec<u8> {
+        (0..len).map(|i| b'a' + (i % 26) as u8).collect()
+    }
+
+    /// `descend_until` through a secondary factor must leave the product zipper exactly where an
+    /// equivalent `descend_to` would, including when the secondary's descent spans several nodes
+    /// and is therefore reported in multiple segments.
+    #[test]
+    fn product_zipper_descend_until_multi_segment_secondary() {
+        for secondary_len in [1usize, 3, 40, 200, 500] {
+            let secondary_path = long_path(secondary_len);
+            let l = PathMap::from_iter([(b"X".as_slice(), ())]);
+            let r = PathMap::from_iter([(secondary_path.as_slice(), ())]);
+            $convert!(l);
+            $convert!(r);
+
+            //Descend into the secondary factor with `descend_until`
+            let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
+            pz.descend_to(b"X");
+            let moved = pz.descend_until(&mut ());
+
+            //An independent zipper walked to the same place with `descend_to`
+            let mut expected = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
+            expected.descend_to(b"X");
+            expected.descend_to(&secondary_path);
+
+            assert_eq!(moved, true, "len={secondary_len}: should have descended");
+            assert_eq!(pz.path(), expected.path(), "len={secondary_len}: path mismatch");
+            assert_eq!(pz.path_exists(), expected.path_exists(), "len={secondary_len}: path_exists mismatch");
+            assert_eq!(pz.val(), expected.val(), "len={secondary_len}: val mismatch");
+            assert_eq!(pz.child_count(), expected.child_count(), "len={secondary_len}: child_count mismatch");
+            assert_eq!(pz.child_mask(), expected.child_mask(), "len={secondary_len}: child_mask mismatch");
+        }
+    }
+
+    /// The observer passed to `descend_until` must receive exactly the bytes the focus moved over,
+    /// no matter how many segments the underlying descent was reported in
+    #[test]
+    fn product_zipper_descend_until_observer_matches_movement() {
+        for secondary_len in [1usize, 3, 40, 200, 500] {
+            let secondary_path = long_path(secondary_len);
+            let l = PathMap::from_iter([(b"X".as_slice(), ())]);
+            let r = PathMap::from_iter([(secondary_path.as_slice(), ())]);
+            $convert!(l);
+            $convert!(r);
+
+            let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
+            pz.descend_to(b"X");
+            let before = pz.path().to_vec();
+
+            let mut observed = Vec::new();
+            pz.descend_until(&mut observed);
+
+            let mut expected_observed = pz.path().to_vec();
+            expected_observed.drain(..before.len());
+            assert_eq!(observed, expected_observed,
+                "len={secondary_len}: observer must report exactly the bytes descended");
+        }
+    }
+
+    /// Repeated `descend_until` calls that cross from the primary into a secondary, and onward
+    /// into a third factor, must agree with a zipper descended directly to the same path
+    #[test]
+    fn product_zipper_descend_until_across_factors() {
+        let mid = long_path(120);
+        let tail = long_path(90);
+        let l = PathMap::from_iter([(b"X".as_slice(), ())]);
+        let r = PathMap::from_iter([(mid.as_slice(), ())]);
+        let e = PathMap::from_iter([(tail.as_slice(), ())]);
+        $convert!(l);
+        $convert!(r);
+        $convert!(e);
+
+        let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+        //Drive the whole product path using only `descend_until`
+        while pz.descend_until(&mut ()) {}
+
+        let mut full = b"X".to_vec();
+        full.extend_from_slice(&mid);
+        full.extend_from_slice(&tail);
+
+        let mut expected = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+        expected.descend_to(&full);
+
+        assert_eq!(pz.path(), expected.path(), "path mismatch after crossing factors");
+        assert_eq!(pz.path_exists(), expected.path_exists());
+        assert_eq!(pz.val(), expected.val());
+        assert_eq!(pz.child_count(), expected.child_count());
+    }
+
     /// Tests a very simple two-level product zipper
     #[test]
     fn product_zipper_test1() {
@@ -1576,7 +1678,7 @@ mod tests {
         assert_eq!(pz.is_val(), false);
 
         // test descend_until
-        assert_eq!(pz.descend_until(), true);
+        assert_eq!(pz.descend_until(&mut ()), true);
         assert_eq!(pz.path(), full_path);
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 0);
@@ -1596,7 +1698,6 @@ mod tests {
         $convert!(e);
         let mut pz = $ProductZipper::new(l.read_zipper_at_borrowed_path(b"abcdefghijklm"), [r.read_zipper(), e.read_zipper()]);
 
-        assert_eq!(pz.factor_count(), 3);
         assert_eq!(pz.focus_factor(), 0);
         assert_eq!(pz.path_indices().len(), 0);
         assert_eq!(pz.path(), b"");
@@ -1635,6 +1736,31 @@ mod tests {
     macro_rules! noop { ($x:ident) => {}; (*$x:ident) => {}; }
     impl_product_zipper_tests!(pz_concrete, ProductZipper, noop);
     impl_product_zipper_tests!(pz_generic, ProductZipperG, noop);
+
+    /// Adapts [DependentProductZipperG] to the `new(primary, [secondaries])` shape the shared
+    /// product-zipper test suite uses, by handing out a fixed list of factors in order.  This lets
+    /// the suite exercise `DependentProductZipperG`, which is otherwise near-identical to
+    /// [ProductZipperG].
+    struct DependentPZAdapter;
+
+    impl DependentPZAdapter {
+        fn new<'trie, PrimaryZ, SecondaryZ, V, L>(primary: PrimaryZ, others: L)
+            -> DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V,
+                   (), impl Clone + for<'a> FnOnce((), &'a [u8], usize) -> ((), Option<SecondaryZ>)>
+            where
+                V: Clone + Send + Sync,
+                PrimaryZ: ZipperMoving + ZipperPath + ZipperValues<V>,
+                SecondaryZ: ZipperMoving + ZipperPath + Clone,
+                L: IntoIterator<Item = SecondaryZ>,
+        {
+            let factors: Vec<SecondaryZ> = others.into_iter().collect();
+            DependentProductZipperG::new_enroll(primary, (), move |_, _, idx| {
+                ((), factors.get(idx).cloned())
+            })
+        }
+    }
+
+    impl_product_zipper_tests!(pz_dependent, DependentPZAdapter, noop);
 
     #[cfg(feature="arena_compact")]
     macro_rules! to_act {
