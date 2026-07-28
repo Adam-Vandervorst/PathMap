@@ -124,8 +124,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// A combination between `ascend_until` and `ascend_until_branch`.
     /// if `allow_stop_on_val` is `true`, behaves as `ascend_until`
-    fn ascend_cond(&mut self, allow_stop_on_val: bool) -> bool {
+    fn ascend_cond(&mut self, allow_stop_on_val: bool) -> usize {
         let mut plen = self.path().len();
+        let mut ascended = 0;
         loop {
             while self.factor_paths.last() == Some(&plen) {
                 self.factor_paths.pop();
@@ -133,20 +134,21 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             }
             if let Some(idx) = self.factor_idx(false) {
                 let zipper = &mut self.secondary[idx];
-                let before = zipper.path().len();
-                let rv = if allow_stop_on_val {
+                //The inner zipper reports how far it moved, so the primary can be brought along
+                //without measuring its path before and after
+                let delta = if allow_stop_on_val {
                     zipper.ascend_until()
                 } else {
                     zipper.ascend_until_branch()
                 };
-                let delta = before - zipper.path().len();
                 plen -= delta;
                 self.primary.ascend(delta);
-                if rv && (self.child_count() != 1 || (allow_stop_on_val && self.is_val())) {
-                    return true;
+                ascended += delta;
+                if delta > 0 && (self.child_count() != 1 || (allow_stop_on_val && self.is_val())) {
+                    return ascended;
                 }
             } else {
-                return if allow_stop_on_val {
+                return ascended + if allow_stop_on_val {
                     self.primary.ascend_until()
                 } else {
                     self.primary.ascend_until_branch()
@@ -158,7 +160,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
         let byte = self.focus_byte()?;
-        assert!(self.ascend(1), "must ascend");
+        let ascended = self.ascend(1);
+        debug_assert_eq!(ascended, 1, "must ascend");
         let child_mask = self.child_mask();
         let Some(sibling_byte) = (if next {
             child_mask.next_bit(byte)
@@ -420,31 +423,32 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(false)
     }
-    fn ascend(&mut self, mut steps: usize) -> bool {
-        while steps > 0 {
+    fn ascend(&mut self, steps: usize) -> usize {
+        let mut remaining = steps;
+        while remaining > 0 {
             self.exit_factors();
             if let Some(idx) = self.factor_idx(false) {
                 let len = self.path().len() - self.factor_paths[idx];
-                let delta = len.min(steps);
+                let delta = len.min(remaining);
                 self.secondary[idx].ascend(delta);
                 self.primary.ascend(delta);
-                steps -= delta;
+                remaining -= delta;
             } else {
-                return self.primary.ascend(steps);
+                return (steps - remaining) + self.primary.ascend(remaining);
             }
         }
-        true
+        steps
     }
     #[inline]
     fn ascend_byte(&mut self) -> bool {
-        self.ascend(1)
+        self.ascend(1) == 1
     }
     #[inline]
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         self.ascend_cond(true)
     }
     #[inline]
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         self.ascend_cond(false)
     }
 }

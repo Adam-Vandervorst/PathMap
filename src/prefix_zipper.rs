@@ -134,15 +134,12 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
             };
         }
         if self.position.is_source() {
-            // let Err(remaining) = self.source.ascend(steps) else {
-            //     return Ok(());
-            // };
-            let len_before = self.source.path().len();
-            if self.source.ascend(steps) {
+            //The source reports how far it moved, so there's no need to measure its path
+            let ascended = self.source.ascend(steps);
+            if ascended == steps {
                 return Ok(())
             }
-            let len_after = self.source.path().len();
-            steps -= len_before - len_after;
+            steps -= ascended;
             self.position = PrefixPos::Prefix { valid: self.prefix.len() - self.origin_depth };
             // Intermediate state: self.position points one off
         }
@@ -166,14 +163,13 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
             //     return Some(moved);
             // }
             let len_before = self.source.path().len();
-            let was_good = if VAL {
+            let moved = if VAL {
                 self.source.ascend_until()
             } else {
                 self.source.ascend_until_branch()
             };
-            if was_good && ((VAL && self.source.is_val()) || self.source.child_count() > 1) {
-                let len_after = self.source.path().len();
-                return Some(len_before - len_after);
+            if moved > 0 && ((VAL && self.source.is_val()) || self.source.child_count() > 1) {
+                return Some(moved);
             }
             ascended += len_before;
             let valid = self.prefix.len() - self.origin_depth;
@@ -475,33 +471,33 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         *self.path.last_mut().unwrap() = byte;
         Some(byte)
     }
-    fn ascend(&mut self, steps: usize) -> bool {
+    fn ascend(&mut self, steps: usize) -> usize {
         let ascended = match self.ascend_n(steps) {
             Err(remaining) => steps - remaining,
             Ok(()) => steps,
         };
         self.path.truncate(self.path.len() - ascended);
-        ascended == steps
+        ascended
     }
     #[inline]
     fn ascend_byte(&mut self) -> bool {
-        self.ascend(1)
+        self.ascend(1) == 1
     }
     #[inline]
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         let Some(ascended) = self.ascend_until_n::<true>() else {
-            return false;
+            return 0;
         };
         self.path.truncate(self.path.len() - ascended);
-        true
+        ascended
     }
     #[inline]
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         let Some(ascended) = self.ascend_until_n::<false>() else {
-            return false;
+            return 0;
         };
         self.path.truncate(self.path.len() - ascended);
-        true
+        ascended
     }
 }
 
@@ -715,18 +711,18 @@ mod tests {
         let mut rz = PrefixZipper::new(b"prefix", map.read_zipper());
         rz.set_root_prefix_path(b"pre").unwrap();
         assert_eq!(rz.descend_to_existing(b"fix00000"), 8);
-        assert_eq!(rz.ascend_until(), true);
+        assert!(rz.ascend_until() > 0);
         assert_eq!(rz.path(), b"fix0000");
         assert_eq!(rz.origin_path(), b"prefix0000");
         assert_eq!(rz.descend_to_existing(b"0"), 1);
-        assert_eq!(rz.ascend_until_branch(), true);
+        assert!(rz.ascend_until_branch() > 0);
         assert_eq!(rz.path(), b"fix000");
-        assert_eq!(rz.ascend_until_branch(), true);
+        assert!(rz.ascend_until_branch() > 0);
         assert_eq!(rz.path(), b"fix");
-        assert_eq!(rz.ascend_until_branch(), true);
+        assert!(rz.ascend_until_branch() > 0);
         assert_eq!(rz.path(), b"");
         assert_eq!(rz.origin_path(), b"pre");
-        assert_eq!(rz.ascend_until_branch(), false);
+        assert_eq!(rz.ascend_until_branch(), 0);
     }
 
     #[test]
@@ -735,21 +731,21 @@ mod tests {
         let mut rz = PrefixZipper::new(b"prefix", map.read_zipper());
         rz.set_root_prefix_path(b"pre").unwrap();
         assert_eq!(rz.descend_to_existing(b"fix00000"), 8);
-        assert_eq!(rz.ascend_until(), true);
+        assert!(rz.ascend_until() > 0);
         assert_eq!(rz.path(), b"fix000");
         assert_eq!(rz.origin_path(), b"prefix000");
-        assert_eq!(rz.ascend_until(), true);
+        assert!(rz.ascend_until() > 0);
         assert_eq!(rz.path(), b"fix00");
-        assert_eq!(rz.ascend_until(), true);
+        assert!(rz.ascend_until() > 0);
         assert_eq!(rz.path(), b"");
-        assert_eq!(rz.ascend_until(), false);
+        assert_eq!(rz.ascend_until(), 0);
         assert_eq!(rz.descend_to_existing(b"fix00000"), 8);
-        assert_eq!(rz.ascend_until_branch(), true);
+        assert!(rz.ascend_until_branch() > 0);
         assert_eq!(rz.path(), b"fix00");
-        assert_eq!(rz.ascend_until_branch(), true);
+        assert!(rz.ascend_until_branch() > 0);
         assert_eq!(rz.path(), b"");
         assert_eq!(rz.origin_path(), b"pre");
-        assert_eq!(rz.ascend_until_branch(), false);
+        assert_eq!(rz.ascend_until_branch(), 0);
     }
 
     #[test]

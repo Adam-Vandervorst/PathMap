@@ -174,7 +174,7 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.z.reset()
     }
     fn val_count(&self) -> usize {
-        assert!(self.focus_factor() == self.factor_count() - 1);
+        debug_assert!(self.focus_factor() == self.factor_count() - 1);
         self.z.val_count()
     }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
@@ -280,7 +280,7 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.ensure_descend_next_factor();
         moved
     }
-    fn ascend(&mut self, steps: usize) -> bool {
+    fn ascend(&mut self, steps: usize) -> usize {
         let ascended = self.z.ascend(steps);
         self.fix_after_ascend();
         ascended
@@ -290,12 +290,12 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.fix_after_ascend();
         ascended
     }
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         let ascended = self.z.ascend_until();
         self.fix_after_ascend();
         ascended
     }
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         let ascended = self.z.ascend_until_branch();
         self.fix_after_ascend();
         ascended
@@ -459,28 +459,30 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
 
     /// A combination between `ascend_until` and `ascend_until_branch`.
     /// if `allow_stop_on_val` is `true`, behaves as `ascend_until`
-    fn ascend_cond(&mut self, allow_stop_on_val: bool) -> bool {
+    fn ascend_cond(&mut self, allow_stop_on_val: bool) -> usize {
         let mut plen = self.path().len();
+        let mut ascended = 0;
         loop {
             while self.factor_paths.last() == Some(&plen) {
                 self.factor_paths.pop();
             }
             if let Some(idx) = self.factor_idx(false) {
                 let zipper = &mut self.secondary[idx];
-                let before = zipper.path().len();
-                let rv = if allow_stop_on_val {
+                //The inner zipper reports how far it moved, so the primary can be brought along
+                //without measuring its path before and after
+                let delta = if allow_stop_on_val {
                     zipper.ascend_until()
                 } else {
                     zipper.ascend_until_branch()
                 };
-                let delta = before - zipper.path().len();
                 plen -= delta;
                 self.primary.ascend(delta);
-                if rv && (self.child_count() != 1 || (allow_stop_on_val && self.is_val())) {
-                    return true;
+                ascended += delta;
+                if delta > 0 && (self.child_count() != 1 || (allow_stop_on_val && self.is_val())) {
+                    return ascended;
                 }
             } else {
-                return if allow_stop_on_val {
+                return ascended + if allow_stop_on_val {
                     self.primary.ascend_until()
                 } else {
                     self.primary.ascend_until_branch()
@@ -492,7 +494,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
         let byte = self.focus_byte()?;
-        assert!(self.ascend(1), "must ascend");
+        let ascended = self.ascend(1);
+        debug_assert_eq!(ascended, 1, "must ascend");
         let child_mask = self.child_mask();
         let Some(sibling_byte) = (if next {
             child_mask.next_bit(byte)
@@ -757,31 +760,32 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
     fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(false)
     }
-    fn ascend(&mut self, mut steps: usize) -> bool {
-        while steps > 0 {
+    fn ascend(&mut self, steps: usize) -> usize {
+        let mut remaining = steps;
+        while remaining > 0 {
             self.exit_factors();
             if let Some(idx) = self.factor_idx(false) {
                 let len = self.path().len() - self.factor_paths[idx];
-                let delta = len.min(steps);
+                let delta = len.min(remaining);
                 self.secondary[idx].ascend(delta);
                 self.primary.ascend(delta);
-                steps -= delta;
+                remaining -= delta;
             } else {
-                return self.primary.ascend(steps);
+                return (steps - remaining) + self.primary.ascend(remaining);
             }
         }
-        true
+        steps
     }
     #[inline]
     fn ascend_byte(&mut self) -> bool {
-        self.ascend(1)
+        self.ascend(1) == 1
     }
     #[inline]
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         self.ascend_cond(true)
     }
     #[inline]
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         self.ascend_cond(false)
     }
 }
@@ -1099,19 +1103,19 @@ mod tests {
         assert_eq!(pz.child_count(), 0);
 
         //Make sure we can ascend out of a secondary factor; in this sub-test we'll hit the path middles
-        assert!(pz.ascend(1));
+        assert_eq!(pz.ascend(1), 1);
         assert_eq!(pz.val(), None);
         assert_eq!(pz.path(), b"AAaDDdG");
         assert_eq!(pz.child_count(), 0);
-        assert!(pz.ascend(3));
+        assert_eq!(pz.ascend(3), 3);
         assert_eq!(pz.path(), b"AAaD");
         assert_eq!(pz.val(), None);
         assert_eq!(pz.child_count(), 1);
-        assert!(pz.ascend(2));
+        assert_eq!(pz.ascend(2), 2);
         assert_eq!(pz.path(), b"AA");
         assert_eq!(pz.val(), None);
         assert_eq!(pz.child_count(), 3);
-        assert!(!pz.ascend(3));
+        assert!(pz.ascend(3) < 3);
         assert_eq!(pz.path(), b"");
         assert_eq!(pz.val(), None);
         assert_eq!(pz.child_count(), 1);
@@ -1124,15 +1128,15 @@ mod tests {
         assert_eq!(pz.child_count(), 0);
 
         //Now try to hit the path transition points
-        assert!(pz.ascend(2));
+        assert_eq!(pz.ascend(2), 2);
         assert_eq!(pz.path(), b"AAaDDd");
         assert_eq!(pz.val(), Some(&1000));
         assert_eq!(pz.child_count(), 0);
-        assert!(pz.ascend(3));
+        assert_eq!(pz.ascend(3), 3);
         assert_eq!(pz.path(), b"AAa");
         assert_eq!(pz.val(), Some(&0));
         assert_eq!(pz.child_count(), 3);
-        assert!(pz.ascend(3));
+        assert_eq!(pz.ascend(3), 3);
         assert_eq!(pz.path(), b"");
         assert_eq!(pz.val(), None);
         assert_eq!(pz.child_count(), 1);
@@ -1296,9 +1300,9 @@ mod tests {
             assert!(p.path_exists());
             assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbowpho");
             assert!(p.is_val());
-            assert!(p.ascend_until());
+            assert!(p.ascend_until() > 0);
             assert_eq!(p.path(), b"abcdefghijklmnopqrstuvwxyzbow");
-            assert!(p.ascend(3));
+            assert_eq!(p.ascend(3), 3);
             assert_eq!(vec![b'A', b'a', b'b'], p.child_mask().iter().collect::<Vec<_>>());
             p.descend_to("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
             assert!(p.path_exists());
@@ -1323,7 +1327,7 @@ mod tests {
             p.descend_to("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
             assert!(!p.path_exists());
             // println!("p {}", std::str::from_utf8(p.path()).unwrap());
-            assert!(!p.ascend(27));
+            assert!(p.ascend(27) < 27);
         }
     }
 
@@ -1650,7 +1654,7 @@ mod tests {
         assert_eq!(pz.is_val(), false);
 
         // test ascend
-        assert_eq!(pz.ascend(snip.len() * (repeats-1)), true);
+        assert_eq!(pz.ascend(snip.len() * (repeats-1)), snip.len() * (repeats-1));
         assert_eq!(pz.path(), snip);
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 1);
@@ -1659,7 +1663,7 @@ mod tests {
         // test ascend_until
         pz.reset();
         pz.descend_to(&full_path);
-        assert_eq!(pz.ascend_until(), true);
+        assert!(pz.ascend_until() > 0);
         assert_eq!(pz.path(), []);
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 1);
@@ -1667,7 +1671,7 @@ mod tests {
 
         // test ascend_until_branch
         pz.descend_to(&full_path);
-        assert_eq!(pz.ascend_until_branch(), true);
+        assert!(pz.ascend_until_branch() > 0);
         assert_eq!(pz.path(), []);
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 1);

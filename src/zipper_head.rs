@@ -1066,7 +1066,7 @@ mod tests {
         // Test the original zipper
         assert_eq!(z.val(), Some(&42));
         assert_eq!(z.to_next_sibling_byte(), None);
-        assert_eq!(z.ascend_until(), true);
+        assert!(z.ascend_until() > 0);
         assert_eq!(z.path(), b"");
         assert_eq!(z.origin_path(), b"A");
         assert_eq!(z.val(), Some(&24));

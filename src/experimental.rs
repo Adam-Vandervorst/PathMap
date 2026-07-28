@@ -70,23 +70,19 @@ impl ZipperMoving for FullZipper {
         obs.descend_to_byte(0);
         true
     }
-    fn ascend(&mut self, steps: usize) -> bool {
-        if steps > self.path.len() {
-            self.path.clear();
-            false
-        } else {
-            self.path.truncate(self.path.len() - steps);
-            true
-        }
+    fn ascend(&mut self, steps: usize) -> usize {
+        let ascended = steps.min(self.path.len());
+        self.path.truncate(self.path.len() - ascended);
+        ascended
     }
     fn ascend_byte(&mut self) -> bool {
         self.path.pop().is_some()
     }
-    fn ascend_until(&mut self) -> bool {
-        self.path.pop().is_some() // not sure?
+    fn ascend_until(&mut self) -> usize {
+        if self.path.pop().is_some() { 1 } else { 0 } // not sure?
     }
-    fn ascend_until_branch(&mut self) -> bool {
-        self.path.pop().is_some() // not sure? What's the difference with the previous?
+    fn ascend_until_branch(&mut self) -> usize {
+        if self.path.pop().is_some() { 1 } else { 0 } // not sure? What's the difference with the previous?
     }
     fn to_next_sibling_byte(&mut self) -> Option<u8> { self.to_sibling(true) }
     fn to_prev_sibling_byte(&mut self) -> Option<u8> { self.to_sibling(false) }
@@ -132,10 +128,10 @@ impl ZipperMoving for NullZipper {
     fn descend_indexed_byte(&mut self, _idx: usize) -> Option<u8> { None }
     fn descend_first_byte(&mut self) -> Option<u8> { None }
     fn descend_until<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
-    fn ascend(&mut self, _steps: usize) -> bool { false }
+    fn ascend(&mut self, _steps: usize) -> usize { 0 }
     fn ascend_byte(&mut self) -> bool { false }
-    fn ascend_until(&mut self) -> bool { false }
-    fn ascend_until_branch(&mut self) -> bool { false }
+    fn ascend_until(&mut self) -> usize { 0 }
+    fn ascend_until_branch(&mut self) -> usize { 0 }
     fn to_next_sibling_byte(&mut self) -> Option<u8> { None }
     fn to_prev_sibling_byte(&mut self) -> Option<u8> { None }
 }

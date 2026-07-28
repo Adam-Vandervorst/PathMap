@@ -551,7 +551,7 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
             let old_path_len = z.origin_path().len();
             let old_val = z.get_val_with_witness(&z_witness);
             let ascended = z.ascend_until();
-            debug_assert!(ascended);
+            debug_assert!(ascended > 0);
 
             let origin_path = unsafe{ z.origin_path_assert_len(old_path_len) };
             let jump_len = if z.child_count() != 1 || z.is_val() {

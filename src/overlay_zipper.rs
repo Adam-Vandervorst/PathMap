@@ -248,8 +248,9 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
                     obs.descend_to(&path_b);
                     committed += path_b.len();
                 } else {
-                    let ascended = self.b.ascend(path_b.len());
-                    debug_assert!(ascended);
+                    let to_ascend = path_b.len();
+                    let ascended = self.b.ascend(to_ascend);
+                    debug_assert_eq!(ascended, to_ascend);
                 }
                 break;
             }
@@ -259,8 +260,9 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
                     obs.descend_to(&path_a);
                     committed += path_a.len();
                 } else {
-                    let ascended = self.a.ascend(path_a.len());
-                    debug_assert!(ascended);
+                    let to_ascend = path_a.len();
+                    let ascended = self.a.ascend(to_ascend);
+                    debug_assert_eq!(ascended, to_ascend);
                 }
                 break;
             }
@@ -268,12 +270,14 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
             //Both moved.  Keep the portion they agree on and rewind the rest
             let overlap = find_prefix_overlap(&path_a, &path_b);
             if path_a.len() > overlap {
-                let ascended = self.a.ascend(path_a.len() - overlap);
-                debug_assert!(ascended);
+                let to_ascend = path_a.len() - overlap;
+                let ascended = self.a.ascend(to_ascend);
+                debug_assert_eq!(ascended, to_ascend);
             }
             if path_b.len() > overlap {
-                let ascended = self.b.ascend(path_b.len() - overlap);
-                debug_assert!(ascended);
+                let to_ascend = path_b.len() - overlap;
+                let ascended = self.b.ascend(to_ascend);
+                debug_assert_eq!(ascended, to_ascend);
             }
             //Both sources must now sit at the same position: the agreed-upon prefix
             debug_assert_eq!(self.a.path(), self.b.path());
@@ -294,48 +298,54 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
         committed > 0
     }
 
-    fn ascend(&mut self, steps: usize) -> bool {
-        self.a.ascend(steps) | self.b.ascend(steps)
+    fn ascend(&mut self, steps: usize) -> usize {
+        //Both sources move together, so they must report the same distance
+        let a = self.a.ascend(steps);
+        let b = self.b.ascend(steps);
+        debug_assert_eq!(a, b);
+        a.max(b)
     }
 
     fn ascend_byte(&mut self) -> bool {
-        self.ascend(1)
+        self.ascend(1) == 1
     }
 
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         debug_assert_eq!(self.a.path(), self.b.path());
-        // eprintln!("asc_until i {:?} {:?}", self.base.path(), self.overlay.path());
+        let start_depth = self.a.path().len();
         let asc_a = self.a.ascend_until();
         let path_a = self.a.path();
         let depth_a = path_a.len();
         let asc_b = self.b.ascend_until();
         let path_b = self.b.path();
         let depth_b = path_b.len();
-        if !(asc_b || asc_a) {
-            return false;
+        if asc_a == 0 && asc_b == 0 {
+            return 0;
         }
-        // eprintln!("asc_until {path_a:?} {path_b:?}");
+        //Whichever source ascended further sets the shared position; the other descends to match
         if depth_b > depth_a {
             self.a.descend_to(&path_b[depth_a..]);
         } else if depth_a > depth_b {
             self.b.descend_to(&path_a[depth_b..]);
         }
-        true
+        start_depth - self.a.path().len()
     }
 
-    fn ascend_until_branch(&mut self) -> bool {
-        let asc_a = self.a.ascend_until_branch();
+    fn ascend_until_branch(&mut self) -> usize {
+        let start_depth = self.a.path().len();
+        let _asc_a = self.a.ascend_until_branch();
         let path_a = self.a.path();
         let depth_a = path_a.len();
-        let asc_b = self.b.ascend_until_branch();
+        let _asc_b = self.b.ascend_until_branch();
         let path_b = self.b.path();
         let depth_b = path_b.len();
+        //Whichever source ascended further sets the shared position; the other descends to match
         if depth_b > depth_a {
             self.a.descend_to(&path_b[depth_a..]);
         } else if depth_a > depth_b {
             self.b.descend_to(&path_a[depth_b..]);
         }
-        asc_a || asc_b
+        start_depth - self.a.path().len()
     }
 
     fn to_next_sibling_byte(&mut self) -> Option<u8> {

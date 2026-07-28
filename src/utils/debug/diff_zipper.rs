@@ -139,7 +139,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         obs.descend_to(&path_a);
         a
     }
-    fn ascend(&mut self, steps: usize) -> bool {
+    fn ascend(&mut self, steps: usize) -> usize {
         let a = self.a.ascend(steps);
         let b = self.b.ascend(steps);
         if self.log_moves {
@@ -157,7 +157,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         let a = self.a.ascend_until();
         let b = self.b.ascend_until();
         if self.log_moves {
@@ -166,7 +166,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         let a = self.a.ascend_until_branch();
         let b = self.b.ascend_until_branch();
         if self.log_moves {

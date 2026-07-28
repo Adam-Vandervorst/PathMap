@@ -2284,24 +2284,23 @@ where Storage: AsRef<[u8]>
         self.invalid == 0
     }
 
-    fn ascend_to_branch(&mut self, need_value: bool) -> bool {
+    fn ascend_to_branch(&mut self, need_value: bool) -> usize {
         self.trace_pos();
-        let mut moved = false;
+        let start_len = self.path.len();
         if self.invalid > 0 {
-            moved = true;
             if !self.ascend_invalid(None) {
-                return false;
+                return start_len - self.path.len();
             }
 
             match &self.cur_node {
                 Node::Line(line) => {
                     if need_value && line.value.is_some() {
-                        return true;
+                        return start_len - self.path.len();
                     }
                 }
                 Node::Branch(node) => {
                     if need_value && node.value.is_some() {
-                        return true;
+                        return start_len - self.path.len();
                     }
                 }
             }
@@ -2311,14 +2310,12 @@ where Storage: AsRef<[u8]>
             let mut this_steps = top_frame.node_depth
                 .min(self.path.len() - self.origin_depth);
             top_frame.node_depth = 0;
-            moved |= this_steps > 0;
             if self.stack.len() > 1 {
                 self.stack.pop();
                 let prev = self.stack.last().unwrap();
                 self.cur_node = self.tree.get_node(prev.node_id).0;
                 nchildren = prev.child_count;
-                moved = true;
-                this_steps += 1;
+                    this_steps += 1;
             }
             self.path.truncate(self.path.len() - this_steps);
             // eprintln!("path={:?}", self.path);
@@ -2332,7 +2329,7 @@ where Storage: AsRef<[u8]>
                 break;
             }
         }
-        moved
+        start_len - self.path.len()
     }
 
     fn descend_cond(&mut self, path: &[u8], on_value: bool) -> usize {
@@ -2416,7 +2413,7 @@ where Storage: AsRef<[u8]>
             }
             top2_frame.child_index - 1
         };
-        if !self.ascend(1) {
+        if self.ascend(1) == 0 {
             return None;
         }
         self.descend_indexed_byte(sibling_idx)
@@ -2727,26 +2724,27 @@ where Storage: AsRef<[u8]>
     ///
     /// If the root is fewer than `n` steps from the zipper's position, then this method will stop at
     /// the root and return `false`
-    fn ascend(&mut self, mut steps: usize) -> bool {
+    fn ascend(&mut self, steps: usize) -> usize {
         self.trace_pos();
-        if !self.ascend_invalid(Some(&mut steps)) {
-            return false;
+        let mut remaining = steps;
+        if !self.ascend_invalid(Some(&mut remaining)) {
+            return steps - remaining;
         }
         while let Some(top_frame) = self.stack.last_mut() {
             let rest_path = &self.path[self.origin_depth..];
-            let mut this_steps = steps.min(top_frame.node_depth).min(rest_path.len());
+            let mut this_steps = remaining.min(top_frame.node_depth).min(rest_path.len());
             top_frame.node_depth -= this_steps;
-            steps -= this_steps;
-            if top_frame.node_depth == 0 && self.stack.len() > 1 && steps > 0 {
+            remaining -= this_steps;
+            if top_frame.node_depth == 0 && self.stack.len() > 1 && remaining > 0 {
                 self.stack.pop();
                 let prev = self.stack.last().unwrap();
                 self.cur_node = self.tree.get_node(prev.node_id).0;
                 this_steps += 1;
-                steps -= 1;
+                remaining -= 1;
             }
             self.path.truncate(self.path.len() - this_steps);
-            if self.at_root() || steps == 0 {
-                return steps == 0 && this_steps > 0;
+            if self.at_root() || remaining == 0 {
+                return steps - remaining;
             }
         }
         unreachable!();
@@ -2754,19 +2752,18 @@ where Storage: AsRef<[u8]>
 
     /// Ascends the zipper up a single byte.  Equivalent to passing `1` to [ascend](Self::ascend)
     fn ascend_byte(&mut self) -> bool {
-        self.ascend(1)
+        self.ascend(1) == 1
     }
 
-    /// Ascends the zipper to the nearest upstream branch point or value.  Returns `true` if the zipper
-    /// focus moved upwards, otherwise returns `false` if the zipper was already at the root
-    fn ascend_until(&mut self) -> bool {
+    /// Ascends the zipper to the nearest upstream branch point or value.  Returns the number of bytes
+    /// ascended.  Returns `0` if the zipper was already at the root
+    fn ascend_until(&mut self) -> usize {
         self.ascend_to_branch(true)
     }
 
     /// Ascends the zipper to the nearest upstream branch point, skipping over values along the way.  Returns
-    /// `true` if the zipper focus moved upwards, otherwise returns `false` if the zipper was already at the
-    /// root
-    fn ascend_until_branch(&mut self) -> bool {
+    /// the number of bytes ascended.  Returns `0` if the zipper was already at the root
+    fn ascend_until_branch(&mut self) -> usize {
         self.ascend_to_branch(false)
     }
 
@@ -2835,7 +2832,7 @@ where Storage: AsRef<[u8]>
         let mut depth = k;
         'outer: loop {
             while depth > 0 && self.child_count() <= 1 {
-                if !self.ascend(1) {
+                if self.ascend(1) == 0 {
                     break 'outer;
                 }
                 depth -= 1;
@@ -2843,7 +2840,7 @@ where Storage: AsRef<[u8]>
             let stack = self.stack.last_mut().unwrap();
             let idx = stack.child_index + 1;
             if idx >= stack.child_count {
-                if depth == 0 || !self.ascend(1) {
+                if depth == 0 || self.ascend(1) == 0 {
                     break 'outer;
                 }
                 depth -= 1;

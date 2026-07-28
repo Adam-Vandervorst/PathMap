@@ -517,19 +517,19 @@ fn derive_poly_zipper_with_traits(
                     }
                 }
 
-                fn ascend(&mut self, steps: usize) -> bool {
+                fn ascend(&mut self, steps: usize) -> usize {
                     match self {
                         #(#variant_arms => inner.ascend(steps),)*
                     }
                 }
 
-                fn ascend_until(&mut self) -> bool {
+                fn ascend_until(&mut self) -> usize {
                     match self {
                         #(#variant_arms => inner.ascend_until(),)*
                     }
                 }
 
-                fn ascend_until_branch(&mut self) -> bool {
+                fn ascend_until_branch(&mut self) -> usize {
                     match self {
                         #(#variant_arms => inner.ascend_until_branch(),)*
                     }

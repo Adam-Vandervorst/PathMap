@@ -117,18 +117,10 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
         //Fan the descended bytes out to our own path buffer as well as the caller's observer
         self.zipper.descend_until(&mut (&mut self.path, &mut *obs))
     }
-    fn ascend(&mut self, steps: usize) -> bool {
-        //`ascend` reports only whether it moved the full distance, so the buffer is trimmed by
-        // comparing against the requested `steps` when it succeeds, and by resetting to the root
-        // when it does not
-        if self.zipper.ascend(steps) {
-            let new_len = self.path.len() - steps;
-            self.path.truncate(new_len);
-            true
-        } else {
-            self.path.truncate(self.origin_len);
-            false
-        }
+    fn ascend(&mut self, steps: usize) -> usize {
+        let ascended = self.zipper.ascend(steps);
+        self.path.truncate(self.path.len() - ascended);
+        ascended
     }
     fn ascend_byte(&mut self) -> bool {
         if self.zipper.ascend_byte() {
@@ -138,11 +130,15 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
             false
         }
     }
-    fn ascend_until(&mut self) -> bool {
-        self.ascend_until_cond(true)
+    fn ascend_until(&mut self) -> usize {
+        let ascended = self.zipper.ascend_until();
+        self.path.truncate(self.path.len() - ascended);
+        ascended
     }
-    fn ascend_until_branch(&mut self) -> bool {
-        self.ascend_until_cond(false)
+    fn ascend_until_branch(&mut self) -> usize {
+        let ascended = self.zipper.ascend_until_branch();
+        self.path.truncate(self.path.len() - ascended);
+        ascended
     }
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let byte = self.zipper.to_next_sibling_byte()?;
@@ -156,29 +152,6 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
     }
 }
 
-impl<Z: ZipperMoving> PathTracker<Z> {
-    /// Shared implementation of [`ascend_until`](ZipperMoving::ascend_until) and
-    /// [`ascend_until_branch`](ZipperMoving::ascend_until_branch)
-    ///
-    /// Neither method reports how far it moved, so the ascent is performed a byte at a time to
-    /// keep the tracked path in step with the wrapped zipper.
-    //TEMPORARY: this re-derives the wrapped zipper's stopping condition rather than delegating to
-    // it, so a zipper that stops somewhere else will disagree.  Once the `ascend_` methods report
-    // the distance they moved, this becomes a single delegated call followed by a truncate.
-    fn ascend_until_cond(&mut self, allow_stop_on_val: bool) -> bool {
-        let mut moved = false;
-        while self.ascend_byte() {
-            moved = true;
-            if self.at_root() {
-                break;
-            }
-            if self.zipper.child_count() > 1 || (allow_stop_on_val && self.zipper.is_val()) {
-                break;
-            }
-        }
-        moved
-    }
-}
 
 impl<Z: ZipperMoving> ZipperIteration for PathTracker<Z> { }
 

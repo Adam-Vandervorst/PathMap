@@ -333,29 +333,28 @@ pub trait ZipperMoving: Zipper {
         descended
     }
 
-    /// Ascends the zipper `steps` steps.  Returns `true` if the zipper sucessfully moved `steps`
+    /// Ascends the zipper `steps` steps.  Returns the number of bytes ascended
     ///
-    /// If the root is fewer than `n` steps from the zipper's position, then this method will stop at
-    /// the root and return `false`
-    fn ascend(&mut self, steps: usize) -> bool;
+    /// If the zipper's focus is fewer than `steps` steps from the root, then this method will stop at
+    /// the root and return the number of steps ascended, which may be smaller than `steps`.
+    fn ascend(&mut self, steps: usize) -> usize;
 
     /// Ascends the zipper up a single byte.  Equivalent to passing `1` to [ascend](Self::ascend)
     fn ascend_byte(&mut self) -> bool {
-        self.ascend(1)
+        self.ascend(1) == 1
     }
 
-    /// Ascends the zipper to the nearest upstream branch point or value.  Returns `true` if the zipper
-    /// focus moved upwards, otherwise returns `false` if the zipper was already at the root
+    /// Ascends the zipper to the nearest upstream branch point or value.  Returns the number of bytes
+    /// ascended.  Returns `0` if the zipper was already at the root
     ///
     /// NOTE: A default implementation could be provided, but all current zippers have more optimal native implementations.
-    fn ascend_until(&mut self) -> bool;
+    fn ascend_until(&mut self) -> usize;
 
     /// Ascends the zipper to the nearest upstream branch point, skipping over values along the way.  Returns
-    /// `true` if the zipper focus moved upwards, otherwise returns `false` if the zipper was already at the
-    /// root
+    /// the number of bytes ascended.  Returns `0` if the zipper was already at the root
     ///
     /// NOTE: A default implementation could be provided, but all current zippers have more optimal native implementations.
-    fn ascend_until_branch(&mut self) -> bool;
+    fn ascend_until_branch(&mut self) -> usize;
 
     /// Moves the zipper's focus to the next sibling byte with the same parent
     ///
@@ -1070,10 +1069,10 @@ macro_rules! zipper_impl_lens {
         fn descend_until_max_bytes<Obs: PathObserver>(&mut $s, max_bytes: usize, obs: &mut Obs) -> bool { $e.descend_until_max_bytes(max_bytes, obs) }
         fn to_next_sibling_byte(&mut $s) -> Option<u8> { $e.to_next_sibling_byte() }
         fn to_prev_sibling_byte(&mut $s) -> Option<u8> { $e.to_prev_sibling_byte() }
-        fn ascend(&mut $s, steps: usize) -> bool { $e.ascend(steps) }
+        fn ascend(&mut $s, steps: usize) -> usize { $e.ascend(steps) }
         fn ascend_byte(&mut $s) -> bool { $e.ascend_byte() }
-        fn ascend_until(&mut $s) -> bool { $e.ascend_until() }
-        fn ascend_until_branch(&mut $s) -> bool { $e.ascend_until_branch() }
+        fn ascend_until(&mut $s) -> usize { $e.ascend_until() }
+        fn ascend_until_branch(&mut $s) -> usize { $e.ascend_until_branch() }
         fn to_next_step(&mut $s) -> bool { $e.to_next_step() }
     };
     (ZipperInfallibleSubtries $s: ident => $e:expr) => {
@@ -2133,9 +2132,10 @@ pub(crate) mod read_zipper_core {
             self.to_sibling(false)
         }
 
-        fn ascend(&mut self, mut steps: usize) -> bool {
+        fn ascend(&mut self, steps: usize) -> usize {
+            let mut remaining = steps;
             debug_assert!(self.is_regularized());
-            while steps > 0 {
+            while remaining > 0 {
                 if self.excess_key_len() == 0 {
                     match self.ancestors.pop() {
                         Some((node, iter_tok, _prefix_offset)) => {
@@ -2144,16 +2144,16 @@ pub(crate) mod read_zipper_core {
                         },
                         None => {
                             debug_assert!(self.is_regularized());
-                            return false
+                            return steps - remaining;
                         }
                     };
                 }
-                let cur_jump = steps.min(self.excess_key_len());
+                let cur_jump = remaining.min(self.excess_key_len());
                 self.prefix_buf.truncate(self.prefix_buf.len() - cur_jump);
-                steps -= cur_jump;
+                remaining -= cur_jump;
             }
             debug_assert!(self.is_regularized());
-            true
+            steps
         }
 
         fn ascend_byte(&mut self) -> bool {
@@ -2175,34 +2175,36 @@ pub(crate) mod read_zipper_core {
             true
         }
 
-        fn ascend_until(&mut self) -> bool {
+        fn ascend_until(&mut self) -> usize {
             debug_assert!(self.is_regularized());
             if self.at_root() {
-                return false;
+                return 0;
             }
+            let mut ascended = 0;
             loop {
                 if self.node_key().len() == 0 {
                     self.ascend_across_nodes();
                 }
-                self.ascend_within_node();
+                ascended += self.ascend_within_node();
                 if self.child_count() > 1 || self.is_val() || self.at_root() {
-                    return true;
+                    return ascended;
                 }
             }
         }
 
-        fn ascend_until_branch(&mut self) -> bool {
+        fn ascend_until_branch(&mut self) -> usize {
             debug_assert!(self.is_regularized());
             if self.at_root() {
-                return false;
+                return 0;
             }
+            let mut ascended = 0;
             loop {
                 if self.node_key().len() == 0 {
                     self.ascend_across_nodes();
                 }
-                self.ascend_within_node();
+                ascended += self.ascend_within_node();
                 if self.child_count() > 1 || self.at_root() {
-                    return true;
+                    return ascended;
                 }
             }
         }
@@ -3032,10 +3034,12 @@ pub(crate) mod read_zipper_core {
         }
         /// Internal method used to impement `ascend_until` when ascending within a node
         #[inline]
-        fn ascend_within_node(&mut self) {
+        fn ascend_within_node(&mut self) -> usize {
             let branch_key = self.focus_node.prior_branch_key(self.node_key());
             let new_len = self.origin_path.len().max(self.node_key_start() + branch_key.len());
+            let old_len = self.prefix_buf.len();
             self.prefix_buf.truncate(new_len);
+            old_len - new_len
         }
         /// Push a new node-path pair onto the zipper.  This is used in the internal implementation of
         /// the [crate::zipper::ProductZipper]
@@ -3490,20 +3494,20 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zipper.to_prev_sibling_byte(), Some(39)); // focus = rom' (we stepped back to where we began)
         assert_eq!(zipper.path(), b"rom'");
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'i']);
-        assert!(zipper.ascend(1)); // focus = rom
+        assert_eq!(zipper.ascend(1), 1); // focus = rom
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'\'', b'a', b'u']); // all three options we visited
         assert_eq!(zipper.descend_indexed_byte(0), Some(39)); // focus = rom'
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'i']);
-        assert!(zipper.ascend(1)); // focus = rom
+        assert_eq!(zipper.ascend(1), 1); // focus = rom
         assert_eq!(zipper.descend_indexed_byte(1), Some(b'a')); // focus = roma
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'n']);
-        assert!(zipper.ascend(1));
+        assert_eq!(zipper.ascend(1), 1);
         assert_eq!(zipper.descend_indexed_byte(2), Some(b'u')); // focus = romu
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'l']);
-        assert!(zipper.ascend(1));
+        assert_eq!(zipper.ascend(1), 1);
         assert_eq!(zipper.descend_indexed_byte(1), Some(b'a')); // focus = roma
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'n']);
-        assert!(zipper.ascend(1));
+        assert_eq!(zipper.ascend(1), 1);
         // ' < a < u
         // 39 105 117
     }
@@ -3526,34 +3530,35 @@ pub(crate) mod zipper_moving_tests {
         zipper.descend_to(b"e");
         assert_eq!(zipper.path(), b"mane");
         assert_eq!(zipper.child_count(), 0);
-        assert_eq!(zipper.ascend_until(), true);
+        assert_eq!(zipper.ascend_until(), 1);
         zipper.descend_to(b"us");
         assert_eq!(zipper.path(), b"manus");
         assert_eq!(zipper.child_count(), 0);
-        assert_eq!(zipper.ascend_until(), true);
+        assert_eq!(zipper.ascend_until(), 2);
         assert_eq!(zipper.path(), b"man");
         assert_eq!(zipper.child_count(), 2);
-        assert_eq!(zipper.ascend_until(), true);
+        assert_eq!(zipper.ascend_until(), 2);
         assert_eq!(zipper.path(), b"m");
         assert_eq!(zipper.child_count(), 3);
-        assert_eq!(zipper.ascend_until(), true);
+        assert_eq!(zipper.ascend_until(), 1);
         assert_eq!(zipper.path(), b"");
         assert_eq!(zipper.child_count(), 1);
         assert_eq!(zipper.at_root(), true);
-        assert_eq!(zipper.ascend_until(), false);
+        assert_eq!(zipper.ascend_until(), 0);
 
         //Test `ascend`
         zipper.descend_to(b"manus");
         assert_eq!(zipper.path(), b"manus");
-        assert_eq!(zipper.ascend(1), true);
+        assert_eq!(zipper.ascend(1), 1);
         assert_eq!(zipper.path(), b"manu");
-        assert_eq!(zipper.ascend(5), false);
+        assert_eq!(zipper.ascend(5), 4);
         assert_eq!(zipper.path(), b"");
         assert_eq!(zipper.at_root(), true);
         zipper.descend_to(b"mane");
         assert_eq!(zipper.path(), b"mane");
-        assert_eq!(zipper.ascend(3), true);
+        assert_eq!(zipper.ascend(3), 3);
         assert_eq!(zipper.path(), b"m");
+        eprintln!("child_mask = {:?}", zipper.child_mask());
         assert_eq!(zipper.child_count(), 3);
     }
 
@@ -3711,13 +3716,13 @@ pub(crate) mod zipper_moving_tests {
         zip.descend_to(b"AAaDDd");
         assert!(!zip.path_exists());
         assert_eq!(zip.path(), b"AAaDDd");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 3);
         assert_eq!(zip.path(), b"AAa");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"AA");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 2);
         assert_eq!(zip.path(), b"");
-        assert!(!zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 0);
     }
 
     // Test what's likely to be represented as a pair node
@@ -3727,13 +3732,13 @@ pub(crate) mod zipper_moving_tests {
         zip.descend_to(b"AAaDDd");
         assert!(!zip.path_exists());
         assert_eq!(zip.path(), b"AAaDDd");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 3);
         assert_eq!(zip.path(), b"AAa");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"AA");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 2);
         assert_eq!(zip.path(), b"");
-        assert!(!zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 0);
     }
 
     /// Test a straight-line trie
@@ -3744,28 +3749,28 @@ pub(crate) mod zipper_moving_tests {
         //First test that ascend_until stops when transitioning from non-existent path
         zip.descend_to(b"123456");
         assert_eq!(zip.path_exists(), false);
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"12345");
 
         //Test that ascend_until stops at each value
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"1234");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"123");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"12");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"1");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"");
-        assert!(!zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 0);
         assert!(zip.at_root());
 
         //Test that ascend_until_branch skips over all the values
         zip.descend_to(b"12345");
         assert!(zip.path_exists());
         assert_eq!(zip.path(), b"12345");
-        assert!(zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 5);
         assert_eq!(zip.path(), b"");
         assert!(zip.at_root());
 
@@ -3778,34 +3783,34 @@ pub(crate) mod zipper_moving_tests {
         zip.descend_to(b"12345");
         assert!(zip.path_exists());
         assert_eq!(zip.path(), b"12345");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"1234"); // "1234" is a branch only
         assert_eq!(zip.is_val(), false);
         assert_eq!(zip.child_count(), 2);
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"123"); // "123" is a value only
         assert_eq!(zip.child_count(), 1);
         assert_eq!(zip.is_val(), true);
-        assert!(zip.ascend_until()); // Jump over "12" because it's neither a branch nor a value
+        assert_eq!(zip.ascend_until(), 2); // Jump over "12" because it's neither a branch nor a value
         assert_eq!(zip.path(), b"1"); // "1" is both a branch and a value
         assert_eq!(zip.is_val(), true);
         assert_eq!(zip.child_count(), 2);
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"");
         assert_eq!(zip.child_count(), 1);
-        assert!(!zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 0);
         assert!(zip.at_root());
 
         //Test that ascend_until_branch skips over all the values
         zip.descend_to(b"12345");
         assert!(zip.path_exists());
-        assert!(zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 1);
         assert_eq!(zip.path(), b"1234");
-        assert!(zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 3);
         assert_eq!(zip.path(), b"1");
-        assert!(zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 1);
         assert_eq!(zip.path(), b"");
-        assert!(!zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 0);
         assert!(zip.at_root());
     }
 
@@ -3818,34 +3823,34 @@ pub(crate) mod zipper_moving_tests {
         zip.descend_to(b"12345");
         assert!(zip.path_exists());
         assert_eq!(zip.path(), b"12345");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"1234"); // "1234" is a branch only
         assert_eq!(zip.is_val(), false);
         assert_eq!(zip.child_count(), 2);
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"123"); // "123" is a value only
         assert_eq!(zip.child_count(), 1);
         assert_eq!(zip.is_val(), true);
-        assert!(zip.ascend_until()); // Jump over "12" because it's neither a branch nor a value
+        assert_eq!(zip.ascend_until(), 2); // Jump over "12" because it's neither a branch nor a value
         assert_eq!(zip.path(), b"1"); // "1" is both a branch and a value
         assert_eq!(zip.is_val(), true);
         assert_eq!(zip.child_count(), 2);
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"");
         assert_eq!(zip.child_count(), 1);
-        assert!(!zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 0);
         assert!(zip.at_root());
 
         //Test that ascend_until_branch skips over all the values
         zip.descend_to(b"12345");
         assert!(zip.path_exists());
-        assert!(zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 1);
         assert_eq!(zip.path(), b"1234");
-        assert!(zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 3);
         assert_eq!(zip.path(), b"1");
-        assert!(zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 1);
         assert_eq!(zip.path(), b"");
-        assert!(!zip.ascend_until_branch());
+        assert_eq!(zip.ascend_until_branch(), 0);
         assert!(zip.at_root());
     }
 
@@ -3857,28 +3862,29 @@ pub(crate) mod zipper_moving_tests {
         //Test that ascend_until stops when transitioning from non-existent path
         zip.descend_to(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB");
         assert_eq!(zip.path_exists(), false);
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
 
         //Test that jump all the way back to where we want to be
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 126);
         assert_eq!(zip.path(), b"A");
-        assert!(zip.ascend_until());
+        assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"");
-        assert_eq!(zip.ascend_until(), false);
+        assert_eq!(zip.ascend_until(), 0);
     }
 
     pub const ZIPPER_INDEXED_MOVEMENT_TEST1_KEYS: &[&[u8]] = &[b"arrow", b"bow", b"cannon", b"romane", b"romanus", b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i"];
 
     pub fn indexed_zipper_movement1<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
-        //descends a single specific byte using `descend_indexed_byte`. Just for testing. A real user would use `descend_towards`
+        //descends a single specific byte using `descend_indexed_byte`. Just for testing. A real user would use `descend_to` or `descend_to_byte`
         fn descend_byte<Z: Zipper + ZipperMoving + ZipperPath>(zipper: &mut Z, byte: u8) {
             for i in 0..zipper.child_count() {
-                assert!(zipper.descend_indexed_byte(i).is_some());
+                let descended = zipper.descend_indexed_byte(i);
+                assert!(descended.is_some());
                 if *zipper.path().last().unwrap() == byte {
                     break
                 } else {
-                    assert_eq!(zipper.ascend(1), true);
+                    assert_eq!(zipper.ascend(1), 1);
                 }
             }
         }
@@ -3905,14 +3911,14 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zipper.path(), b"arrow");
         assert_eq!(zipper.child_count(), 0);
 
-        assert_eq!(zipper.ascend(3), true);
+        assert_eq!(zipper.ascend(3), 3);
         assert_eq!(zipper.path(), b"ar");
         assert_eq!(zipper.child_count(), 1);
     }
 
     pub const ZIPPER_VALUE_LOCATIONS_TEST1_KEYS: &[&[u8]] = &[b"arrow", b"bow", b"cannon", b"roman", b"romane", b"romanus", b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i"];
 
-    pub fn zipper_value_locations<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+    pub fn zipper_value_locations<Z: ZipperMoving>(mut zipper: Z) {
 
         zipper.descend_to(b"ro");
         assert!(zipper.path_exists());
@@ -3926,7 +3932,7 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zipper.is_val(), true);
         zipper.descend_to(b"e");
         assert_eq!(zipper.is_val(), true);
-        assert_eq!(zipper.ascend(1), true);
+        assert_eq!(zipper.ascend(1), 1);
         zipper.descend_to(b"u");
         assert_eq!(zipper.is_val(), false);
         zipper.descend_until(&mut ());
@@ -3935,7 +3941,7 @@ pub(crate) mod zipper_moving_tests {
 
     pub const ZIPPER_CHILD_MASK_TEST1_KEYS: &[&[u8]] = &[&[8, 194, 1, 45, 194, 1], &[34, 193]];
 
-    pub fn zipper_child_mask_test1<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+    pub fn zipper_child_mask_test1<Z: ZipperMoving>(mut zipper: Z) {
 
         zipper.descend_to(&[8, 194, 1]);
         assert_eq!(zipper.path_exists(), true);
@@ -3951,7 +3957,7 @@ pub(crate) mod zipper_moving_tests {
 
     pub const ZIPPER_CHILD_MASK_TEST2_KEYS: &[&[u8]] = &[b"arrow", b"bow", b"cannon", b"roman", b"romane", b"romanus", b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i"];
 
-    pub fn zipper_child_mask_test2<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+    pub fn zipper_child_mask_test2<Z: ZipperMoving>(mut zipper: Z) {
 
         //'a' + 'b' + 'c' + 'r'
         assert_eq!(zipper.child_mask(), [0, 1<<(b'a'-64) | 1<<(b'b'-64) | 1<<(b'c'-64) | 1<<(b'r'-64), 0, 0]);
@@ -4472,7 +4478,7 @@ pub(crate) mod zipper_iteration_tests {
         assert_eq!(zipper.path(), b"1a1C");
         assert_eq!(zipper.to_next_k_path(1), false);
         assert_eq!(zipper.path(), b"1a1");
-        assert_eq!(zipper.ascend(1), true);
+        assert_eq!(zipper.ascend(1), 1);
         assert_eq!(zipper.path(), b"1a");
         assert_eq!(zipper.to_next_k_path(1), true);
         assert_eq!(zipper.path(), b"1b");
@@ -4616,7 +4622,7 @@ pub(crate) mod zipper_iteration_tests {
                 zipper.descend_to(path);
                 assert!(zipper.path_exists());
             },
-            |zipper, steps| assert!(zipper.ascend(steps)),
+            |zipper, steps| assert_eq!(zipper.ascend(steps), steps),
         );
 
         //Try with a `descend_to_byte` & `ascend_byte`
@@ -4906,7 +4912,7 @@ mod tests {
         zipper.descend_to(b"e");
         assert_eq!(zipper.is_val(), true);
         assert_eq!(zipper.val(), Some(&"romane"));
-        assert_eq!(zipper.ascend(1), true);
+        assert_eq!(zipper.ascend(1), 1);
         zipper.descend_to(b"u");
         assert_eq!(zipper.is_val(), false);
         assert_eq!(zipper.val(), None);

@@ -15,7 +15,7 @@ fn drop_symbol_head_byte<Z: ZipperWriting<usize> + Zipper + ZipperMoving + Zippe
     if b == 0 { continue }
     loc.descend_to_existing_byte(b);
     loc.join_k_path_into(b as usize, true);
-    assert!(loc.ascend(1));
+    assert_eq!(loc.ascend(1), 1);
   }
   loc.reset();
   loc.descend_to(&p[..]);
