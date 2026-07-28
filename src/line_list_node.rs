@@ -2065,6 +2065,19 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                             return (Some(key0[key.len()]), None)
                         }
                     }
+                    //Both slots hold the same key, which happens when one of them holds the value
+                    // at that key and the other holds the onward child.  The byte is the same either
+                    // way, but the child can be in either slot, so check both before giving up on it
+                    // (`node_get_child` does the same).
+                    if key.len() + 1 == key0.len() {
+                        if self.is_child_ptr::<0>() {
+                            return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<0>().as_tagged()) })
+                        }
+                        if self.is_child_ptr::<1>() {
+                            return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<1>().as_tagged()) })
+                        }
+                    }
+                    return (Some(key0[key.len()]), None)
                 }
                 if starts_with(key1, key) && key1.len() > key.len() {
                     if key.len() + 1 == key1.len() && self.is_child_ptr::<1>() {
@@ -3353,6 +3366,36 @@ mod tests {
         assert_eq!(inner_node.as_tagged().node_get_val(b"anana"), Some(&1));
     }
 
+    /// Regression test: a value and the onward child at the same path are kept
+    /// in the two slots of one node, both under the same key.  In that shape
+    /// `nth_child_from_key` used to look for the child in slot 1 only, and so
+    /// reported "no child node" whenever the child sat in slot 0.  A zipper
+    /// that descended by index then left its focus in the parent node, and
+    /// reported the position as having no children at all.
+    #[test]
+    fn test_nth_child_from_key_val_and_child_share_key() {
+        use crate::PathMap;
+        use crate::zipper::{ZipperMoving, ZipperValues, ZipperWriting, Zipper};
+
+        // Grafting builds the shape: "a" ends up with a value and children
+        let leaf = PathMap::from_iter([("", 9u64), ("x", 1)]);
+        let mut map = PathMap::<u64>::new();
+        for prefix in [b"a".as_slice(), b"aa"] {
+            let mut wz = map.write_zipper_at_path(prefix);
+            wz.graft(&leaf.read_zipper());
+        }
+
+        let mut by_index = map.read_zipper();
+        assert!(by_index.descend_indexed_byte(0));
+        let mut by_path = map.read_zipper();
+        by_path.descend_to(b"a");
+
+        assert_eq!(by_index.path(), by_path.path());
+        assert_eq!(by_index.val(), Some(&9));
+        assert_eq!(by_path.child_count(), 2, "\"a\" has children 'a' and 'x'");
+        assert_eq!(by_index.child_count(), by_path.child_count());
+        assert_eq!(by_index.child_mask(), by_path.child_mask());
+    }
 }
 
 //GOAT, merge wrappers for lattice impls on primitives
