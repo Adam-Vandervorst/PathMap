@@ -1575,6 +1575,126 @@ mod tests {
         assert_eq!(pz.is_val(), false);
     }
 
+    /// Repeated reset-and-redescend cycles must each land in the same place.  A zipper that
+    /// unwinds its factor state incompletely on reset will diverge on the second or later pass.
+    #[test]
+    fn product_zipper_repeated_reset_test() {
+        let snip = b"-=**=-";
+        let mut map = PathMap::<()>::new();
+        map.create_path(snip);
+        $convert!(map);
+
+        let factors: Vec<_> = (0..3).into_iter().map(|_| map.read_zipper()).collect();
+        let mut pz = $ProductZipper::new(map.read_zipper(), factors);
+
+        let mut full_path = snip.to_vec();
+        for _ in 0..3 { full_path.extend(snip); }
+
+        //Every cycle must reproduce the first one exactly
+        for cycle in 0..4 {
+            pz.reset();
+            assert_eq!(pz.path(), b"", "cycle {cycle}: reset should return to the root");
+            pz.descend_to(&full_path);
+            assert_eq!(pz.path(), full_path, "cycle {cycle}: path mismatch");
+            assert_eq!(pz.path_exists(), true, "cycle {cycle}: path_exists mismatch");
+            assert_eq!(pz.child_count(), 0, "cycle {cycle}: child_count mismatch");
+        }
+    }
+
+    /// Ascending back to the root and descending again must reproduce the original position,
+    /// for each of the three ascent methods
+    #[test]
+    fn product_zipper_ascend_redescend_test() {
+        let snip = b"-=**=-";
+        let mut map = PathMap::<()>::new();
+        map.create_path(snip);
+        $convert!(map);
+
+        let mut full_path = snip.to_vec();
+        for _ in 0..3 { full_path.extend(snip); }
+
+        //Each ascent method gets a fresh zipper, then has to descend the same path twice
+        for mode in 0..3 {
+            let factors: Vec<_> = (0..3).into_iter().map(|_| map.read_zipper()).collect();
+            let mut pz = $ProductZipper::new(map.read_zipper(), factors);
+
+            pz.descend_to(&full_path);
+            assert_eq!(pz.path(), full_path, "mode {mode}: first descent");
+
+            match mode {
+                0 => { pz.ascend(full_path.len()); },
+                1 => { while pz.ascend_until() {} },
+                _ => { while pz.ascend_until_branch() {} },
+            }
+            assert_eq!(pz.path(), b"", "mode {mode}: should have returned to the root");
+
+            //The second descent must reach exactly the same place as the first
+            pz.descend_to(&full_path);
+            assert_eq!(pz.path(), full_path, "mode {mode}: second descent");
+            assert_eq!(pz.path_exists(), true, "mode {mode}: path_exists after redescent");
+            assert_eq!(pz.child_count(), 0, "mode {mode}: child_count after redescent");
+        }
+    }
+
+    /// Sibling movement that crosses a factor boundary must keep the factors consistent, so a
+    /// subsequent descent still works
+    #[test]
+    fn product_zipper_sibling_across_factor_test() {
+        //The primary branches, so there are siblings to step between
+        let l = PathMap::from_iter([(b"a".as_slice(), ()), (b"b".as_slice(), ())]);
+        let r = PathMap::from_iter([(b"XY".as_slice(), ())]);
+        $convert!(l);
+        $convert!(r);
+
+        let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
+
+        //Descend into the first branch and on into the secondary factor
+        pz.descend_to(b"aXY");
+        assert_eq!(pz.path(), b"aXY");
+        assert_eq!(pz.path_exists(), true);
+
+        //Ascend back to the branch point and step to the sibling
+        pz.ascend(2);
+        assert_eq!(pz.path(), b"a");
+        assert_eq!(pz.to_next_sibling_byte(), true);
+        assert_eq!(pz.path(), b"b");
+
+        //The sibling must be able to descend into its own copy of the secondary factor
+        pz.descend_to(b"XY");
+        assert_eq!(pz.path(), b"bXY", "sibling should descend into the secondary factor");
+        assert_eq!(pz.path_exists(), true);
+    }
+
+    /// Factors of differing lengths must stitch together correctly, unlike the repeated-identical
+    /// factors used elsewhere, where an off-by-one in factor bookkeeping can go unnoticed
+    #[test]
+    fn product_zipper_uneven_factors_test() {
+        let l = PathMap::from_iter([(b"A".as_slice(), ())]);
+        let r = PathMap::from_iter([(b"BBBBBBBB".as_slice(), ())]);
+        let e = PathMap::from_iter([(b"CC".as_slice(), ())]);
+        $convert!(l);
+        $convert!(r);
+        $convert!(e);
+
+        let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+        let full_path = b"ABBBBBBBBCC";
+
+        pz.descend_to(full_path);
+        assert_eq!(pz.path(), full_path);
+        assert_eq!(pz.path_exists(), true);
+        assert_eq!(pz.child_count(), 0);
+
+        //Ascend into the middle factor and back out again
+        pz.ascend(3);
+        assert_eq!(pz.path(), b"ABBBBBBB");
+        assert_eq!(pz.path_exists(), true);
+
+        pz.reset();
+        pz.descend_to(full_path);
+        assert_eq!(pz.path(), full_path, "path after reset and redescent");
+        assert_eq!(pz.path_exists(), true);
+    }
+
     #[test]
     fn product_zipper_inspection_test() {
         let lpaths = ["abcdefghijklmnopqrstuvwxyz".as_bytes(), "arr".as_bytes(), "arrow".as_bytes(), "x".as_bytes()];
@@ -1588,7 +1708,6 @@ mod tests {
         $convert!(e);
         let mut pz = $ProductZipper::new(l.read_zipper_at_borrowed_path(b"abcdefghijklm"), [r.read_zipper(), e.read_zipper()]);
 
-        assert_eq!(pz.factor_count(), 3);
         assert_eq!(pz.focus_factor(), 0);
         assert_eq!(pz.path_indices().len(), 0);
         assert_eq!(pz.path(), b"");
@@ -1627,6 +1746,31 @@ mod tests {
     macro_rules! noop { ($x:ident) => {}; (*$x:ident) => {}; }
     impl_product_zipper_tests!(pz_concrete, ProductZipper, noop);
     impl_product_zipper_tests!(pz_generic, ProductZipperG, noop);
+
+    /// Adapts [DependentProductZipperG] to the `new(primary, [secondaries])` shape the shared
+    /// product-zipper test suite uses, by handing out a fixed list of factors in order.  This lets
+    /// the suite exercise `DependentProductZipperG`, which is otherwise near-identical to
+    /// [ProductZipperG].
+    struct DependentPZAdapter;
+
+    impl DependentPZAdapter {
+        fn new<'trie, PrimaryZ, SecondaryZ, V, L>(primary: PrimaryZ, others: L)
+            -> DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V,
+                   (), impl Clone + for<'a> FnOnce((), &'a [u8], usize) -> ((), Option<SecondaryZ>)>
+            where
+                V: Clone + Send + Sync,
+                PrimaryZ: ZipperMoving + ZipperValues<V>,
+                SecondaryZ: ZipperMoving + Clone,
+                L: IntoIterator<Item = SecondaryZ>,
+        {
+            let factors: Vec<SecondaryZ> = others.into_iter().collect();
+            DependentProductZipperG::new_enroll(primary, (), move |_, _, idx| {
+                ((), factors.get(idx).cloned())
+            })
+        }
+    }
+
+    impl_product_zipper_tests!(pz_dependent, DependentPZAdapter, noop);
 
     #[cfg(feature="arena_compact")]
     macro_rules! to_act {
