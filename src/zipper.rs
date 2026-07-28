@@ -21,6 +21,7 @@ pub use crate::zipper_head::*;
 pub use crate::product_zipper::{ProductZipper, ProductZipperG, ZipperProduct, OneFactor};
 pub use crate::overlay_zipper::{OverlayZipper};
 pub use crate::prefix_zipper::{PrefixZipper};
+pub use crate::path_tracker::{PathTracker};
 pub use crate::empty_zipper::{EmptyZipper};
 pub use crate::poly_zipper::{PolyZipper, PolyZipperExplicit};
 pub use crate::dependent_zipper::DependentProductZipperG;

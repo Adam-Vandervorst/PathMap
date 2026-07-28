@@ -133,6 +133,7 @@ mod empty_zipper;
 mod prefix_zipper;
 mod overlay_zipper;
 mod dependent_zipper;
+mod path_tracker;
 mod trie_ref;
 mod dense_byte_node;
 pub(crate) mod line_list_node;
