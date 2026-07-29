@@ -559,7 +559,7 @@ mod tests {
                             Ok((mut reader_z, mut writer_z)) => {
                                 //We got the zippers, do the stuff
                                 let witness = reader_z.witness();
-                                while let Some(val) = reader_z.to_next_get_val_with_witness(&witness) {
+                                while let Some(val) = reader_z.to_next_get_val_with_witness(&witness, &mut ()) {
                                     writer_z.descend_to(reader_z.path());
                                     writer_z.set_val(*val);
                                     writer_z.reset();

@@ -82,7 +82,8 @@ impl ZipperAbsolutePath for EmptyZipper {
 }
 
 impl ZipperIteration for EmptyZipper {
-    fn to_next_val(&mut self) -> bool { false }
+    fn to_next_val<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
+    fn descend_last_path<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn descend_first_k_path(&mut self, _k: usize) -> bool { false }
     fn to_next_k_path(&mut self, _k: usize) -> bool { false }
 }
@@ -109,11 +110,11 @@ impl<'a, V: Clone + Send + Sync> ZipperReadOnlyConditionalValues<'a, V> for Empt
 }
 
 impl<'a, V: Clone + Send + Sync> ZipperReadOnlyIteration<'a, V> for EmptyZipper {
-    fn to_next_get_val(&mut self) -> Option<&'a V> { None }
+    fn to_next_get_val<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> Option<&'a V> { None }
 }
 
 impl<'a, V: Clone + Send + Sync> ZipperReadOnlyConditionalIteration<'a, V> for EmptyZipper {
-    fn to_next_get_val_with_witness<'w>(&mut self, _witness: &'w Self::WitnessT) -> Option<&'w V> where 'a: 'w { None }
+    fn to_next_get_val_with_witness<'w, Obs: PathObserver>(&mut self, _witness: &'w Self::WitnessT, _obs: &mut Obs) -> Option<&'w V> where 'a: 'w { None }
 }
 
 impl ZipperPathBuffer for EmptyZipper {

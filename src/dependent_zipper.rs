@@ -501,7 +501,9 @@ mod tests {
         });
 
         let mut full = String::new();
-        while dpz.to_next_val() {
+        let mut observed = Vec::<u8>::new();
+        while dpz.to_next_val(&mut observed) {
+            assert_eq!(&observed[..], dpz.path());
             if dpz.child_count() == 0 {
                 full.push_str(std::str::from_utf8(dpz.path()).unwrap());
                 full.push('\n');
@@ -532,7 +534,9 @@ rubicundus.postfix
         });
 
         let mut full = String::new();
-        while dpz.to_next_val() {
+        let mut observed = Vec::<u8>::new();
+        while dpz.to_next_val(&mut observed) {
+            assert_eq!(&observed[..], dpz.path());
             if dpz.child_count() == 0 {
                 full.push_str(std::str::from_utf8(dpz.path()).unwrap());
                 full.push('\n');

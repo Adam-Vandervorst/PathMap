@@ -2554,7 +2554,7 @@ where Storage: AsRef<[u8]>
         if zipper.is_val() {
             count += 1;
         }
-        while zipper.to_next_val() {
+        while zipper.to_next_val(&mut ()) {
             count += 1;
         }
         count
@@ -2782,7 +2782,7 @@ where Storage: AsRef<[u8]>
     }
 
     // default
-    // fn to_next_step(&mut self) -> bool;
+    // fn to_next_step<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool;
 }
 
 impl<Storage, Value> ZipperIteration for ACTZipper<'_, Storage, Value>
@@ -2792,8 +2792,8 @@ where Storage: AsRef<[u8]>
     /// order
     ///
     /// Returns a reference to the value or `None` if the zipper has encountered the root.
-    fn to_next_val(&mut self) -> bool {
-        while self.to_next_step()  {
+    fn to_next_val<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        while self.to_next_step(obs)  {
             if self.is_val() {
                 return true;
             }
@@ -2912,14 +2912,18 @@ mod tests {
         let mut btm_zipper = btm.read_zipper();
         let mut act_zipper = act.read_zipper_u64();
 
+        let mut btm_observed = Vec::<u8>::new();
+        let mut act_observed = Vec::<u8>::new();
         loop {
-            btm_zipper.to_next_val();
-            act_zipper.to_next_val();
+            btm_zipper.to_next_val(&mut btm_observed);
+            act_zipper.to_next_val(&mut act_observed);
 
             let btm_val = btm_zipper.val().copied();
             let act_val = act_zipper.val().copied();
 
             assert_eq!(btm_zipper.path(), act_zipper.path());
+            assert_eq!(btm_observed, act_observed);
+            assert_eq!(&btm_observed[..], btm_zipper.path());
             assert_eq!(btm_val, act_val);
 
             if act_val.is_none() {
@@ -3012,11 +3016,15 @@ mod tests {
         let btm = PathMap::from_iter(items.iter().map(|&(k, v)| (k, v)));
         let mut bz = btm.read_zipper();
         let mut az = act.read_zipper_u64();
+        let mut b_observed = Vec::<u8>::new();
+        let mut a_observed = Vec::<u8>::new();
         loop {
-            let more_b = bz.to_next_val();
-            let more_a = az.to_next_val();
+            let more_b = bz.to_next_val(&mut b_observed);
+            let more_a = az.to_next_val(&mut a_observed);
             assert_eq!(more_b, more_a, "walks end together");
             assert_eq!(bz.path(), az.path());
+            assert_eq!(b_observed, a_observed);
+            assert_eq!(&b_observed[..], bz.path());
             assert_eq!(bz.val().copied(), az.val().copied());
             if !more_a {
                 break;
@@ -3197,11 +3205,15 @@ mod tests {
         let act = ArenaCompactTree::from_zipper(btm.read_zipper(), |&v| v);
         let mut cata_zipper = act.read_zipper_u64();
         let mut stream_zipper = tree.read_zipper_u64();
+        let mut cata_observed = Vec::<u8>::new();
+        let mut stream_observed = Vec::<u8>::new();
         loop {
-            let cata_next = cata_zipper.to_next_val();
-            let stream_next = stream_zipper.to_next_val();
+            let cata_next = cata_zipper.to_next_val(&mut cata_observed);
+            let stream_next = stream_zipper.to_next_val(&mut stream_observed);
             assert_eq!(cata_next, stream_next);
             assert_eq!(cata_zipper.path(), stream_zipper.path());
+            assert_eq!(cata_observed, stream_observed);
+            assert_eq!(&cata_observed[..], cata_zipper.path());
             assert_eq!(cata_zipper.get_val(), stream_zipper.get_val());
             if !cata_next {
                 break;
@@ -3319,10 +3331,14 @@ mod tests {
     fn assert_act_matches_map(map: &PathMap<u64>, tree: &ArenaCompactTree<super::Mmap>) {
         let mut map_zipper = map.read_zipper();
         let mut act_zipper = tree.read_zipper_u64();
+        let mut map_observed = Vec::<u8>::new();
+        let mut act_observed = Vec::<u8>::new();
         loop {
-            let map_next = map_zipper.to_next_val();
-            assert_eq!(map_next, act_zipper.to_next_val());
+            let map_next = map_zipper.to_next_val(&mut map_observed);
+            assert_eq!(map_next, act_zipper.to_next_val(&mut act_observed));
             assert_eq!(map_zipper.path(), act_zipper.path());
+            assert_eq!(map_observed, act_observed);
+            assert_eq!(&map_observed[..], map_zipper.path());
             assert_eq!(map_zipper.val().copied(), act_zipper.val().copied());
             if !map_next { break }
         }
@@ -3376,7 +3392,7 @@ mod tests {
         let map = random_pathmap(0xAC7_0002, 5000);
         let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(map.val_count());
         let mut zipper = map.read_zipper();
-        while zipper.to_next_val() {
+        while zipper.to_next_val(&mut ()) {
             items.push((zipper.path().to_vec(), *zipper.val().unwrap()));
         }
 

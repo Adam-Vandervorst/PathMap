@@ -196,7 +196,7 @@ fn binary_zipper_iter(bencher: Bencher, n: u64) {
     bencher.bench_local(|| {
         let mut count = 0;
         let mut zipper = map.read_zipper();
-        while zipper.to_next_val() {
+        while zipper.to_next_val(&mut ()) {
             count += 1;
         }
         assert_eq!(count, n);

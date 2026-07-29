@@ -78,7 +78,7 @@ impl <T : TrieValue> Distribution<(Vec<u8>, T)> for FairTrieValue<T> {
     let size = rz.val_count();
     let target = rng.random_range(0..size);
     let mut i = 0;
-    while let Some(t) = rz.to_next_get_val() {
+    while let Some(t) = rz.to_next_get_val(&mut ()) {
       if i == target { return (rz.path().to_vec(), t.clone()) }
       i += 1;
     }

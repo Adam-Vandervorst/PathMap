@@ -259,7 +259,7 @@ fn build_ascii_graph_logical<V: TrieValue + Debug, A: Allocator, Z: ZipperInfall
     let mut graph_stack = vec![(0, root_id)];
     let mut skip_node = false;
 
-    while z.to_next_step() {
+    while z.to_next_step(&mut ()) {
         if skip_node {
             z.ascend_byte();
             while z.to_next_sibling_byte().is_none() {
@@ -563,7 +563,7 @@ fn viz_zipper_logical<V : TrieValue + Debug + Hash, A: Allocator, Z: ZipperInfal
     let mut trie_stack = vec![(0, root_node.shared_node_id())];
     let mut graph_stack = vec![(0, root_node_id)];
     let mut skip_node = false;
-    while z.to_next_step() {
+    while z.to_next_step(&mut ()) {
         //Skip a whole branch if we've already rendered it elsewhere
         if skip_node {
             z.ascend_byte();
