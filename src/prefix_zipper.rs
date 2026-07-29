@@ -61,10 +61,9 @@ pub struct PrefixZipper<'prefix, Z> {
     position: PrefixPos,
 }
 
-//TEMPORARY: `ZipperPath` on the source comes off once the `ascend_` methods report their distance
 impl<'prefix, Z>  PrefixZipper<'prefix, Z>
     where
-        Z: ZipperMoving + ZipperPath
+        Z: ZipperMoving
 {
     /// Creates a new `PrefixZipper` wrapping the supplied `source` zipper and prepending the
     /// supplied `prefix`
@@ -159,10 +158,6 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
         }
         let mut ascended = 0;
         if self.position.is_source() {
-            // if let Some(moved) = self.source.ascend_until() {
-            //     return Some(moved);
-            // }
-            let len_before = self.source.path().len();
             let moved = if VAL {
                 self.source.ascend_until()
             } else {
@@ -171,7 +166,10 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
             if moved > 0 && ((VAL && self.source.is_val()) || self.source.child_count() > 1) {
                 return Some(moved);
             }
-            ascended += len_before;
+            //Falling through here means the source ascended all the way to its own root, so the
+            //distance it reports is the whole of the path it had descended
+            debug_assert!(self.source.at_root());
+            ascended += moved;
             let valid = self.prefix.len() - self.origin_depth;
             self.position = PrefixPos::Prefix { valid };
         }
@@ -279,7 +277,7 @@ impl<'prefix, 'source, Z, V> ZipperReadOnlyConditionalValues<'source, V>
 }
 
 impl<'prefix, Z> ZipperPathBuffer for PrefixZipper<'prefix, Z>
-    where Z: ZipperMoving + ZipperPath
+    where Z: ZipperMoving
 {
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         assert!(self.path.capacity() >= len);
@@ -342,7 +340,7 @@ impl<'prefix, Z> Zipper for PrefixZipper<'prefix, Z>
 
 impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
     where
-        Z: ZipperMoving + ZipperPath
+        Z: ZipperMoving
 {
     fn at_root(&self) -> bool {
         match self.position {
@@ -443,13 +441,8 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         } else {
             false
         };
-        let len_before = self.source.path().len();
-        if !self.source.descend_until(obs) {
-            return descended_prefix;
-        }
-        let path = self.source.path();
-        self.path.extend_from_slice(&path[len_before..]);
-        true
+        //Fan the descended bytes out to our own path buffer as well as the caller's observer
+        descended_prefix | self.source.descend_until(&mut (&mut self.path, &mut *obs))
     }
 
     #[inline]
@@ -502,7 +495,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
 }
 
 impl<'prefix, Z> ZipperPath for PrefixZipper<'prefix, Z>
-    where Z: ZipperMoving + ZipperPath
+    where Z: ZipperMoving
 {
     #[inline]
     fn path(&self) -> &[u8] {

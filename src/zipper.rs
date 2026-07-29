@@ -775,9 +775,10 @@ pub trait ZipperReadOnlySubtries<'a, V: Clone + Send + Sync, A: Allocator = Glob
 
 /// An interface for advanced [Zipper] movements used for various types of iteration; such as iterating
 /// every value, or iterating all paths descending from a common root at a certain depth
-//TEMPORARY: the `ZipperPath` bound is needed by the `descend_first_k_path` / `to_next_k_path`
-// default impls, which track how far they have descended by measuring `path()`.  It comes off when
-// the `ascend_` methods report the distance they moved.
+///
+/// NOTE: the [ZipperPath] bound will be removed when these methods are changed to take a
+/// [PathObserver], as [ZipperMoving::descend_until] does.  Until then, the `k_path` methods locate
+/// themselves by measuring [`path`](ZipperPath::path), so a zipper must maintain one to iterate.
 pub trait ZipperIteration: ZipperMoving + ZipperPath {
     /// Systematically advances to the next value accessible from the zipper, traversing in a depth-first
     /// order
@@ -866,8 +867,11 @@ pub trait ZipperIteration: ZipperMoving + ZipperPath {
 }
 
 /// The default implementation of both [ZipperIteration::to_next_k_path] and [ZipperIteration::descend_first_k_path]
+///
+/// NOTE: `base_idx` is an absolute depth, compared against the length of [`path`](ZipperPath::path)
+/// to tell how far the traversal has descended.  When the [ZipperIteration] methods are changed to
+/// take a [PathObserver], the depth will be tracked directly and the [ZipperPath] bound will go away.
 #[inline]
-//TEMPORARY: the `ZipperPath` bound comes off once the `ascend_` methods report their distance
 fn k_path_default_internal<Z: ZipperMoving + ZipperPath + ?Sized>(z: &mut Z, k: usize, base_idx: usize) -> bool {
     loop {
         if z.path().len() < base_idx + k {
