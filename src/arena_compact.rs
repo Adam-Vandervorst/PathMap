@@ -3209,6 +3209,53 @@ where Storage: AsRef<[u8]>
     }
 }
 
+/// Iterator over (Path, Value) in ArenaCompactTree
+pub struct ActIter<'a, Storage, Value>
+where
+    Storage: AsRef<[u8]>,
+    ACTZipper<'a, Storage, Value>: ZipperValues<Value>,
+{
+    zipper: ACTZipper<'a, Storage, Value>,
+    root_visited: bool,
+}
+
+impl <'a, Storage, Value>
+Iterator for ActIter<'a, Storage, Value>
+where
+    Storage: AsRef<[u8]>,
+    ACTZipper<'a, Storage, Value>: ZipperValues<Value>,
+    Value: Clone,
+{
+    type Item = (Vec<u8>, Value);
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.root_visited {
+            self.root_visited = true;
+            if let Some(val) = self.zipper.val_at(b"") {
+                return Some((Vec::new(), val.clone()));
+            }
+        }
+        if !self.zipper.to_next_val() {
+            return None;
+        }
+        let path = self.zipper.path().to_vec();
+        let val = self.zipper.val()?.clone();
+        Some((path, val))
+    }
+}
+
+impl <'a, Storage> ArenaCompactTree<Storage>
+where
+    Storage: AsRef<[u8]>,
+{
+    /// Iterate over paths with `u64` values in ArenaCompactTree
+    pub fn iter(&'a self) -> ActIter<'a, Storage, u64> {
+        ActIter {
+            zipper: self.read_zipper_u64(),
+            root_visited: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
@@ -3272,32 +3319,6 @@ mod tests {
         }
     }
 
-    /// Every (path, value) in `map`, collected with a catamorphism
-    fn map_contents(map: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> {
-        let mut out = Vec::new();
-        map.read_zipper().into_cata_side_effect(|_bm, _ch: &mut [()], v, path| {
-            if let Some(v) = v {
-                out.push((path.to_vec(), *v));
-            }
-        });
-        out.sort();
-        out
-    }
-
-    /// Every (path, value) in `act`, collected by walking it
-    fn act_contents(act: &ArenaCompactTree<Vec<u8>>) -> Vec<(Vec<u8>, u64)> {
-        let mut out = Vec::new();
-        if let Some(v) = act.get_val_at(b"") {
-            out.push((Vec::new(), v));
-        }
-        let mut z = act.read_zipper_u64();
-        while z.to_next_val() {
-            out.push((z.path().to_vec(), *z.val().unwrap()));
-        }
-        out.sort();
-        out
-    }
-
     /// Build `map` both ways and check the results describe the same trie.
     ///
     /// When there is nothing to re-use the two builders must agree byte for
@@ -3306,13 +3327,8 @@ mod tests {
         let plain = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
         let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
 
-        let expected = map_contents(map);
-        assert_eq!(act_contents(&plain), expected, "{name}: plain content");
-        assert_eq!(act_contents(&cached), expected, "{name}: cached content");
-        for (path, v) in &expected {
-            assert_eq!(cached.get_val_at(path), Some(*v),
-                "{name}: get_val_at {:?}", String::from_utf8_lossy(path));
-        }
+        assert!(map.iter().map(|(p, &v)| (p, v)).eq(plain.iter()), "{name}: plain content");
+        assert!(map.iter().map(|(p, &v)| (p, v)).eq(cached.iter()), "{name}: cached content");
 
         if expect_identical {
             assert_eq!(plain.get_data(), cached.get_data(),
