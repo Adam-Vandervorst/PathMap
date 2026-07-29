@@ -212,7 +212,7 @@ fn run_graft_bench(bencher: Bencher, src_template: PathMap<u32>, dst_template: P
 /// - `remove_unset = true`
 /// - `src` contains hundreds of branches, regardless of mask
 /// - the mask bits are a contiguous range
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_remove_full_src_contiguous(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_case(masked_branch_count, MaskDistribution::Contiguous);
     run_graft_bench(bencher, src_template, dst_template, child_mask, true);
@@ -221,7 +221,7 @@ fn graft_masked_branches_remove_full_src_contiguous(bencher: Bencher, masked_bra
 /// - `remove_unset = true`
 /// - `src` contains hundreds of branches, regardless of mask
 /// - mask bits are distributed pseudorandomly
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_remove_full_src_pseudorandom(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_case(masked_branch_count, MaskDistribution::PseudoRandom);
     run_graft_bench(bencher, src_template, dst_template, child_mask, true);
@@ -230,7 +230,7 @@ fn graft_masked_branches_remove_full_src_pseudorandom(bencher: Bencher, masked_b
 /// - `remove_unset = true`
 /// - `src` contains only the branches we're grafting,
 /// - the mask bits are a contiguous range
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_remove_part_src_contiguous(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count, MaskDistribution::Contiguous);
     run_graft_bench(bencher, src_template, dst_template, child_mask, true);
@@ -239,7 +239,7 @@ fn graft_masked_branches_remove_part_src_contiguous(bencher: Bencher, masked_bra
 /// - `remove_unset = true`
 /// - `src` contains only the branches we're grafting
 /// - mask bits are distributed pseudorandomly
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_remove_part_src_pseudorandom(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_partial_source_case(masked_branch_count, MaskDistribution::PseudoRandom);
     run_graft_bench(bencher, src_template, dst_template, child_mask, true);
@@ -249,7 +249,7 @@ fn graft_masked_branches_remove_part_src_pseudorandom(bencher: Bencher, masked_b
 /// - `src` contains hundreds of branches, regardless of mask
 /// - the mask bits are a contiguous range
 /// - destination contains a LOW density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_full_src_contiguous_low(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
@@ -264,7 +264,7 @@ fn graft_masked_branches_keep_full_src_contiguous_low(bencher: Bencher, masked_b
 /// - `src` contains hundreds of branches, regardless of mask
 /// - the mask bits are a contiguous range
 /// - destination contains a HIGH density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_full_src_contiguous_high(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
@@ -279,7 +279,7 @@ fn graft_masked_branches_keep_full_src_contiguous_high(bencher: Bencher, masked_
 /// - `src` contains hundreds of branches, regardless of mask
 /// - mask bits are distributed pseudorandomly
 /// - destination contains a LOW density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_full_src_pseudorandom_low(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
@@ -294,7 +294,7 @@ fn graft_masked_branches_keep_full_src_pseudorandom_low(bencher: Bencher, masked
 /// - `src` contains hundreds of branches, regardless of mask
 /// - mask bits are distributed pseudorandomly
 /// - destination contains a HIGH density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_full_src_pseudorandom_high(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
@@ -309,7 +309,7 @@ fn graft_masked_branches_keep_full_src_pseudorandom_high(bencher: Bencher, maske
 /// - `src` contains only the branches we're grafting
 /// - the mask bits are a contiguous range
 /// - destination contains a LOW density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_part_src_contiguous_low(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
@@ -324,7 +324,7 @@ fn graft_masked_branches_keep_part_src_contiguous_low(bencher: Bencher, masked_b
 /// - `src` contains only the branches we're grafting
 /// - the mask bits are a contiguous range
 /// - destination contains a HIGH density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_part_src_contiguous_high(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
@@ -339,7 +339,7 @@ fn graft_masked_branches_keep_part_src_contiguous_high(bencher: Bencher, masked_
 /// - `src` contains only the branches we're grafting
 /// - mask bits are distributed pseudorandomly
 /// - destination contains a LOW density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_part_src_pseudorandom_low(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
@@ -354,7 +354,7 @@ fn graft_masked_branches_keep_part_src_pseudorandom_low(bencher: Bencher, masked
 /// - `src` contains only the branches we're grafting
 /// - mask bits are distributed pseudorandomly
 /// - destination contains a HIGH density of pre-existing branches before the graft operation
-#[divan::bench(sample_size = 1, args = BRANCH_COUNTS)]
+#[divan::bench(args = BRANCH_COUNTS)]
 fn graft_masked_branches_keep_part_src_pseudorandom_high(bencher: Bencher, masked_branch_count: usize) {
     let (src_template, dst_template, child_mask) = make_keep_case_with_dst_branch_count(
         masked_branch_count,
