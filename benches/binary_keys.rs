@@ -178,8 +178,8 @@ fn binary_k_path_iter(bencher: Bencher, n: u64) {
         //NOTE: 30 was found empirically and has no special meaning.  It's just a number that is deep enough
         // that there happens not to be any non-unique paths at that depth, given the RNG I tested.  If this
         // test fails, make that number smaller.
-        zipper.descend_first_k_path(KEY_LENGTH-30);
-        while zipper.to_next_k_path(KEY_LENGTH-30) {
+        zipper.descend_first_k_path(KEY_LENGTH-30, &mut ());
+        while zipper.to_next_k_path(KEY_LENGTH-30, &mut ()) {
             count += 1;
         }
         assert_eq!(count, n);

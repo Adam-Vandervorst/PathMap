@@ -296,8 +296,8 @@ fn sparse_k_path_iter(bencher: Bencher, n: u64) {
     bencher.bench_local(|| {
         let mut zipper = map.read_zipper();
         let mut count = 1;
-        zipper.descend_first_k_path(5);
-        while zipper.to_next_k_path(5) {
+        zipper.descend_first_k_path(5, &mut ());
+        while zipper.to_next_k_path(5, &mut ()) {
             count += 1;
         }
         assert_eq!(count, n);

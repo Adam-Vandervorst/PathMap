@@ -2814,11 +2814,15 @@ where Storage: AsRef<[u8]>
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
-    fn descend_first_k_path(&mut self, k: usize) -> bool {
+    fn descend_first_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         for ii in 0..k {
-            if self.descend_first_byte().is_none() {
-                self.ascend(ii);
-                return false;
+            match self.descend_first_byte() {
+                Some(byte) => obs.descend_to_byte(byte),
+                None => {
+                    self.ascend(ii);
+                    obs.ascend(ii);
+                    return false;
+                }
             }
         }
         return true;
@@ -2835,35 +2839,45 @@ where Storage: AsRef<[u8]>
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
-    fn to_next_k_path(&mut self, k: usize) -> bool {
+    fn to_next_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         let mut depth = k;
         'outer: loop {
             while depth > 0 && self.child_count() <= 1 {
                 if self.ascend(1) == 0 {
                     break 'outer;
                 }
+                obs.ascend(1);
                 depth -= 1;
             }
             let stack = self.stack.last_mut().unwrap();
             let idx = stack.child_index + 1;
             if idx >= stack.child_count {
-                if depth == 0 || self.ascend(1) == 0 {
+                if depth == 0 {
                     break 'outer;
                 }
+                if self.ascend(1) == 0 {
+                    break 'outer;
+                }
+                obs.ascend(1);
                 depth -= 1;
                 continue 'outer;
             }
-            assert!(self.descend_indexed_byte(idx).is_some());
+            let byte = self.descend_indexed_byte(idx);
+            assert!(byte.is_some());
+            //The loops above already ascended, so this is a plain descent of one byte
+            obs.descend_to_byte(byte.unwrap());
             depth += 1;
             for _ii in 0..k - depth {
-                if self.descend_first_byte().is_none() {
-                    continue 'outer;
+                match self.descend_first_byte() {
+                    Some(byte) => obs.descend_to_byte(byte),
+                    None => continue 'outer,
                 }
                 depth += 1;
             }
             return true;
         }
         self.ascend(depth);
+        obs.ascend(depth);
         false
     }
 }

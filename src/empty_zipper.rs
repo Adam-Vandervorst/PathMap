@@ -84,8 +84,8 @@ impl ZipperAbsolutePath for EmptyZipper {
 impl ZipperIteration for EmptyZipper {
     fn to_next_val<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn descend_last_path<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
-    fn descend_first_k_path(&mut self, _k: usize) -> bool { false }
-    fn to_next_k_path(&mut self, _k: usize) -> bool { false }
+    fn descend_first_k_path<Obs: PathObserver>(&mut self, _k: usize, _obs: &mut Obs) -> bool { false }
+    fn to_next_k_path<Obs: PathObserver>(&mut self, _k: usize, _obs: &mut Obs) -> bool { false }
 }
 
 impl<V> ZipperValues<V> for EmptyZipper {

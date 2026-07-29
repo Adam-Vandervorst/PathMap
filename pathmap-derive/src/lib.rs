@@ -679,15 +679,15 @@ fn derive_poly_zipper_with_traits(
                     }
                 }
 
-                fn descend_first_k_path(&mut self, k: usize) -> bool {
+                fn descend_first_k_path<Obs: pathmap::zipper::PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
                     match self {
-                        #(#variant_arms => inner.descend_first_k_path(k),)*
+                        #(#variant_arms => inner.descend_first_k_path(k, obs),)*
                     }
                 }
 
-                fn to_next_k_path(&mut self, k: usize) -> bool {
+                fn to_next_k_path<Obs: pathmap::zipper::PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
                     match self {
-                        #(#variant_arms => inner.to_next_k_path(k),)*
+                        #(#variant_arms => inner.to_next_k_path(k, obs),)*
                     }
                 }
             }

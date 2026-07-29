@@ -256,8 +256,8 @@ fn superdense_k_path_iter(bencher: Bencher, n: u64) {
         let mut zipper = map.read_zipper();
         let mut count = 1;
 
-        zipper.descend_first_k_path(2);
-        while zipper.to_next_k_path(2) {
+        zipper.descend_first_k_path(2, &mut ());
+        while zipper.to_next_k_path(2, &mut ()) {
             count += 1;
         }
         assert_eq!(count, n);

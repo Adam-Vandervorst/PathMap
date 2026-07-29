@@ -932,9 +932,12 @@ pub trait ZipperIteration: ZipperMoving + ZipperPath {
     /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to the paths
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
+    /// `obs` is notified of every movement made, so a caller can track the zipper's location without
+    /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
+    ///
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
-    fn descend_first_k_path(&mut self, k: usize) -> bool {
-        k_path_default_internal(self, k, self.path().len())
+    fn descend_first_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        k_path_default_internal(self, k, self.depth(), obs)
     }
 
     /// Moves the zipper's focus to the next location with the same path length as the current focus,
@@ -947,38 +950,52 @@ pub trait ZipperIteration: ZipperMoving + ZipperPath {
     /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to the paths
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
+    /// `obs` is notified of every movement made, so a caller can track the zipper's location without
+    /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
+    ///
     /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
-    fn to_next_k_path(&mut self, k: usize) -> bool {
-        let base_idx = if self.path().len() >= k {
-            self.path().len() - k
+    fn to_next_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        let depth = self.depth();
+        let base_idx = if depth >= k {
+            depth - k
         } else {
             return false
         };
-        k_path_default_internal(self, k, base_idx)
+        k_path_default_internal(self, k, base_idx, obs)
     }
 }
 
 /// The default implementation of both [ZipperIteration::to_next_k_path] and [ZipperIteration::descend_first_k_path]
 ///
-/// NOTE: `base_idx` is an absolute depth, compared against the length of [`path`](ZipperPath::path)
-/// to tell how far the traversal has descended.  When the [ZipperIteration] methods are changed to
-/// take a [PathObserver], the depth will be tracked directly and the [ZipperPath] bound will go away.
+/// `base_idx` is the [`depth`](ZipperMoving::depth) of the common root the traversal explores from, and
+/// the traversal is finished when the depth returns to it.
 #[inline]
-fn k_path_default_internal<Z: ZipperMoving + ZipperPath + ?Sized>(z: &mut Z, k: usize, base_idx: usize) -> bool {
+fn k_path_default_internal<Z: ZipperMoving + ?Sized, Obs: PathObserver>(z: &mut Z, k: usize, base_idx: usize, obs: &mut Obs) -> bool {
     loop {
-        if z.path().len() < base_idx + k {
-            while z.descend_first_byte().is_some() {
-                if z.path().len() == base_idx + k { return true }
+        if z.depth() < base_idx + k {
+            while let Some(byte) = z.descend_first_byte() {
+                obs.descend_to_byte(byte);
+                if z.depth() == base_idx + k { return true }
             }
         }
-        if z.to_next_sibling_byte().is_some() {
-            if z.path().len() == base_idx + k { return true }
+        //A sibling step replaces the last byte rather than adding one, so the observer sees the old
+        //byte retracted before the new one arrives
+        if let Some(byte) = z.to_next_sibling_byte() {
+            obs.ascend(1);
+            obs.descend_to_byte(byte);
+            if z.depth() == base_idx + k { return true }
             continue
         }
-        while z.path().len() > base_idx {
-            z.ascend_byte();
-            if z.path().len() == base_idx { return false }
-            if z.to_next_sibling_byte().is_some() { break }
+        while z.depth() > base_idx {
+            if z.ascend_byte() {
+                obs.ascend(1);
+            }
+            if z.depth() == base_idx { return false }
+            if let Some(byte) = z.to_next_sibling_byte() {
+                obs.ascend(1);
+                obs.descend_to_byte(byte);
+                break
+            }
         }
     }
 }
@@ -1119,8 +1136,8 @@ macro_rules! zipper_impl_lens {
     (ZipperIteration $s: ident => $e:expr) => {
         fn to_next_val<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.to_next_val(obs) }
         fn descend_last_path<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.descend_last_path(obs) }
-        fn descend_first_k_path(&mut $s, k: usize) -> bool { $e.descend_first_k_path(k) }
-        fn to_next_k_path(&mut $s, k: usize) -> bool { $e.to_next_k_path(k) }
+        fn descend_first_k_path<Obs: PathObserver>(&mut $s, k: usize, obs: &mut Obs) -> bool { $e.descend_first_k_path(k, obs) }
+        fn to_next_k_path<Obs: PathObserver>(&mut $s, k: usize, obs: &mut Obs) -> bool { $e.to_next_k_path(k, obs) }
     };
     (ZipperAbsolutePath $s: ident => $e:expr) => {
         fn origin_path(&$s) -> &[u8] { $e.origin_path() }
@@ -2452,16 +2469,16 @@ pub(crate) mod read_zipper_core {
         fn to_next_val<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
             unsafe{ self.to_next_get_val(obs) }.is_some()
         }
-        fn descend_first_k_path(&mut self, k: usize) -> bool {
+        fn descend_first_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
             let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
             self.focus_iter_token = cur_tok;
 
-            self.k_path_internal(k, self.prefix_buf.len())
+            self.k_path_internal(k, self.prefix_buf.len(), obs)
         }
-        fn to_next_k_path(&mut self, k: usize) -> bool {
+        fn to_next_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
             let base_idx = if self.path_len() >= k {
                 self.prefix_buf.len() - k
             } else {
@@ -2470,7 +2487,7 @@ pub(crate) mod read_zipper_core {
             //De-regularize the zipper
             debug_assert!(self.is_regularized());
             self.deregularize();
-            self.k_path_internal(k, base_idx)
+            self.k_path_internal(k, base_idx, obs)
         }
     }
 
@@ -2900,8 +2917,13 @@ pub(crate) mod read_zipper_core {
         }
 
         /// Internal method that implements both `k_path...` methods above
+        ///
+        /// `obs` is notified of every movement made.  As in [Self::to_next_get_val], the movements are
+        /// multi-byte because this zipper advances by rewinding `prefix_buf` to a node boundary and
+        /// extending it by a whole key run.
         #[inline]
-        fn k_path_internal(&mut self, k: usize, base_idx: usize) -> bool {
+        fn k_path_internal<Obs: PathObserver>(&mut self, k: usize, base_idx: usize, obs: &mut Obs) -> bool {
+            let obs_floor = self.origin_path.len();
             loop {
                 //If either of these trip, the caller is probably misusing the API and likely didn't call
                 // `descend_first_k_path` before calling `to_next_k_path`
@@ -2929,6 +2951,7 @@ pub(crate) mod read_zipper_core {
                     //Have we reached the root of this k_path iteration?
                     if self.node_key_start() <= base_idx  {
                         self.focus_iter_token = NODE_ITER_FINISHED;
+                        obs.ascend(self.prefix_buf.len().saturating_sub(base_idx.max(obs_floor)));
                         self.prefix_buf.truncate(base_idx);
                         return false
                     }
@@ -2936,10 +2959,12 @@ pub(crate) mod read_zipper_core {
                     if let Some((focus_node, iter_tok, prefix_offset)) = self.ancestors.pop() {
                         *self.focus_node = focus_node;
                         self.focus_iter_token = iter_tok;
+                        obs.ascend(self.prefix_buf.len().saturating_sub(prefix_offset.max(obs_floor)));
                         self.prefix_buf.truncate(prefix_offset);
                     } else {
                         let new_len = self.origin_path.len();
                         self.focus_iter_token = NODE_ITER_INVALID;
+                        obs.ascend(self.prefix_buf.len().saturating_sub(new_len));
                         self.prefix_buf.truncate(new_len);
                         return false
                     }
@@ -2955,6 +2980,7 @@ pub(crate) mod read_zipper_core {
                     if key_start < base_idx {
                         let base_key_len = base_idx - key_start; //The number of bytes we should not modify
                         if base_key_len > key_bytes.len() || &key_bytes[..base_key_len] != &self.prefix_buf[key_start..base_idx] {
+                            obs.ascend(self.prefix_buf.len().saturating_sub(base_idx.max(obs_floor)));
                             self.prefix_buf.truncate(base_idx);
                             return false;
                         }
@@ -2965,8 +2991,15 @@ pub(crate) mod read_zipper_core {
                     //If we got here, it means we're either going to continue to descend, or return a
                     // result at `path_len == base_idx+k`
                     let key_start = self.node_key_start();
+                    //`key_bytes` re-supplies everything from `key_start`, so the observer retreats to
+                    //that point (or the origin, whichever is lower) and re-descends
+                    let obs_skip = obs_floor.saturating_sub(key_start);
+                    obs.ascend(self.prefix_buf.len().saturating_sub(key_start.max(obs_floor)));
                     self.prefix_buf.truncate(key_start);
                     self.prefix_buf.extend(key_bytes);
+                    if obs_skip < key_bytes.len() {
+                        obs.descend_to(&key_bytes[obs_skip..]);
+                    }
 
                     if self.prefix_buf.len() <= k+base_idx {
                         match child_node {
@@ -2978,6 +3011,8 @@ pub(crate) mod read_zipper_core {
                             },
                         }
                     } else {
+                        //The descent overshot `k`, so retract the excess from the observer as well
+                        obs.ascend(self.prefix_buf.len() - (k+base_idx));
                         self.prefix_buf.truncate(k+base_idx);
                     }
 
@@ -4493,36 +4528,37 @@ pub(crate) mod zipper_iteration_tests {
         assert!(zipper.descend_indexed_byte(0).is_some());
         assert_eq!(zipper.child_count(), 6);
 
+        //The observer starts in sync with the zipper, and must track it through every k_path call
+        let mut observed = zipper.path().to_vec();
+
         //Start iterating over all the symbols of length=sym_len
-        assert_eq!(zipper.descend_first_k_path(sym_len+1), true);
+        assert_eq!(zipper.descend_first_k_path(sym_len+1, &mut observed), true);
 
         //This should have taken us to "above:"
         assert_eq!(zipper.path(), b"5:above:");
+        assert_eq!(&observed[..], zipper.path());
 
         //Go to the next symbol.
         // Two interesting things will happen.  First, we blow past "err" because its path length is
         // shorter than `k`.  Second, we will stop in the middle of "erronious".
         // These situations would be caused by an encode bug.  Which hopefully we won't have in real
         // paths. But the parser should recognize the last digit of the path isn't ':'
-        assert_eq!(zipper.to_next_k_path(sym_len+1), true);
+        assert_eq!(zipper.to_next_k_path(sym_len+1, &mut observed), true);
         assert_eq!(zipper.path(), b"5:erroni");
+        assert_eq!(&observed[..], zipper.path());
         assert_ne!(zipper.path().last(), Some(&b':'));
 
         //Now we'll move on to some correctly formed symbols
-        assert_eq!(zipper.to_next_k_path(sym_len+1), true);
-        assert_eq!(zipper.path(), b"5:error:");
-        assert_eq!(zipper.to_next_k_path(sym_len+1), true);
-        assert_eq!(zipper.path(), b"5:hello:");
-        assert_eq!(zipper.to_next_k_path(sym_len+1), true);
-        assert_eq!(zipper.path(), b"5:mucky:");
-        assert_eq!(zipper.to_next_k_path(sym_len+1), true);
-        assert_eq!(zipper.path(), b"5:roger:");
-        assert_eq!(zipper.to_next_k_path(sym_len+1), true);
-        assert_eq!(zipper.path(), b"5:zebra:");
+        for expected in [b"5:error:", b"5:hello:", b"5:mucky:", b"5:roger:", b"5:zebra:"] {
+            assert_eq!(zipper.to_next_k_path(sym_len+1, &mut observed), true);
+            assert_eq!(zipper.path(), expected);
+            assert_eq!(&observed[..], zipper.path());
+        }
 
         //The last step should return false, and put us back to where we began
-        assert_eq!(zipper.to_next_k_path(sym_len+1), false);
+        assert_eq!(zipper.to_next_k_path(sym_len+1, &mut observed), false);
         assert_eq!(zipper.path(), b"5:");
+        assert_eq!(&observed[..], zipper.path());
         assert_eq!(zipper.child_count(), 6);
     }
 
@@ -4536,9 +4572,11 @@ pub(crate) mod zipper_iteration_tests {
 
     pub fn k_path_test2<'a, Z: ZipperIteration>(mut zipper: Z) {
 
-        zipper.descend_first_k_path(5);
+        let mut observed = Vec::<u8>::new();
+        zipper.descend_first_k_path(5, &mut observed);
         let mut count = 1;
-        while zipper.to_next_k_path(5) {
+        while zipper.to_next_k_path(5, &mut observed) {
+            assert_eq!(&observed[..], zipper.path());
             count += 1;
         }
         assert_eq!(count, K_PATH_TEST2_COUNT);
@@ -4551,72 +4589,82 @@ pub(crate) mod zipper_iteration_tests {
         //Scan over the first symbols in the path (lower case letters)
         zipper.descend_to(b"1");
         assert_eq!(zipper.path_exists(), true);
-        assert_eq!(zipper.descend_first_k_path(1), true);
+        assert_eq!(zipper.descend_first_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1b");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1c");
-        assert_eq!(zipper.to_next_k_path(1), false);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), false);
         assert_eq!(zipper.path(), b"1");
 
         //Scan over the nested second symbols in the path (upper case letters)
         zipper.reset();
         zipper.descend_to(b"1a1");
         assert!(zipper.path_exists());
-        assert_eq!(zipper.descend_first_k_path(1), true);
+        assert_eq!(zipper.descend_first_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a1A");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a1B");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a1C");
-        assert_eq!(zipper.to_next_k_path(1), false);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), false);
         assert_eq!(zipper.path(), b"1a1");
 
         //Recursively scan nested symbols within a scan of the first outer symbols
+        //A single observer tracks this whole nested sequence, since the only movements are k_path calls
         zipper.reset();
         zipper.descend_to(b"1");
         assert!(zipper.path_exists());
-        assert_eq!(zipper.descend_first_k_path(1), true);
+        let mut observed = zipper.path().to_vec();
+        assert_eq!(zipper.descend_first_k_path(1, &mut observed), true);
         assert_eq!(zipper.path(), b"1a");
-        assert_eq!(zipper.descend_first_k_path(2), true);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.descend_first_k_path(2, &mut observed), true);
         assert_eq!(zipper.path(), b"1a1A");
-        assert_eq!(zipper.to_next_k_path(2), true);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(2, &mut observed), true);
         assert_eq!(zipper.path(), b"1a1B");
-        assert_eq!(zipper.to_next_k_path(2), true);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(2, &mut observed), true);
         assert_eq!(zipper.path(), b"1a1C");
-        assert_eq!(zipper.to_next_k_path(2), false);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(2, &mut observed), false);
         assert_eq!(zipper.path(), b"1a");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(1, &mut observed), true);
         assert_eq!(zipper.path(), b"1b");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(1, &mut observed), true);
         assert_eq!(zipper.path(), b"1c");
-        assert_eq!(zipper.to_next_k_path(1), false);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(1, &mut observed), false);
         assert_eq!(zipper.path(), b"1");
+        assert_eq!(&observed[..], zipper.path());
 
         //Similar to above, but inter-operating with `descend_indexed_byte`
         zipper.reset();
         zipper.descend_to(b"1");
         assert!(zipper.path_exists());
-        assert_eq!(zipper.descend_first_k_path(1), true);
+        assert_eq!(zipper.descend_first_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a");
         assert!(zipper.descend_indexed_byte(0).is_some());
         assert_eq!(zipper.path(), b"1a1");
-        assert_eq!(zipper.descend_first_k_path(1), true);
+        assert_eq!(zipper.descend_first_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a1A");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a1B");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1a1C");
-        assert_eq!(zipper.to_next_k_path(1), false);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), false);
         assert_eq!(zipper.path(), b"1a1");
         assert_eq!(zipper.ascend(1), 1);
         assert_eq!(zipper.path(), b"1a");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1b");
-        assert_eq!(zipper.to_next_k_path(1), true);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), true);
         assert_eq!(zipper.path(), b"1c");
-        assert_eq!(zipper.to_next_k_path(1), false);
+        assert_eq!(zipper.to_next_k_path(1, &mut ()), false);
         assert_eq!(zipper.path(), b"1");
     }
 
@@ -4675,9 +4723,11 @@ pub(crate) mod zipper_iteration_tests {
 
     pub fn k_path_test4<'a, Z: ZipperIteration>(mut zipper: Z) {
 
-        zipper.descend_first_k_path(5);
+        let mut observed = Vec::<u8>::new();
+        zipper.descend_first_k_path(5, &mut observed);
         let mut count = 1;
-        while zipper.to_next_k_path(5) {
+        while zipper.to_next_k_path(5, &mut observed) {
+            assert_eq!(&observed[..], zipper.path());
             count += 1;
         }
         assert_eq!(count, K_PATH_TEST4_KEYS.len());
@@ -4696,10 +4746,14 @@ pub(crate) mod zipper_iteration_tests {
     pub fn k_path_test5<'a, Z: ZipperIteration>(mut zipper: Z) {
         zipper.descend_to(&[3, 193, 4, 194, 1, 43, 3, 193, 8, 194, 1, 45, 194]);
         assert!(zipper.path_exists());
-        assert_eq!(zipper.descend_first_k_path(2), true);
+        //This straddles a node boundary, so it exercises the multi-byte movement reporting
+        let mut observed = zipper.path().to_vec();
+        assert_eq!(zipper.descend_first_k_path(2, &mut observed), true);
         assert_eq!(zipper.path(), &[3, 193, 4, 194, 1, 43, 3, 193, 8, 194, 1, 45, 194, 1, 46]);
-        assert_eq!(zipper.to_next_k_path(2), false);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(2, &mut observed), false);
         assert_eq!(zipper.path(), &[3, 193, 4, 194, 1, 43, 3, 193, 8, 194, 1, 45, 194]);
+        assert_eq!(&observed[..], zipper.path());
     }
 
     pub const K_PATH_TEST6_KEYS: &[&[u8]] = &[
@@ -4716,33 +4770,33 @@ pub(crate) mod zipper_iteration_tests {
 
             //L0 descent
             descend_f(zipper, &[2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193]);
-            assert!(zipper.descend_first_k_path(1));
+            assert!(zipper.descend_first_k_path(1, &mut ()));
             assert_eq!(zipper.path(), &[2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 75]);
 
             //L1 descent
             descend_f(zipper, &[192, 3, 193, 84, 192, 3, 193]);
-            assert!(zipper.descend_first_k_path(1));
+            assert!(zipper.descend_first_k_path(1, &mut ()));
             assert_eq!(zipper.path(), &[2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 75, 192, 3, 193, 84, 192, 3, 193, 75]);
 
             //L2 descent
             descend_f(zipper, &[128, 131, 193]);
-            assert!(zipper.descend_first_k_path(1));
+            assert!(zipper.descend_first_k_path(1, &mut ()));
             assert_eq!(zipper.path(), &[2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 75, 192, 3, 193, 84, 192, 3, 193, 75, 128, 131, 193, 49]);
 
             //L2 next and ascent
-            assert!(!zipper.to_next_k_path(1));
+            assert!(!zipper.to_next_k_path(1, &mut ()));
             assert_eq!(zipper.path(), &[2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 75, 192, 3, 193, 84, 192, 3, 193, 75, 128, 131, 193]);
 
             ascend_f(zipper, 3);
 
             //L1 next and ascent
-            assert!(!zipper.to_next_k_path(1));
+            assert!(!zipper.to_next_k_path(1, &mut ()));
             assert_eq!(zipper.path(), &[2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 75, 192, 3, 193, 84, 192, 3, 193]);
 
             ascend_f(zipper, 7);
 
             //L0 next
-            assert!(zipper.to_next_k_path(1));
+            assert!(zipper.to_next_k_path(1, &mut ()));
             assert_eq!(zipper.path(), &[2, 197, 97, 120, 105, 111, 109, 3, 193, 61, 4, 193, 97, 192, 192, 3, 193, 84]);
 
             ascend_f(zipper, 17);
@@ -4796,17 +4850,21 @@ pub(crate) mod zipper_iteration_tests {
     pub fn k_path_test7<'a, Z: ZipperIteration>(mut zipper: Z) {
         let keys = K_PATH_TEST7_KEYS;
 
+        //Only k_path calls move this zipper, so one observer tracks the whole descent and re-ascent
+        let mut observed = Vec::<u8>::new();
         for i in 0..keys[0].len() {
             assert_eq!(zipper.path(), &keys[0][..i]);
-            assert!(zipper.descend_first_k_path(1));
+            assert_eq!(&observed[..], zipper.path());
+            assert!(zipper.descend_first_k_path(1, &mut observed));
         }
         for i in (0..keys[0].len()).rev() {
             assert_eq!(zipper.path(), &keys[0][..=i]);
+            assert_eq!(&observed[..], zipper.path());
             if i != 17 {
-                assert!(!zipper.to_next_k_path(1));
+                assert!(!zipper.to_next_k_path(1, &mut observed));
             } else {
-                assert!(zipper.to_next_k_path(1));
-                assert!(!zipper.to_next_k_path(1));
+                assert!(zipper.to_next_k_path(1, &mut observed));
+                assert!(!zipper.to_next_k_path(1, &mut observed));
             }
         }
     }
@@ -4819,10 +4877,13 @@ pub(crate) mod zipper_iteration_tests {
         zipper.reset();
         zipper.descend_to_byte(b'A');
         assert_eq!(zipper.path_exists(), true);
-        assert_eq!(zipper.descend_first_k_path(1), true);
+        let mut observed = zipper.path().to_vec();
+        assert_eq!(zipper.descend_first_k_path(1, &mut observed), true);
         assert_eq!(zipper.path(), b"AB");
-        assert_eq!(zipper.to_next_k_path(1), false);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(1, &mut observed), false);
         assert_eq!(zipper.path(), b"A");
+        assert_eq!(&observed[..], zipper.path());
     }
 
     pub const K_PATH_TEST9_KEYS: &[&[u8]] = &[
@@ -4835,10 +4896,13 @@ pub(crate) mod zipper_iteration_tests {
     pub fn k_path_test9<'a, Z: ZipperIteration>(mut zipper: Z) {
 
         zipper.reset();
-        assert_eq!(zipper.descend_first_k_path(1), true);
+        let mut observed = Vec::<u8>::new();
+        assert_eq!(zipper.descend_first_k_path(1, &mut observed), true);
         assert_eq!(zipper.path(), &[1]);
-        assert_eq!(zipper.to_next_k_path(1), false);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path(1, &mut observed), false);
         assert_eq!(zipper.path(), &[]);
+        assert_eq!(&observed[..], zipper.path());
     }
 }
 
