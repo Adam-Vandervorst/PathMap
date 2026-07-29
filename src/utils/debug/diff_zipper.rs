@@ -46,6 +46,12 @@ impl<A: Zipper, B: Zipper> Zipper for DiffZipper<A, B>
 
 impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZipper<A, B>
 {
+    fn depth(&self) -> usize {
+        let a = self.a.depth();
+        let b = self.b.depth();
+        assert_eq!(a, b);
+        a
+    }
     fn at_root(&self) -> bool {
         let a = self.a.at_root();
         let b = self.b.at_root();

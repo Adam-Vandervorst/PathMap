@@ -45,7 +45,7 @@ impl ZipperPathBuffer for FullZipper {
 }
 
 impl ZipperMoving for FullZipper {
-    fn at_root(&self) -> bool { self.path.len() == 0 }
+    #[inline] fn depth(&self) -> usize { self.path.len() }
     #[inline]
     fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.clear() }
@@ -118,7 +118,7 @@ impl Zipper for NullZipper {
 }
 
 impl ZipperMoving for NullZipper {
-    fn at_root(&self) -> bool { true }
+    #[inline] fn depth(&self) -> usize { 0 }
     #[inline]
     fn focus_byte(&self) -> Option<u8> { None }
     fn reset(&mut self) {}

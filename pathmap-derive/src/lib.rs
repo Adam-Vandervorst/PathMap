@@ -472,6 +472,13 @@ fn derive_poly_zipper_with_traits(
             impl #impl_generics pathmap::zipper::ZipperMoving for #enum_name #ty_generics
             #zipper_moving_where
             {
+                #[inline]
+                fn depth(&self) -> usize {
+                    match self {
+                        #(#variant_arms => inner.depth(),)*
+                    }
+                }
+
                 fn at_root(&self) -> bool {
                     match self {
                         #(#variant_arms => inner.at_root(),)*

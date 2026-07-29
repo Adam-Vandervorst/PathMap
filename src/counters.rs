@@ -104,7 +104,7 @@ impl Counters {
 
         let mut zipper = map.read_zipper();
         while zipper.to_next_step(&mut ()) {
-            let depth = zipper.path().len();
+            let depth = zipper.depth();
 
             counters.run_counter_update(depth);
             if let Some(focus_node) = zipper.get_focus().try_as_tagged() {

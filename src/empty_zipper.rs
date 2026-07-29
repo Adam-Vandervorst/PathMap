@@ -32,7 +32,7 @@ impl Zipper for EmptyZipper {
 }
 
 impl ZipperMoving for EmptyZipper {
-    fn at_root(&self) -> bool { self.path.len() == self.path_start_idx }
+    #[inline] fn depth(&self) -> usize { self.path.len() - self.path_start_idx }
     #[inline]
     fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.truncate(self.path_start_idx) }

@@ -134,8 +134,17 @@ pub trait ZipperSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Zi
 /// on how the zipper was created, and the origin will never be below the root.  The origin of a given zipper
 /// will never change.
 pub trait ZipperMoving: Zipper {
+    /// Returns the number of bytes between the zipper's root and its current focus
+    ///
+    /// This is equal to `self.path().len()` for zippers that implement [`ZipperPath`], although
+    /// implementations are usually able to supply it more cheaply than by measuring a path.  Zippers
+    /// that do not retain a contiguous path buffer must still be able to report their depth.
+    fn depth(&self) -> usize;
+
     /// Returns `true` if the zipper's focus is at its root, and it cannot ascend further, otherwise returns `false`
-    fn at_root(&self) -> bool;
+    fn at_root(&self) -> bool {
+        self.depth() == 0
+    }
 
     /// Returns the byte that was last descended to reach the zipper's focus, or `None` if that
     /// byte is unavailable
@@ -1141,6 +1150,7 @@ macro_rules! zipper_impl_lens {
         fn alloc(&$s) -> A { $e.alloc() }
     };
     (ZipperMoving $s: ident => $e:expr) => {
+        #[inline] fn depth(&$s) -> usize { $e.depth() }
         fn at_root(&$s) -> bool { $e.at_root() }
         #[inline] fn focus_byte(&$s) -> Option<u8> { $e.focus_byte() }
         fn reset(&mut $s) { $e.reset() }
@@ -1866,6 +1876,11 @@ pub(crate) mod read_zipper_core {
 
 
     impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ReadZipperCore<'trie, '_, V, A> {
+        #[inline]
+        fn depth(&self) -> usize {
+            self.prefix_buf.len().saturating_sub(self.origin_path.len())
+        }
+
         fn at_root(&self) -> bool {
             self.prefix_buf.len() <= self.origin_path.len()
         }
@@ -3596,6 +3611,7 @@ pub(crate) mod zipper_moving_tests {
         assert_in_list(zipper.path(), &[b"roma", b"romu"]);
         assert_eq!(zipper.to_prev_sibling_byte(), Some(39)); // focus = rom' (we stepped back to where we began)
         assert_eq!(zipper.path(), b"rom'");
+        assert_eq!(zipper.depth(), zipper.path().len());
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'i']);
         assert_eq!(zipper.ascend(1), 1); // focus = rom
         assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![b'\'', b'a', b'u']); // all three options we visited
@@ -3629,6 +3645,8 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zipper.child_count(), 3);
         zipper.descend_to(b"an");
         assert_eq!(zipper.path(), b"man");
+        //`depth` is relative to the zipper's root, not the map root
+        assert_eq!(zipper.depth(), zipper.path().len());
         assert_eq!(zipper.child_count(), 2);
         zipper.descend_to(b"e");
         assert_eq!(zipper.path(), b"mane");
@@ -3645,6 +3663,7 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zipper.child_count(), 3);
         assert_eq!(zipper.ascend_until(), 1);
         assert_eq!(zipper.path(), b"");
+        assert_eq!(zipper.depth(), 0);
         assert_eq!(zipper.child_count(), 1);
         assert_eq!(zipper.at_root(), true);
         assert_eq!(zipper.ascend_until(), 0);
@@ -3819,12 +3838,16 @@ pub(crate) mod zipper_moving_tests {
         zip.descend_to(b"AAaDDd");
         assert!(!zip.path_exists());
         assert_eq!(zip.path(), b"AAaDDd");
+        assert_eq!(zip.depth(), zip.path().len());
         assert_eq!(zip.ascend_until(), 3);
         assert_eq!(zip.path(), b"AAa");
+        assert_eq!(zip.depth(), zip.path().len());
         assert_eq!(zip.ascend_until(), 1);
         assert_eq!(zip.path(), b"AA");
+        assert_eq!(zip.depth(), zip.path().len());
         assert_eq!(zip.ascend_until(), 2);
         assert_eq!(zip.path(), b"");
+        assert_eq!(zip.depth(), 0);
         assert_eq!(zip.ascend_until(), 0);
     }
 

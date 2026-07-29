@@ -2525,6 +2525,9 @@ where Storage: AsRef<[u8]>
 impl<'tree, Storage, Value> ZipperMoving for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
+    #[inline]
+    fn depth(&self) -> usize { self.path.len().saturating_sub(self.origin_depth) }
+
     /// Returns `true` if the zipper cannot ascend further, otherwise returns `false`
     fn at_root(&self) -> bool { self.path.len() <= self.origin_depth }
 

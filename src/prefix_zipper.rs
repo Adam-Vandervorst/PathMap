@@ -342,6 +342,11 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
     where
         Z: ZipperMoving
 {
+    #[inline]
+    fn depth(&self) -> usize {
+        self.path.len() - self.origin_depth
+    }
+
     fn at_root(&self) -> bool {
         match self.position {
             PrefixPos::Prefix { valid } => valid == 0,

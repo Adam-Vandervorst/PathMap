@@ -61,7 +61,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     /// Actual focus factor calculation.
     /// Returns a valid index into `self.factor_paths`, truncating to parents if requested.
     fn factor_idx(&self, truncate_up: bool) -> Option<usize> {
-        let len = self.path().len();
+        let len = self.depth();
         let mut factor = self.factor_paths.len().checked_sub(1)?;
         while truncate_up && self.factor_paths[factor] == len {
             factor = factor.checked_sub(1)?;
@@ -94,7 +94,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// Remove top factors if they are at root
     fn exit_factors(&mut self) -> bool {
-        let len = self.path().len();
+        let len = self.depth();
         let mut exited = false;
         while self.factor_paths.last() == Some(&len) {
             self.factor_paths.pop();
@@ -106,7 +106,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// Enter factors at current location if we're on the end of the factor's path
     fn enter_factors(&mut self) -> bool {
-        let len = self.path().len();
+        let len = self.depth();
         // enter the next factor if we can
         let mut entered = false;
         if self.is_path_end() {
@@ -332,8 +332,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         PrimaryZ: ZipperMoving + ZipperPath,
         SecondaryZ: ZipperMoving + ZipperPath,
 {
-    fn at_root(&self) -> bool {
-        self.path().is_empty()
+    #[inline]
+    fn depth(&self) -> usize {
+        self.primary.depth()
     }
     #[inline]
     fn focus_byte(&self) -> Option<u8> {

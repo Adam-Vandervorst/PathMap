@@ -60,6 +60,7 @@ impl<Z: Zipper> Zipper for PathTracker<Z> {
 }
 
 impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
+    #[inline] fn depth(&self) -> usize { self.path.len() - self.origin_len }
     #[inline] fn at_root(&self) -> bool { self.zipper.at_root() }
     fn reset(&mut self) {
         self.zipper.reset();
