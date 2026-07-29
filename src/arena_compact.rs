@@ -2269,26 +2269,29 @@ where Storage: AsRef<[u8]>
         })
     }
 
-    fn ascend_invalid(&mut self, limit: Option<&mut usize>) -> bool {
+    /// Ascends any non-existent portion of the path.  Returns the number of steps ascended
+    ///
+    /// `limit` sets an upper bound on the number of steps that will be ascended
+    fn ascend_invalid(&mut self, limit: Option<usize>) -> usize {
         if self.invalid == 0 {
-            return true;
+            return 0;
         }
         let len = self.path.len();
         let mut invalid_cut = self.invalid.min(len - self.origin_depth);
         if let Some(limit) = limit {
-            invalid_cut = invalid_cut.min(*limit);
-            *limit -= invalid_cut;
+            invalid_cut = invalid_cut.min(limit);
         }
         self.path.truncate(len - invalid_cut);
         self.invalid = self.invalid - invalid_cut;
-        self.invalid == 0
+        invalid_cut
     }
 
     fn ascend_to_branch(&mut self, need_value: bool) -> usize {
         self.trace_pos();
         let start_len = self.path.len();
         if self.invalid > 0 {
-            if !self.ascend_invalid(None) {
+            self.ascend_invalid(None);
+            if self.invalid > 0 {
                 return start_len - self.path.len();
             }
 
@@ -2727,7 +2730,8 @@ where Storage: AsRef<[u8]>
     fn ascend(&mut self, steps: usize) -> usize {
         self.trace_pos();
         let mut remaining = steps;
-        if !self.ascend_invalid(Some(&mut remaining)) {
+        remaining -= self.ascend_invalid(Some(remaining));
+        if self.invalid > 0 {
             return steps - remaining;
         }
         while let Some(top_frame) = self.stack.last_mut() {
