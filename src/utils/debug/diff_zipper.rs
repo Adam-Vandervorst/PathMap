@@ -127,16 +127,17 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         a
     }
     fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
-        let mut path_a = Vec::new();
-        let mut path_b = Vec::new();
-        let a = self.a.descend_until(&mut path_a);
-        let b = self.b.descend_until(&mut path_b);
+        //`a`'s descent is forwarded to the caller as it happens, since a digest can't reconstruct
+        //the bytes afterwards.  `b`'s is only hashed, and the two digests are compared.
+        let mut hash_a = HashObserver::default();
+        let mut hash_b = HashObserver::default();
+        let a = self.a.descend_until(&mut (&mut hash_a, &mut *obs));
+        let b = self.b.descend_until(&mut hash_b);
         if self.log_moves {
             println!("DiffZipper: descend_until")
         }
         assert_eq!(a, b);
-        assert_eq!(path_a, path_b);
-        obs.descend_to(&path_a);
+        assert_eq!(hash_a, hash_b);
         a
     }
     fn ascend(&mut self, steps: usize) -> usize {

@@ -620,6 +620,49 @@ impl<Obs: PathObserver> PathObserver for TruncatingObserver<'_, Obs> {
     }
 }
 
+/// A [PathObserver] that reduces the path it observes to a 64-bit digest
+///
+/// The digest is independent of how the movements were chunked, so +`12` +`34`, +`1234`, and
+/// +`1` +`23` +`4` all produce the same value.  This makes it suitable for comparing two zippers
+/// that visit identical paths but report them in different-sized pieces.
+///
+/// Note this is invariance over *chunking*, not over byte order.  So +`4321` puts different bytes
+/// at every depth and therefore does not match +`1234`.
+///
+/// Ascending zeroes the digest, because the bytes being ascended over aren't reported and their
+/// contributions can't be removed.  Two observers tracking the same movements zero together, so they
+/// still agree; the digest simply stops carrying information from movements prior to the last ascend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HashObserver {
+    /// The digest of the observed path
+    pub hash: u64,
+    /// The depth of the observed path
+    pub depth: usize,
+}
+
+impl PathObserver for HashObserver {
+    #[inline]
+    fn descend_to(&mut self, path: &[u8]) {
+        for &byte in path {
+            self.descend_to_byte(byte);
+        }
+    }
+    #[inline]
+    fn descend_to_byte(&mut self, byte: u8) {
+        //SplitMix64's finalizer, a bijection, so distinct (depth, byte) pairs contribute
+        //distinct values
+        let mut z = (((self.depth as u64) << 8) | byte as u64).wrapping_mul(0x9E3779B97F4A7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        self.hash ^= z ^ (z >> 27);
+        self.depth += 1;
+    }
+    #[inline]
+    fn ascend(&mut self, steps: usize) {
+        self.hash = 0;
+        self.depth = self.depth.saturating_sub(steps);
+    }
+}
+
 /// An interface to access values through a [Zipper] that cannot modify the trie.  Allows
 /// references with lifetimes that may outlive the zipper
 ///
