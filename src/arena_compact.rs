@@ -3342,18 +3342,39 @@ mod tests {
 
     /// Graft `leaf` under every prefix, `levels` times over, so each level
     /// shares the whole trie built by the level below it
-    fn make_shared_map(prefixes: &[&[u8]], levels: usize, leaf: PathMap<u64>) -> PathMap<u64> {
+    /// Equivalent to cartesian `(prefix**levels)*leaf`
+    fn make_shared_map(prefix: &PathMap<u64>, levels: usize, leaf: &PathMap<u64>) -> PathMap<u64> {
         use crate::zipper::ZipperWriting;
-        let mut map = leaf;
+        let mut map = leaf.clone();
         for _level in 0..levels {
-            let mut next = PathMap::<u64>::new();
-            for prefix in prefixes {
-                let mut wz = next.write_zipper_at_path(prefix);
+            let mut next = prefix.clone();
+            let mut rpz = prefix.read_zipper();
+            let mut wz = next.write_zipper();
+            // wz.to_next_val does not exist, so have to iterate over rz
+            while rpz.to_next_val() {
+                wz.reset();
+                wz.descend_to(rpz.path());
+                wz.remove_val(false);
                 wz.graft(&map.read_zipper());
             }
             map = next;
         }
         map
+    }
+
+    /// Create a fully-populated map with depth `depth`.
+    /// The nodes are maximally shared.
+    /// There are 256**depth paths in the resulting map.
+    fn make_fully_populated_shared(depth: usize) -> PathMap<u64> {
+        if depth == 0 {
+            let mut map = PathMap::new();
+            map.set_val_at(b"", 1);
+            return map;
+        }
+        let paths: [u8; 256] = std::array::from_fn(|n| n as u8);
+        let pairs = paths.iter().map(|p| (std::slice::from_ref(p), 1));
+        let full = PathMap::from_iter(pairs);
+        make_shared_map(&full, depth - 1, &full)
     }
 
     /// With nothing to re-use, the cached builder must lay out the same bytes
@@ -3400,8 +3421,9 @@ mod tests {
         ];
         for (li, leaf) in leaves.iter().enumerate() {
             for (pi, prefixes) in prefix_sets.iter().enumerate() {
+                let prefixes = PathMap::from_iter(prefixes.iter().map(|p| (p, 1)));
                 for levels in 1..4 {
-                    let map = make_shared_map(prefixes, levels, leaf.clone());
+                    let map = make_shared_map(&prefixes, levels, &leaf);
                     check_cached_build(&format!("shared l{li} p{pi} lv{levels}"), &map, false);
                 }
             }
@@ -3430,8 +3452,10 @@ mod tests {
     #[test]
     fn test_act_from_zipper_cached_size() {
         for prefix_set in [&[b"a".as_slice(), b"b", b"c", b"d"][..],
-                           &[b"aa".as_slice(), b"bb", b"cc", b"dd"][..]] {
-            let map = make_shared_map(prefix_set, 6, PathMap::from_iter([("leaf", 1u64)]));
+                           &[b"aa".as_slice(), b"bb", b"cc", b"dd"][..]]
+        {
+            let prefixes = PathMap::from_iter(prefix_set.iter().map(|p| (p, 1)));
+            let map = make_shared_map(&prefixes, 6, &PathMap::from_iter([("leaf", 1u64)]));
             let plain = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
             let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
             assert_eq!(map.val_count(), 4096);
@@ -3451,12 +3475,7 @@ mod tests {
         use crate::{utils::ByteMask, zipper::Zipper};
         const DEPTH: usize = 5;
 
-        let bytes: [u8; 256] = std::array::from_fn(|b| b as u8);
-        let prefixes: Vec<&[u8]> = bytes.iter().map(std::slice::from_ref).collect();
-        // The leaf's value sits at its root, so grafting it under every byte
-        // DEPTH times over puts a value on every DEPTH-byte path and nowhere
-        // else
-        let map = make_shared_map(&prefixes, DEPTH, PathMap::from_iter([("", 1u64)]));
+        let map = make_fully_populated_shared(DEPTH);
         let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
 
         // Each level is one branch node plus the 256 copies of the level below
@@ -3502,8 +3521,9 @@ mod tests {
     /// yields the tree the plain builder would have written
     #[test]
     fn test_act_from_zipper_cached_round_trip() {
-        let map = make_shared_map(&[b"aa", b"bb"], 3,
-            PathMap::from_iter([("x", 1u64), ("y", 2), ("zzzz", 3)]));
+        let prefixes = PathMap::from_iter([(b"aa", 1), (b"bb", 1)]);
+        let leaf = PathMap::from_iter([("x", 1u64), ("y", 2), ("zzzz", 3)]);
+        let map = make_shared_map(&prefixes, 3, &leaf);
         let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
         let plain = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
         let round_trip = ArenaCompactTree::from_zipper(cached.read_zipper_u64(), |&v: &u64| v);
