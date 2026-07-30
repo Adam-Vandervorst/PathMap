@@ -187,7 +187,7 @@ impl Counters {
     }
 }
 
-pub fn print_traversal<'a, V: 'a + Clone + Unpin, Z: ZipperIteration + Clone>(zipper: &Z) {
+pub fn print_traversal<'a, V: 'a + Clone + Unpin, Z: ZipperIteration + ZipperPath + Clone>(zipper: &Z) {
     let mut zipper = zipper.clone();
 
     println!("{:?}", zipper.path());

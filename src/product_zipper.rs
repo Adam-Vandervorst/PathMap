@@ -396,8 +396,8 @@ pub struct ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
 impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperPath,
-        SecondaryZ: ZipperMoving + ZipperPath,
+        PrimaryZ: ZipperMoving,
+        SecondaryZ: ZipperMoving,
 {
     /// Creates a new `ProductZipper` from the provided zippers
     pub fn new<ZipperList>(primary: PrimaryZ, other_zippers: ZipperList) -> Self
@@ -628,8 +628,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperReadOnlyConditionalValues<'trie, V>
 impl<'trie, PrimaryZ, SecondaryZ, V> Zipper for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperPath + Zipper,
-        SecondaryZ: ZipperMoving + ZipperPath + Zipper,
+        PrimaryZ: ZipperMoving + Zipper,
+        SecondaryZ: ZipperMoving + Zipper,
 {
     fn path_exists(&self) -> bool {
         if let Some(idx) = self.factor_idx(true) {
@@ -664,8 +664,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V> Zipper for ProductZipperG<'trie, PrimaryZ, 
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperPath,
-        SecondaryZ: ZipperMoving + ZipperPath,
+        PrimaryZ: ZipperMoving,
+        SecondaryZ: ZipperMoving,
 {
     #[inline]
     fn depth(&self) -> usize {
@@ -836,7 +836,7 @@ pub trait ZipperProduct : ZipperMoving + Zipper + ZipperAbsolutePath + ZipperIte
     /// The returned slice will have a length of [`focus_factor`](ZipperProduct::focus_factor), so the factor
     /// containing the current focus has will not be included.
     ///
-    /// Indices will be offsets into the buffer returned by [path](ZipperMoving::path).  To get an offset into
+    /// Indices will be offsets into the buffer returned by [path](ZipperPath::path).  To get an offset into
     /// [origin_path](ZipperAbsolutePath::origin_path), add the length of the prefix path from
     /// [root_prefix_path](ZipperAbsolutePath::root_prefix_path).
     fn path_indices(&self) -> &[usize];

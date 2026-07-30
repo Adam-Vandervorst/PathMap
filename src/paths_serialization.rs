@@ -49,7 +49,7 @@ pub struct DeserializationStats {
 pub fn serialize_paths<'a, V, W, RZ>(rz: RZ, target: &mut W) -> std::io::Result<SerializationStats>
   where
     V: TrieValue,
-    RZ: ZipperReadOnlyConditionalIteration<'a, V>,
+    RZ: ZipperReadOnlyConditionalIteration<'a, V> + ZipperPath,
     W: std::io::Write
 {
   serialize_paths_with_auxdata(rz, target, |_, _, _| {})

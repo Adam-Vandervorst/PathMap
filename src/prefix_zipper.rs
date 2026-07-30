@@ -97,7 +97,7 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
 
     /// Sets the portion of the zipper's `prefix` to treat as the [`root_prefix_path`](ZipperAbsolutePath::root_prefix_path)
     ///
-    /// The remaining portion of the `prefix` will be part of the [`path`](ZipperMoving::path).
+    /// The remaining portion of the `prefix` will be part of the [`path`](ZipperPath::path).
     /// This method resets the zipper, and typically it is called immediately after creating the `PrefixZipper`.
     pub fn set_root_prefix_path(&mut self, root_prefix_path: &[u8]) -> Result<(), &'static str> {
         if !starts_with(&*self.prefix, root_prefix_path) {

@@ -854,10 +854,9 @@ pub trait ZipperReadOnlySubtries<'a, V: Clone + Send + Sync, A: Allocator = Glob
 /// An interface for advanced [Zipper] movements used for various types of iteration; such as iterating
 /// every value, or iterating all paths descending from a common root at a certain depth
 ///
-/// NOTE: the [ZipperPath] bound will be removed when these methods are changed to take a
-/// [PathObserver], as [ZipperMoving::descend_until] does.  Until then, the `k_path` methods locate
-/// themselves by measuring [`path`](ZipperPath::path), so a zipper must maintain one to iterate.
-pub trait ZipperIteration: ZipperMoving + ZipperPath {
+/// Every method takes a [PathObserver], so these movements are available to "blind" zippers that do
+/// not maintain a contiguous path buffer of their own.
+pub trait ZipperIteration: ZipperMoving {
     /// Systematically advances to the next value accessible from the zipper, traversing in a depth-first
     /// order
     ///
@@ -4467,7 +4466,7 @@ pub(crate) mod zipper_iteration_tests {
     pub const ZIPPER_ITER_TEST1_KEYS: &[&[u8]] = &[b"arrow", b"bow", b"cannon", b"rom'i", b"roman", b"romane", b"romanus", b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus"];
 
     /// Simply calls `to_next_val` over the whole trie, ensuring all paths are visited exactly once
-    pub fn zipper_iter_test1<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn zipper_iter_test1<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
         let keys = ZIPPER_ITER_TEST1_KEYS;
 
         //Test iteration of the whole tree
@@ -4490,7 +4489,7 @@ pub(crate) mod zipper_iteration_tests {
         }).collect()
     }
 
-    pub fn zipper_iter_test2<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn zipper_iter_test2<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
         //Test iterating using a zipper that has a root that is not the map root
         let mut count: usize = 0;
@@ -4517,7 +4516,7 @@ pub(crate) mod zipper_iteration_tests {
         b":9:muckymuck:5:raker:",
     ];
 
-    pub fn k_path_test1<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test1<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
         //This is a cheesy way to encode lengths, but it's is more readable than unprintable chars
         assert!(zipper.descend_indexed_byte(0).is_some());
@@ -4570,7 +4569,7 @@ pub(crate) mod zipper_iteration_tests {
         }).collect()
     }
 
-    pub fn k_path_test2<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test2<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
         let mut observed = Vec::<u8>::new();
         zipper.descend_first_k_path(5, &mut observed);
@@ -4584,7 +4583,7 @@ pub(crate) mod zipper_iteration_tests {
 
     pub const K_PATH_TEST3_KEYS: &[&[u8]] = &[b":1a1A", b":1a1B", b":1a1C", b":1b1A", b":1b1B", b":1b1C", b":1c1A"];
 
-    pub fn k_path_test3<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test3<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
         //Scan over the first symbols in the path (lower case letters)
         zipper.descend_to(b"1");
@@ -4721,7 +4720,7 @@ pub(crate) mod zipper_iteration_tests {
         &[192, 215, 69, 171, 218, 187, 202, 120, 92, 33, 14, 77, 34, 46, 40, 93, 135, 117, 152],
     ];
 
-    pub fn k_path_test4<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test4<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
         let mut observed = Vec::<u8>::new();
         zipper.descend_first_k_path(5, &mut observed);
@@ -4743,7 +4742,7 @@ pub(crate) mod zipper_iteration_tests {
         &[3, 193, 4, 194, 1, 43, 3, 193, 34, 193],
     ];
 
-    pub fn k_path_test5<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test5<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
         zipper.descend_to(&[3, 193, 4, 194, 1, 43, 3, 193, 8, 194, 1, 45, 194]);
         assert!(zipper.path_exists());
         //This straddles a node boundary, so it exercises the multi-byte movement reporting
@@ -4763,9 +4762,9 @@ pub(crate) mod zipper_iteration_tests {
 
     /// This tests the k_path methods in the context of using them recursively, to shake out
     /// bugs caused by invalidating the iter token
-    pub fn k_path_test6<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test6<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
-        fn test_loop<'a, Z: ZipperMoving + ZipperIteration, AscendF: Fn(&mut Z, usize), DescendF: Fn(&mut Z, &[u8])>(zipper: &mut Z, descend_f: DescendF, ascend_f: AscendF) {
+        fn test_loop<'a, Z: ZipperMoving + ZipperIteration + ZipperPath, AscendF: Fn(&mut Z, usize), DescendF: Fn(&mut Z, &[u8])>(zipper: &mut Z, descend_f: DescendF, ascend_f: AscendF) {
             zipper.reset();
 
             //L0 descent
@@ -4847,7 +4846,7 @@ pub(crate) mod zipper_iteration_tests {
     ];
 
     /// This uses the k_path methods to descend and then re-ascend a trie, one step at a time.
-    pub fn k_path_test7<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test7<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
         let keys = K_PATH_TEST7_KEYS;
 
         //Only k_path calls move this zipper, so one observer tracks the whole descent and re-ascent
@@ -4872,7 +4871,7 @@ pub(crate) mod zipper_iteration_tests {
     pub const K_PATH_TEST8_KEYS: &[&[u8]] = &[b"ABCDEFGHIJKLMNOPQRSTUVWXYZ", b"ab",];
 
     /// Tests `..k_path` after `descend_to_byte`
-    pub fn k_path_test8<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test8<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
         zipper.reset();
         zipper.descend_to_byte(b'A');
@@ -4893,7 +4892,7 @@ pub(crate) mod zipper_iteration_tests {
     ];
 
     /// Tests `..k_path` in a subtrie without attitional branches to descend, when the outer trie does have branches
-    pub fn k_path_test9<'a, Z: ZipperIteration>(mut zipper: Z) {
+    pub fn k_path_test9<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
 
         zipper.reset();
         let mut observed = Vec::<u8>::new();
