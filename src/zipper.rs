@@ -2481,7 +2481,7 @@ pub(crate) mod read_zipper_core {
             let base_idx = if self.path_len() >= k {
                 self.prefix_buf.len() - k
             } else {
-                self.origin_path.len()
+                return false
             };
             //De-regularize the zipper
             debug_assert!(self.is_regularized());
