@@ -2862,10 +2862,11 @@ where Storage: AsRef<[u8]>
                 depth -= 1;
                 continue 'outer;
             }
-            let byte = self.descend_indexed_byte(idx);
-            assert!(byte.is_some());
             //The loops above already ascended, so this is a plain descent of one byte
-            obs.descend_to_byte(byte.unwrap());
+            match self.descend_indexed_byte(idx) {
+                Some(byte) => obs.descend_to_byte(byte),
+                None => unreachable!("idx was bounds-checked against child_count above"),
+            }
             depth += 1;
             for _ii in 0..k - depth {
                 match self.descend_first_byte() {

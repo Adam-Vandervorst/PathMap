@@ -2757,11 +2757,15 @@ pub(crate) mod read_zipper_core {
                     //re-supplied identically by `key_bytes` (checked above), so the focus stays at or
                     //below the root.  The observer tracks the path from the root, so `key_bytes` is
                     //reported from the point where the rewind lands relative to it.
+                    //`get` rather than indexing, so the slicing carries no panic path and can be
+                    //optimized away entirely when `obs` discards what it is given
                     let obs_skip = origin_path_len.saturating_sub(key_start);
                     obs.ascend(self.prefix_buf.len() - key_start - obs_skip);
                     self.prefix_buf.truncate(key_start);
                     self.prefix_buf.extend(key_bytes);
-                    obs.descend_to(&key_bytes[obs_skip..]);
+                    if let Some(reported) = key_bytes.get(obs_skip..) {
+                        obs.descend_to(reported);
+                    }
 
                     match child_node {
                         None => {},
@@ -2992,12 +2996,14 @@ pub(crate) mod read_zipper_core {
                     let key_start = self.node_key_start();
                     //`key_bytes` re-supplies everything from `key_start`, so the observer retreats to
                     //that point (or the origin, whichever is lower) and re-descends
+                    //`get` rather than indexing, so the slicing carries no panic path and can be
+                    //optimized away entirely when `obs` discards what it is given
                     let obs_skip = obs_floor.saturating_sub(key_start);
                     obs.ascend(self.prefix_buf.len().saturating_sub(key_start.max(obs_floor)));
                     self.prefix_buf.truncate(key_start);
                     self.prefix_buf.extend(key_bytes);
-                    if obs_skip < key_bytes.len() {
-                        obs.descend_to(&key_bytes[obs_skip..]);
+                    if let Some(reported) = key_bytes.get(obs_skip..) {
+                        obs.descend_to(reported);
                     }
 
                     if self.prefix_buf.len() <= k+base_idx {
