@@ -1367,6 +1367,10 @@ struct CachedFrame {
 /// - the cached cata's algebra is an `Fn`, so writing to the arena from it
 ///   would need interior mutability.
 ///
+/// TODO: GOAT: introduce an abstraction/modify `into_cata_jumping_cached`,
+///  to address the problems listed above.  The suggested API is to have
+///  `FnMut` variant for the caching catamorphism.
+///
 /// Sharing that begins in the middle of a jumped chain is still missed, since
 /// finding it would mean giving up `descend_until` and stepping byte by byte.
 ///
@@ -3365,6 +3369,10 @@ mod tests {
     /// Create a fully-populated map with depth `depth`.
     /// The nodes are maximally shared.
     /// There are 256**depth paths in the resulting map.
+    ///
+    /// TODO: Use `crate::utils::ints::gen_int_range` instead?
+    ///  Reason it was not used -- in the moment, the promise of sharing nodes
+    ///  in the `gen_int_range` was not clear.  This uses sharing explicitly.
     fn make_fully_populated_shared(depth: usize) -> PathMap<u64> {
         if depth == 0 {
             let mut map = PathMap::new();
