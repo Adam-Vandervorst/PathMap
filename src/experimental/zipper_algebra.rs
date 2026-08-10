@@ -515,13 +515,11 @@ where
         Out: ZipperWriting<V, A>,
     {
         if *lhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(lhs, *lhs_grafts, false);
-            *lhs_grafts = ByteMask::EMPTY;
+            do_graft(out, lhs, std::mem::take(lhs_grafts));
         }
 
         if *rhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(rhs, *rhs_grafts, false);
-            *rhs_grafts = ByteMask::EMPTY;
+            do_graft(out, rhs, std::mem::take(rhs_grafts));
         }
     }
 
@@ -731,18 +729,15 @@ where
         Out: ZipperWriting<V, A>,
     {
         if *lhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(lhs, *lhs_grafts, false);
-            *lhs_grafts = ByteMask::EMPTY;
+            do_graft(out, lhs, std::mem::take(lhs_grafts));
         }
 
         if *mid_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(mid, *mid_grafts, false);
-            *mid_grafts = ByteMask::EMPTY;
+            do_graft(out, mid, std::mem::take(mid_grafts));
         }
 
         if *rhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(rhs, *rhs_grafts, false);
-            *rhs_grafts = ByteMask::EMPTY;
+            do_graft(out, rhs, std::mem::take(rhs_grafts));
         }
     }
 
@@ -1016,23 +1011,19 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
         Out: ZipperWriting<V, A>,
     {
         if *z0_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z0, *z0_grafts, false);
-            *z0_grafts = ByteMask::EMPTY;
+            do_graft(out, z0, std::mem::take(z0_grafts));
         }
 
         if *z1_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z1, *z1_grafts, false);
-            *z1_grafts = ByteMask::EMPTY;
+            do_graft(out, z1, std::mem::take(z1_grafts));
         }
 
         if *z2_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z2, *z2_grafts, false);
-            *z2_grafts = ByteMask::EMPTY;
+            do_graft(out, z2, std::mem::take(z2_grafts));
         }
 
         if *z3_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z3, *z3_grafts, false);
-            *z3_grafts = ByteMask::EMPTY;
+            do_graft(out, z3, std::mem::take(z3_grafts));
         }
     }
 
@@ -1631,6 +1622,37 @@ fn with_k<const K: usize, T, R>(
     f(refs)
 }
 
+fn do_graft<V, A, Z, Out>(dst: &mut Out, src: &Z, grafts: ByteMask)
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    Out: ZipperWriting<V, A>,
+    Z: ZipperInfallibleSubtries<V, A>,
+{
+    match grafts.count_bits() {
+        0 => {}
+        1 => {
+            let byte = grafts.indexed_bit::<true>(0).expect("one bit set");
+            dst.descend_to_byte(byte);
+            dst.graft_src_at(src, &[byte]);
+            dst.ascend_byte();
+        }
+        2 => {
+            let first_byte = grafts.indexed_bit::<true>(0).expect("some bit set");
+            dst.descend_to_byte(first_byte);
+            dst.graft_src_at(src, &[first_byte]);
+            dst.ascend_byte();
+            let second_byte = grafts.next_bit(first_byte).expect("two bits set");
+            dst.descend_to_byte(second_byte);
+            dst.graft_src_at(src, &[second_byte]);
+            dst.ascend_byte();
+        }
+        _ => {
+            dst.graft_masked_branches(src, grafts, false);
+        }
+    }
+}
+
 // - The function is fully monomorphized over `Z` and `N` and uses a bitmask (`active`)
 //   to track participating zippers.
 // - Small frontiers (`k ≤ 4`) are dispatched to specialized implementations
@@ -1674,8 +1696,7 @@ where
     {
         for_each_bit(active, |i| {
             if grafts[i] != ByteMask::EMPTY {
-                out.graft_masked_branches(&zs[i], grafts[i], false);
-                grafts[i] = ByteMask::EMPTY;
+                do_graft(out, &zs[i], std::mem::take(&mut grafts[i]));
             }
         });
     }
