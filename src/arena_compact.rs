@@ -902,6 +902,71 @@ impl ArenaCompactTree<Vec<u8>> {
         build_arena_tree(zipper, map)
     }
 
+    /// Construct [ArenaCompactTree] from a read zipper, re-using the subtries
+    /// that are structurally shared in the source trie.
+    ///
+    /// This behaves exactly like [`Self::from_zipper`], except that whenever
+    /// the source zipper reports the same
+    /// [`shared_node_id`](ZipperConcrete::shared_node_id) for two positions
+    /// (i.e. both paths lead into the same in-memory node), the arena bytes
+    /// below that node are written only once, and the second occurrence points
+    /// back at them.  For tries built by grafting the same subtrie in many
+    /// places this can shrink the output (and the time to produce it) by
+    /// orders of magnitude; for a trie with no sharing it produces the same
+    /// bytes as [`Self::from_zipper`], at the cost of maintaining the reuse
+    /// map.
+    ///
+    /// ## Why the shared node is still copied
+    ///
+    /// The ACT format requires all children of a node to be laid out
+    /// contiguously, so that a parent only stores the offset of its *first*
+    /// child.  A shared subtrie therefore cannot be pointed at from two
+    /// different sibling runs: its top node has to live inside each run it
+    /// belongs to.  What gets re-used is everything the top node references —
+    /// its line data and its own children, which is where essentially all of
+    /// the bytes are.  So each additional occurrence of a shared subtrie costs
+    /// one copied node (a handful of bytes) rather than the whole subtrie.
+    ///
+    /// Note that a source position carrying a value is never reported as
+    /// shared (values live outside the node), so such subtries are re-emitted
+    /// in full, exactly as [`Self::from_zipper`] does.  The same goes for
+    /// sharing that starts in the middle of a run of single-child bytes, which
+    /// this traversal jumps over in one step.
+    ///
+    /// # Examples
+    /// ```
+    /// use pathmap::{PathMap, arena_compact::ArenaCompactTree};
+    /// use pathmap::zipper::{ZipperMoving, ZipperWriting};
+    /// // Build a trie where the same subtrie hangs off of many paths
+    /// let leaf = PathMap::from_iter(["x", "y", "z"].iter().map(|i| (i, ())));
+    /// let mut btm = PathMap::<()>::new();
+    /// for prefix in ["a", "b", "c", "d"] {
+    ///     let mut wz = btm.write_zipper_at_path(prefix.as_bytes());
+    ///     wz.graft(&leaf.read_zipper());
+    /// }
+    /// let plain = ArenaCompactTree::from_zipper(btm.read_zipper(), |_v| 0);
+    /// let shared = ArenaCompactTree::from_zipper_cached(btm.read_zipper(), |_v| 0);
+    /// assert!(shared.get_data().len() < plain.get_data().len());
+    /// // ... and both represent the same trie
+    /// for path in ["ax", "by", "cz", "dx"] {
+    ///     let mut zipper = shared.read_zipper();
+    ///     assert!(zipper.descend_to_existing(path) == path.len());
+    /// }
+    /// ```
+    ///
+    /// Unlike [`Self::from_zipper`], this takes a zipper proper rather than
+    /// anything [Catamorphism]ic: it needs to ask the source about node
+    /// identity as it walks, so it drives the traversal itself.
+    #[inline]
+    pub fn from_zipper_cached<V, Z, M>(zipper: Z, map: M) -> Self
+    where
+        Z: Zipper + ZipperMoving + ZipperValues<V> + ZipperConcrete
+            + ZipperAbsolutePath + ZipperPathBuffer,
+        M: Fn(&V) -> u64,
+    {
+        build_arena_tree_cached(zipper, map)
+    }
+
     fn push_v(&mut self, node: &Node) -> NodeId {
         self.push(node).expect("push to vec doesn't fail")
     }
@@ -1113,6 +1178,308 @@ fn build_arena_tree<V, Z, F>(zipper: Z, map_val: F) -> ArenaCompactTree<Vec<u8>>
         line.child = first_child;
         Node::Line(line)
     });
+    let _root_id = arena.set_root(&root);
+    arena.finalize().unwrap();
+    arena
+}
+
+/// State for [build_arena_tree_cached]
+///
+/// Holds the arena being written, plus the map that makes re-use possible:
+/// [`ZipperConcrete::shared_node_id`] of a source position -> the [Node]
+/// describing the trie at that position, as already written into the arena.
+struct CachedBuilder {
+    arena: ArenaCompactTree<Vec<u8>>,
+    cache: HashMap<u64, Node>,
+}
+
+impl CachedBuilder {
+    /// Build the node for a position, `prefix.len()` bytes above a position
+    /// with `bytemask` / `children` / `value`
+    ///
+    /// This is [build_arena_tree]'s algebra verbatim, so both builders lay out
+    /// the same bytes for the parts of the trie that aren't re-used.
+    fn make_node(
+        &mut self, bytemask: ByteMask, children: &[Node], prefix: &[u8], value: Option<u64>
+    ) -> Node {
+        let mut first_child: Option<NodeId> = None;
+        for child in children.iter() {
+            let id = self.arena.push_v(child);
+            first_child = first_child.or(Some(id));
+        }
+        let node = NodeBranch { bytemask, first_child, value };
+        if prefix.is_empty() {
+            return Node::Branch(node);
+        }
+
+        let mut line = NodeLine::empty();
+        line.path = self.arena.add_path(prefix);
+
+        if !children.is_empty() {
+            first_child = Some(self.arena.push_v(&Node::Branch(node)));
+        } else {
+            line.value = value;
+        }
+
+        line.child = first_child;
+        Node::Line(line)
+    }
+
+    /// Wrap `node` in a line node covering the `prefix` bytes directly above it
+    ///
+    /// This is the re-use path: `node` may be a copy of a node built for a
+    /// completely different part of the trie.  Pushing it costs one node, and
+    /// the line data and children it references stay shared.  Note the write
+    /// order (line data, then the node) matches [Self::make_node], so a re-used
+    /// node is laid out exactly like a freshly built one.
+    fn prefix_node(&mut self, prefix: &[u8], node: &Node) -> Node {
+        if prefix.is_empty() {
+            // The caller pushes it as a part of its own sibling run
+            return node.clone();
+        }
+        let mut line = NodeLine::empty();
+        line.path = self.arena.add_path(prefix);
+        line.child = Some(self.arena.push_v(node));
+        Node::Line(line)
+    }
+
+    fn cache_insert(&mut self, addr: Option<u64>, node: &Node) {
+        if let Some(addr) = addr {
+            self.cache.insert(addr, node.clone());
+        }
+    }
+
+    fn cache_get(&self, addr: Option<u64>) -> Option<Node> {
+        self.cache.get(&addr?).cloned()
+    }
+
+    /// Ascend from the zipper's focus to the closest fork above it (or to the
+    /// root), and return the [Node] for the position one byte below that fork
+    ///
+    /// This mirrors `morphisms::ascend_to_fork` specialized to [Node]: the
+    /// bytes we ascend over become a line node, and each value encountered on
+    /// the way up breaks the chain, becoming a one-child branch node.
+    ///
+    /// `focus_node` is the node for the trie at the focus when we already have
+    /// it (a cache hit), in which case `children` is ignored; otherwise the
+    /// node at the focus is built from `children` plus the focus's own mask
+    /// and value.  `focus_id` is the focus's
+    /// [`shared_node_id`](ZipperConcrete::shared_node_id), if the node built
+    /// for it should be recorded for re-use.
+    fn ascend_to_fork<V, Z, F>(
+        &mut self, z: &mut Z, map_val: &F,
+        focus_node: Option<Node>, focus_id: Option<u64>, children: &mut [Node],
+    ) -> Node
+        where
+            Z: Zipper + ZipperMoving + ZipperValues<V> + ZipperAbsolutePath + ZipperPathBuffer,
+            F: Fn(&V) -> u64,
+    {
+        let mut w;
+        let mut focus_node = focus_node;
+        let mut focus_id = focus_id;
+        let mut child_mask = ByteMask::from(z.child_mask());
+        let mut children = &mut children[..];
+        loop {
+            let old_len = z.origin_path().len();
+            let old_val = z.val().map(map_val);
+            let ascended = z.ascend_until();
+            debug_assert!(ascended);
+
+            // The byte we ascended over into a fork (or into a value) belongs
+            // to that node's child mask, the rest of them are the line
+            let stops_above = z.child_count() != 1 || z.is_val();
+            let jump_len = if stops_above {
+                old_len - (z.origin_path().len() + 1)
+            } else {
+                old_len - z.origin_path().len()
+            };
+            // SAFETY: the path buffer is initialized up to `old_len`, we were
+            // standing there a moment ago
+            let origin_path = unsafe { z.origin_path_assert_len(old_len) };
+            let prefix = &origin_path[old_len - jump_len..];
+
+            let fresh_id = focus_id.take();
+            w = if let Some(node) = focus_node.take() {
+                self.prefix_node(prefix, &node)
+            } else if fresh_id.is_some() && !prefix.is_empty() && !children.is_empty() {
+                // Build the node for the focus on its own, so it can be handed
+                // out again elsewhere, then wrap it in the line separately.
+                // This writes the same bytes as the fused case below.
+                let node = self.make_node(child_mask, children, &[], old_val);
+                self.cache_insert(fresh_id, &node);
+                self.prefix_node(prefix, &node)
+            } else {
+                let node = self.make_node(child_mask, children, prefix, old_val);
+                if prefix.is_empty() {
+                    self.cache_insert(fresh_id, &node);
+                }
+                node
+            };
+
+            if z.child_count() != 1 || z.at_root() {
+                return w;
+            }
+
+            // We stopped at a value in the middle of the chain: fold the byte
+            // below it into a one-child branch node and keep ascending
+            // SAFETY: as above, `old_len - jump_len <= old_len`
+            let byte = *unsafe { z.origin_path_assert_len(old_len - jump_len) }
+                .last().expect("we just ascended over this byte");
+            child_mask = ByteMask::EMPTY;
+            child_mask.set_bit(byte);
+            children = core::array::from_mut(&mut w);
+        }
+    }
+}
+
+/// A forking point we have descended into, and how far we got iterating it
+struct CachedFrame {
+    child_idx: usize,
+    child_cnt: usize,
+    /// `shared_node_id` of the child we descended into most recently
+    child_addr: Option<u64>,
+    /// `shared_node_id` of the forking point itself
+    fork_addr: Option<u64>,
+}
+
+/// [build_arena_tree], but re-using the subtries that are shared in the source
+///
+/// Whenever the source zipper reports a [`shared_node_id`](ZipperConcrete::shared_node_id)
+/// we have already built a [Node] for, that node is handed to the parent
+/// instead of walking the subtrie again.  A cached [Node] is a perfectly good
+/// result to hand to a parent, because every [NodeId] / [LineId] inside it
+/// addresses arena data that has already been written, and all references in
+/// the arena point backwards.  The parent pushes a *copy* of that node into its
+/// own sibling run — which it must, since the format requires siblings to be
+/// contiguous — and the copy keeps pointing at the original children.  So a
+/// repeated subtrie costs one node, not a subtrie.
+///
+/// The traversal itself is the jumping catamorphism, unrolled (see
+/// `morphisms::into_cata_cached_body`, which this follows closely).  It is
+/// spelled out here rather than delegating to
+/// [`Catamorphism::into_cata_jumping_cached`] for two reasons:
+/// - the cached cata only consults its cache one byte below a fork, whereas we
+///   also consult it at the fork we land on after jumping over a chain of
+///   bytes.  That is where a subtrie grafted under a multi-byte path shows up,
+///   which is the common case.  Re-using it needs an operation the generic
+///   jumping algebra has no way to express — "put this jumped prefix in front
+///   of an already-folded subtrie" — but which is trivial here: a line node
+///   pointing at the re-used node.
+/// - the cached cata's algebra is an `Fn`, so writing to the arena from it
+///   would need interior mutability.
+///
+/// TODO: GOAT: introduce an abstraction/modify `into_cata_jumping_cached`,
+///  to address the problems listed above.  The suggested API is to have
+///  `FnMut` variant for the caching catamorphism.
+///
+/// Sharing that begins in the middle of a jumped chain is still missed, since
+/// finding it would mean giving up `descend_until` and stepping byte by byte.
+///
+/// See [`ArenaCompactTree::from_zipper_cached`] for the user-facing docs.
+fn build_arena_tree_cached<V, Z, F>(mut z: Z, map_val: F) -> ArenaCompactTree<Vec<u8>>
+    where
+        Z: Zipper + ZipperMoving + ZipperValues<V> + ZipperConcrete
+            + ZipperAbsolutePath + ZipperPathBuffer,
+        F: Fn(&V) -> u64,
+{
+    let mut b = CachedBuilder {
+        arena: ArenaCompactTree::new(),
+        cache: HashMap::new(),
+    };
+    let map_val = &map_val;
+
+    z.reset();
+    z.prepare_buffers();
+
+    // A frame per forking point above the focus.  Values don't get a frame,
+    // they are folded in while ascending.
+    let mut stack = Vec::<CachedFrame>::with_capacity(12);
+    stack.push(CachedFrame {
+        child_idx: 0,
+        child_cnt: z.child_count(),
+        child_addr: None,
+        fork_addr: z.shared_node_id(),
+    });
+    let mut children = Vec::<Node>::new();
+
+    let root = loop {
+        let top = stack.len() - 1;
+        if stack[top].child_idx < stack[top].child_cnt {
+            let descended = z.descend_indexed_byte(stack[top].child_idx);
+            debug_assert!(descended);
+            stack[top].child_idx += 1;
+            let child_addr = z.shared_node_id();
+            stack[top].child_addr = child_addr;
+
+            // Everything below this byte may already be in the arena
+            if let Some(node) = b.cache_get(child_addr) {
+                children.push(node);
+                z.ascend_byte();
+                continue;
+            }
+
+            // Descend to the next forking point, or to a leaf
+            let mut is_leaf = false;
+            while z.child_count() < 2 {
+                if !z.descend_until() {
+                    is_leaf = true;
+                    break;
+                }
+            }
+
+            if is_leaf {
+                // A leaf always carries a value, so it is never shared
+                let w = b.ascend_to_fork(&mut z, map_val, None, None, &mut []);
+                b.cache_insert(child_addr, &w);
+                children.push(w);
+                continue;
+            }
+
+            // We are at a fork.  Checking here as well as at the byte above is
+            // what catches a subtrie shared under a multi-byte path: only the
+            // jumped bytes leading down to it differ between the places it
+            // occurs, and those become a line node wrapping the re-used node.
+            let fork_addr = z.shared_node_id();
+            if let Some(node) = b.cache_get(fork_addr) {
+                let w = b.ascend_to_fork(&mut z, map_val, Some(node), None, &mut []);
+                b.cache_insert(child_addr, &w);
+                children.push(w);
+                continue;
+            }
+
+            // Enter one recursion step
+            stack.push(CachedFrame {
+                child_idx: 0,
+                child_cnt: z.child_count(),
+                child_addr: None,
+                fork_addr,
+            });
+            continue;
+        }
+
+        // This forking point is exhausted, fold it into a node
+        let frame = stack.pop().expect("the loop returns before emptying the stack");
+        let child_start = children.len() - frame.child_cnt;
+        if stack.is_empty() {
+            debug_assert!(z.at_root(), "must be at root when the traversal is done");
+            let value = z.val().map(map_val);
+            let child_mask = ByteMask::from(z.child_mask());
+            break if frame.child_cnt == 1 && value.is_none() {
+                children.pop().expect("child_cnt == 1")
+            } else {
+                b.make_node(child_mask, &children[child_start..], &[], value)
+            };
+        }
+
+        // Exit one recursion step
+        let w = b.ascend_to_fork(
+            &mut z, map_val, None, frame.fork_addr, &mut children[child_start..]);
+        children.truncate(child_start);
+        b.cache_insert(stack[stack.len() - 1].child_addr, &w);
+        children.push(w);
+    };
+
+    let mut arena = b.arena;
     let _root_id = arena.set_root(&root);
     arena.finalize().unwrap();
     arena
@@ -2865,6 +3232,53 @@ where Storage: AsRef<[u8]>
     }
 }
 
+/// Iterator over (Path, Value) in ArenaCompactTree
+pub struct ActIter<'a, Storage, Value>
+where
+    Storage: AsRef<[u8]>,
+    ACTZipper<'a, Storage, Value>: ZipperValues<Value>,
+{
+    zipper: ACTZipper<'a, Storage, Value>,
+    root_visited: bool,
+}
+
+impl <'a, Storage, Value>
+Iterator for ActIter<'a, Storage, Value>
+where
+    Storage: AsRef<[u8]>,
+    ACTZipper<'a, Storage, Value>: ZipperValues<Value>,
+    Value: Clone,
+{
+    type Item = (Vec<u8>, Value);
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.root_visited {
+            self.root_visited = true;
+            if let Some(val) = self.zipper.val_at(b"") {
+                return Some((Vec::new(), val.clone()));
+            }
+        }
+        if !self.zipper.to_next_val() {
+            return None;
+        }
+        let path = self.zipper.path().to_vec();
+        let val = self.zipper.val()?.clone();
+        Some((path, val))
+    }
+}
+
+impl <'a, Storage> ArenaCompactTree<Storage>
+where
+    Storage: AsRef<[u8]>,
+{
+    /// Iterate over paths with `u64` values in ArenaCompactTree
+    pub fn iter(&'a self) -> ActIter<'a, Storage, u64> {
+        ActIter {
+            zipper: self.read_zipper_u64(),
+            root_visited: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
@@ -2926,6 +3340,221 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// Build `map` both ways and check the results describe the same trie.
+    ///
+    /// When there is nothing to re-use the two builders must agree byte for
+    /// byte; otherwise re-use may only ever make the output smaller.
+    fn check_cached_build(name: &str, map: &PathMap<u64>, expect_identical: bool) {
+        let plain = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
+        let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
+
+        assert!(map.iter().map(|(p, &v)| (p, v)).eq(plain.iter()), "{name}: plain content");
+        assert!(map.iter().map(|(p, &v)| (p, v)).eq(cached.iter()), "{name}: cached content");
+
+        if expect_identical {
+            assert_eq!(plain.get_data(), cached.get_data(),
+                "{name}: expected an identical layout (plain={}B cached={}B)",
+                plain.get_data().len(), cached.get_data().len());
+        } else {
+            assert!(cached.get_data().len() <= plain.get_data().len(),
+                "{name}: cached={}B plain={}B", cached.get_data().len(), plain.get_data().len());
+        }
+    }
+
+    /// Graft `leaf` under every prefix, `levels` times over, so each level
+    /// shares the whole trie built by the level below it
+    /// Equivalent to cartesian `(prefix**levels)*leaf`
+    fn make_shared_map(prefix: &PathMap<u64>, levels: usize, leaf: &PathMap<u64>) -> PathMap<u64> {
+        use crate::zipper::ZipperWriting;
+        let mut map = leaf.clone();
+        for _level in 0..levels {
+            let mut next = prefix.clone();
+            let mut rpz = prefix.read_zipper();
+            let mut wz = next.write_zipper();
+            // wz.to_next_val does not exist, so have to iterate over rz
+            while rpz.to_next_val() {
+                wz.reset();
+                wz.descend_to(rpz.path());
+                wz.remove_val(false);
+                wz.graft(&map.read_zipper());
+            }
+            map = next;
+        }
+        map
+    }
+
+    /// Create a fully-populated map with depth `depth`.
+    /// The nodes are maximally shared.
+    /// There are 256**depth paths in the resulting map.
+    ///
+    /// TODO: Use `crate::utils::ints::gen_int_range` instead?
+    ///  Reason it was not used -- in the moment, the promise of sharing nodes
+    ///  in the `gen_int_range` was not clear.  This uses sharing explicitly.
+    fn make_fully_populated_shared(depth: usize) -> PathMap<u64> {
+        if depth == 0 {
+            let mut map = PathMap::new();
+            map.set_val_at(b"", 1);
+            return map;
+        }
+        let paths: [u8; 256] = std::array::from_fn(|n| n as u8);
+        let pairs = paths.iter().map(|p| (std::slice::from_ref(p), 1));
+        let full = PathMap::from_iter(pairs);
+        make_shared_map(&full, depth - 1, &full)
+    }
+
+    /// With nothing to re-use, the cached builder must lay out the same bytes
+    /// as the plain one
+    #[test]
+    fn test_act_from_zipper_cached_unshared() {
+        let path_vals = PATHS.iter().enumerate()
+            .map(|(idx, path)| (path, idx as u64));
+        check_cached_build("paths", &PathMap::from_iter(path_vals), true);
+
+        check_cached_build("empty", &PathMap::<u64>::new(), true);
+        check_cached_build("single", &PathMap::from_iter([("a", 1u64)]), true);
+        check_cached_build("root_val",
+            &PathMap::from_iter([("", 7u64), ("a", 1), ("ab", 2)]), true);
+        // values at every step of a chain, which breaks the jumped lines up
+        check_cached_build("prefix_vals",
+            &PathMap::from_iter([("a", 1u64), ("ab", 2), ("abc", 3), ("abcd", 4), ("abd", 5)]), true);
+        check_cached_build("long_chain",
+            &PathMap::from_iter([("a".repeat(5000), 1u64)]), true);
+        check_cached_build("long_chain_vals",
+            &PathMap::from_iter((1..50).map(|i| ("a".repeat(i * 37), i as u64))), true);
+        // 256 children, i.e. branch nodes that store a full child mask
+        check_cached_build("wide",
+            &PathMap::from_iter((0u64..256).map(|b| (vec![b as u8], b))), true);
+        check_cached_build("wide_deep", &PathMap::from_iter((0u64..256)
+            .flat_map(|b| (0u64..256).map(move |c| (vec![b as u8, c as u8, 7], b * 256 + c)))), true);
+    }
+
+    /// A trie whose subtries are shared must come out the same, but smaller
+    #[test]
+    fn test_act_from_zipper_cached_shared() {
+        let leaves = [
+            PathMap::from_iter([("leaf", 1u64)]),
+            PathMap::from_iter([("x", 1u64), ("y", 2), ("zzzz", 3)]),
+            (0u64..256).map(|b| (vec![b as u8], b)).collect(),
+        ];
+        // Sharing one byte below a fork, several bytes below a fork, and under
+        // prefixes that are prefixes of each other
+        let prefix_sets: [&[&[u8]]; 4] = [
+            &[b"a", b"b"],
+            &[b"aa", b"bb", b"cc"],
+            &[b"long_prefix_one", b"long_prefix_two"],
+            &[b"a", b"aa", b"aaa"],
+        ];
+        for (li, leaf) in leaves.iter().enumerate() {
+            for (pi, prefixes) in prefix_sets.iter().enumerate() {
+                let prefixes = PathMap::from_iter(prefixes.iter().map(|p| (p, 1)));
+                for levels in 1..4 {
+                    let map = make_shared_map(&prefixes, levels, &leaf);
+                    check_cached_build(&format!("shared l{li} p{pi} lv{levels}"), &map, false);
+                }
+            }
+        }
+    }
+
+    /// Values on the paths leading into the shared subtries, which stop those
+    /// positions from being re-usable and break the jumped lines apart
+    #[test]
+    fn test_act_from_zipper_cached_shared_with_values() {
+        use crate::zipper::ZipperWriting;
+        let leaf: PathMap<u64> = PathMap::from_iter([("x", 1u64), ("yy", 2)]);
+        let mut map = PathMap::<u64>::new();
+        for (idx, prefix) in ["aa", "ab", "ba", "bb"].iter().enumerate() {
+            let mut wz = map.write_zipper_at_path(prefix.as_bytes());
+            wz.graft(&leaf.read_zipper());
+            drop(wz);
+            map.set_val_at(&prefix.as_bytes()[..1], 100 + idx as u64);
+            map.set_val_at(prefix.as_bytes(), 200 + idx as u64);
+        }
+        check_cached_build("values_between", &map, false);
+    }
+
+    /// Re-use has to pay off: a trie that is 4 copies of the trie one level
+    /// down, 6 levels deep, is 4096 values but only a handful of nodes
+    #[test]
+    fn test_act_from_zipper_cached_size() {
+        for prefix_set in [&[b"a".as_slice(), b"b", b"c", b"d"][..],
+                           &[b"aa".as_slice(), b"bb", b"cc", b"dd"][..]]
+        {
+            let prefixes = PathMap::from_iter(prefix_set.iter().map(|p| (p, 1)));
+            let map = make_shared_map(&prefixes, 6, &PathMap::from_iter([("leaf", 1u64)]));
+            let plain = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
+            let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
+            assert_eq!(map.val_count(), 4096);
+            assert!(cached.get_data().len() * 50 < plain.get_data().len(),
+                "prefix len {}: cached={}B plain={}B",
+                prefix_set[0].len(), cached.get_data().len(), plain.get_data().len());
+        }
+    }
+
+    /// The full 5-byte trie: every one of the 256^5 paths of length 5 carries
+    /// a value.  The source is built by grafting each level under all 256
+    /// bytes, so it is nothing but shared nodes, and the cached builder has to
+    /// fold it into ~1300 nodes.  The plain builder is not run here: it would
+    /// walk 10^12 paths.
+    #[test]
+    fn test_act_from_zipper_cached_full_depth_5() {
+        use crate::{utils::ByteMask, zipper::Zipper};
+        const DEPTH: usize = 5;
+
+        let map = make_fully_populated_shared(DEPTH);
+        let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
+
+        // Each level is one branch node plus the 256 copies of the level below
+        // it, i.e. ~256 nodes per level (~37KB in all) rather than 256^5 paths
+        assert!(cached.get_data().len() < 64 * 1024,
+            "cached={}B", cached.get_data().len());
+
+        // Every level branches on all 256 bytes, values appear only at DEPTH
+        let mut z = cached.read_zipper_u64();
+        for depth in 0..DEPTH {
+            assert_eq!(z.child_mask(), ByteMask::FULL, "child mask at depth {depth}");
+            assert_eq!(z.val(), None, "value at depth {depth}");
+            assert!(z.descend_to_existing(&[depth as u8]) == 1, "descend at depth {depth}");
+        }
+        assert_eq!(z.child_mask(), ByteMask::EMPTY, "child mask at depth {DEPTH}");
+        assert_eq!(z.val().copied(), Some(1), "value at depth {DEPTH}");
+
+        // Spot check the paths themselves against the source trie: bytes at
+        // both ends of the range and around the byte that splits the mask
+        // words, in every position
+        let sample = [0u8, 1, 63, 64, 65, 127, 128, 254, 255];
+        for a in sample {
+            for b in sample {
+                for c in sample {
+                    let path = [a, b, c, b, a];
+                    assert_eq!(cached.get_val_at(&path), Some(1), "{path:?}");
+                    assert_eq!(map.get_val_at(&path), Some(&1), "source {path:?}");
+                    // ...and nothing above or below a full-depth path
+                    for len in 0..DEPTH {
+                        assert_eq!(cached.get_val_at(&path[..len]), None, "{path:?}[..{len}]");
+                    }
+                    let mut deeper = path.to_vec();
+                    deeper.push(a);
+                    assert_eq!(cached.get_val_at(&deeper), None, "{deeper:?}");
+                    let mut z = cached.read_zipper_u64();
+                    assert_eq!(z.descend_to_existing(&deeper), DEPTH, "descend {deeper:?}");
+                }
+            }
+        }
+    }
+
+    /// Node re-use must survive a round trip: reading the re-used tree back
+    /// yields the tree the plain builder would have written
+    #[test]
+    fn test_act_from_zipper_cached_round_trip() {
+        let prefixes = PathMap::from_iter([(b"aa", 1), (b"bb", 1)]);
+        let leaf = PathMap::from_iter([("x", 1u64), ("y", 2), ("zzzz", 3)]);
+        let map = make_shared_map(&prefixes, 3, &leaf);
+        let cached = ArenaCompactTree::from_zipper_cached(map.read_zipper(), |&v| v);
+        let plain = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
+        let round_trip = ArenaCompactTree::from_zipper(cached.read_zipper_u64(), |&v: &u64| v);
+        assert_eq!(plain.get_data(), round_trip.get_data());
     }
 
     #[test]

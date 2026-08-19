@@ -61,6 +61,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     /// Actual focus factor calculation.
     /// Returns a valid index into `self.factor_paths`, truncating to parents if requested.
     fn factor_idx(&self, truncate_up: bool) -> Option<usize> {
+        debug_assert_eq!(self.factor_paths.len(), self.secondary.len(),
+            "factor_paths and secondary must stay in step");
         let len = self.path().len();
         let mut factor = self.factor_paths.len().checked_sub(1)?;
         while truncate_up && self.factor_paths[factor] == len {

@@ -19,7 +19,7 @@ name = "pathmap"
 path = "src/lib.rs"
 
 [dependencies]
-pathmap-derive = { version = "0.2.1", path = "./pathmap-derive" }
+pathmap-derive = { version = "0.3.0", path = "./pathmap-derive" }
 maybe-dangling = "0.1.1"
 dyn-clone = "1.0.17" # NOTE, we can eliminate this when we eliminate `!slim_ptrs`
 local-or-heap = "0.1.0"
