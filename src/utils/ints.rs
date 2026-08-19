@@ -27,12 +27,73 @@ use crate::write_zipper::ZipperWriting;
 // Other encoding ideas are in this video: https://youtu.be/gjY13VrXcBo?t=3480
 
 /// Implemented on integer types that may be encoded as path elements by this code
-pub trait PathInteger<const N: usize> : num_traits::PrimInt + num_traits::ops::saturating::SaturatingAdd + num_traits::SaturatingMul + std::ops::Mul + std::ops::Add + std::ops::AddAssign + num_traits::FromPrimitive + num_traits::ToPrimitive + num_traits::ToBytes + num_traits::FromBytes<Bytes=[u8; N]> + core::hash::Hash + core::fmt::Debug {}
+pub trait PathInteger<const N: usize> : num_traits::PrimInt + num_traits::ops::saturating::SaturatingAdd + num_traits::SaturatingMul + std::ops::Mul + std::ops::Add + std::ops::AddAssign + std::ops::BitOrAssign + num_traits::FromPrimitive + num_traits::ToPrimitive + num_traits::ToBytes + num_traits::FromBytes<Bytes=[u8; N]> + core::hash::Hash + core::fmt::Debug {}
 impl PathInteger<1> for u8 {}
 impl PathInteger<2> for u16 {}
 impl PathInteger<4> for u32 {}
 impl PathInteger<8> for u64 {}
+#[cfg(target_pointer_width = "64")]
+impl PathInteger<8> for usize {}
 impl PathInteger<16> for u128 {}
+
+/// "Bits of Byte". Encode up to 8 natural numbers into a path by combining the bits into the path bytes.
+/// Does not pad to number bit length.
+/// ```rs,ignore
+/// let is = [10, 30, 100];
+/// let bob = vec![];
+/// > is.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>()
+/// ["1010", "11110", "1100100"]
+/// > indices_to_bob(&is[..], &mut bob);
+/// > bob.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>()
+/// ["0", "11", "110", "11", "10", "100", "100"]
+/// ```
+pub fn indices_to_bob<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(xs: &[R], bob: &mut Vec<u8>) -> usize {
+    assert!(xs.len() <= 8);
+    let steps = xs.into_iter().map(|x| (NUM_SIZE*8) - (x.leading_zeros() as usize)).max().unwrap_or(0);
+    for c in (0..steps).rev() {
+        bob.push(0);
+        for i in 0..xs.len() {
+            unsafe { *bob.last_mut().unwrap_unchecked() |= ((xs[i] >> c) & R::one()).to_u8().unwrap_unchecked() << i; }
+        }
+    }
+    steps
+}
+
+/// Decodes a "Bits of Byte" path.
+/// Requires `xs` to be zeroed.
+pub fn bob_to_indices<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(bob: &[u8], xs: &mut [R]) {
+    assert!(xs.len() <= 8 && bob.len() <= NUM_SIZE*8);
+    for i in 0..bob.len() {
+        for k in 0..xs.len() {
+            unsafe { xs[k] |= R::from_u8((bob[i] >> k) & 1).unwrap_unchecked() << (bob.len() - 1 - i); }
+        }
+    }
+}
+
+/// Encode multiple integers big-endian round-robin wise into a byte path.
+/// Does not pad to number byte length.
+pub fn indices_to_weave<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(xs: &[usize], weave: &mut Vec<u8>) {
+    // let steps = xs.into_iter().map(|x| (NUM_SIZE*8 - (x.leading_zeros() as usize)).div_ceil(8).max(1)).max().unwrap_or(0);
+    for c in (0..NUM_SIZE).rev() {
+        for i in 0..xs.len() {
+            weave.push((xs[i] >> c*8) as u8)
+        }
+    }
+}
+
+/// Decodes a weave path.
+/// Requires `xs` to be zeroed.
+pub fn weave_to_indices<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(weave: &[u8], xs: &mut [R]) {
+    let n = xs.len();
+    if n == 0 { return; }
+    assert_eq!(weave.len() % n, 0);
+    let steps = weave.len()/n;
+    for c in (0..steps).rev() {
+        for i in 0..xs.len() {
+            unsafe { xs[i] |= R::from_u8(weave[n*c+i]).unwrap_unchecked() << (8*steps - (c+1)*8); }
+        }
+    }
+}
 
 /// Creates a map that represents an encoded integer range specified by `start`, `stop`, and `step`,
 /// with copies of the provided `value` at every path
@@ -308,4 +369,44 @@ fn int_range_generator_5() {
 
     z.to_next_sibling_byte();
     z.ascend_byte();
+}
+
+#[cfg(not(miri))]
+#[test]
+fn bob_and_weave_simple() {
+    let is = [10usize, 30, 100];
+    // [*map(bin, is)] --> ['0b1010', '0b11110', '0b1100100']
+    // [*map(lambda x: [*x.to_bytes()], is)] --> [[10], [30], [100]]
+    let mut is_ = [0, 0, 0];
+    let mut weave = vec![];
+    let mut bob = vec![];
+    indices_to_weave::<8, usize>(&is[..], &mut weave);
+    weave_to_indices(&weave[..], &mut is_[..]);
+    println!("weave {:?}", weave);
+    // weave [10, 30, 100]
+    assert_eq!(is, is_);
+    let mut is_ = [0, 0, 0];
+    indices_to_bob(&is[..], &mut bob);
+    bob_to_indices(&bob[..], &mut is_[..]);
+    println!("bob {:?}", bob.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>());
+    // bob ["0", "11", "110", "11", "10", "100", "100"]
+    assert_eq!(is, is_);
+
+    let is = [3333, 30, 1000];
+    // [*map(bin, is)] --> ['0b110100000101', '0b11110', '0b1111101000'
+    // [*map(lambda x: [*x.to_bytes(2)], is)] --> [[13, 5], [0, 30], [3, 232]]
+    let mut is_ = [0, 0, 0];
+    let mut weave = vec![];
+    let mut bob = vec![];
+    indices_to_weave::<8, usize>(&is[..], &mut weave);
+    weave_to_indices(&weave[..], &mut is_[..]);
+    println!("weave {:?}", weave);
+    // weave [13, 0, 3, 5, 30, 232]
+    assert_eq!(is, is_);
+    let mut is_ = [0, 0, 0];
+    indices_to_bob(&is[..], &mut bob);
+    bob_to_indices(&bob[..], &mut is_[..]);
+    println!("bob {:?}", bob.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>());
+    // bob ["1", "10", "11", "110", "10", "100", "100", "100", "101", "100", "1", "1"]
+    assert_eq!(is, is_);
 }

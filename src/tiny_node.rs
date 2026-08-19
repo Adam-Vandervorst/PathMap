@@ -11,7 +11,8 @@ use core::mem::MaybeUninit;
 use core::fmt::{Debug, Formatter};
 use std::collections::HashMap;
 
-use crate::utils::{ByteMask, find_prefix_overlap};
+use fast_slice_utils::{find_prefix_overlap, starts_with};
+use crate::utils::ByteMask;
 use crate::alloc::Allocator;
 use crate::trie_node::*;
 use crate::ring::*;
@@ -127,7 +128,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         find_prefix_overlap(self.key(), key)
     }
     fn node_contains_partial_key(&self, key: &[u8]) -> bool {
-        if self.key().starts_with(key) {
+        if starts_with(self.key(), key) {
             true
         } else {
             false
@@ -156,7 +157,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         let self_key = self.key();
         debug_assert!(results.len() >= keys.len());
         for ((key, expect_val), (result_key_len, payload_ref)) in keys.into_iter().zip(results.into_iter()) {
-            if key.starts_with(self_key) {
+            if starts_with(key, self_key) {
                 let self_key_len = self_key.len();
                 if self.is_child_ptr() {
                     if !*expect_val || self_key_len < key.len() {
@@ -194,7 +195,9 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         }
         None
     }
-    fn node_remove_val(&mut self, _key: &[u8]) -> Option<V> { unreachable!() }
+    fn node_remove_val(&mut self, _key: &[u8], _prune: bool) -> Option<V> { unreachable!() }
+    fn node_create_dangling(&mut self, _key: &[u8]) -> Result<(bool, bool), TrieNodeODRc<V, A>> { unreachable!() }
+    fn node_remove_dangling(&mut self, _key: &[u8]) -> usize { unreachable!() }
     fn node_get_val_mut(&mut self, _key: &[u8]) -> Option<&mut V> { unreachable!() }
     fn node_set_val(&mut self, key: &[u8], val: V) -> Result<(Option<V>, bool), TrieNodeODRc<V, A>> {
         let mut replacement_node = self.into_full().unwrap();
@@ -206,17 +209,30 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         replacement_node.node_set_branch(key, new_node).unwrap_or_else(|_| panic!());
         Err(TrieNodeODRc::new_in(replacement_node, self.alloc.clone()))
     }
-    fn node_remove_all_branches(&mut self, _key: &[u8]) -> bool { unreachable!() }
-    fn node_remove_unmasked_branches(&mut self, _key: &[u8], _mask: ByteMask) { unreachable!() }
+    fn node_remove_all_branches(&mut self, _key: &[u8], _prune: bool) -> bool { unreachable!() }
+    fn node_remove_unmasked_branches(&mut self, _key: &[u8], _mask: ByteMask, _prune: bool) { unreachable!() }
     fn node_is_empty(&self) -> bool {
         self.header & (1 << 7) == 0
     }
-    fn new_iter_token(&self) -> u128 { unreachable!() }
-    fn iter_token_for_path(&self, _key: &[u8]) -> u128 { unreachable!() }
-    fn next_items(&self, _token: u128) -> (u128, &'a[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) { unreachable!() }
+    fn new_iter_token(&self) -> IterToken { unreachable!() }
+    fn iter_token_for_path(&self, _key: &[u8]) -> IterToken { unreachable!() }
+    fn next_items(&self, _token: IterToken) -> (IterToken, &'a[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) { unreachable!() }
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
         let temp_node = self.into_full().unwrap();
         temp_node.node_val_count(cache)
+    }
+    fn node_goat_val_count(&self) -> usize {
+        self.into_full().unwrap().node_goat_val_count()
+    }
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        if self.is_used_child() {
+            (0, Some(unsafe{ &*self.payload.child }))
+        } else {
+            (0, None)
+        }
+    }
+    fn node_child_iter_next(&self, _token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        (0, None) //A TinyNode only has, at most, one child
     }
     #[cfg(feature = "counters")]
     fn item_count(&self) -> usize {
@@ -225,7 +241,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
     fn node_first_val_depth_along_key(&self, key: &[u8]) -> Option<usize> {
         debug_assert!(key.len() > 0);
         let node_key = self.key();
-        if self.is_used_val() && key.starts_with(node_key) {
+        if self.is_used_val() && starts_with(key, node_key) {
             Some(node_key.len() - 1)
         } else {
             None
@@ -265,7 +281,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         }
 
         //Otherwise check to see if we need to make a sub-node.
-        if node_key.len() > key.len() && node_key.starts_with(key) {
+        if node_key.len() > key.len() && starts_with(node_key, key) {
             let new_key = &node_key[key.len()..];
             let ref_node = TinyRefNode::new_in(self.is_child_ptr(), new_key, self.payload, self.alloc.clone());
             return AbstractNodeRef::BorrowedTiny(ref_node)
@@ -274,7 +290,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         //The key must specify a path the node doesn't contains
         AbstractNodeRef::None
     }
-    fn take_node_at_key(&mut self, _key: &[u8]) -> Option<TrieNodeODRc<V, A>> { unreachable!() }
+    fn take_node_at_key(&mut self, _key: &[u8], _prune: bool) -> Option<TrieNodeODRc<V, A>> { unreachable!() }
     fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
         //TODO, I can streamline this quite a lot, but for now I'll just up-convert to a ListNode to test
         // the basic premise of the TinyRefNode

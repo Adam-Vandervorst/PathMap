@@ -1,22 +1,14 @@
 use core::cell::UnsafeCell;
-use std::ptr::slice_from_raw_parts;
 use crate::alloc::{Allocator, GlobalAlloc, global_alloc};
-use crate::morphisms::{new_map_from_ana_in, Catamorphism, TrieBuilder};
+use crate::morphisms::{new_map_from_ana_in, TrieBuilder};
 use crate::trie_node::*;
 use crate::zipper::*;
+use crate::merkleization::{MerkleizeResult, merkleize_impl};
 use crate::ring::{AlgebraicResult, AlgebraicStatus, COUNTER_IDENT, SELF_IDENT, Lattice, LatticeRef, DistributiveLattice, DistributiveLatticeRef, Quantale};
 
-#[cfg(not(miri))]
-use gxhash::gxhash128;
+use crate::gxhash;
 
-#[cfg(miri)]
-fn gxhash128(data: &[u8], _seed: i64) -> u128 { xxhash_rust::const_xxh3::xxh3_128(data) }
-
-//GOAT-old-names
-#[deprecated]
-pub type BytesTrieMap<V, A = GlobalAlloc> = PathMap<V, A>;
-
-/// A map type that uses byte slices `&[u8]` as keys
+/// A map type that uses a trie based on byte slices (`&[u8]`) known as "paths"
 ///
 /// This type is implemented using some of the approaches explained in the
 /// ["Bitwise trie with bitmap" Wikipedia article](https://en.wikipedia.org/wiki/Bitwise_trie_with_bitmap).
@@ -48,6 +40,42 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Clone for PathMap<V, A> {
         let root_ref = unsafe{ &*self.root.get() };
         let root_val_ref = unsafe{ &*self.root_val.get() };
         Self::new_with_root_in(root_ref.clone(), root_val_ref.clone(), self.alloc.clone())
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin + core::fmt::Debug, A: Allocator> core::fmt::Debug for PathMap<V, A> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        const MAX_DEBUG_PATHS: usize = 100;
+
+        let mut rz = self.read_zipper();
+
+        //Try first assuming the paths are all ascii
+        let mut contains_all_ascii = true;
+        let mut dbg_map = f.debug_map();
+        let mut path_cnt = 0;
+        while rz.to_next_val() && path_cnt < MAX_DEBUG_PATHS  {
+            if let Some(key) = crate::utils::debug::render_debug_path(rz.path(), crate::utils::debug::PathRenderMode::RequireAscii) {
+                dbg_map.entry(&key, rz.val().unwrap());
+                path_cnt += 1;
+            } else {
+                contains_all_ascii = false;
+                break;
+            }
+        }
+        if contains_all_ascii {
+            return dbg_map.finish()
+        }
+
+        //If that failed, render them again with non-ascii paths
+        rz.reset();
+        let mut dbg_struct = f.debug_struct("PathMap");
+        let mut path_cnt = 0;
+        while rz.to_next_val() && path_cnt < MAX_DEBUG_PATHS  {
+            let key = crate::utils::debug::render_debug_path(rz.path(), crate::utils::debug::PathRenderMode::ByteList).unwrap();
+            dbg_struct.field(&key, rz.val().unwrap());
+            path_cnt += 1;
+        }
+        dbg_struct.finish()
     }
 }
 
@@ -92,7 +120,6 @@ impl<V: Clone + Send + Sync + Unpin> PathMap<V, GlobalAlloc> {
     {
         Self::new_from_ana_in(w, alg_f, global_alloc())
     }
-
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
@@ -116,7 +143,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     /// Internal method to ensure there is a valid node at the root of the map
     #[inline]
     pub(crate) fn ensure_root(&self) {
-        let root_ref = unsafe{ &mut *self.root.get() };
+        let root_ref = unsafe{ &*self.root.get() };
         if root_ref.is_some() {
             return
         }
@@ -189,24 +216,17 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     }
 
     /// Creates a new [TrieRef], referring to a position from the root of the `PathMap`
-    pub fn trie_ref_at_path<K: AsRef<[u8]>>(&self, path: K) -> TrieRef<'_, V, A> {
+    pub fn trie_ref_at_path<K: AsRef<[u8]>>(&self, path: K) -> TrieRefBorrowed<'_, V, A> {
         self.ensure_root();
         let path = path.as_ref();
-        trie_ref_at_path_in(self.root().unwrap().as_tagged(), self.root_val(), &[], path, self.alloc.clone())
+        TrieRefBorrowed::new_with_key_and_path_in(self.root().unwrap(), || self.root_val(), &[], path, self.alloc.clone())
     }
 
     /// Creates a new read-only [Zipper], starting at the root of a `PathMap`
     pub fn read_zipper<'a>(&'a self) -> ReadZipperUntracked<'a, 'static, V, A> {
         self.ensure_root();
         let root_val = unsafe{ &*self.root_val.get() }.as_ref();
-        #[cfg(debug_assertions)]
-        {
-            ReadZipperUntracked::new_with_node_and_path_internal_in(self.root().unwrap().as_tagged(), &[], 0, root_val, self.alloc.clone(), None)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            ReadZipperUntracked::new_with_node_and_path_internal_in(self.root().unwrap().as_tagged(), &[], 0, root_val, self.alloc.clone())
-        }
+        ReadZipperUntracked::new_with_node_and_path_internal_in(self.root().unwrap(), &[], 0, root_val, self.alloc.clone())
     }
 
     /// Creates a new read-only [Zipper], with the specified path from the root of the map; This method is much more
@@ -218,14 +238,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
             true => unsafe{ &*self.root_val.get() }.as_ref(),
             false => None
         };
-        #[cfg(debug_assertions)]
-        {
-            ReadZipperUntracked::new_with_node_and_path_in(self.root().unwrap().as_tagged(), path.as_ref(), path.len(), 0, root_val, self.alloc.clone(), None)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            ReadZipperUntracked::new_with_node_and_path_in(self.root().unwrap().as_tagged(), path.as_ref(), path.len(), 0, root_val, self.alloc.clone())
-        }
+        ReadZipperUntracked::new_with_node_and_path_in(self.root().unwrap(), path.as_ref(), path.len(), 0, root_val, self.alloc.clone())
     }
 
     /// Creates a new read-only [Zipper], with the `path` specified from the root of the map
@@ -236,14 +249,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
             true => unsafe{ &*self.root_val.get() }.as_ref(),
             false => None
         };
-        #[cfg(debug_assertions)]
-        {
-            ReadZipperUntracked::new_with_node_and_cloned_path_in(self.root().unwrap().as_tagged(), path, path.len(), 0, root_val, self.alloc.clone(), None)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            ReadZipperUntracked::new_with_node_and_cloned_path_in(self.root().unwrap().as_tagged(), path, path.len(), 0, root_val, self.alloc.clone())
-        }
+        ReadZipperUntracked::new_with_node_and_cloned_path_in(self.root().unwrap(), path, path.len(), 0, root_val, self.alloc.clone())
     }
 
     /// Creates a new [write zipper](ZipperWriting) starting at the root of the `PathMap`
@@ -251,14 +257,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         self.ensure_root();
         let root_node = self.root.get_mut().as_mut().unwrap();
         let root_val = self.root_val.get_mut();
-        #[cfg(debug_assertions)]
-        {
-            WriteZipperUntracked::new_with_node_and_path_internal_in(root_node, Some(root_val), &[], 0, self.alloc.clone(), None)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            WriteZipperUntracked::new_with_node_and_path_internal_in(root_node, Some(root_val), &[], 0, self.alloc.clone())
-        }
+        WriteZipperUntracked::new_with_node_and_path_internal_in(root_node, Some(root_val), &[], 0, self.alloc.clone())
     }
 
     /// Creates a new [write zipper](ZipperWriting) with the specified path from the root of the map
@@ -269,14 +268,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
             true => Some(self.root_val.get_mut()),
             false => None
         };
-        #[cfg(debug_assertions)]
-        {
-            WriteZipperUntracked::new_with_node_and_path_in(root_node, root_val, path, path.len(), 0, self.alloc.clone(), None)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            WriteZipperUntracked::new_with_node_and_path_in(root_node, root_val, path, path.len(), 0, self.alloc.clone())
-        }
+        WriteZipperUntracked::new_with_node_and_path_in(root_node, root_val, path, path.len(), 0, self.alloc.clone())
     }
 
     /// Creates a [ZipperHead] at the root of the map
@@ -332,11 +324,17 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         zipper.is_val()
     }
 
-    /// Returns `true` if a path is contained within the map, or `false` otherwise
-    pub fn contains_path<K: AsRef<[u8]>>(&self, k: K) -> bool {
-        let k = k.as_ref();
-        let zipper = self.read_zipper_at_borrowed_path(k);
+    /// Returns `true` if `path` is contained within the map, or `false` otherwise
+    pub fn path_exists_at<K: AsRef<[u8]>>(&self, path: K) -> bool {
+        let path = path.as_ref();
+        let zipper = self.read_zipper_at_borrowed_path(path);
         zipper.path_exists()
+    }
+
+    /// Deprecated alias for [`PathMap::path_exists_at`]
+    #[deprecated]
+    pub fn contains_path<K: AsRef<[u8]>>(&self, k: K) -> bool {
+        self.path_exists_at(k)
     }
 
     /// Inserts `v` into the map at `path`.  Panics if `path` has a zero length
@@ -356,8 +354,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         zipper.set_val(v)
     }
 
-    /// Deprecated alias for [Self::set_val_at]
-    #[deprecated] //GOAT-old-names
+    /// Alias for [Self::set_val_at], so `PathMap` "feels" like other Rust collections
     pub fn insert<K: AsRef<[u8]>>(&mut self, k: K, v: V) -> Option<V> {
         self.set_val_at(k, v)
     }
@@ -366,19 +363,21 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     // than replacing it
 
     /// Removes the value at `path` from the map and returns it, or returns `None` if there was no value at `path`
-    pub fn remove_val_at<K: AsRef<[u8]>>(&mut self, path: K) -> Option<V> {
+    ///
+    /// If `prune` is `true`, the path will be pruned, otherwise it will be left dangling.
+    pub fn remove_val_at<K: AsRef<[u8]>>(&mut self, path: K, prune: bool) -> Option<V> {
         let path = path.as_ref();
         //NOTE: we're descending the zipper rather than creating it at the path so it will be allowed to
         // prune the branches.  A WriteZipper can't move above its root, so it couldn't prune otherwise
+        //GOAT, come back and redo this withoug a temporary WZ
         let mut zipper = self.write_zipper();
         zipper.descend_to(path);
-        zipper.remove_val()
+        zipper.remove_val(prune)
     }
 
-    /// Deprecated alias for [Self::remove_val_at]
-    #[deprecated] //GOAT-old-names
+    /// Alias for [Self::remove_val_at], so `PathMap` "feels" like other Rust collections
     pub fn remove<K: AsRef<[u8]>>(&mut self, path: K) -> Option<V> {
-        self.remove_val_at(path)
+        self.remove_val_at(path, true)
     }
 
     /// Returns a reference to the value at the specified `path`, or `None` if no value exists
@@ -395,8 +394,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         zipper.get_val()
     }
 
-    /// Deprecated alias for [Self::get_val_at]
-    #[deprecated] //GOAT-old-names
+    /// Alias for [Self::get_val_at], so `PathMap` "feels" like other Rust collections
     pub fn get<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         self.get_val_at(path)
     }
@@ -411,7 +409,12 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         self.ensure_root();
         let root_node = self.root.get_mut().as_mut().unwrap();
         let (node_key, node) = node_along_path_mut(root_node, path, true);
-        node.as_tagged_mut().node_into_val_ref_mut(node_key)
+        node.make_mut().node_into_val_ref_mut(node_key)
+    }
+
+    /// Alias for [Self::get_val_mut_at], so `PathMap` "feels" like other Rust collections
+    pub fn get_mut<K: AsRef<[u8]>>(&mut self, path: K) -> Option<&mut V> {
+        self.get_val_mut_at(path)
     }
 
     /// Returns a mutable reference to the value at the specified `path`, inserting the result
@@ -448,6 +451,21 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         self.get_val_or_set_mut_with_at(path, || default)
     }
 
+    /// Removes all downstream branches below `path`.  Does not affect a value at `path`
+    ///
+    /// Returns `true` if at least one branch was removed.
+    ///
+    /// If `prune` is `true`, the path will be pruned, otherwise it will be left dangling.
+    pub fn remove_branches_at<K: AsRef<[u8]>>(&mut self, path: K, prune: bool) -> bool {
+        let path = path.as_ref();
+        //NOTE: we're descending the zipper rather than creating it at the path so it will be allowed to
+        // prune the branches.  A WriteZipper can't move above its root, so it couldn't prune otherwise
+        //GOAT, come back and redo this withoug a temporary WZ
+        let mut zipper = self.write_zipper();
+        zipper.descend_to(path);
+        zipper.remove_branches(prune)
+    }
+
     /// Returns `true` if the map is empty, otherwise returns `false`
     pub fn is_empty(&self) -> bool {
         (match self.root() {
@@ -456,27 +474,48 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         } && self.root_val().is_none())
     }
 
+    /// Prunes the dangling `path` specified up to the first upstream value or fork in the path, and 
+    /// returns the number of path bytes removed
+    pub fn prune_path<K: AsRef<[u8]>>(&mut self, path: K) -> usize {
+        let path = path.as_ref();
+        //GOAT, come back and redo this withoug a temporary WZ
+        let mut zipper = self.write_zipper();
+        zipper.descend_to(path);
+        zipper.prune_path()
+    }
+
+    /// Creates the `path` specified as a dangling path.  Returns `true` if new path bytes were created,
+    /// or `false` if the path already existed
+    pub fn create_path<K: AsRef<[u8]>>(&mut self, path: K) -> bool {
+        let path = path.as_ref();
+        //GOAT, come back and redo this withoug a temporary WZ
+        let mut zipper = self.write_zipper();
+        zipper.descend_to(path);
+        zipper.create_path()
+    }
+
     /// Returns the total number of values contained within the map
     ///
     /// WARNING: This is not a cheap method. It may have an order-N cost
     pub fn val_count(&self) -> usize {
+        let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
         match self.root() {
-            Some(root) => val_count_below_root(root.as_tagged()),
-            None => 0
+            Some(root) => val_count_below_root(root.as_tagged()) + root_val,
+            None => root_val
         }
     }
 
-    const INVIS_HASH: u128 = 0b00001110010011001111100111000110011110101111001101110110011100001011010011010011001000100111101000001100011111110100001000000111;
-    /// Hash the logical `PathMap` and all its values with the provided hash function (which can return INVIS_HASH to ignore values).
-    pub fn hash<VHash : Fn(&V) -> u128>(&self, vhash: VHash) -> u128 {
-        unsafe {
-        self.read_zipper().into_cata_cached(|bm, hs, mv, _| {
-            let mut state = [0u8; 48];
-            state[0..16].clone_from_slice(gxhash128(slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap(), 0b0100110001110010000010011111010011100011010000101101111001100110i64).to_le_bytes().as_slice());
-            state[16..32].clone_from_slice(gxhash128(slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap(), 0b0111010001001011011011011111010110111011111101100110101100010000i64).to_le_bytes().as_slice());
-            state[32..].clone_from_slice(mv.map(|v| vhash(v)).unwrap_or(Self::INVIS_HASH).to_le_bytes().as_slice());
-            gxhash128(state.as_slice(), 0b0100001010101101111110010110100110000010011000100100100111110111i64)
-        })
+    /// GOAT, temporary method to do side-by-side comparison between abstracted val_count and bespoke version
+    pub fn goat_val_count(&self) -> usize {
+        let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
+        match self.root() {
+            Some(root) => {
+                traverse_physical(root,
+                    |node, ctx: usize| { ctx + node.node_goat_val_count() },
+                    |ctx, child_ctx| { ctx + child_ctx },
+                ) + root_val
+            },
+            None => root_val
         }
     }
 
@@ -540,6 +579,38 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
 
         Self::new_with_root_in(subtracted_root_node, subtracted_root_val, self.alloc.clone())
     }
+
+    /// Optimize the `PathMap` by factoring shared subtries using a temporary [Merkle Tree](https://en.wikipedia.org/wiki/Merkle_tree)
+    pub fn merkleize(&mut self) -> MerkleizeResult
+        where V: core::hash::Hash
+    {
+        let Some(root) = self.root() else {
+            return MerkleizeResult::default();
+        };
+        let mut result = MerkleizeResult::default();
+        let mut memo = gxhash::HashMap::default();
+        let (hash, new_root) = merkleize_impl(&mut result, &mut memo, root, self.root_val());
+        result.hash = hash;
+        if let Some(new_root) = new_root {
+            *self.root.get_mut() = Some(new_root);
+        }
+        result
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for PathMap<V, A> {
+    #[inline]
+    fn shared_node_id(&self) -> Option<u64> {
+        if self.root_val().is_some() || !self.is_shared() {
+            return None;
+        }
+        self.root().map(|root| root.as_tagged().shared_node_id())
+    }
+
+    #[inline]
+    fn is_shared(&self) -> bool {
+        self.root().is_some_and(|root| root.refcount() > 1)
+    }
 }
 
 
@@ -567,6 +638,26 @@ impl<V: Clone + Send + Sync + Unpin, K: AsRef<[u8]>> FromIterator<(K, V)> for Pa
         let mut map = Self::new();
         for (key, val) in iter {
             map.set_val_at(key, val);
+        }
+        map
+    }
+}
+
+impl<'a, V: Clone + Send + Sync + Unpin, K: AsRef<[u8]>> FromIterator<&'a (K, V)> for PathMap<V> {
+    fn from_iter<I: IntoIterator<Item=&'a (K, V)>>(iter: I) -> Self {
+        let mut map = Self::new();
+        for (key, val) in iter {
+            map.set_val_at(key, val.clone());
+        }
+        map
+    }
+}
+
+impl<'a> FromIterator<&'a [u8]> for PathMap<()> {
+    fn from_iter<I: IntoIterator<Item=&'a [u8]>>(iter: I) -> Self {
+        let mut map = Self::new();
+        for key in iter {
+            map.set_val_at(key, ());
         }
         map
     }
@@ -841,10 +932,10 @@ mod tests {
         let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
 
-        assert_eq!(btm.contains_path(b"can"), true);
-        assert_eq!(btm.contains_path(b"cannon"), true);
-        assert_eq!(btm.contains_path(b"cannonade"), false);
-        assert_eq!(btm.contains_path(b""), true);
+        assert_eq!(btm.path_exists_at(b"can"), true);
+        assert_eq!(btm.path_exists_at(b"cannon"), true);
+        assert_eq!(btm.path_exists_at(b"cannonade"), false);
+        assert_eq!(btm.path_exists_at(b""), true);
     }
 
     #[test]
@@ -874,7 +965,7 @@ mod tests {
         //Test root value
         assert_eq!(map.get_val_or_set_mut_at(b"", 42), &mut 42);
         assert_eq!(map.get_val_mut_at(b""), Some(&mut 42));
-        assert_eq!(map.remove_val_at(b""), Some(42));
+        assert_eq!(map.remove_val_at(b"", true), Some(42));
         *map.get_val_or_set_mut_at(b"", 42) = 24;
         assert_eq!(map.get_val_mut_at(b""), Some(&mut 24));
 
@@ -883,7 +974,7 @@ mod tests {
         assert_eq!(map.get_val_mut_at(PATH), None);
         assert_eq!(map.get_val_or_set_mut_at(PATH, 42), &mut 42);
         assert_eq!(map.get_val_mut_at(PATH), Some(&mut 42));
-        assert_eq!(map.remove_val_at(PATH), Some(42));
+        assert_eq!(map.remove_val_at(PATH, true), Some(42));
         *map.get_val_or_set_mut_at(PATH, 42) = 24;
         assert_eq!(map.get_val_mut_at(PATH), Some(&mut 24));
     }
@@ -901,23 +992,23 @@ mod tests {
         map.set_val_at("acaaa", "acaaa");
         assert_eq!(map.val_count(), 8);
 
-        assert_eq!(map.remove_val_at(b"aaaaa"), Some("aaaaa"));
+        assert_eq!(map.remove_val_at(b"aaaaa", true), Some("aaaaa"));
         assert_eq!(map.val_count(), 7);
-        assert_eq!(map.remove_val_at(b"acaaa"), Some("acaaa"));
+        assert_eq!(map.remove_val_at(b"acaaa", true), Some("acaaa"));
         assert_eq!(map.val_count(), 6);
-        assert_eq!(map.remove_val_at(b"cccccnot-a-real-key"), None);
+        assert_eq!(map.remove_val_at(b"cccccnot-a-real-key", true), None);
         assert_eq!(map.val_count(), 6);
-        assert_eq!(map.remove_val_at(b"aaaac"), Some("aaaac"));
+        assert_eq!(map.remove_val_at(b"aaaac", true), Some("aaaac"));
         assert_eq!(map.val_count(), 5);
-        assert_eq!(map.remove_val_at(b"aaaab"), Some("aaaab"));
+        assert_eq!(map.remove_val_at(b"aaaab", true), Some("aaaab"));
         assert_eq!(map.val_count(), 4);
-        assert_eq!(map.remove_val_at(b"abbbb"), Some("abbbb"));
+        assert_eq!(map.remove_val_at(b"abbbb", true), Some("abbbb"));
         assert_eq!(map.val_count(), 3);
-        assert_eq!(map.remove_val_at(b"ddddd"), Some("ddddd"));
+        assert_eq!(map.remove_val_at(b"ddddd", true), Some("ddddd"));
         assert_eq!(map.val_count(), 2);
-        assert_eq!(map.remove_val_at(b"ccccc"), Some("ccccc"));
+        assert_eq!(map.remove_val_at(b"ccccc", true), Some("ccccc"));
         assert_eq!(map.val_count(), 1);
-        assert_eq!(map.remove_val_at(b"bbbbb"), Some("bbbbb"));
+        assert_eq!(map.remove_val_at(b"bbbbb", true), Some("bbbbb"));
         assert_eq!(map.val_count(), 0);
         assert!(map.is_empty());
     }
@@ -925,8 +1016,8 @@ mod tests {
     #[test]
     fn map_remove_test2() {
         let mut btm = PathMap::from_iter([("abbb", ()), ("b", ()), ("bba", ())].iter().map(|(p, v)| (p.as_bytes(), v)));
-        btm.remove_val_at("abbb".as_bytes());
-        btm.remove_val_at("a".as_bytes());
+        btm.remove_val_at("abbb".as_bytes(), true);
+        btm.remove_val_at("a".as_bytes(), true);
     }
 
     #[test]
@@ -1004,7 +1095,7 @@ mod tests {
         assert_eq!(map.get_val_at([]), None);
         assert_eq!(map.set_val_at([], 1), None);
         assert_eq!(map.get_val_at([]), Some(&1));
-        assert_eq!(map.remove_val_at([]), Some(1));
+        assert_eq!(map.remove_val_at([], true), Some(1));
         assert_eq!(map.get_val_at([]), None);
 
         //Through a WriteZipper, created at the root
@@ -1013,7 +1104,7 @@ mod tests {
         assert_eq!(z.set_val(1), None);
         assert_eq!(z.val(), Some(&1));
         *z.get_val_mut().unwrap() = 2;
-        assert_eq!(z.remove_val(), Some(2));
+        assert_eq!(z.remove_val(true), Some(2));
         assert_eq!(z.val(), None);
         drop(z);
 
@@ -1023,7 +1114,7 @@ mod tests {
         assert_eq!(z.set_val(1), None);
         assert_eq!(z.val(), Some(&1));
         *z.get_val_mut().unwrap() = 2;
-        assert_eq!(z.remove_val(), Some(2));
+        assert_eq!(z.remove_val(true), Some(2));
         assert_eq!(z.val(), None);
         drop(z);
 
@@ -1033,7 +1124,7 @@ mod tests {
         assert_eq!(map.read_zipper().get_val(), Some(&1));
         assert_eq!(map.read_zipper_at_borrowed_path(&[]).get_val(), Some(&1));
         assert_eq!(map.read_zipper_at_path([]).get_val(), Some(&1));
-        assert_eq!(map.remove_val_at([]), Some(1));
+        assert_eq!(map.remove_val_at([], true), Some(1));
         assert_eq!(map.read_zipper_at_borrowed_path(&[]).get_val(), None);
         assert_eq!(map.read_zipper_at_path([]).get_val(), None);
 
@@ -1198,7 +1289,8 @@ mod tests {
 
         let expected = [3, 5, 4];
         let mut i = 0;
-        while let Some(val) = zipper.to_next_get_val() {
+        let witness = zipper.witness();
+        while let Some(val) = zipper.to_next_get_val_with_witness(&witness) {
             assert_eq!(*val, expected[i]);
             i += 1;
         }
@@ -1299,6 +1391,133 @@ mod tests {
         assert_eq!(map.get_val_at(b"start:0000:goodbye"), Some(&0));
         assert_eq!(map.get_val_at(b"start:0003:hello"), Some(&3));
         assert_eq!(map.get_val_at(b"start:0003:goodbye"), Some(&3));
+    }
+
+    /// Makes a PathMap with a value type that must be dropped, to ensure we don't leak memory
+    #[test]
+    fn map_values_drop_test() {
+        let mut map = PathMap::<String>::new();
+
+        //We want at least one pair node and at least one byte node.
+        // "h" is the byte node, "how" is the pair node
+        map.set_val_at("hello", "hello".to_string());
+        map.set_val_at("howdy", "howdy".to_string());
+        map.set_val_at("how do you do", "how do you do".to_string());
+        map.set_val_at("hi there", "hi there".to_string());
+
+        assert_eq!(map.remove_val_at("how do you do", true), Some("how do you do".to_string()));
+        assert_eq!(map.remove_val_at("hello", true), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn val_count_root_value() {
+        let mut map = PathMap::new();
+        map.insert(b"", ());
+        map.insert(b"a", ());
+        assert_eq!(map.val_count(), 2);
+    }
+
+    /// Validates that alg ops on whole maps do the right thing WRT the existence of the root value
+    #[test]
+    fn map_root_val_test1() {
+        let mut map = PathMap::new();
+        map.insert(b"b", ());
+        map.insert(b"a", ());
+        map.insert(b"", ());
+
+        //Validate subtract of identity clears the root val
+        let ident_map = map.clone();
+        let result_map = map.subtract(&ident_map);
+        assert_eq!(result_map.iter().count(), 0);
+
+        //Validate subtract of empty keeps the root val
+        let empty_map = PathMap::new();
+        let result_map = map.subtract(&empty_map);
+        assert_eq!(result_map.iter().count(), 3);
+
+        //Validate subtract of just_root clears it
+        let mut just_root_map = PathMap::new();
+        just_root_map.insert(b"", ());
+        let result_map = map.subtract(&just_root_map);
+        assert_eq!(result_map.iter().count(), 2);
+
+        //Validate subtract of all_but_root keeps it
+        let mut all_but_root_map = PathMap::new();
+        all_but_root_map.insert(b"b", ());
+        all_but_root_map.insert(b"a", ());
+        let result_map = map.subtract(&all_but_root_map);
+        assert_eq!(result_map.iter().count(), 1);
+
+        //Validate meet with empty clears the root val
+        let result_map = map.meet(&empty_map);
+        assert_eq!(result_map.iter().count(), 0);
+
+        //Validate meet with identity leaves the root val
+        let result_map = map.meet(&ident_map);
+        assert_eq!(result_map.iter().count(), 3);
+
+        //Validate meet with just_root keeps it
+        let result_map = map.meet(&just_root_map);
+        assert_eq!(result_map.iter().count(), 1);
+
+        //Validate meet with all_but_root removes it
+        let result_map = map.meet(&all_but_root_map);
+        assert_eq!(result_map.iter().count(), 2);
+    }
+
+    #[test]
+    fn path_map_is_zipper_concrete_at_root() {
+        use crate::zipper::ZipperConcrete;
+
+        let mut map: PathMap<()> = PathMap::new();
+        map.insert(b"a", ());
+        let snapshot = map.clone();
+
+        assert!(map.is_shared());
+        let shared_id = map.shared_node_id();
+        assert_eq!(shared_id, snapshot.shared_node_id());
+
+        map.insert(b"b", ());
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot.is_shared());
+        assert_eq!(snapshot.shared_node_id(), None);
+
+        let snapshot_after_insert = map.clone();
+        assert!(map.is_shared());
+        assert_eq!(map.shared_node_id(), snapshot_after_insert.shared_node_id());
+
+        map.remove(b"b");
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot_after_insert.is_shared());
+        assert_eq!(snapshot_after_insert.shared_node_id(), None);
+
+        let mut with_root_value = snapshot.clone();
+        with_root_value.insert(b"", ());
+        assert!(with_root_value.is_shared());
+        assert_eq!(with_root_value.shared_node_id(), None);
+
+        // Root values live outside the root node, and inserting at the empty key goes through
+        // `set_root_val` without touching `root`, so these two maps share a root node while
+        // holding different contents. Asserted as a pair in both directions because that is the
+        // shape of the regression: a node-only identity check reports them the same.
+        assert!(snapshot.is_shared());
+        assert!(snapshot.shared_node_id().is_some());
+        assert_ne!(snapshot.shared_node_id(), with_root_value.shared_node_id());
+        assert_ne!(with_root_value.shared_node_id(), snapshot.shared_node_id());
+
+        let mut independent = PathMap::new();
+        independent.insert(b"a", ());
+        assert!(!independent.is_shared());
+        assert_eq!(independent.shared_node_id(), None);
+
+        let empty_a: PathMap<()> = PathMap::new();
+        let empty_b: PathMap<()> = PathMap::new();
+        assert!(!empty_a.is_shared());
+        assert!(!empty_b.is_shared());
+        assert_eq!(empty_a.shared_node_id(), None);
+        assert_eq!(empty_b.shared_node_id(), None);
     }
 }
 

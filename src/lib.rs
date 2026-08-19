@@ -1,11 +1,64 @@
-#![cfg_attr(feature = "nightly", allow(internal_features), feature(core_intrinsics))]
-#![cfg_attr(feature = "nightly", feature(portable_simd))]
+#![cfg_attr(feature = "nightly", allow(internal_features))]
 #![cfg_attr(feature = "nightly", feature(allocator_api))]
+#![cfg_attr(feature = "nightly", feature(coroutine_trait))]
+#![cfg_attr(feature = "nightly", feature(coroutines))]
+#![cfg_attr(feature = "nightly", feature(stmt_expr_attributes))]
+#![cfg_attr(feature = "nightly", feature(yield_expr))]
 
 #![doc = include_str!("../README.md")]
 
 #[cfg(feature = "jemalloc")]
 use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(any(miri, target_arch="riscv64")))]
+use gxhash;
+
+#[cfg(any(miri, target_arch="riscv64"))]
+mod gxhash {
+    // fallback
+    // pub use xxhash_rust::xxh64::{Xxh64 as GxHasher};
+    /// Just a simple XOR hasher so miri doesn't explode on all the tests that use GxHash
+    #[derive(Clone, Default)]
+    pub struct GxHasher { state_lo: u64, state_hi: u64, }
+    impl GxHasher {
+      pub fn with_seed(seed: i64) -> Self {
+        //Reinterpret the bits without any kind of rounding, truncation, extension, etc.
+        let seed = u64::from_ne_bytes(seed.to_ne_bytes());
+        Self { state_lo: seed ^ 0xA5A5A5A5_A5A5A5A5, state_hi: !seed ^ 0x5A5A5A5A_5A5A5A5A, }
+      }
+      pub fn finish_u128(&self) -> u128 {
+        ((self.state_hi as u128) << 64) | self.state_lo as u128
+      }
+    }
+    impl core::hash::Hasher for GxHasher {
+      fn write(&mut self, buf: &[u8]) {
+        for &c in buf {
+            self.write_u8(c);
+        }
+      }
+      fn write_u8(&mut self, i: u8) {
+        self.state_lo = self.state_lo.wrapping_add(i as u64);
+        self.state_hi ^= (i as u64).rotate_left(11);
+        self.state_lo = self.state_lo.rotate_left(3);
+      }
+      fn write_u128(&mut self, i: u128) {
+        let low = i as u64;
+        let high = (i >> 64) as u64;
+        self.state_lo = self.state_lo.wrapping_add(low);
+        self.state_hi ^= high.rotate_left(17);
+        self.state_lo ^= high.rotate_left(9);
+      }
+      fn finish(&self) -> u64 {
+        self.finish_u128() as u64
+      }
+    }
+
+    pub use std::collections::HashMap;
+    pub fn gxhash128(data: &[u8], _seed: i64) -> u128 { xxhash_rust::const_xxh3::xxh3_128(data) }
+    pub trait HashMapExt{}
+    pub trait HashSetExt{}
+}
+
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -16,15 +69,18 @@ static GLOBAL: Jemalloc = Jemalloc;
 pub mod ring;
 
 /// A collection indexed by paths of bytes, supporting [algebraic](crate::ring) operations
-//GOAT-old-names, this mod shouldn't be pub, because it only contains one public object which is re-exported here
-pub mod trie_map;
+mod trie_map;
 pub use trie_map::PathMap;
 
 /// Cursors that can move over a trie, to inspect and modify contained elements or entire branches
+#[macro_use]
 pub mod zipper;
 
 /// Functionality for applying various morphisms to [PathMap] and [Zipper](crate::zipper::Zipper)s
 pub mod morphisms;
+
+/// Functionality to optimize a trie by finding structural sharing using a temporary [Merkle tree](https://en.wikipedia.org/wiki/Merkle_tree)
+pub mod merkleization;
 
 /// Handy conveniences and utilities to use with a [PathMap]
 pub mod utils;
@@ -44,12 +100,15 @@ pub mod zipper_tracking;
 #[cfg(not(feature = "zipper_tracking"))]
 mod zipper_tracking;
 
+/// Only includes PolyZipper tests.  The real implementation is in the `pathmap-derive` crate
+mod poly_zipper;
+
 /// Used to create multiple simultaneous zippers from the same parent
 mod zipper_head;
 
-/// Used for creating random paths, tries, and zipper movements
-#[cfg(feature = "fuzzer")]
-pub mod fuzzer;
+/// Used for creating random paths and tries, according to configurable distributions
+#[cfg(feature = "random")]
+pub mod random;
 
 /// Features to inspect performance properties of trees, for optimizing
 #[cfg(feature = "counters")]
@@ -65,13 +124,16 @@ pub mod alloc;
 #[cfg(feature = "viz")]
 pub mod viz;
 
-pub mod serialization;
-pub mod path_serialization;
-pub mod tree_serialization;
+#[cfg(feature = "serialization")]
+pub mod paths_serialization;
 
 mod trie_node;
 mod write_zipper;
 mod product_zipper;
+mod empty_zipper;
+mod prefix_zipper;
+mod overlay_zipper;
+mod dependent_zipper;
 mod trie_ref;
 mod dense_byte_node;
 pub(crate) mod line_list_node;
@@ -84,9 +146,21 @@ mod bridge_node;
 mod old_cursor;
 
 /// A supertrait that encapsulates the bounds for a value that can be put in a [PathMap]
-pub trait TrieValue: Clone + Send + Sync + Unpin + 'static {}
+pub trait TrieValue: Clone + Send + Sync + Unpin {}
 
-impl<T> TrieValue for T where T : Clone + Send + Sync + Unpin + 'static {}
+impl<T> TrieValue for T where T : Clone + Send + Sync + Unpin {}
+
+/// Internal macro to implement Debug on a type that just outputs the type name
+macro_rules! impl_name_only_debug {
+    (impl $($impl_tail:tt)*) => {
+        impl $($impl_tail)* {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.debug_struct(core::any::type_name::<Self>()).finish()
+            }
+        }
+    };
+}
+pub(crate) use impl_name_only_debug;
 
 #[cfg(test)]
 mod tests {
@@ -257,6 +331,58 @@ mod tests {
     }
 
     #[test]
+    fn btm_join_dangling_branching_factor_test() {
+        // Left has a single downstream dangling branch
+        let mut left: PathMap<u64> = PathMap::new();
+        left.create_path([9u8, 40u8, 1u8]);
+
+        // Right fans out the same prefix with three branches (mix of dangling and valued)
+        let mut right: PathMap<u64> = PathMap::new();
+        right.create_path([9u8, 10u8]); // dangling branch only
+        right.set_val_at([9u8, 11u8], 11);
+        right.set_val_at([9u8, 12u8, 0u8], 12);
+
+        let joined = left.join(&right);
+
+        assert!(joined.path_exists_at([9u8, 40u8, 1u8]));
+        assert!(joined.path_exists_at([9u8, 10u8]));
+        assert_eq!(joined.get_val_at([9u8, 10u8]), None);
+        assert_eq!(joined.get_val_at([9u8, 11u8]), Some(&11));
+        assert_eq!(joined.get_val_at([9u8, 12u8, 0u8]), Some(&12));
+
+        let mut rz = joined.read_zipper();
+        rz.descend_to([9u8]);
+        assert_eq!(rz.child_count(), 4);
+    }
+
+    #[test]
+    fn btm_subtract_dangling_branching_factor_test() {
+        // Left has one populated branch under [5] alongside an unrelated top-level key
+        let mut left: PathMap<()> = PathMap::new();
+        left.create_path([5u8, 0u8, 9u8]);
+        left.create_path([8u8]);
+
+        // Right overlaps [5] but introduces additional branches (value + dangling)
+        let mut right: PathMap<()> = PathMap::new();
+        right.create_path([5u8, 0u8, 9u8]);
+        right.create_path([5u8, 1u8, 1u8]);
+        right.create_path([5u8, 2u8]); // dangling extra branch
+
+        let remaining = left.subtract(&right);
+        assert_eq!(remaining.path_exists_at([5u8, 0u8, 9u8]), false);
+        assert_eq!(remaining.path_exists_at([5u8, 1u8, 1u8]), false);
+        assert_eq!(remaining.path_exists_at([8u8]), true);
+        assert_eq!(remaining.path_exists_at([5u8, 2u8]), false);
+
+        //Try the subtraction the other way
+        let remaining = right.subtract(&left);
+        assert_eq!(remaining.path_exists_at([5u8, 0u8, 9u8]), false);
+        assert_eq!(remaining.path_exists_at([5u8, 1u8, 1u8]), true);
+        assert_eq!(remaining.path_exists_at([8u8]), false);
+        assert_eq!(remaining.path_exists_at([5u8, 2u8]), true);
+    }
+
+    #[test]
     fn btm_test_restrict1() {
         let mut l: PathMap<&str> = PathMap::new();
         l.set_val_at(b"alligator", "alligator");
@@ -385,6 +511,67 @@ mod tests {
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), Some(&9));
         assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
+    }
+
+    #[test]
+    fn map_meet_dangling_branching_factor_test1() {
+        // Left contains a path without a split
+        let mut left: PathMap<u64> = PathMap::new();
+        left.create_path([7u8, 1u8, 0u8]);
+
+        // Right has a 3-way split and fans out at level 1
+        let mut right: PathMap<u64> = PathMap::new();
+        right.set_val_at([7u8, 1u8, 0u8], 10);
+        right.set_val_at([7u8, 2u8, 0u8], 20);
+        right.create_path([7u8, 3u8]);
+
+        let intersection = left.meet(&right);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true); //Should have had its value removed, but the path should remain
+        assert_eq!(intersection.get_val_at([7u8, 1u8, 0u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+
+        //Make sure the result is the same with the opposite operand order
+        let intersection = right.meet(&left);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true);
+        assert_eq!(intersection.get_val_at([7u8, 1u8, 0u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+
+        // TEST 2.  Same as above, but with less nesting
+        let mut left: PathMap<u64> = PathMap::new();
+        left.create_path([7u8, 1u8]);
+        let mut right: PathMap<u64> = PathMap::new();
+        right.set_val_at([7u8, 1u8], 10);
+        right.set_val_at([7u8, 2u8], 20);
+        right.create_path([7u8, 3u8]);
+
+        let intersection = left.meet(&right);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8]), true); //Should have had its value removed, but the path should remain
+        assert_eq!(intersection.get_val_at([7u8, 1u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+
+        //Make sure the result is the same with the opposite operand order
+        let intersection = right.meet(&left);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8]), true);
+        assert_eq!(intersection.get_val_at([7u8, 1u8]), None);
+        assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
+    }
+
+    #[test]
+    fn map_meet_dangling_branching_factor_test2() {
+        //Test 1: Path subsets
+        let mut left: PathMap<()> = PathMap::new();
+        left.create_path(b"OneTwo");
+        let mut right: PathMap<()> = PathMap::new();
+        right.create_path(b"OneTwoThree");
+
+        let intersection = left.meet(&right);
+        assert_eq!(intersection.path_exists_at(b"OneTwo"), true);
+        assert_eq!(intersection.path_exists_at(b"OneTwoThree"), false);
+        assert_eq!(intersection.path_exists_at(b"OneTwoT"), false);
     }
 
     #[test]
@@ -538,7 +725,11 @@ mod tests {
             // test_key_len(16777216); //2^24 bytes
             // test_key_len(67108864); //2^26 bytes
             // test_key_len(268435456); //2^28 bytes
-            // test_key_len(1073741824); //2^30 bytes //Still no failure at 1GB keys
+            // test_key_len(1073741824); //2^30 bytes - 1GB keys
+            // test_key_len(2147483648); //2^31 bytes - 2GB keys
+            // test_key_len(4294967296); //2^32 bytes - 4GB keys
+            // test_key_len(8589934592); //2^33 bytes - 8GB keys
+            // test_key_len(17179869184); //2^34 bytes - Still no failure at 16GB keys
         }
     }
 

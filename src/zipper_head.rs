@@ -5,7 +5,6 @@ use crate::alloc::{Allocator, GlobalAlloc};
 use crate::PathMap;
 use crate::trie_node::*;
 use crate::zipper::*;
-use crate::zipper::zipper_priv::ZipperPriv;
 use crate::zipper_tracking::*;
 use crate::dense_byte_node::CellByteNode;
 
@@ -20,11 +19,15 @@ pub trait ZipperCreation<'trie, V: Clone + Send + Sync, A: Allocator = GlobalAll
     /// Creates a new read-only [Zipper] with the path specified from the `ZipperHead`, where the caller
     /// guarantees that there are and there never will be any conflicts with any [write zippers](ZipperWriting)s at this time
     /// or any time before the returned zipper is dropped
-    unsafe fn read_zipper_at_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> ReadZipperUntracked<'a, 'static, V, A> where 'trie: 'a;
+    ///
+    /// The returned type is [ReadZipperTracked] although the tracking logic will be skipped in release mode.
+    unsafe fn read_zipper_at_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> ReadZipperTracked<'a, 'static, V, A> where 'trie: 'a;
 
     /// A more efficient version of [read_zipper_at_path_unchecked](ZipperCreation::read_zipper_at_path_unchecked),
     /// where the returned zipper is constrained by the `'path` lifetime
-    unsafe fn read_zipper_at_borrowed_path_unchecked<'a, 'path>(&'a self, path: &'path[u8]) -> ReadZipperUntracked<'a, 'path, V, A> where 'trie: 'a;
+    ///
+    /// The returned type is [ReadZipperTracked] although the tracking logic will be skipped in release mode.
+    unsafe fn read_zipper_at_borrowed_path_unchecked<'a, 'path>(&'a self, path: &'path[u8]) -> ReadZipperTracked<'a, 'path, V, A> where 'trie: 'a;
 
     //GOAT-TrackedOwnedZippers: This is a proposed feature to create owned variants of zippers, but still
     // track them using the ZipperHead infrastructure.  Creating owned zippers safely is easy to do and
@@ -47,7 +50,10 @@ pub trait ZipperCreation<'trie, V: Clone + Send + Sync, A: Allocator = GlobalAll
     /// Creates a new [write zippers](ZipperWriting) with the specified path from the `ZipperHead`, where the
     /// caller guarantees that no existing zippers may access the specified path at any time before the
     /// write zipper is dropped
-    unsafe fn write_zipper_at_exclusive_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> WriteZipperUntracked<'a, 'static, V, A> where 'trie: 'a;
+    ///
+    /// NOTE: Zippers created by this method are still tracked in debug mode.  `_unchecked` isn't permission to
+    /// break the rules, it's just an optimization that affects when to spend time enforcing them.
+    unsafe fn write_zipper_at_exclusive_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> WriteZipperTracked<'a, 'static, V, A> where 'trie: 'a;
 
     //GOAT-TrackedOwnedZippers
     // /// Creates a [WriteZipperOwned] from the specified path by temporarily cutting the trie
@@ -140,26 +146,18 @@ impl<'trie, V: Clone + Send + Sync, A: Allocator> ZipperCreationPriv<'trie, V, A
     }
 }
 
-impl<'trie, V: Clone + Send + Sync, A: Allocator + 'trie> Drop for ZipperHead<'_, 'trie, V, A> {
-    fn drop(&mut self) {
-        self.with_inner_core_z(|z| z.focus_stack.advance_if_empty())
-    }
-}
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ZipperHead<'_, '_, V, A>
+);
 
 /// Similar to [ZipperHead], but owns the trie from which zippers are granted
 ///
 /// `ZipperHeadOwned` is useful when managing the lifetime of an ordinary `ZipperHead` is unwieldy, as
 /// often occurs in multi-threaded situations.
 ///
-/// TODO: `ZipperHeadOwned` should be benchmarked against an ordinary `ZipperHead` to see how much
-/// performance is lost.  There are two costs paid by `ZipperHeadOwned` that are not present in the
-/// ordinary `ZipperHead`.
-/// 1. There is a `Mutex` in `ZipperHeadOwned` so that it can be `Sync`, while the ordinary `ZipperHead`
-///   uses an `UnsafeCell`.  However in a scenario where all the zipper-creation activity was happening
-///   from the same thread, it's unclear how much cost in involved locking an unlocking the mutex.
-/// 2. Within `ZipperHeadOwned` there is a `WriteZipperOwned`, which needs to wrap its `WriteZipperCore`
-///   in a `Box`.  This indirection is probably no big deal because the contents will likely be in cache,
-///   but it ought to be measured nonetheless.
+/// Benchmark note: `benches/zipper_head_owned.rs` compares same-thread read creation and write
+/// creation/cleanup against ordinary `ZipperHead`. The owned head pays for a `Mutex` so it can be
+/// `Sync`, while ordinary `ZipperHead` uses an `UnsafeCell`.
 pub struct ZipperHeadOwned<V: Clone + Send + Sync + 'static, A: Allocator + 'static = GlobalAlloc> {
     z: std::sync::Mutex<WriteZipperOwned<V, A>>,
     tracker_paths: SharedTrackerPaths,
@@ -195,85 +193,77 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperCreationPriv<'static, V
     }
 }
 
+crate::impl_name_only_debug!(
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> core::fmt::Debug for ZipperHeadOwned<V, A>
+);
+
 impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperCreation<'trie, V, A> for Z where Z: ZipperCreationPriv<'trie, V, A> {
     fn read_zipper_at_borrowed_path<'a, 'path>(&'a self, path: &'path[u8]) -> Result<ReadZipperTracked<'a, 'path, V, A>, Conflict> where 'trie: 'a {
-        let zipper_tracker = ZipperTracker::<TrackingRead>::new(self.tracker_paths().clone(), path)?;
+        let zipper_tracker = Some(ZipperTracker::<TrackingRead>::new(self.tracker_paths().clone(), path)?);
         self.with_inner_core_z(|z| {
-            z.focus_stack.advance_if_empty();
             let (root_node, root_val) = z.splitting_borrow_focus();
 
             //SAFETY: I am effectively taking items bound by `z`'s lifetime and lifting them up to the `'trie`
             // lifetime.  We need to do this because the ZipperHead internally uses a WriteZipper, which must
             // remain &mut accessible.  Safety is upheld by the fact that the ZipperHead exclusivity runtime
             // logic makes sure conflicting paths aren't permitted, so we should not get aliased &mut borrows
-            let root_node: TaggedNodeRef<'trie, V, A> = unsafe{ core::mem::transmute(root_node) };
-            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*(v as *const _) } );
-            let new_zipper = ReadZipperTracked::new_with_node_and_path_in(root_node, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker);
+            let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
+            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
+            let new_zipper = ReadZipperTracked::new_with_node_and_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker);
             Ok(new_zipper)
         })
     }
-    unsafe fn read_zipper_at_borrowed_path_unchecked<'a, 'path>(&'a self, path: &'path[u8]) -> ReadZipperUntracked<'a, 'path, V, A> where 'trie: 'a {
+    unsafe fn read_zipper_at_borrowed_path_unchecked<'a, 'path>(&'a self, path: &'path[u8]) -> ReadZipperTracked<'a, 'path, V, A> where 'trie: 'a {
         self.with_inner_core_z(|z| {
-            z.focus_stack.advance_if_empty();
             let (root_node, root_val) = z.splitting_borrow_focus();
 
             //SAFETY: The user is asserting that the paths won't conflict.
             // See identical code in `read_zipper_at_borrowed_path` for more discussion
-            let root_node: TaggedNodeRef<'trie, V, A> = unsafe{ core::mem::transmute(root_node) };
-            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*(v as *const _) } );
+            let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
+            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
 
-            let new_zipper;
             #[cfg(debug_assertions)]
-            {
-                let zipper_tracker = ZipperTracker::<TrackingRead>::new(self.tracker_paths().clone(), path)
-                    .unwrap_or_else(|conflict| panic!("Fatal error. ReadZipper at {path:?} {conflict}"));
-                new_zipper = ReadZipperUntracked::new_with_node_and_path_in(root_node, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), Some(zipper_tracker));
-            }
+            let zipper_tracker = Some(ZipperTracker::<TrackingRead>::new(self.tracker_paths().clone(), path)
+                .unwrap_or_else(|conflict| panic!("Fatal error. ReadZipper at {path:?} {conflict}")));
+
             #[cfg(not(debug_assertions))]
-            {
-                new_zipper = ReadZipperUntracked::new_with_node_and_path_in(root_node, path.as_ref(), path.len(), 0, root_val, z.alloc.clone());
-            }
-            new_zipper
+            let zipper_tracker = None;
+
+            ReadZipperTracked::new_with_node_and_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker)
         })
     }
     fn read_zipper_at_path<'a, K: AsRef<[u8]>>(&'a self, path: K) -> Result<ReadZipperTracked<'a, 'static, V, A>, Conflict> where 'trie: 'a {
         let path = path.as_ref();
         let zipper_tracker = ZipperTracker::<TrackingRead>::new(self.tracker_paths().clone(), path)?;
         self.with_inner_core_z(|z| {
-            z.focus_stack.advance_if_empty();
             let (root_node, root_val) = z.splitting_borrow_focus();
 
             //SAFETY: See identical code in `read_zipper_at_borrowed_path` for more discussion
-            let root_node: TaggedNodeRef<'trie, V, A> = unsafe{ core::mem::transmute(root_node) };
-            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*(v as *const _) } );
+            let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
+            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
 
-            let new_zipper = ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker);
+            let new_zipper = ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), Some(zipper_tracker));
             Ok(new_zipper)
         })
     }
-    unsafe fn read_zipper_at_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> ReadZipperUntracked<'a, 'static, V, A> where 'trie: 'a {
+    unsafe fn read_zipper_at_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> ReadZipperTracked<'a, 'static, V, A> where 'trie: 'a {
         let path = path.as_ref();
         self.with_inner_core_z(|z| {
-            z.focus_stack.advance_if_empty();
             let (root_node, root_val) = z.splitting_borrow_focus();
 
             //SAFETY: The user is asserting that the paths won't conflict.
             // See identical code in `read_zipper_at_borrowed_path` for more discussion
-            let root_node: TaggedNodeRef<'trie, V, A> = unsafe{ core::mem::transmute(root_node) };
-            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*(v as *const _) } );
+            let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
+            let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
 
-            let new_zipper;
             #[cfg(debug_assertions)]
-            {
-                let zipper_tracker = ZipperTracker::<TrackingRead>::new(self.tracker_paths().clone(), path)
-                    .unwrap_or_else(|conflict| panic!("Fatal error. ReadZipper at {path:?} {conflict}"));
-                new_zipper = ReadZipperUntracked::new_with_node_and_cloned_path_in(root_node, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), Some(zipper_tracker));
-            }
+            let zipper_tracker = Some(ZipperTracker::<TrackingRead>::new(self.tracker_paths().clone(), path)
+                .unwrap_or_else(|conflict| panic!("Fatal error. ReadZipper at {path:?} {conflict}")));
+
             #[cfg(not(debug_assertions))]
-            {
-                new_zipper = ReadZipperUntracked::new_with_node_and_cloned_path_in(root_node, path.as_ref(), path.len(), 0, root_val, z.alloc.clone());
-            }
-            new_zipper
+            let zipper_tracker = None;
+
+            ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker)
         })
     }
     fn write_zipper_at_exclusive_path<'a, K: AsRef<[u8]>>(&'a self, path: K) -> Result<WriteZipperTracked<'a, 'static, V, A>, Conflict> where 'trie: 'a {
@@ -285,10 +275,10 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             let zipper_root_node: &'trie mut TrieNodeODRc<V, A> = unsafe{ &mut *(zipper_root_node as *mut _) };
             let zipper_root_val: &'trie mut Option<V> = unsafe{ &mut *(zipper_root_val as *mut _) };
 
-            Ok(WriteZipperTracked::new_with_node_and_cloned_path_internal_in(zipper_root_node, Some(zipper_root_val), path, path.len(), z.alloc.clone(), zipper_tracker))
+            Ok(WriteZipperTracked::new_with_node_and_cloned_path_internal_in(zipper_root_node, Some(zipper_root_val), path, path.len(), z.alloc.clone(), Some(zipper_tracker)))
         })
     }
-    unsafe fn write_zipper_at_exclusive_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> WriteZipperUntracked<'a, 'static, V, A> where 'trie: 'a {
+    unsafe fn write_zipper_at_exclusive_path_unchecked<'a, K: AsRef<[u8]>>(&'a self, path: K) -> WriteZipperTracked<'a, 'static, V, A> where 'trie: 'a {
         let path = path.as_ref();
         self.with_inner_core_z(|z| {
             let (zipper_root_node, zipper_root_val) = prepare_exclusive_write_path(z, path);
@@ -297,16 +287,14 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             let zipper_root_node: &'trie mut TrieNodeODRc<V, A> = unsafe{ &mut *(zipper_root_node as *mut _) };
             let zipper_root_val: &'trie mut Option<V> = unsafe{ &mut *(zipper_root_val as *mut _) };
 
+            //We still keep the trackers in debug mode
             #[cfg(debug_assertions)]
-            {
-                let tracker = ZipperTracker::<TrackingWrite>::new(self.tracker_paths().clone(), path)
-                    .unwrap_or_else(|conflict| panic!("Fatal error. WriteZipper at {path:?} {conflict}"));
-                WriteZipperUntracked::new_with_node_and_cloned_path_internal_in(zipper_root_node, Some(zipper_root_val), path, path.len(), z.alloc.clone(), Some(tracker))
-            }
+            let tracker = Some(ZipperTracker::<TrackingWrite>::new(self.tracker_paths().clone(), path)
+                .unwrap_or_else(|conflict| panic!("Fatal error. WriteZipper at {path:?} {conflict}")));
             #[cfg(not(debug_assertions))]
-            {
-                WriteZipperUntracked::new_with_node_and_cloned_path_internal_in(zipper_root_node, Some(zipper_root_val), path, path.len(), z.alloc.clone())
-            }
+            let tracker = None;
+
+            WriteZipperTracked::new_with_node_and_cloned_path_internal_in(zipper_root_node, Some(zipper_root_val), path, path.len(), z.alloc.clone(), tracker)
         })
     }
     fn cleanup_write_zipper<ChildZ: ZipperWriting<V, A> + ZipperAbsolutePath>(&self, mut z: ChildZ) {
@@ -317,10 +305,8 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             // has already been dismantled... So we are checking here in order to handle that situation gracefully
             if inner_z.focus_stack.top().is_some() {
                 inner_z.move_to_path(origin_path);
-                if inner_z.try_borrow_focus().unwrap().node_is_empty() {
-                    if !inner_z.is_val() && inner_z.child_count() == 0 {
-                        inner_z.prune_path();
-                    }
+                if inner_z.try_borrow_focus().unwrap().0.as_tagged().node_is_empty() {
+                    inner_z.prune_path();
                 }
                 inner_z.reset();
             }
@@ -341,9 +327,11 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
 /// 4. The target path is the zipper focus
 pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie>(z: &'a mut WriteZipperCore<'trie, 'path, V, A>, path: &[u8]) -> (&'a mut TrieNodeODRc<V, A>, &'a mut Option<V>)
 {
-    //If we end up taking write zipper from the ZipperHead's root, we leave the focus_stack in an
-    // undescended root state, so we need to fix it.
-    z.focus_stack.advance_if_empty();
+    //We need to start by making sure that the node at the root of the ZipperHead's WriteZipper is
+    // unique, because a ReadZipper may have cloned that node, so we need to re-unique it
+    if let Some(node) = z.try_borrow_focus_mut() {
+        node.make_unique();
+    }
 
     let node_key_start = z.key.node_key_start();
 
@@ -371,7 +359,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
     //Walk along the path to get the parent node
     let mut remaining_key = &z.key.prefix_buf[node_key_start..];
     if remaining_key.len() > 0 {
-        match z.focus_stack.top_mut().unwrap().node_get_child_mut(remaining_key) {
+        match z.focus_stack.top_mut().unwrap().node_into_child_mut(remaining_key) {
             Some((consumed_bytes, node)) => {
                 //CASE 2
                 remaining_key = &remaining_key[consumed_bytes..];
@@ -393,7 +381,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                 z.in_zipper_mut_static_result(
                     |node, key| {
                         let new_node = if key.len() > 0 {
-                            if let Some(mut remaining) = node.take_node_at_key(key) {
+                            if let Some(mut remaining) = node.take_node_at_key(key, false) {
                                 make_cell_node(&mut remaining);
                                 remaining
                             } else {
@@ -423,13 +411,13 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
         z.key.prefix_buf.truncate(original_path_len);
 
         //If the node on top of the stack is not a cell node, we need to upgrade it
-        if !z.focus_stack.top().unwrap().reborrow().is_cell_node() {
+        if !z.focus_stack.top().unwrap().is_cell_node() {
             swap_top_node(&mut z.focus_stack, &z.key, |mut existing_node| {
                 make_cell_node(&mut existing_node);
-                Some(existing_node)
-            }, z.alloc.clone());
+                existing_node
+            });
         }
-        let cell_node = z.focus_stack.top_mut().unwrap().as_cell_node().unwrap();
+        let cell_node = z.focus_stack.top_mut().unwrap().into_cell_node().unwrap();
         let (exclusive_node, val) = cell_node.prepare_cf(last_path_byte);
         return (exclusive_node, val)
     }
@@ -442,7 +430,7 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
     //If remaining_key is non-zero length, split and upgrade the intervening node
     if remaining_key.len() > 0 {
         let mut node_ref = node.make_mut();
-        let mut new_parent = match node_ref.take_node_at_key(remaining_key) {
+        let mut new_parent = match node_ref.take_node_at_key(remaining_key, false) {
             Some(downward_node) => downward_node,
             None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc)
         };
@@ -552,7 +540,7 @@ mod tests {
 
         std::thread::scope(|scope| {
 
-            let mut zipper_senders: Vec<std::sync::mpsc::Sender<(ReadZipperUntracked<'_, '_, usize>, WriteZipperUntracked<'_, '_, usize>)>> = Vec::with_capacity(thread_cnt);
+            let mut zipper_senders: Vec<std::sync::mpsc::Sender<(ReadZipperTracked<'_, '_, usize>, WriteZipperTracked<'_, '_, usize>)>> = Vec::with_capacity(thread_cnt);
             let mut signal_receivers: Vec<std::sync::mpsc::Receiver<bool>> = Vec::with_capacity(thread_cnt);
 
             //Spawn all the threads
@@ -570,7 +558,8 @@ mod tests {
                         match zipper_rx.recv() {
                             Ok((mut reader_z, mut writer_z)) => {
                                 //We got the zippers, do the stuff
-                                while let Some(val) = reader_z.to_next_get_val() {
+                                let witness = reader_z.witness();
+                                while let Some(val) = reader_z.to_next_get_val_with_witness(&witness) {
                                     writer_z.descend_to(reader_z.path());
                                     writer_z.set_val(*val);
                                     writer_z.reset();
@@ -593,7 +582,7 @@ mod tests {
             }
 
             let mut writer_z = zipper_head.write_zipper_at_exclusive_path(b"out").unwrap();
-            writer_z.remove_branches();
+            writer_z.remove_branches(true);
             drop(writer_z);
 
             //Dispatch a zipper to each thread
@@ -664,7 +653,8 @@ mod tests {
         map.set_val_at(b"test:3", 3);
         let map_head = map.zipper_head();
         let mut zipper = map_head.write_zipper_at_exclusive_path(b"test").unwrap();
-        assert!(zipper.descend_to(b":3"));
+        zipper.descend_to(b":3");
+        assert!(zipper.path_exists());
         assert_eq!(zipper.val(), Some(&3));
         zipper.ascend_byte();
         zipper.descend_to_byte(b'2');
@@ -703,7 +693,8 @@ mod tests {
         map.set_val_at(b"test:4", 4);
         let map_head = map.zipper_head();
         let mut zipper = map_head.write_zipper_at_exclusive_path(b"test").unwrap();
-        assert!(zipper.descend_to(b":3"));
+        zipper.descend_to(b":3");
+        assert!(zipper.path_exists());
         assert_eq!(zipper.val(), Some(&3));
         zipper.ascend_byte();
         zipper.descend_to_byte(b'5');
@@ -729,7 +720,8 @@ mod tests {
         map.set_val_at(b"test:4", 4);
         let map_head = map.zipper_head();
         let mut zipper = map_head.write_zipper_at_exclusive_path(b"test:").unwrap();
-        assert!(zipper.descend_to(b"3"));
+        zipper.descend_to(b"3");
+        assert!(zipper.path_exists());
         assert_eq!(zipper.val(), Some(&3));
         zipper.ascend_byte();
         zipper.descend_to_byte(b'5');
@@ -842,10 +834,46 @@ mod tests {
 
         assert_eq!(wz.val(), None);
         assert!(wz.set_val(()).is_none());
+
+        rz.reset();
+        assert_eq!(rz.val(), None);
+        assert!(rz.descend_first_byte());
+        assert_eq!(rz.val(), Some(&()));
+
         drop(wz);
         drop(rz);
         drop(zh);
         assert_eq!(map.get_val_at([3, 194, 22]), Some(&()));
+
+        //Similar to above case, but for the ReadZipper that uses a cloned path
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at([1], 1000);
+        map.set_val_at([2], 1001);
+        map.set_val_at([3, 193, 4], 1002);
+        map.set_val_at([3, 194, 21, 134], 1003);
+        map.set_val_at([3, 194, 21, 133], 1004);
+
+        let zh = map.zipper_head();
+        let mut rz = zh.read_zipper_at_path(&[3, 194, 21]).unwrap();
+        let rz2 = zh.read_zipper_at_path(&[3, 194, 21, 134]).unwrap();
+        let mut wz = zh.write_zipper_at_exclusive_path(&[3, 194, 22]).unwrap();
+
+        assert_eq!(rz.val(), None);
+        assert!(rz.descend_first_byte());
+        assert_eq!(rz.val(), Some(&1004));
+
+        assert_eq!(rz2.val(), Some(&1003));
+
+        assert_eq!(wz.val(), None);
+        assert!(wz.set_val(1005).is_none());
+
+        assert_eq!(rz2.val(), Some(&1003));
+
+        drop(wz);
+        drop(rz);
+        drop(rz2);
+        drop(zh);
+        assert_eq!(map.get_val_at([3, 194, 22]), Some(&1005));
     }
 
     /// Dance a bunch of readers and writers inside the same zipper head
@@ -868,7 +896,7 @@ mod tests {
 
         let mut wz = unsafe{ space.write_zipper_at_exclusive_path_unchecked(&[4, 200, 0, 0, 0, 0, 0, 0, 0, 6, 2, 200, 0, 0, 0, 0, 0, 0, 0, 4]) };
         wz.descend_to(&[200, 0, 0, 0, 0, 0, 0, 0, 7, 2, 200, 0, 0, 0, 0, 0, 0, 0, 3, 2, 200, 0, 0, 0, 0, 0, 0, 0, 4, 2, 200, 0, 0, 0, 0, 0, 0, 0, 8, 192, 2, 200, 0, 0, 0, 0, 0, 0, 0, 3, 2, 200, 0, 0, 0, 0, 0, 0, 0, 4, 2, 200, 0, 0, 0, 0, 0, 0, 0, 9, 128]);
-        wz.remove_val();
+        wz.remove_val(true);
         drop(wz);
 
         let wz = unsafe{ space.write_zipper_at_exclusive_path_unchecked(&[2, 200, 0, 0, 0, 0, 0, 0, 0, 4, 2, 200, 0, 0, 0, 0, 0, 0, 0, 9]) };
@@ -879,7 +907,7 @@ mod tests {
 
         let mut wz = unsafe{ space.write_zipper_at_exclusive_path_unchecked(&[4, 200, 0, 0, 0, 0, 0, 0, 0, 6, 2, 200, 0, 0, 0, 0, 0, 0, 0, 4]) };
         wz.descend_to(&[200, 0, 0, 0, 0, 0, 0, 0, 7, 2, 200, 0, 0, 0, 0, 0, 0, 0, 3, 2, 200, 0, 0, 0, 0, 0, 0, 0, 4, 200, 0, 0, 0, 0, 0, 0, 0, 5, 2, 200, 0, 0, 0, 0, 0, 0, 0, 3, 2, 200, 0, 0, 0, 0, 0, 0, 0, 4, 200, 0, 0, 0, 0, 0, 0, 0, 10]);
-        wz.remove_val();
+        wz.remove_val(true);
         drop(wz);
 
         let wz = unsafe{ space.write_zipper_at_exclusive_path_unchecked(&[2, 200, 0, 0, 0, 0, 0, 0, 0, 4, 200, 0, 0, 0, 0, 0, 0, 0, 10]) };
@@ -927,9 +955,10 @@ mod tests {
         let mut rz1 = zh.read_zipper_at_borrowed_path(b"A").unwrap();
         let rz1_witness = rz1.witness();
         assert_eq!(rz1.get_val_with_witness(&rz1_witness), Some(&42));
-        assert_eq!(rz1.descend_to(":rd1"), true);
+        rz1.descend_to(":rd1");
+        assert_eq!(rz1.path_exists(), true);
         assert_eq!(rz1.get_val_with_witness(&rz1_witness), Some(&1));
-        assert_eq!(rz1.move_to_path(":rd2"), (3, true));
+        assert_eq!(rz1.move_to_path(":rd2"), 3);
         assert_eq!(rz1.get_val_with_witness(&rz1_witness), Some(&2));
 
         //Cause the node that supports the reader to be upgraded from a PairNode to a ByteNode
@@ -939,19 +968,21 @@ mod tests {
 
         //Check we can re-create a reader, and see all the right stuff
         let mut rz2 = zh.read_zipper_at_borrowed_path(b"A").unwrap();
-        let rz2_witness = rz1.witness();
+        let rz2_witness = rz2.witness();
         assert_eq!(rz2.get_val_with_witness(&rz2_witness), Some(&42));
-        assert_eq!(rz2.descend_to(":rd1"), true);
+        rz2.descend_to(":rd1");
+        assert_eq!(rz2.path_exists(), true);
         assert_eq!(rz2.get_val_with_witness(&rz2_witness), Some(&1));
-        assert_eq!(rz2.move_to_path(":rd2"), (3, true));
+        assert_eq!(rz2.move_to_path(":rd2"), 3);
         assert_eq!(rz2.get_val_with_witness(&rz2_witness), Some(&2));
 
         //Check that our original reader is still valid
         rz1.reset();
         assert_eq!(rz1.get_val_with_witness(&rz1_witness), Some(&42));
-        assert_eq!(rz1.descend_to(":rd1"), true);
+        rz1.descend_to(":rd1");
+        assert_eq!(rz1.path_exists(), true);
         assert_eq!(rz1.get_val_with_witness(&rz1_witness), Some(&1));
-        assert_eq!(rz1.move_to_path(":rd2"), (3, true));
+        assert_eq!(rz1.move_to_path(":rd2"), 3);
         assert_eq!(rz1.get_val_with_witness(&rz1_witness), Some(&2));
     }
 
@@ -966,15 +997,12 @@ mod tests {
         assert_eq!(*val_ref, 42);
         drop(rz);
 
-        //Make sure the existance of the borrowed witness keeps the WZ from being created
-        assert!(zh.write_zipper_at_exclusive_path(b"path").is_err());
-
         assert_eq!(*val_ref, 42);
         drop(rz_witness);
 
         //Now that the witness is gone, validate I can create the WZ, and remove the value
         let mut wz = zh.write_zipper_at_exclusive_path(b"path").unwrap();
-        wz.remove_val();
+        wz.remove_val(true);
         drop(wz);
         drop(zh);
         assert_eq!(map.get_val_at(b"path"), None);
@@ -1043,6 +1071,89 @@ mod tests {
         assert_eq!(z.origin_path(), b"A");
         assert_eq!(z.val(), Some(&24));
         assert_eq!(z.to_next_sibling_byte(), false);
+    }
+
+    /// Similar test to zipper_headc, but here we are testing to make sure there are no issues when
+    /// the read zipper clones (by reference) a descended node, rather than cloning the node at the
+    /// ZipperHead's root
+    #[test]
+    fn zipper_headh() {
+        let mut space = PathMap::<()>::new();
+        space.set_val_at(b"A:read_path_that_is_long_enough_to_spill_past_a_single_node1", ());
+        space.set_val_at(b"A:read_path_that_is_long_enough_to_spill_past_a_single_node2", ());
+        let zh = space.zipper_head();
+
+        //Sanity check.  Validate that we see everything the items via a reader
+        let rz1 = zh.read_zipper_at_borrowed_path(b"A:read_path_that_is_long_enough_to_spill_past_a_single_node").unwrap();
+        assert_eq!(rz1.val_count(), 2);
+
+        //Cause the node that supports the reader to be upgraded from a PairNode to a ByteNode
+        let _wz1 = zh.write_zipper_at_exclusive_path(b"B:wt").unwrap();
+        let _wz2 = zh.write_zipper_at_exclusive_path(b"C:wt").unwrap();
+        let _wz3 = zh.write_zipper_at_exclusive_path(b"D:wt").unwrap();
+
+        //Check we can re-create a reader, and see all the right stuff
+        let rz2 = zh.read_zipper_at_borrowed_path(b"A:read_path_that_is_long_enough_to_spill_past_a_single_node").unwrap();
+        assert_eq!(rz2.val_count(), 2);
+
+        //Check that our original reader is still valid
+        assert_eq!(rz1.val_count(), 2);
+    }
+
+    /// Similar test to zipper_headc, but we create the zipper head far from the root of the WriteZipper
+    #[test]
+    fn zipper_headi() {
+        let mut space = PathMap::<()>::new();
+        space.set_val_at(b"path_that_is_long_enough_to_spill_past_a_single_node:A:rd1", ());
+        space.set_val_at(b"path_that_is_long_enough_to_spill_past_a_single_node:A:rd2", ());
+        let mut space_wz = space.write_zipper();
+        space_wz.descend_to(b"path_that_is_long_enough_to_spill_past_a_single_node:");
+        let zh = space_wz.zipper_head();
+
+        //Sanity check.  Validate that we see everything the items via a reader
+        let rz1 = zh.read_zipper_at_borrowed_path(b"A:").unwrap();
+        assert_eq!(rz1.val_count(), 2);
+
+        //Cause the node that supports the reader to be upgraded from a PairNode to a ByteNode
+        let _wz1 = zh.write_zipper_at_exclusive_path(b"B:wt").unwrap();
+        let _wz2 = zh.write_zipper_at_exclusive_path(b"C:wt").unwrap();
+        let _wz3 = zh.write_zipper_at_exclusive_path(b"D:wt").unwrap();
+
+        //Check we can re-create a reader, and see all the right stuff
+        let rz2 = zh.read_zipper_at_borrowed_path(b"A:").unwrap();
+        assert_eq!(rz2.val_count(), 2);
+
+        //Check that our original reader is still valid
+        assert_eq!(rz1.val_count(), 2);
+    }
+
+    /// A test that mimicks the usage of ZipperHead inside MORK's MM2 evaluator
+    #[test]
+    fn zipper_headj() {
+        let paths: [&[u8]; _] = [
+            &[4, 193, 95, 1, 193, 95, 193, 95, 193, 95],
+            &[4, 193, 95, 2, 193, 95, 193, 95, 193, 95, 193, 95],
+            &[4, 196, 101, 120, 101, 99, 193, 95, 2, 193, 44, 196, 116, 114, 117, 101, 2, 193, 44, 4, 196, 95, 95, 95, 95, 193, 95, 1, 193, 95, 1, 193, 95],
+            &[196, 116, 114, 117, 101],
+        ];
+        let mut space = PathMap::<()>::from_iter(paths.into_iter());
+
+        space.remove([4, 196, 101, 120, 101, 99, 193, 95, 2, 193, 44, 196, 116, 114, 117, 101, 2, 193, 44, 4, 196, 95, 95, 95, 95, 193, 95, 1, 193, 95, 1, 193, 95]);
+
+        let mut read_copy = space.clone();
+        let zh = space.zipper_head();
+        read_copy.insert([4, 196, 101, 120, 101, 99, 193, 95, 2, 193, 44, 196, 116, 114, 117, 101, 2, 193, 44, 4, 196, 95, 95, 95, 95, 193, 95, 1, 193, 95, 1, 193, 95], ());
+
+        let _wz = zh.write_zipper_at_exclusive_path([4, 196, 95, 95, 95, 95, 193, 95, 1, 193, 95, 1, 193, 95]).unwrap();
+    }
+
+    /// Tests using a ZipperHead to create a zipper at a dangling path that already exists
+    #[test]
+    fn zipper_headk() {
+        let mut map: PathMap<()> = PathMap::new();
+        map.create_path(&[1, 255, 0]);
+        let zh = map.zipper_head();
+        let _rz = zh.read_zipper_at_path(&[1, 255, 0]).unwrap();
     }
 
     #[test]
@@ -1350,5 +1461,37 @@ mod tests {
         drop(rz);
 
         drop(zh);
+    }
+
+    #[test]
+    fn cleanup_write_zipper_test3() {
+        let mut btm: PathMap<()> = PathMap::new();
+        btm.insert([2, 197, 115, 116, 97, 116, 101, 197, 114, 101, 97, 100, 121], ());
+        btm.insert([4, 196, 101, 120, 101, 99, 193, 50, 2, 193, 44, 2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120, 2, 193, 79, 2, 193, 43, 2, 195, 97, 100, 100, 193, 120], ());
+        let zh = btm.zipper_head();
+
+        //Make a single value, at the root of a shared path
+        let mut wz = zh.write_zipper_at_exclusive_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]).unwrap();
+        wz.set_val(());
+        zh.cleanup_write_zipper(wz);
+
+        //Validate that the value is where we think it is
+        let rz = zh.read_zipper_at_borrowed_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]).unwrap();
+        assert_eq!(rz.path_exists(), true);
+        assert_eq!(rz.is_val(), true);
+        assert_eq!(rz.child_count(), 0);
+        assert_eq!(rz.child_mask(), ByteMask::EMPTY);
+        drop(rz);
+
+        //Now clean up the value
+        let mut wz = zh.write_zipper_at_exclusive_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]).unwrap();
+        wz.remove_val(true);
+        zh.cleanup_write_zipper(wz);
+
+        //Validate that the value is gone
+        let rz = zh.read_zipper_at_borrowed_path(&[2, 199, 116, 114, 105, 103, 103, 101, 114, 193, 120]).unwrap();
+        assert_eq!(rz.path_exists(), false);
+        assert_eq!(rz.is_val(), false);
+        drop(rz);
     }
 }

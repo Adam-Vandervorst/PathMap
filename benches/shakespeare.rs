@@ -21,7 +21,11 @@ fn read_data(as_words: bool) -> Vec<String> {
     // https://ocw.mit.edu/ans7870/6/6.006/s08/lecturenotes/files/t8.shakespeare.txt
     // ~200k clauses
     // ~900k words
-    let file_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches").join("shakespeare.txt");
+    let data_dir = match std::env::var("BENCH_DATA_DIR") {
+        Ok(val) => std::path::PathBuf::from(val),
+        Err(_) => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches"),
+    };
+    let file_path = data_dir.join("shakespeare.txt");
     let file = File::open(file_path).unwrap();
 
     //Parse the file, with each sentence clause as an expression

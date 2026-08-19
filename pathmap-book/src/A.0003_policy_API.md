@@ -41,3 +41,5 @@ Even if we conclude that it is only the function signature that differentiates p
 ### Is "policy" the right word? Or have we come full circle back to "lattice"?
 
 That's the question.  Do we need more terminology?
+
+{{#include api_links.md}}

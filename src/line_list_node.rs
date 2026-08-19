@@ -2,9 +2,10 @@ use core::hint::unreachable_unchecked;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use std::collections::HashMap;
 
+use fast_slice_utils::{find_prefix_overlap, starts_with};
 use local_or_heap::LocalOrHeap;
 
-use crate::utils::{BitMask, ByteMask, find_prefix_overlap};
+use crate::utils::{BitMask, ByteMask};
 use crate::alloc::Allocator;
 use crate::trie_node::*;
 use crate::ring::*;
@@ -19,7 +20,7 @@ pub struct LineListNode<V: Clone + Send + Sync, A: Allocator> {
     /// bit 15 = slot_0_used
     /// bit 14 = slot_1_used
     /// bit 13 = slot_0_is_child (child ptr vs value)
-    /// bit 12 = slot_1_is_child (child ptr vs value).  If bit 14 is 0, but bit 12 is 1, it means slot_0 consumed all the key space, so nothing can go in slot_1
+    /// bit 12 = slot_1_is_child (child ptr vs value)
     /// bits 11 to bit 6 = slot_0_key_len
     /// bit 5 to bit 0 = slot_1_key_len
     key_bytes: [MaybeUninit<u8>; KEY_BYTES_CNT],
@@ -37,6 +38,16 @@ pub struct LineListNode<V: Clone + Send + Sync, A: Allocator> {
 pub(crate) const KEY_BYTES_CNT: usize = 42;
 #[cfg(not(feature = "slim_ptrs"))]
 pub(crate) const KEY_BYTES_CNT: usize = 14;
+
+// Only the slim_ptrs layout is asserted. The not(slim_ptrs) TrieNodeODRc has no
+// empty-sentinel representation yet (`new_empty`/`is_empty`/`make_unique`/`==`
+// exist only on the slim variant; the allocator prevents a free sentinel for the
+// Arc form, the open design in the note at trie_node.rs on TaggedNodeRefMut's
+// EmptyNode arm), so that configuration does not compile and its size cannot be
+// asserted until the sentinel design lands.
+#[cfg(all(feature = "slim_ptrs", target_arch = "x86_64", not(miri)))]
+const _: [(); core::mem::size_of::<LineListNode<[u8; 1024], crate::alloc::GlobalAlloc>>()] =
+    [(); 64];
 
 const SLOT_0_USED_MASK: u16 = 1 << 15;
 const SLOT_1_USED_MASK: u16 = 1 << 14;
@@ -78,7 +89,10 @@ impl<V: Clone + Send + Sync, A: Allocator> Drop for LineListNode<V, A> {
 
 #[inline]
 fn list_node_iterative_drop<V: Clone + Send + Sync, A: Allocator>(node: &mut LineListNode<V, A>) {
-    let mut next_node = list_node_take_child_to_drop(node).unwrap();
+    let mut next_node = match list_node_take_child_to_drop(node) {
+        Some(node) => node,
+        None => return
+    };
     loop {
         if next_node.refcount() > 1 {
             break;
@@ -108,7 +122,11 @@ fn list_node_take_child_to_drop<V: Clone + Send + Sync, A: Allocator>(node: &mut
             }
             node.header = 0;
             let next_node = unsafe{ ManuallyDrop::take(&mut node.val_or_child0.child) };
-            Some(next_node)
+            if !next_node.is_empty() {
+                Some(next_node)
+            } else {
+                None
+            }
         },
         (false, true) => {
             if node.is_used::<0>() {
@@ -116,7 +134,11 @@ fn list_node_take_child_to_drop<V: Clone + Send + Sync, A: Allocator>(node: &mut
             }
             node.header = 0;
             let next_node = unsafe{ ManuallyDrop::take(&mut node.val_or_child1.child) };
-            Some(next_node)
+            if !next_node.is_empty() {
+                Some(next_node)
+            } else {
+                None
+            }
         }
         (true, true) => None, //Since we don't clear the header, the recursive path will end up freeing the downward trie
         (false, false) => None, //Node is already empty of child links; recursive path will drop values
@@ -166,6 +188,15 @@ impl<V: Clone + Send + Sync, A: Allocator> core::fmt::Debug for LineListNode<V, 
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
         //Recursively printing a whole tree will get pretty unwieldy.  Should do something
         // like serialization for inspection using standard tools.
+        let dangling_0 = if self.is_used_child_0() {
+            if unsafe{ self.child_in_slot::<0>() }.is_empty() {
+                "true"
+            } else {
+                "false"
+            }
+        } else {
+            "n/a"
+        };
         let key_0 = if self.is_used::<0>() {
             let key = unsafe{ self.key_unchecked::<0>() };
             match std::str::from_utf8(key) {
@@ -174,6 +205,15 @@ impl<V: Clone + Send + Sync, A: Allocator> core::fmt::Debug for LineListNode<V, 
             }
         } else {
             "".to_string()
+        };
+        let dangling_1 = if self.is_used_child_1() {
+            if unsafe{ self.child_in_slot::<1>() }.is_empty() {
+                "true"
+            } else {
+                "false"
+            }
+        } else {
+            "n/a"
         };
         let key_1 = if self.is_used::<1>() {
             let key = unsafe{ self.key_unchecked::<1>() };
@@ -185,9 +225,9 @@ impl<V: Clone + Send + Sync, A: Allocator> core::fmt::Debug for LineListNode<V, 
             "".to_string()
         };
         write!(f,
-               "LineListNode (\nslot0: occupied={} is_child={} key={:?}\nslot1: occupied={} is_child={} key={:?})",
-               self.is_used::<0>(), self.is_child_ptr::<0>(), key_0,
-               self.is_used::<1>(), self.is_child_ptr::<1>(), key_1)
+            "LineListNode (\nslot0: occupied={} is_child={} key={:?} dangling={}\nslot1: occupied={} is_child={} key={:?} dangling={})",
+            self.is_used::<0>(), self.is_child_ptr::<0>(), key_0, dangling_0,
+            self.is_used::<1>(), self.is_child_ptr::<1>(), key_1, dangling_1)
     }
 }
 
@@ -255,23 +295,77 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         };
         mask as u16
     }
-    /// Constructs a header for slot0
+    /// A mask that has all 0 for the slot1 bits.  &= this mask to clear slot1
     #[inline]
     fn header1_inverse() -> u16 {
-        0xafe0
+        0xafc0
     }
     /// Returns `true` if slot_1 is available to be filled with an entry, otherwise `false`.  The reason
     /// `!is_used_1()` is insufficient is because `slot_1` may be empty but the key storage may be fully
     /// consumed by slot_0's key
     #[inline]
     pub fn is_available_1(&self) -> bool {
-        self.header & ((1 << 14) | (1 << 12)) == 0
+        const SLOT_1_USED_AND_LEN_0_MASK: u16 = (1 << 14) | 0xfc0;
+        (self.header & SLOT_1_USED_AND_LEN_0_MASK) < ((KEY_BYTES_CNT as u16) << 6)
     }
     #[inline]
     pub fn is_child_ptr<const SLOT: usize>(&self) -> bool {
         match SLOT {
             0 => self.header & (1 << 13) > 0,
             1 => self.header & (1 << 12) > 0,
+            _ => unreachable!()
+        }
+    }
+    #[inline]
+    pub fn set_is_child_ptr<const SLOT: usize>(&mut self) {
+        match SLOT {
+            0 => {
+                self.header |= 1u16 << 13;
+            },
+            1 => {
+                self.header |= 1u16 << 12;
+            },
+            _ => unreachable!()
+        }
+    }
+    #[inline]
+    pub fn unset_is_child_ptr<const SLOT: usize>(&mut self) {
+        match SLOT {
+            0 => {
+                self.header &= !(1u16 << 13);
+            },
+            1 => {
+                self.header &= !(1u16 << 12);
+            },
+            _ => unreachable!()
+        }
+    }
+    /// Shortens the key for an occupied slot in the node
+    #[inline]
+    pub fn shorten_key_len<const SLOT: usize>(&mut self, new_len: usize) {
+        match SLOT {
+            0 => {
+                let old_len = self.key_len_0();
+                debug_assert!(new_len <= old_len);
+                const LEN_MASK: u16 = 0xfc0; //bits 11 to 6, inclusive
+                self.header &= !LEN_MASK;
+                self.header |= (new_len << 6) as u16;
+                if self.is_used::<1>() {
+                    let key_len_1 = self.key_len_1();
+                    unsafe {
+                        let base_ptr = self.key_bytes.as_mut_ptr().cast::<u8>();
+                        let src_ptr = base_ptr.add(old_len);
+                        let dst_ptr = base_ptr.add(new_len);
+                        core::ptr::copy(src_ptr, dst_ptr, key_len_1);
+                    }
+                }
+            },
+            1 => {
+                debug_assert!(new_len <= self.key_len_1());
+                const LEN_MASK: u16 = 0x3f; //bits 5 to 0, inclusive
+                self.header &= !LEN_MASK;
+                self.header |= new_len as u16;
+            },
             _ => unreachable!()
         }
     }
@@ -311,8 +405,8 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     #[inline]
     pub(crate) unsafe fn key_unchecked<const SLOT: usize>(&self) -> &[u8] {
         match SLOT {
-            0 => core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), self.key_len_0()),
-            1 => {
+            0 => unsafe{ core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), self.key_len_0()) },
+            1 => unsafe{
                 let ptr = self.key_bytes.as_ptr().cast::<u8>().add(self.key_len_0());
                 core::slice::from_raw_parts(ptr, self.key_len_1())
             },
@@ -322,24 +416,24 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     #[inline]
     unsafe fn child_in_slot<const SLOT: usize>(&self) -> &TrieNodeODRc<V, A> {
         match SLOT {
-            0 => &*self.val_or_child0.child,
-            1 => &*self.val_or_child1.child,
+            0 => unsafe{ &*self.val_or_child0.child },
+            1 => unsafe{ &*self.val_or_child1.child },
             _ => unreachable!()
         }
     }
     #[inline]
     unsafe fn child_in_slot_mut<const SLOT: usize>(&mut self) -> &mut TrieNodeODRc<V, A> {
         match SLOT {
-            0 => &mut *self.val_or_child0.child,
-            1 => &mut *self.val_or_child1.child,
+            0 => unsafe{ &mut *self.val_or_child0.child },
+            1 => unsafe{ &mut *self.val_or_child1.child },
             _ => unreachable!()
         }
     }
     #[inline]
     unsafe fn val_in_slot<const SLOT: usize>(&self) -> &V {
         match SLOT {
-            0 => &**self.val_or_child0.val,
-            1 => &**self.val_or_child1.val,
+            0 => unsafe{ &**self.val_or_child0.val },
+            1 => unsafe{ &**self.val_or_child1.val },
             _ => unreachable!()
         }
     }
@@ -395,7 +489,11 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             if key.len() >= key_len {
                 if node_key_0 == &key[..key_len] {
                     let child = unsafe{ self.child_in_slot_mut::<0>() };
-                    return Some((key_len, child))
+                    if !child.is_empty() {
+                        return Some((key_len, child))
+                    } else {
+                        return None
+                    }
                 }
             }
         }
@@ -405,7 +503,11 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             if key.len() >= key_len {
                 if node_key_1 == &key[..key_len] {
                     let child = unsafe{ self.child_in_slot_mut::<1>() };
-                    return Some((key_len, child))
+                    if !child.is_empty() {
+                        return Some((key_len, child))
+                    } else {
+                        return None
+                    }
                 }
             }
         }
@@ -425,6 +527,26 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             }
         }
         None
+    }
+    /// If the node has a sentinel empty node in either slot with a key that's a subset of `key` then remove it
+    #[inline]
+    fn remove_dangling_payload_along_key(&mut self, key: &[u8]) {
+        if self.is_used::<0>() && self.is_child_ptr::<0>() {
+            if unsafe { &self.val_or_child0.child }.is_empty() {
+                let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                if starts_with(key, node_key_0) {
+                    self.take_payload::<0>();
+                }
+            }
+        }
+        if self.is_used::<1>() && self.is_child_ptr::<1>() {
+            if unsafe { &self.val_or_child1.child }.is_empty() {
+                let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+                if starts_with(key, node_key_1) {
+                    self.take_payload::<1>();
+                }
+            }
+        }
     }
     #[inline]
     pub(crate) fn get_both_keys(&self) -> (&[u8], &[u8]) {
@@ -454,11 +576,11 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     #[inline]
     unsafe fn set_child_0(&mut self, key: &[u8], child: TrieNodeODRc<V, A>) {
-        self.set_payload_0(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) });
+        unsafe{ self.set_payload_0(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) }); }
     }
     #[inline]
     unsafe fn set_child_1(&mut self, key: &[u8], child: TrieNodeODRc<V, A>) {
-        self.set_payload_1(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) });
+        unsafe{ self.set_payload_1(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) }); }
     }
     /// Splits the key in slot_0 at `idx` (exclusive.  ie. the length of the key)
     fn split_0(&mut self, idx: usize) where V: Clone {
@@ -488,9 +610,6 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 
         //Re-adjust the length and flags
         self.header = (0xa000 | (idx << 6) | slot_mask_1) as u16;
-        if idx == KEY_BYTES_CNT {
-            self.header |= 1 << 12; //Set the flag state so slot_1 is unavailable
-        }
     }
     /// Splits the key in slot_0 at `idx` (exclusive.  ie. the length of the key)
     fn split_1(&mut self, idx: usize) where V: Clone {
@@ -539,32 +658,32 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     #[inline]
     unsafe fn set_payload_0(&mut self, key: &[u8], is_child_ptr: bool, payload: ValOrChildUnion<V, A>) {
         debug_assert!(key.len() <= KEY_BYTES_CNT);
-        core::ptr::copy_nonoverlapping(key.as_ptr(), self.key_bytes.as_mut_ptr().cast(), key.len());
+        unsafe{ core::ptr::copy_nonoverlapping(key.as_ptr(), self.key_bytes.as_mut_ptr().cast(), key.len()); }
         self.val_or_child0 = payload;
         self.header = Self::header0(is_child_ptr, key.len());
-        if key.len() == KEY_BYTES_CNT {
-            self.header |= 1 << 12; //Set the flag state so slot_1 is unavailable
-        }
     }
     #[inline]
     unsafe fn set_payload_1(&mut self, key: &[u8], is_child_ptr: bool, payload: ValOrChildUnion<V, A>) {
         let key_0_used_cnt = self.key_len_0();
         debug_assert!(key.len() <= KEY_BYTES_CNT - key_0_used_cnt);
-        let dst_ptr = self.key_bytes.as_mut_ptr().cast::<u8>().add(key_0_used_cnt);
-        core::ptr::copy_nonoverlapping(key.as_ptr(), dst_ptr, key.len());
+        let dst_ptr = unsafe{ self.key_bytes.as_mut_ptr().cast::<u8>().add(key_0_used_cnt) };
+        unsafe{ core::ptr::copy_nonoverlapping(key.as_ptr(), dst_ptr, key.len()); }
         self.val_or_child1 = payload;
         self.header |= Self::header1(is_child_ptr, key.len());
+        debug_assert_eq!(self.key_len_1(), key.len());
+        debug_assert_eq!(self.is_child_ptr::<1>(), is_child_ptr);
+        debug_assert_eq!(self.is_used::<1>(), true);
     }
     #[inline]
     pub(crate) unsafe fn set_payload_owned<const SLOT: usize>(&mut self, key: &[u8], payload: ValOrChild<V, A>) where V: Clone {
         match SLOT {
             0 => match payload {
-                ValOrChild::Child(child) => self.set_payload_0(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) }),
-                ValOrChild::Val(val) => self.set_payload_0(key, false, ValOrChildUnion{ val: ManuallyDrop::new(LocalOrHeap::new(val)) })
+                ValOrChild::Child(child) => unsafe{ self.set_payload_0(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) }) },
+                ValOrChild::Val(val) => unsafe{ self.set_payload_0(key, false, ValOrChildUnion{ val: ManuallyDrop::new(LocalOrHeap::new(val)) }) }
             },
             1 => match payload {
-                ValOrChild::Child(child) => { self.set_payload_1_no_overflow(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) }); },
-                ValOrChild::Val(val) => { self.set_payload_1_no_overflow(key, false, ValOrChildUnion{ val: ManuallyDrop::new(LocalOrHeap::new(val)) }); }
+                ValOrChild::Child(child) => unsafe{ self.set_payload_1_no_overflow(key, true, ValOrChildUnion{ child: ManuallyDrop::new(child) }); },
+                ValOrChild::Val(val) => unsafe{ self.set_payload_1_no_overflow(key, false, ValOrChildUnion{ val: ManuallyDrop::new(LocalOrHeap::new(val)) }); }
             },
             _ => unreachable!()
         }
@@ -583,15 +702,15 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             debug_assert!(child_node_key.len() > 0);
             debug_assert!(child_node_key.len() <= KEY_BYTES_CNT);
             let mut child_node = Self::new_in(self.alloc.clone());
-            child_node.set_payload_0(child_node_key, is_child_ptr, payload);
+            unsafe{ child_node.set_payload_0(child_node_key, is_child_ptr, payload); }
             let mut next_node = TrieNodeODRc::new_in(child_node, self.alloc.clone());
             for idx in (1..node_cnt).rev() {
                 let mut child_node = Self::new_in(self.alloc.clone());
                 let child_node_key = &key[(idx*KEY_BYTES_CNT)..((idx+1)*KEY_BYTES_CNT)];
-                child_node.set_child_0(child_node_key, next_node);
+                unsafe{ child_node.set_child_0(child_node_key, next_node); }
                 next_node = TrieNodeODRc::new_in(child_node, self.alloc.clone());
             }
-            self.set_child_0(&key[..KEY_BYTES_CNT], next_node);
+            unsafe{ self.set_child_0(&key[..KEY_BYTES_CNT], next_node); }
             true
         }
     }
@@ -610,7 +729,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             } else {
                 //We need to recursively create a new node to hold the remaining part of the key
                 let mut child_node = Self::new_in(self.alloc.clone());
-                child_node.set_payload_0_no_overflow(&key[remaining_key_bytes..], is_child_ptr, payload);
+                unsafe{ child_node.set_payload_0_no_overflow(&key[remaining_key_bytes..], is_child_ptr, payload); }
                 unsafe{ self.set_child_1(&key[..remaining_key_bytes], TrieNodeODRc::new_in(child_node, self.alloc.clone())); }
                 true
             }
@@ -620,7 +739,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             self.split_0(KEY_BYTES_CNT / 2);
 
             //Try again to add the new value to self, now that we've cleared some space
-            self.set_payload_1_no_overflow(key, is_child_ptr, payload);
+            unsafe{ self.set_payload_1_no_overflow(key, is_child_ptr, payload); }
             true
         }
     }
@@ -641,7 +760,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             } else {
                 //We need to recursively create at least one new node to hold the remaining part of the key
                 let mut child_node = Self::new_in(self.alloc.clone());
-                child_node.set_payload_0_no_overflow(&key[remaining_key_bytes..], is_child_ptr, payload);
+                unsafe{ child_node.set_payload_0_no_overflow(&key[remaining_key_bytes..], is_child_ptr, payload); }
                 (&key[..remaining_key_bytes], true, ValOrChildUnion{ child: ManuallyDrop::new(TrieNodeODRc::new_in(child_node, self.alloc.clone())) }, true)
             };
             let new_key_len = new_key.len();
@@ -674,7 +793,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             //If there is a single slot that is occupied but the key consumes the full node, then arbitrarily
             // chop the existing key in half to make room, and then try again
             self.split_0(KEY_BYTES_CNT / 2);
-            self.set_payload_0_shift_existing(key, is_child_ptr, payload);
+            unsafe{ self.set_payload_0_shift_existing(key, is_child_ptr, payload); }
             true
         }
     }
@@ -711,6 +830,59 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                         Some(ValOrChild::Val(LocalOrHeap::into_inner(val)))
                     }
                 }
+            },
+            _ => unreachable!()
+        }
+    }
+    /// Swaps the contents of `SLOT` for a new payload
+    fn swap_payload<const SLOT: usize>(&mut self, new_payload: ValOrChild<V, A>) -> ValOrChild<V, A> {
+        debug_assert!(self.is_used::<SLOT>());
+        match SLOT {
+            0 => {
+                let result = match self.is_child_ptr::<SLOT>() {
+                    true => {
+                        let child = unsafe{ ManuallyDrop::take(&mut self.val_or_child0.child) };
+                        self.unset_is_child_ptr::<SLOT>();
+                        ValOrChild::Child(child)
+                    },
+                    false => {
+                        let val = unsafe{ ManuallyDrop::take(&mut self.val_or_child0.val) };
+                        ValOrChild::Val(LocalOrHeap::into_inner(val))
+                    }
+                };
+                match new_payload {
+                    ValOrChild::Child(child) => {
+                        self.val_or_child0.child = ManuallyDrop::new(child);
+                        self.set_is_child_ptr::<SLOT>();
+                    },
+                    ValOrChild::Val(val) => {
+                        self.val_or_child0.val = ManuallyDrop::new(LocalOrHeap::new(val));
+                    }
+                }
+                result
+            },
+            1 => {
+                let result = match self.is_child_ptr::<SLOT>() {
+                    true => {
+                        let child = unsafe{ ManuallyDrop::take(&mut self.val_or_child1.child) };
+                        self.unset_is_child_ptr::<SLOT>();
+                        ValOrChild::Child(child)
+                    },
+                    false => {
+                        let val = unsafe{ ManuallyDrop::take(&mut self.val_or_child1.val) };
+                        ValOrChild::Val(LocalOrHeap::into_inner(val))
+                    }
+                };
+                match new_payload {
+                    ValOrChild::Child(child) => {
+                        self.val_or_child1.child = ManuallyDrop::new(child);
+                        self.set_is_child_ptr::<SLOT>();
+                    },
+                    ValOrChild::Val(val) => {
+                        self.val_or_child1.val = ManuallyDrop::new(LocalOrHeap::new(val));
+                    }
+                }
+                result
             },
             _ => unreachable!()
         }
@@ -788,6 +960,9 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             core::mem::swap(&mut payload, node_payload);
             return Ok((Some(ValOrChild::from_union::<IS_CHILD>(payload)), false));
         }
+
+        //If we have an empty (dangling) payload anywhere along the new key, remove it
+        self.remove_dangling_payload_along_key(key);
 
         //If this node is empty, insert the new key-payload into slot_0
         if !self.is_used::<0>() {
@@ -969,12 +1144,15 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let path = unsafe{ self.key_unchecked::<SLOT>() };
         if let Some((onward_key, onward_node)) = follow_path(other, path) {
             if self.is_child_ptr::<SLOT>() {
-                let self_onward_link = unsafe{ self.child_in_slot::<SLOT>() };
+                let self_onward_link = unsafe{ self.child_in_slot::<SLOT>() }.as_tagged();
                 let difference = if onward_key.len() == 0 {
-                    self_onward_link.as_tagged().psubtract_dyn(onward_node)
+                    self_onward_link.psubtract_dyn(onward_node)
                 } else {
+                    if self_onward_link.node_is_empty() {
+                        return AlgebraicResult::None
+                    }
                     match onward_node.get_node_at_key(onward_key).into_option() {
-                        Some(other_onward_node) => self_onward_link.as_tagged().psubtract_dyn(other_onward_node.as_tagged()),
+                        Some(other_onward_node) => self_onward_link.psubtract_dyn(other_onward_node.as_tagged()),
                         None => return AlgebraicResult::Identity(SELF_IDENT)
                     }
                 };
@@ -983,8 +1161,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             } else {
                 debug_assert!(onward_key.len() > 0);
                 let self_val = unsafe{ self.val_in_slot::<SLOT>() };
-                let other_val = onward_node.node_get_val(onward_key).unwrap();
-                self_val.psubtract(other_val).map(|val| ValOrChildUnion::from(val))
+                match onward_node.node_get_val(onward_key) {
+                    Some(other_val) => self_val.psubtract(other_val).map(|val| ValOrChildUnion::from(val)),
+                    None => AlgebraicResult::Identity(SELF_IDENT)
+                }
             }
         } else {
             //We subtracted nothing from the slot, so the source should be referenced, unmodified
@@ -1490,7 +1670,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     #[inline]
     fn node_contains_partial_key(&self, key: &[u8]) -> bool {
         let (key0, key1) = self.get_both_keys();
-        if key0.starts_with(key) || key1.starts_with(key) {
+        if starts_with(key0, key) || starts_with(key1, key) {
             return true;
         }
         false
@@ -1535,7 +1715,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         debug_assert!(results.len() >= keys.len());
         for ((key, expect_val), (result_key_len, payload_ref)) in keys.into_iter().zip(results.iter_mut()) {
             if self.is_used::<0>() {
-                if key.starts_with(node_key_0) {
+                if starts_with(key, node_key_0) {
                     let node_key_len = node_key_0.len();
                     if self.is_child_ptr::<0>() {
                         if !*expect_val || node_key_len < key.len() {
@@ -1553,7 +1733,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 }
             }
             if self.is_used::<1>() {
-                if key.starts_with(node_key_1) {
+                if starts_with(key, node_key_1) {
                     let node_key_len = node_key_1.len();
                     if self.is_child_ptr::<1>() {
                         if !*expect_val || node_key_len < key.len() {
@@ -1588,48 +1768,121 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             (result.map(|payload| payload.into_val() ), created_subnode)
         })
     }
-
-    fn node_remove_val(&mut self, key: &[u8]) -> Option<V> {
-        if self.is_used_value_0() {
-            let node_key_0 = unsafe{ self.key_unchecked::<0>() };
-            if node_key_0 == key {
-                return Some(self.take_payload::<0>().unwrap().into_val())
+    fn node_remove_val(&mut self, key: &[u8], prune: bool) -> Option<V> {
+        //Removing a value is one of the ways a node can be left holding two onward children
+        // under one key, so check the node over on the way out
+        let result = (|| {
+            if self.is_used_value_0() {
+                let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                if node_key_0 == key {
+                    if prune {
+                        return Some(self.take_payload::<0>().unwrap().into_val())
+                    } else {
+                        //If the other slot already keeps this path, then just remove the value
+                        let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+                        let overlap = find_prefix_overlap(node_key_0, node_key_1);
+                        if node_key_0.len() == overlap {
+                            return Some(self.take_payload::<0>().unwrap().into_val())
+                        } else {
+                            //Otherwise, turn the value into an empty node
+                            return Some(self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        }
+                    }
+                }
             }
-        }
-        if self.is_used_value_1() {
-            let node_key_1 = unsafe{ self.key_unchecked::<1>() };
-            if node_key_1 == key {
-                return Some(self.take_payload::<1>().unwrap().into_val())
+            if self.is_used_value_1() {
+                let node_key_1 = unsafe{ self.key_unchecked::<1>() };
+                if node_key_1 == key {
+                    if prune {
+                        return Some(self.take_payload::<1>().unwrap().into_val())
+                    } else {
+                        //If the other slot already keeps this path, then remove the value
+                        let node_key_0 = unsafe{ self.key_unchecked::<0>() };
+                        let overlap = find_prefix_overlap(node_key_1, node_key_0);
+                        if node_key_1.len() == overlap {
+                            return Some(self.take_payload::<1>().unwrap().into_val())
+                        } else {
+                            //Otherwise, turn the value into an empty node
+                            return Some(self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val())
+                        }
+                    }
+                }
             }
-        }
-        None
+            None
+        })();
+        debug_assert!(validate_node(self));
+        result
     }
 
+    #[inline]
+    fn node_create_dangling(&mut self, key: &[u8]) -> Result<(bool, bool), TrieNodeODRc<V, A>> {
+        debug_assert!(key.len() > 0);
+        if !self.node_contains_partial_key(key) {
+            self.set_payload_abstract::<true>(key, ValOrChildUnion::from(TrieNodeODRc::new_empty())).map(|(result, created_subnode)| {
+                debug_assert!(result.is_none());
+                (true, created_subnode)
+            })
+        } else {
+            Ok((false, false))
+        }
+    }
+
+    #[inline]
+    fn node_remove_dangling(&mut self, key: &[u8]) -> usize {
+        debug_assert!(key.len() > 0);
+        let (key0, key1) = self.get_both_keys();
+        if self.is_used_child_0() {
+            if key0 == key {
+                let child = unsafe{ &self.val_or_child0.child };
+                if child.as_tagged().node_is_empty() {
+                    let pruned_bytes = if key1.len() > 0 && key[0] == key1[0] {
+                        key.len() - 1
+                    } else {
+                        key.len()
+                    };
+                    let _ = self.take_payload::<0>();
+                    return pruned_bytes
+                }
+            }
+        }
+        if self.is_used_child_1() {
+            if key1 == key {
+                let child = unsafe{ &self.val_or_child1.child };
+                if child.as_tagged().node_is_empty() {
+                    let pruned_bytes = if key[0] == key0[0] {
+                        key.len() - 1
+                    } else {
+                        key.len()
+                    };
+                    let _ = self.take_payload::<1>();
+                    return pruned_bytes
+                }
+            }
+        }
+        0
+    }
     fn node_set_branch(&mut self, key: &[u8], new_node: TrieNodeODRc<V, A>) -> Result<bool, TrieNodeODRc<V, A>> {
         self.set_payload_abstract::<true>(key, new_node.into())
             .map(|(_, created_subnode)| created_subnode)
     }
 
-    fn node_remove_all_branches(&mut self, key: &[u8]) -> bool {
+    fn node_remove_all_branches(&mut self, key: &[u8], prune: bool) -> bool {
         let key_len = key.len();
         let (key0, key1) = self.get_both_keys();
-        let remove_0 = key0.starts_with(key) && (key0.len() > key_len || self.is_child_ptr::<0>());
-        let remove_1 = key1.starts_with(key) && (key1.len() > key_len || self.is_child_ptr::<1>());
-        if remove_1 {
-            self.take_payload::<1>().unwrap();
-        }
-        if remove_0 {
-            self.take_payload::<0>().unwrap();
-        }
+        let key0_starts_with = starts_with(key0, key);
+        let remove_0 = key0_starts_with && (key0.len() > key_len || self.is_child_ptr::<0>());
+        let remove_1 = starts_with(key1, key) && (key1.len() > key_len || self.is_child_ptr::<1>());
+        self.remove_subtries(remove_0, remove_1, key0_starts_with, prune, key.len());
         remove_0 || remove_1
     }
 
-    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask) {
+    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune: bool) {
         let key_len = key.len();
         let (key0, key1) = self.get_both_keys();
         let mut remove_0 = false;
         let mut remove_1 = false;
-        if key0.starts_with(key) {
+        let key0_starts_with = starts_with(key0, key);
+        if key0_starts_with {
             if key0.len() > key_len {
                 remove_0 = !mask.test_bit(key0[key_len]);
             } else {
@@ -1638,19 +1891,14 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 debug_assert!(!self.is_child_ptr::<0>());
             }
         }
-        if key1.starts_with(key) {
+        if starts_with(key1, key) {
             if key1.len() > key_len {
                 remove_1 = !mask.test_bit(key1[key_len]);
             } else {
                 debug_assert!(!self.is_child_ptr::<1>()); //See comment above
             }
         }
-        if remove_1 {
-            self.take_payload::<1>().unwrap();
-        }
-        if remove_0 {
-            self.take_payload::<0>().unwrap();
-        }
+        self.remove_subtries(remove_0, remove_1, key0_starts_with, prune, key.len());
     }
 
     fn node_is_empty(&self) -> bool {
@@ -1668,7 +1916,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     // *   NODE_ITER_FINISHED
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
     #[inline(always)]
-    fn new_iter_token(&self) -> u128 {
+    fn new_iter_token(&self) -> IterToken {
         0
     }
     /// Explanation of logic: The ListNode contains a sorted list of keys (up to 2 of them), and the
@@ -1679,7 +1927,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     /// - == key1, we should return (2, key1)
     /// - > key1, (NODE_ITER_FINISHED, &[])
     #[inline(always)]
-    fn iter_token_for_path(&self, key: &[u8]) -> u128 {
+    fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
         if key.len() == 0 {
             return 0
         }
@@ -1696,7 +1944,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         NODE_ITER_FINISHED
     }
     #[inline(always)]
-    fn next_items(&self, token: u128) -> (u128, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
         match token {
             0 => {
                 if !self.is_used::<0>() {
@@ -1739,6 +1987,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             _ => (NODE_ITER_FINISHED, &[], None, None)
         }
     }
+    #[inline]
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
         let mut result = 0;
         if self.is_used_value_0() {
@@ -1757,6 +2006,57 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
         result
     }
+    #[inline]
+    fn node_goat_val_count(&self) -> usize {
+        //Here are 3 alternative implementations.  They're basically the same in perf, with a slight edge to the
+        // inline bitwise arithmetic version.
+
+        // ====================================
+        // Simplest impl
+
+        // self.is_used_value_0() as usize + self.is_used_value_1() as usize
+
+        // ====================================
+        // Inline bitwise arithmetic
+
+        let h = (self.header >> 12) as usize;
+        debug_assert!((h & 0b1000) != 0 || h == 0); //If the first slot is empty, no other header bits should be set
+        let s0 = ((h & 0b1000) >> 3) & (((h & 0b0010) ^ 0b0010) >> 1);
+        let s1 = ((h & 0b0100) >> 2) & ((h & 0b0001) ^ 0b0001);
+        s0 + s1
+
+        // ====================================
+        // LUT
+
+        // match (self.header >> 12) as usize {
+        //     0b0000 => 0, //Empty node.  0b0xxx with any if the 'x' bits set is an invalid config
+        //     0b1010 => 0, //Slot 0 filled with an onward link, slot 1 empty
+        //     0b1111 => 0, //Both slots filled with onward links
+        //     0b1000 => 1, //Slot 0 filled with a value, slot 1 empty
+        //     0b1101 => 1, //Both slots are filled, but only slot 0 is a value
+        //     0b1110 => 1, //Both slots are filled, but only slot 1 is a value
+        //     0b1100 => 2, //Both slots contain values
+        //     _ => unsafe{ unreachable_unchecked() }
+        // }
+    }
+    #[inline]
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        if self.is_used_child_0() {
+            return (1, Some(unsafe{ self.child_in_slot::<0>() }))
+        }
+        if self.is_used_child_1() {
+            return (2, Some(unsafe{ self.child_in_slot::<1>() }))
+        }
+        return (0, None)
+    }
+    #[inline]
+    fn node_child_iter_next(&self, token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        if token == 1 && self.is_used_child_1() {
+            (2, Some(unsafe{ self.child_in_slot::<1>() }))
+        } else {
+            (0, None)
+        }
+    }
     #[cfg(feature = "counters")]
     fn item_count(&self) -> usize {
         self.count()
@@ -1764,10 +2064,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     fn node_first_val_depth_along_key(&self, key: &[u8]) -> Option<usize> {
         debug_assert!(key.len() > 0);
         let (key0, key1) = self.get_both_keys();
-        if self.is_used_value_0() && key.starts_with(key0) {
+        if self.is_used_value_0() && starts_with(key, key0) {
             return Some(key0.len() - 1)
         }
-        if self.is_used_value_1() && key.starts_with(key1) {
+        if self.is_used_value_1() && starts_with(key, key1) {
             return Some(key1.len() - 1)
         }
         None
@@ -1780,7 +2080,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         match n {
             0 => {
                 let (key0, key1) = self.get_both_keys();
-                if key0.starts_with(key) && key0.len() > key.len() {
+                if starts_with(key0, key) && key0.len() > key.len() {
                     if key0 != key1 {
                         if key.len() + 1 == key0.len() && self.is_child_ptr::<0>() {
                             return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<0>().as_tagged()) })
@@ -1788,8 +2088,16 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                             return (Some(key0[key.len()]), None)
                         }
                     }
+                    //If we get here, we know both slots hold the same single-byte key, which means one of them holds
+                    // a value and the other holds the onward child.  So we have to check both
+                    if self.is_child_ptr::<0>() {
+                        return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<0>().as_tagged()) })
+                    }
+                    if self.is_child_ptr::<1>() {
+                        return (Some(key0[key.len()]), unsafe{ Some(self.child_in_slot::<1>().as_tagged()) })
+                    }
                 }
-                if key1.starts_with(key) && key1.len() > key.len() {
+                if starts_with(key1, key) && key1.len() > key.len() {
                     if key.len() + 1 == key1.len() && self.is_child_ptr::<1>() {
                         return (Some(key1[key.len()]), unsafe{ Some(self.child_in_slot::<1>().as_tagged()) })
                     } else {
@@ -1884,7 +2192,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
 
         //Case 4
-        if key0.starts_with(key) {
+        if starts_with(key0, key) {
             let remaining_key = remaining_key(key0, key.len());
             if self.is_child_ptr::<0>() {
                 return (Some(remaining_key), unsafe{ Some(self.child_in_slot::<0>().as_tagged()) })
@@ -1894,7 +2202,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
 
         //Case 5
-        if key1.starts_with(key) {
+        if starts_with(key1, key) {
             let remaining_key = remaining_key(key1, key.len());
             if self.is_child_ptr::<1>() {
                 return (Some(remaining_key), unsafe{ Some(self.child_in_slot::<1>().as_tagged()) })
@@ -1920,12 +2228,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         // k0="ahoy", k1="howdy", key="h", result = 1
         // k0="ahoy", k1="howdy", key="", result = 2
 
-        let c0 = if key0.len() > key_len && key0.starts_with(key) {
+        let c0 = if key0.len() > key_len && starts_with(key0, key) {
             Some(key0[key_len])
         } else {
             None
         };
-        let c1 = if key1.len() > key_len && key1.starts_with(key) {
+        let c1 = if key1.len() > key_len && starts_with(key1, key) {
             Some(key1[key_len])
         } else {
             None
@@ -1949,11 +2257,11 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         let (key0, key1) = self.get_both_keys();
         let mut m = [0u64; 4];
 
-        if key0.len() > key.len() && key0.starts_with(key) {
+        if key0.len() > key.len() && starts_with(key0, key) {
             let k = key0[key.len()];
             m[((k & 0b11000000) >> 6) as usize] |= 1u64 << (k & 0b00111111);
         }
-        if key1.len() > key.len() && key1.starts_with(key) {
+        if key1.len() > key.len() && starts_with(key1, key) {
             let k = key1[key.len()];
             m[((k & 0b11000000) >> 6) as usize] |= 1u64 << (k & 0b00111111);
         }
@@ -1975,14 +2283,16 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             return &[]
         }
         let (key0, key1) = self.get_both_keys();
-        if key_len > key0.len() {
-            if &key[..key0.len()] == key0 {
-                return &key[..key0.len()]
-            }
-        }
-        if key_len > key1.len() {
+
+        //We are checking key1 first because, key1 is allowed to be a superset of key0, but never the reverse
+        if key1.len() > 0 && key_len > key1.len() {
             if &key[..key1.len()] == key1 {
                 return &key[..key1.len()]
+            }
+        }
+        if key0.len() > 0 && key_len > key0.len() {
+            if &key[..key0.len()] == key0 {
+                return &key[..key0.len()]
             }
         }
         let key_byte = key.get(0);
@@ -2000,7 +2310,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         let (key0, key1) = self.get_both_keys();
         match next {
             true => {
-                if key0.starts_with(key) && key1.starts_with(common_key) {
+                if starts_with(key0, key) && starts_with(key1, common_key) {
                     let key1_last_byte = match key1.get(last_key_byte_idx) {
                         Some(byte) => byte,
                         None => return (None, None)
@@ -2022,7 +2332,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 }
             },
             false => {
-                if key1.starts_with(key) && key0.starts_with(common_key) {
+                if starts_with(key1, key) && starts_with(key0, common_key) {
                     let key0_last_byte = match key0.get(last_key_byte_idx) {
                         Some(byte) => byte,
                         None => return (None, None)
@@ -2067,7 +2377,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
         //Otherwise check to see if we need to make a sub-node.  If we do,
         // We know the new node will have only 1 slot filled
-        if key0.len() > key.len() && key0.starts_with(key) {
+        if key0.len() > key.len() && starts_with(key0, key) {
             let new_key = &key0[key.len()..];
             //If the new node's key is 7 Bytes or fewer, we can make a TinyRefNode
             if new_key.len() <= 7 {
@@ -2081,7 +2391,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 return AbstractNodeRef::OwnedRc(TrieNodeODRc::new_in(new_node, self.alloc.clone()));
             }
         }
-        if key1.len() > key.len() && key1.starts_with(key) {
+        if key1.len() > key.len() && starts_with(key1, key) {
             let new_key = &key1[key.len()..];
             //If the new node's key is 7 Bytes or fewer, we can make a TinyRefNode
             if new_key.len() <= 7 {
@@ -2099,32 +2409,52 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         AbstractNodeRef::None
     }
 
-    fn take_node_at_key(&mut self, key: &[u8]) -> Option<TrieNodeODRc<V, A>> {
+    fn take_node_at_key(&mut self, key: &[u8], prune: bool) -> Option<TrieNodeODRc<V, A>> {
         debug_assert!(validate_node(self));
         debug_assert!(key.len() > 0);
 
         //Exact match with a path to a child node means take that node
         let (key0, key1) = self.get_both_keys();
         if self.is_used_child_0() && key0 == key {
-            return self.take_payload::<0>().map(|payload| payload.into_child())
+            if prune {
+                return self.take_payload::<0>().map(|payload| payload.into_child())
+            } else {
+                let child_payload = self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty()));
+                return Some(child_payload.into_child())
+            }
         }
         if self.is_used_child_1() && key1 == key {
-            return self.take_payload::<1>().map(|payload| payload.into_child())
+            if prune {
+                return self.take_payload::<1>().map(|payload| payload.into_child())
+            } else {
+                let child_payload = self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty()));
+                return Some(child_payload.into_child())
+            }
         }
 
         //Otherwise check to see if we need to make a sub-node.  If we do,
         // We know the new node will have only 1 slot filled
-        if key0.len() > key.len() && key0.starts_with(key) {
+        if key0.len() > key.len() && starts_with(key0, key) {
             let mut new_node = Self::new_in(self.alloc.clone());
             unsafe{ new_node.set_payload_0(&key0[key.len()..], self.is_child_ptr::<0>(), ValOrChildUnion{ _unused: () }) }
-            new_node.val_or_child0 = self.take_payload::<0>().unwrap().into();
+            new_node.val_or_child0 = if prune {
+                self.take_payload::<0>().unwrap().into()
+            } else {
+                self.shorten_key_len::<0>(key.len());
+                self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into()
+            };
             debug_assert!(validate_node(&new_node));
             return Some(TrieNodeODRc::new_in(new_node, self.alloc.clone()));
         }
-        if key1.len() > key.len() && key1.starts_with(key) {
+        if key1.len() > key.len() && starts_with(key1, key) {
             let mut new_node = Self::new_in(self.alloc.clone());
             unsafe{ new_node.set_payload_0(&key1[key.len()..], self.is_child_ptr::<1>(), ValOrChildUnion{ _unused: () }) }
-            new_node.val_or_child0 = self.take_payload::<1>().unwrap().into();
+            new_node.val_or_child0 = if prune {
+                self.take_payload::<1>().unwrap().into()
+            } else {
+                self.shorten_key_len::<1>(key.len());
+                self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into()
+            };
             debug_assert!(validate_node(&new_node));
             return Some(TrieNodeODRc::new_in(new_node, self.alloc.clone()));
         }
@@ -2230,13 +2560,15 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             // See if we just shorten the key in this node, or if we need to discard the node entirely and recurse
             if byte_cnt < key_len {
                 let new_key_len = key_len-byte_cnt;
+                debug_assert!(new_key_len > 0);
                 unsafe{
                     let base_ptr = temp_node.key_bytes.as_mut_ptr().cast::<u8>();
                     let src_ptr = base_ptr.add(byte_cnt);
                     let dst_ptr = base_ptr;
                     core::ptr::copy(src_ptr, dst_ptr, new_key_len);
                 }
-                temp_node.header &= 0xf03f; //Zero out the old length, and reset it
+                debug_assert!(temp_node.header & 0x503f == 0); //Confirm there are no stale header bits for slot1
+                temp_node.header &= 0xa000; //Zero out the old length, and reset it
                 temp_node.header |= (new_key_len << 6) as u16;
                 debug_assert!(validate_node(&temp_node));
                 return Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
@@ -2394,6 +2726,31 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     }
 }
 
+impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
+    /// Part of the implementation of methods the remove subtries from a node
+    fn remove_subtries(&mut self, remove_0: bool, remove_1: bool, key0_starts_with: bool, prune: bool, key_len: usize) {
+        //NOTE: the order here is important because removing slot_0 first might shift the
+        // contents of slot_1, so we much deal with slot_1 first
+        if remove_1 {
+            if prune || key0_starts_with || key_len == 0 {
+                self.take_payload::<1>();
+            } else {
+                self.shorten_key_len::<1>(key_len);
+                self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty()));
+            }
+        }
+        if remove_0 {
+            if prune || key_len == 0 {
+                self.take_payload::<0>();
+            } else {
+                //Shortening key_0 won't ever change the sort order, so it's ok to assume we can stay in slot_0
+                self.shorten_key_len::<0>(key_len);
+                self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty()));
+            }
+        }
+    }
+}
+
 impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for LineListNode<V, A> {
     #[inline]
     fn tag(&self) -> usize {
@@ -2436,8 +2793,35 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
+    //Two slots may share a key (that is how a value and the onward child at the same path are
+    // stored) but only one of them may be the onward child, otherwise the byte leads to two
+    // different subtries and every accessor is free to pick a different one
+    if node.is_used_child_0() && node.is_used_child_1() && key0 == key1 {
+        println!("Invalid node - two onward children under the same key. {node:?}");
+        panic!()
+    }
+
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
+        println!("Invalid node - duplicated prefix too long. {node:?}");
+        panic!()
+    }
+
+    //slot_1 child/value metadata must only be meaningful when slot_1 is occupied
+    if !node.is_used::<1>() && node.is_child_ptr::<1>() {
+        println!("Invalid node - slot_1 child bit set while slot_1 is empty. {node:?}");
+        panic!()
+    }
+
+    //keys must fit in available buffer
+    if key0.len() + key1.len() > KEY_BYTES_CNT {
+        println!("Invalid node - key lengths over-run storage. {node:?}");
+        panic!()
+    }
+
+    //If slot0 saturates the node, slot1 must be empty
+    if key0.len() == KEY_BYTES_CNT && node.is_used::<1>() {
+        println!("Invalid node - slot0 saturates key storage, but slot1 is filled. {node:?}");
         panic!()
     }
 
@@ -2572,6 +2956,51 @@ mod tests {
         //Now make sure that adding a second key is still ok because of in-place splitting
         assert_eq!(new_node.node_set_val("hello".as_bytes(), 42).map_err(|_| 0), Ok((None, true)));
         assert_eq!(new_node.node_get_val("hello".as_bytes()), Some(&42));
+    }
+
+    /// Regression for slot_1 availability after shortening a full-width slot_0 key.
+    #[test]
+    fn test_line_list_shorten_key_releases_slot_1_availability() {
+        let full_key = vec![b'a'; KEY_BYTES_CNT];
+        let prefix_len = (KEY_BYTES_CNT / 3).max(1);
+        debug_assert!(prefix_len < KEY_BYTES_CNT);
+        let prefix = vec![b'a'; prefix_len];
+        let suffix = &full_key[prefix.len()..];
+
+        let mut new_node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(new_node.node_set_val(&full_key, 24).map_err(|_| 0), Ok((None, false)));
+
+        let detached = new_node.take_node_at_key(&prefix, false).unwrap();
+        assert_eq!(detached.as_tagged().node_get_val(suffix), Some(&24));
+
+        assert_eq!(new_node.key_len_0(), prefix.len());
+        assert!(!new_node.is_used::<1>());
+        assert!(
+            new_node.is_available_1(),
+            "slot_1 should become available after shortening slot_0 below KEY_BYTES_CNT"
+        );
+
+        assert_eq!(new_node.node_set_val(b"z", 42).map_err(|_| 0), Ok((None, false)));
+        assert_eq!(new_node.node_get_val(b"z"), Some(&42));
+    }
+
+    /// Regression for the single-slot drop_head_dyn path preserving slot_1 availability.
+    #[test]
+    fn test_line_list_drop_head_releases_slot_1_availability() {
+        let full_key = vec![b'a'; KEY_BYTES_CNT];
+        let drop_bytes = (KEY_BYTES_CNT / 3).max(1);
+        let expected_key_len = KEY_BYTES_CNT - drop_bytes;
+
+        let mut new_node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(new_node.node_set_val(&full_key, 24).map_err(|_| 0), Ok((None, false)));
+
+        let mut shortened = new_node.drop_head_dyn(drop_bytes).unwrap().as_tagged().as_list().unwrap().clone();
+        assert_eq!(shortened.key_len_0(), expected_key_len);
+        assert!(!shortened.is_used::<1>());
+        assert!(shortened.is_available_1());
+
+        assert_eq!(shortened.node_set_val(b"z", 42).map_err(|_| 0), Ok((None, false)));
+        assert_eq!(shortened.node_get_val(b"z"), Some(&42));
     }
 
     /// This tests that a common prefix is found with the entry in slot_0, when slot_1 is already full
@@ -2963,6 +3392,39 @@ mod tests {
         assert_eq!(inner_node.as_tagged().node_get_val(b"anana"), Some(&1));
     }
 
+    /// Regression test: a value and the onward child at the same path are kept
+    /// in the two slots of one node, both under the same key.  In that shape
+    /// `nth_child_from_key` used to look for the child in slot 1 only, and so
+    /// reported "no child node" whenever the child sat in slot 0.  A zipper
+    /// that descended by index then left its focus in the parent node, and
+    /// reported the position as having no children at all.
+    #[test]
+    fn test_nth_child_from_key_val_and_child_share_key() {
+        use crate::PathMap;
+        use crate::zipper::{ZipperMoving, ZipperValues, ZipperWriting, Zipper};
+
+        // Grafting puts the child in slot 0; the value added afterwards lands
+        // in slot 1 under the same key.  (Insertion alone builds the mirror
+        // image, which is the arrangement the buggy code expected.)
+        let leaf = PathMap::from_iter([("x", 1u64)]);
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper_at_path(b"a");
+            wz.graft(&leaf.read_zipper());
+        }
+        map.set_val_at(b"a", 9);
+
+        let mut by_index = map.read_zipper();
+        assert!(by_index.descend_indexed_byte(0));
+        let mut by_path = map.read_zipper();
+        by_path.descend_to(b"a");
+
+        assert_eq!(by_index.path(), by_path.path());
+        assert_eq!(by_index.val(), Some(&9));
+        assert_eq!(by_path.child_count(), 1, "\"a\" has the child 'x'");
+        assert_eq!(by_index.child_count(), by_path.child_count());
+        assert_eq!(by_index.child_mask(), by_path.child_mask());
+    }
 }
 
 //GOAT, merge wrappers for lattice impls on primitives

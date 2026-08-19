@@ -1,34 +1,165 @@
 
+use std::ops::{Bound, Range, RangeBounds, RangeInclusive};
+
 use crate::ring::*;
 
 pub mod ints;
+
+pub mod debug;
+
+/// Use `fast_slice_utils` directly.  We don't want to maintain this re-export from pathmap
+//GOAT, remove this re-export when nothing downstream is going to break
+#[deprecated]
+pub use fast_slice_utils::find_prefix_overlap;
 
 /// A 256-bit type containing a bit for every possible value in a byte
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ByteMask(pub [u64; 4]);
 
+/// Alternate formatter for displaying a [`ByteMask`] as binary instead of as a set of byte indices.
+#[derive(Clone, Copy)]
+pub struct ByteMaskBinaryFmt(ByteMask);
+
 impl ByteMask {
-    pub const EMPTY: ByteMask = Self(empty_mask());
+    pub const EMPTY: ByteMask = Self([0u64; 4]);
     pub const FULL: ByteMask = Self([!0u64; 4]);
+
+    const SUBSET: [ByteMask; 256] = const {
+        let mut bm = [[0u64; 4]; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut j = 0;
+            while j < 256 {
+                if i & j == j { bm[i][j / 64] |= 1 << (j % 64) }
+                j += 1;
+            }
+            i += 1;
+        }
+        unsafe { std::mem::transmute(bm) }
+    };
+
+    /// Nth row of the sierpinsky triangle
+    pub fn subset(b: u8) -> Self {
+        Self::SUBSET[b as usize]
+    }
 
     /// Create a new empty ByteMask
     #[inline]
     pub const fn new() -> Self {
-        Self(empty_mask())
+        Self::EMPTY
     }
+
+    /// Constructs a `ByteMask` with all bits in the given range set.
+    ///
+    /// The range is interpreted over the interval `[0, 256)` and supports all
+    /// standard Rust range syntaxes via [`RangeBounds<u8>`], including:
+    ///
+    /// - `a..b` (half-open)
+    /// - `a..=b` (inclusive)
+    /// - `..b`, `a..`, and `..` (unbounded)
+    ///
+    /// # Semantics
+    ///
+    /// The resulting mask has all bits set for indices within the specified range,
+    /// and all other bits cleared. Internally, the 256-bit mask is represented as
+    /// four `u64` words in little-endian order (i.e., lower indices correspond to
+    /// lower words and lower bit positions).
+    ///
+    /// If the normalized range is empty (i.e., `start >= end`), the empty mask
+    /// (`ByteMask::EMPTY`) is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pathmap::utils::ByteMask;
+    /// let m = ByteMask::from_range(10..70);
+    /// // sets bits 10 through 69
+    ///
+    /// let full = ByteMask::from_range(..);
+    /// // sets all 256 bits
+    ///
+    /// let single = ByteMask::from_range(42..=42);
+    /// // sets only bit 42
+    /// ```
+    #[inline]
+    pub fn from_range<R: RangeBounds<u8>>(range: R) -> Self {
+        let start = match range.start_bound() {
+            Bound::Included(&s) => s as usize,
+            Bound::Excluded(&s) => s as usize + 1,
+            Bound::Unbounded => 0,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(&e) => e as usize + 1,
+            Bound::Excluded(&e) => e as usize,
+            Bound::Unbounded => 256,
+        };
+
+        if start >= end {
+            return ByteMask::EMPTY
+        }
+
+        let mut mask = [0u64; 4];
+        let end_idx = end - 1;
+
+        let start_word = start >> 6;
+        let end_word = end_idx >> 6;
+
+        let start_bit = start & 0x3F;
+        let end_bit = end_idx & 0x3F;
+
+        if start_word == end_word {
+            let len = end_bit - start_bit + 1;
+            mask[start_word] = (u64::MAX >> (64 - len)) << start_bit;
+        } else {
+            // first partial word
+            mask[start_word] = (!0u64) << start_bit;
+
+            // fully covered words
+            for w in mask.iter_mut().take(end_word).skip(start_word + 1) {
+                *w = !0u64;
+            }
+
+            // last partial word
+            mask[end_word] = u64::MAX >> (63 - end_bit);
+        }
+
+        ByteMask(mask)
+    }
+
     /// Unwraps the `ByteMask` type to yield the inner array
     #[inline]
     pub fn into_inner(self) -> [u64; 4] {
         self.0
     }
     /// Create an iterator over every byte, in ascending order
+    ///
+    /// DEVELOPER NOTE: This iterator owns a copy of the 256-bit mask and clears bits as it advances.
+    /// A cursor design that borrows the `ByteMask` is possible, reducing iterator state from the 32-byte mask plus word
+    /// cursor down to a mask reference and the cursor padded to a word.
+    /// However, because the borrowed cursor cannot clear the source mask, each `next` call has to rebuild
+    /// a shifted word mask to hide already-visited bits.  Benchmarks showed that fixed per-item cost more
+    /// than doubled iteration overhead when the current owned iterator fits in registers.
     #[inline]
     pub fn iter(&self) -> ByteMaskIter {
-        self.byte_mask_iter()
+        ByteMaskIter::from(self.0)
+    }
+
+    /// Create an iterator over contiguous ranges of set bits, in ascending order
+    #[inline]
+    pub fn range_iter(&self) -> ByteMaskRangeIter {
+        ByteMaskRangeIter::from(self.0)
+    }
+
+    /// Returns a wrapper that renders this mask as 256 bits of binary text.
+    #[inline]
+    pub fn fmt_binary(&self) -> ByteMaskBinaryFmt {
+        ByteMaskBinaryFmt(self.clone())
     }
 
     /// Returns how many set bits precede the requested bit
+    #[inline]
     pub fn index_of(&self, byte: u8) -> u8 {
         if byte == 0 {
             return 0;
@@ -53,6 +184,8 @@ impl ByteMask {
     }
 
     /// Returns the byte corresponding to the `nth` set bit in the mask, counting forwards or backwards
+    ///
+    /// GOAT TODO Optimization: There should be a code path for `idx > 8` where we do a binary search instead of just scanning linearly
     pub fn indexed_bit<const FORWARD: bool>(&self, idx: usize) -> Option<u8> {
         let mut i = if FORWARD { 0 } else { 3 };
         let mut m = self.0[i];
@@ -183,6 +316,32 @@ impl core::fmt::Debug for ByteMask {
     }
 }
 
+impl core::fmt::Debug for ByteMaskBinaryFmt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for word in self.0.0.iter().rev() {
+            write!(f, "{word:064b}")?;
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for ByteMaskBinaryFmt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut bit_count = 0usize;
+        for word in self.0.0.iter().rev() {
+            for shift in (0..64).rev() {
+                let bit = (word >> shift) & 1;
+                write!(f, "{bit}")?;
+                bit_count += 1;
+                if bit_count < 256 && bit_count % 8 == 0 {
+                    write!(f, " ")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl BitMask for ByteMask {
     #[inline]
     fn count_bits(&self) -> usize { self.0.count_bits() }
@@ -229,6 +388,20 @@ impl From<u8> for ByteMask {
     }
 }
 
+impl From<Range<u8>> for ByteMask {
+    #[inline]
+    fn from(range: Range<u8>) -> Self {
+        Self::from_range(range)
+    }
+}
+
+impl From<RangeInclusive<u8>> for ByteMask {
+    #[inline]
+    fn from(range: RangeInclusive<u8>) -> Self {
+        Self::from_range(range)
+    }
+}
+
 impl From<[u64; 4]> for ByteMask {
     #[inline]
     fn from(mask: [u64; 4]) -> Self {
@@ -243,6 +416,7 @@ impl From<ByteMask> for [u64; 4] {
     }
 }
 
+#[allow(deprecated)]
 impl IntoByteMaskIter for ByteMask {
     #[inline]
     fn byte_mask_iter(self) -> ByteMaskIter {
@@ -460,16 +634,34 @@ pub struct ByteMaskIter {
     mask: [u64; 4],
 }
 
+crate::impl_name_only_debug!(
+    impl core::fmt::Debug for ByteMaskIter
+);
+
+/// An iterator to visit contiguous ranges of set bytes in ascending order.
+pub struct ByteMaskRangeIter {
+    i: u8,
+    mask: [u64; 4],
+}
+
+crate::impl_name_only_debug!(
+    impl core::fmt::Debug for ByteMaskRangeIter
+);
+
+/// Iterate over a [u64; 4].  Deprecated in favor [`ByteMask`]
+#[deprecated]
 pub trait IntoByteMaskIter {
     fn byte_mask_iter(self) -> ByteMaskIter;
 }
 
+#[allow(deprecated)]
 impl IntoByteMaskIter for [u64; 4] {
     fn byte_mask_iter(self) -> ByteMaskIter {
         ByteMaskIter::from(self)
     }
 }
 
+#[allow(deprecated)]
 impl IntoByteMaskIter for &[u64; 4] {
     fn byte_mask_iter(self) -> ByteMaskIter {
         ByteMaskIter::from(*self)
@@ -478,23 +670,44 @@ impl IntoByteMaskIter for &[u64; 4] {
 
 impl From<[u64; 4]> for ByteMaskIter {
     fn from(mask: [u64; 4]) -> Self {
+        Self::new(ByteMask(mask))
+    }
+}
+
+impl From<ByteMask> for ByteMaskIter {
+    fn from(mask: ByteMask) -> Self {
+        Self::new(mask)
+    }
+}
+
+impl From<[u64; 4]> for ByteMaskRangeIter {
+    fn from(mask: [u64; 4]) -> Self {
+        Self::new(ByteMask(mask))
+    }
+}
+
+impl From<ByteMask> for ByteMaskRangeIter {
+    fn from(mask: ByteMask) -> Self {
         Self::new(mask)
     }
 }
 
 impl ByteMaskIter {
-    /// Make a new `ByteMaskIter` from a mask, as you might get from [child_mask](crate::zipper::Zipper::child_mask)
-    pub fn new(mask: [u64; 4]) -> Self {
-        Self {
-            i: 0,
-            mask,
-        }
+    pub fn new(mask: ByteMask) -> Self {
+        Self { i: 0, mask: mask.0 }
+    }
+}
+
+impl ByteMaskRangeIter {
+    pub fn new(mask: ByteMask) -> Self {
+        Self { i: 0, mask: mask.0 }
     }
 }
 
 impl Iterator for ByteMaskIter {
     type Item = u8;
 
+    #[inline]
     fn next(&mut self) -> Option<u8> {
         loop {
             let w = &mut self.mask[self.i as usize];
@@ -509,6 +722,63 @@ impl Iterator for ByteMaskIter {
                 return None
             }
         }
+    }
+}
+
+impl Iterator for ByteMaskRangeIter {
+    type Item = RangeInclusive<u8>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        // Skip empty words until we find the first set bit of the next range.
+        let start_bit;
+        let start = loop {
+            let w = self.mask[self.i as usize];
+            if w != 0 {
+                start_bit = w.trailing_zeros() as u8;
+                break self.i * 64 + start_bit;
+            } else if self.i < 3 {
+                self.i += 1;
+            } else {
+                return None;
+            }
+        };
+
+        let run_len = (self.mask[self.i as usize] >> start_bit).trailing_ones() as u8;
+        // The range ends inside the current word, so clear just that span and return it.
+        if run_len < 64 - start_bit {
+            let clear_mask = ((1u64 << run_len) - 1) << start_bit;
+            self.mask[self.i as usize] &= !clear_mask;
+            return Some(start..=(start + run_len - 1));
+        }
+
+        // The range consumes the rest of the current word, so clear it before advancing.
+        self.mask[self.i as usize] = 0;
+
+        //Find the end of the range
+        while self.i < 3 {
+            self.i += 1;
+            let next_word = self.mask[self.i as usize];
+
+            // The range covers this entire next word, so clear it and continue forward.
+            if next_word == u64::MAX {
+                self.mask[self.i as usize] = 0;
+                continue;
+            }
+
+            let next_run_len = next_word.trailing_ones() as u8;
+            // The next word starts with a zero bit, so the range ended at the prior word boundary.
+            if next_run_len == 0 {
+                return Some(start..=((self.i - 1) * 64 + 63));
+            }
+
+            // The range ends inside the prefix of the next word, so clear that prefix and return it.
+            self.mask[self.i as usize] &= !((1u64 << next_run_len) - 1);
+            return Some(start..=(self.i * 64 + next_run_len - 1));
+        }
+
+        // The range runs through the end of the mask after clearing every fully covered word.
+        Some(start..=(self.i * 64 + 63))
     }
 }
 
@@ -557,13 +827,14 @@ fn bitmask_algebraic_result(result: [u64; 4], self_mask: &[u64; 4], other_mask: 
 
 /// Returns a new empty mask
 #[inline]
+#[deprecated]
 pub const fn empty_mask() -> [u64; 4] {
     [0; 4]
 }
 
 #[test]
 fn bit_utils_test() {
-    let mut mask = empty_mask();
+    let mut mask = ByteMask::EMPTY;
     assert_eq!(mask.count_bits(), 0);
     assert_eq!(mask.is_empty_mask(), true);
 
@@ -634,235 +905,75 @@ fn next_bit_test2() {
     assert_eq!(None, test_mask.next_bit(117));
 }
 
-// =======================================================================================
-// Path Utility Functions.  (currently just `find_prefix_overlap`)
-// =======================================================================================
-
-// GOAT!  UGH!  It turned out that having scalar paths aren't enough faster to justify having them
-// Probably on account of the extra branching causing misprediction
-// This code should be deleted eventually, but maybe keep it for a while while we discuss
-//
-// /// Returns the number of characters shared between two slices
-// #[inline]
-// pub fn find_prefix_overlap(a: &[u8], b: &[u8]) -> usize {
-//     let len = a.len().min(b.len());
-
-//     match len {
-//         0 => 0,
-//         1 => (unsafe{ a.get_unchecked(0) == b.get_unchecked(0) } as usize),
-//         2 => { 
-//             let a_word = unsafe{ core::ptr::read_unaligned(a.as_ptr() as *const u16) };
-//             let b_word = unsafe{ core::ptr::read_unaligned(b.as_ptr() as *const u16) };
-//             let cmp = !(a_word ^ b_word); // equal bytes will be 0xFF
-//             let cnt = cmp.trailing_ones();
-//             cnt as usize / 8
-//         },
-//         3 | 4 | 5 | 6 | 7 | 8 => {
-//             //GOAT, we need to do a check to make sure we don't over-read a page
-//             let a_word = unsafe{ core::ptr::read_unaligned(a.as_ptr() as *const u64) };
-//             let b_word = unsafe{ core::ptr::read_unaligned(b.as_ptr() as *const u64) };
-//             let cmp = !(a_word ^ b_word); // equal bytes will be 0xFF
-//             let cnt = cmp.trailing_ones();
-//             let result = cnt as usize / 8;
-//             result.min(len)
-//         },
-//         _ => count_shared_neon(a, b),
-//     }
-// }
-
-// GOAT!  AGH!! Even this is much slower, even on the zipfian distribution where 70% of the pairs have 0 overlap!!!
-//
-// /// Returns the number of characters shared between two slices
-// #[inline]
-// pub fn find_prefix_overlap(a: &[u8], b: &[u8]) -> usize {
-//     if a.len() != 0 && b.len() != 0 && unsafe{ a.get_unchecked(0) == b.get_unchecked(0) } {
-//         count_shared_neon(a, b)
-//     } else {
-//         0
-//     }
-// }
-
-#[cfg(not(feature = "nightly"))]
-#[allow(unused)]
-pub(crate) use core::convert::{identity as likely, identity as unlikely};
-#[cfg(feature = "nightly")]
-#[allow(unused)]
-pub(crate) use core::intrinsics::{likely, unlikely};
-
-const PAGE_SIZE: usize = 4096;
-
-#[inline(always)]
-unsafe fn same_page<const VECTOR_SIZE: usize>(slice: &[u8]) -> bool {
-    let address = slice.as_ptr() as usize;
-    // Mask to keep only the last 12 bits
-    let offset_within_page = address & (PAGE_SIZE - 1);
-    // Check if the 16/32/64th byte from the current offset exceeds the page boundary
-    offset_within_page < PAGE_SIZE - VECTOR_SIZE
-}
-
-fn count_shared_reference(p: &[u8], q: &[u8]) -> usize {
-    p.iter().zip(q)
-        .take_while(|(x, y)| x == y).count()
-}
-
-#[cold]
-fn count_shared_cold(a: &[u8], b: &[u8]) -> usize {
-    count_shared_reference(a, b)
-}
-
-#[cfg(all(target_feature="avx2", not(miri)))]
-#[inline(always)]
-fn count_shared_avx2(p: &[u8], q: &[u8]) -> usize {
-    use core::arch::x86_64::*;
-    unsafe {
-        let pl = p.len();
-        let ql = q.len();
-        let max_shared = pl.min(ql);
-        if unlikely(max_shared == 0) { return 0 }
-        if likely(same_page::<32>(p) && same_page::<32>(q)) {
-            let pv = _mm256_loadu_si256(p.as_ptr() as _);
-            let qv = _mm256_loadu_si256(q.as_ptr() as _);
-            let ev = _mm256_cmpeq_epi8(pv, qv);
-            let ne = !(_mm256_movemask_epi8(ev) as u32);
-            let count = _tzcnt_u32(ne);
-            if count != 32 || max_shared < 33 {
-                (count as usize).min(max_shared)
-            } else {
-                let new_len = max_shared-32;
-                32 + count_shared_avx2(core::slice::from_raw_parts(p.as_ptr().add(32), new_len), core::slice::from_raw_parts(q.as_ptr().add(32), new_len))
-            }
-        } else {
-            count_shared_cold(p, q)
-        }
-    }
-}
-
-/// Returns the number of characters shared between two slices
-#[cfg(all(target_feature="avx2", not(miri)))]
-#[inline]
-pub fn find_prefix_overlap(a: &[u8], b: &[u8]) -> usize {
-    count_shared_avx2(a, b)
-}
-
-#[cfg(all(not(feature = "nightly"), target_arch = "aarch64", target_feature = "neon", not(miri)))]
-#[inline(always)]
-fn count_shared_neon(p: &[u8], q: &[u8]) -> usize {
-    use core::arch::aarch64::*;
-    unsafe {
-        let pl = p.len();
-        let ql = q.len();
-        let max_shared = pl.min(ql);
-        if unlikely(max_shared == 0) { return 0 }
-
-        if same_page::<16>(p) && same_page::<16>(q) {
-            let pv = vld1q_u8(p.as_ptr());
-            let qv = vld1q_u8(q.as_ptr());
-            let eq = vceqq_u8(pv, qv);
-
-            //UGH! There must be a better way to do this...
-            // let neg = vmvnq_u8(eq);
-            // let lo: u64 = vgetq_lane_u64(core::mem::transmute(neg), 0);
-            // let hi: u64 = vgetq_lane_u64(core::mem::transmute(neg), 1);
-            // let count = if lo != 0 {
-            //     lo.trailing_zeros()
-            // } else {
-            //     64 + hi.trailing_zeros()
-            // } / 8;
-
-            //UGH! This code is actually a bit faster than the commented out code above.
-            // I'm sure I'm just not familiar enough with the neon ISA
-            let mut bytes = [core::mem::MaybeUninit::<u8>::uninit(); 16];
-            vst1q_u8(bytes.as_mut_ptr().cast(), eq);
-            let scalar128 = u128::from_le_bytes(core::mem::transmute(bytes));
-            let count = scalar128.trailing_ones() / 8;
-
-            if count != 16 || max_shared < 17 {
-                (count as usize).min(max_shared)
-            } else {
-                let new_len = max_shared-16;
-                16 + count_shared_neon(core::slice::from_raw_parts(p.as_ptr().add(16), new_len), core::slice::from_raw_parts(q.as_ptr().add(16), new_len))
-            }
-        } else {
-            return count_shared_cold(p, q);
-        }
-    }
-}
-
-#[cfg(all(feature = "nightly", not(miri)))]
-#[inline(always)]
-fn count_shared_simd(p: &[u8], q: &[u8]) -> usize {
-    use std::simd::{u8x32, cmp::SimdPartialEq};
-    unsafe {
-        let pl = p.len();
-        let ql = q.len();
-        let max_shared = pl.min(ql);
-        if unlikely(max_shared == 0) { return 0 }
-        if same_page::<32>(p) && same_page::<32>(q) {
-            let mut p_array = [core::mem::MaybeUninit::<u8>::uninit(); 32];
-            core::ptr::copy_nonoverlapping(p.as_ptr().cast(), (&mut p_array).as_mut_ptr(), 32);
-            let pv = u8x32::from_array(core::mem::transmute(p_array));
-            let mut q_array = [core::mem::MaybeUninit::<u8>::uninit(); 32];
-            core::ptr::copy_nonoverlapping(q.as_ptr().cast(), (&mut q_array).as_mut_ptr(), 32);
-            let qv = u8x32::from_array(core::mem::transmute(q_array));
-            let ev = pv.simd_eq(qv);
-            let mask = ev.to_bitmask();
-            let count = mask.trailing_ones();
-            if count != 32 || max_shared < 33 {
-                (count as usize).min(max_shared)
-            } else {
-                let new_len = max_shared-32;
-                32 + count_shared_simd(core::slice::from_raw_parts(p.as_ptr().add(32), new_len), core::slice::from_raw_parts(q.as_ptr().add(32), new_len))
-            }
-        } else {
-            return count_shared_cold(p, q);
-        }
-    }
-}
-
-/// Returns the number of characters shared between two slices
-#[cfg(all(not(feature = "nightly"), target_arch = "aarch64", target_feature = "neon", not(miri)))]
-#[inline]
-pub fn find_prefix_overlap(a: &[u8], b: &[u8]) -> usize {
-    count_shared_neon(a, b)
-}
-
-/// Returns the number of characters shared between two slices
-#[cfg(all(feature = "nightly", target_arch = "aarch64", target_feature = "neon", not(miri)))]
-#[inline]
-pub fn find_prefix_overlap(a: &[u8], b: &[u8]) -> usize {
-    count_shared_simd(a, b)
-}
-
-/// Returns the number of characters shared between two slices
-#[cfg(any(all(not(target_feature="avx2"), not(target_feature="neon")), miri))]
-#[inline]
-pub fn find_prefix_overlap(a: &[u8], b: &[u8]) -> usize {
-    count_shared_reference(a, b)
+#[test]
+fn from_range_test() {
+    assert_eq!(ByteMask::from_range(10..70), ByteMask::from([
+        0b1111111111111111111111111111111111111111111111111111110000000000u64,
+        0b0000000000000000000000000000000000000000000000000000000000111111u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+    ]));
+   assert_eq!(ByteMask::from_range(..), ByteMask::FULL);
+   assert_eq!(ByteMask::from_range(..=127), ByteMask::from([
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+        0b0000000000000000000000000000000000000000000000000000000000000000u64,
+    ]));
+    assert_eq!(ByteMask::from_range(10..), ByteMask::from([
+        0b1111111111111111111111111111111111111111111111111111110000000000u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        0b1111111111111111111111111111111111111111111111111111111111111111u64,
+    ]));
+    assert_eq!(ByteMask::from_range(0..0), ByteMask::EMPTY);
+    assert_eq!(ByteMask::from_range(0..=0), ByteMask::from(0));
+    assert_eq!(ByteMask::from_range(255..255), ByteMask::EMPTY);
+    assert_eq!(ByteMask::from_range(255..=255), ByteMask::from(255));
 }
 
 #[test]
-fn find_prefix_overlap_test() {
-    let tests = [
-        ("12345", "67890", 0),
-        ("", "12300", 0),
-        ("12345", "", 0),
-        ("12345", "12300", 3),
-        ("123", "123000000", 3),
-        ("123456789012345678901234567890xxxx", "123456789012345678901234567890yy", 30),
-        ("123456789012345678901234567890123456789012345678901234567890xxxx", "123456789012345678901234567890123456789012345678901234567890yy", 60),
-        ("1234567890123456xxxx", "1234567890123456yyyyyyy", 16),
-        ("123456789012345xxxx", "123456789012345yyyyyyy", 15),
-        ("12345678901234567xxxx", "12345678901234567yyyyyyy", 17),
-        ("1234567890123456789012345678901xxxx", "1234567890123456789012345678901yy", 31),
-        ("12345678901234567890123456789012xxxx", "12345678901234567890123456789012yy", 32),
-        ("123456789012345678901234567890123xxxx", "123456789012345678901234567890123yy", 33),
-        ("123456789012345678901234567890123456789012345678901234567890123xxxx", "123456789012345678901234567890123456789012345678901234567890123yy", 63),
-        ("1234567890123456789012345678901234567890123456789012345678901234xxxx", "1234567890123456789012345678901234567890123456789012345678901234yy", 64),
-        ("12345678901234567890123456789012345678901234567890123456789012345xxxx", "12345678901234567890123456789012345678901234567890123456789012345yy", 65),
-    ];
-
-    for test in tests {
-        let overlap = find_prefix_overlap(test.0.as_bytes(), test.1.as_bytes());
-        assert_eq!(overlap, test.2);
+fn range_iter_test() {
+    fn next_once(mask: ByteMask) -> Option<RangeInclusive<u8>> {
+        let mut iter = mask.range_iter();
+        iter.next()
     }
+
+    // Returns from the short in-word path.
+    assert_eq!(next_once(ByteMask::from(10..12)), Some(10..=11));
+
+    // Returns at a word boundary when the next word starts with zero.
+    assert_eq!(next_once(ByteMask::from(62..=63)), Some(62..=63));
+
+    // Returns from the next-word prefix path.
+    assert_eq!(next_once(ByteMask::from(62..=66)), Some(62..=66));
+
+    // Returns from the full-word continuation path after spanning a whole intermediate word.
+    assert_eq!(next_once(ByteMask::from(62..=130)), Some(62..=130));
+
+    // Returns from the end-of-mask path.
+    assert_eq!(next_once(ByteMask::from(250..=255)), Some(250..=255));
+
+    // Iterates multiple disjoint ranges in ascending order.
+    let mask = ByteMask::from(0..=3)
+        | ByteMask::from(10..12)
+        | ByteMask::from(64..=64)
+        | ByteMask::from(126..=130)
+        | ByteMask::from(255..=255);
+    let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
+    assert_eq!(ranges, vec![0..=3, 10..=11, 64..=64, 126..=130, 255..=255]);
+
+    // Span multiple words
+    let mask = ByteMask::from(2..=4)
+        | ByteMask::from(30..220);
+    let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
+    assert_eq!(ranges, vec![2..=4, 30..=219]);
+
+    // Empty mask
+    let mut iter = ByteMask::EMPTY.range_iter();
+    assert_eq!(iter.next(), None);
+
+    // Full mask
+    let mut iter = ByteMask::FULL.range_iter();
+    assert_eq!(iter.next(), Some(0..=255));
 }

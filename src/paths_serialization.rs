@@ -1,47 +1,108 @@
+//! Functionality for working with the `.paths` data format
+//!
+//! `.paths` is a compressed trie-based representation suitable for writing to a file.
+//!
+//! `.paths` data does not contain values, so the `_auxdata` functions allow values to
+//! be associated with path indices.
 
-// GOAT both functions should be tested on long paths (larger than chunk size)
 use libz_ng_sys::*;
 use crate::PathMap;
 use crate::TrieValue;
 use crate::alloc::Allocator;
-use crate::zipper::{ZipperReadOnlyConditionalIteration, ZipperWriting};
+use crate::zipper::{
+  ZipperReadOnlyConditionalIteration,
+  ZipperWriting,
+  ZipperIteration,
+  ZipperValues,
+};
 
+#[cfg(feature="nightly")]
+#[path="paths_serialization_nightly.rs"]
+mod paths_serialization_nightly;
+#[cfg(feature="nightly")]
+pub use paths_serialization_nightly::*;
+
+/// Statistics from a `serialize` operation
 #[derive(Debug, Clone, Copy)]
 pub struct SerializationStats {
-  pub bytes_out  : usize, 
-  pub bytes_in   : usize, 
+  /// The number of output bytes written to the target
+  pub bytes_out  : usize,
+  /// The number of serialized (uncompressed) bytes
+  pub bytes_in   : usize,
+  /// The total number of paths that were serialized
   pub path_count : usize
 }
+
+/// Statistics from a `deserialize` operation
 #[derive(Debug, Clone, Copy)]
 pub struct DeserializationStats {
-  pub bytes_in   : usize, 
-  pub bytes_out  : usize, 
+  /// The number of input bytes read from the source
+  pub bytes_in   : usize,
+  /// The number of deserialized (uncompressed) path bytes
+  pub bytes_out  : usize,
+  /// The total number of path insert attempts (i.e. paths in the source)
   pub path_count : usize
 }
 
-pub fn serialize_paths_<'a, V : TrieValue, RZ : ZipperReadOnlyConditionalIteration<'a, V>, W: std::io::Write>(rz: RZ, target: &mut W) -> std::io::Result<SerializationStats> {
-  serialize_paths(rz, target, |_, _, _| {})
+/// Serializes each value's path from the focus of `rz` into `.paths` data written to `target`
+pub fn serialize_paths<'a, V, W, RZ>(rz: RZ, target: &mut W) -> std::io::Result<SerializationStats>
+  where
+    V: TrieValue,
+    RZ: ZipperReadOnlyConditionalIteration<'a, V>,
+    W: std::io::Write
+{
+  serialize_paths_with_auxdata(rz, target, |_, _, _| {})
 }
 
-pub fn serialize_paths<'a, V : TrieValue, RZ : ZipperReadOnlyConditionalIteration<'a, V>, W: std::io::Write, F: FnMut(usize, &[u8], &V) -> ()>(mut rz: RZ, target: &mut W, mut fv: F) -> std::io::Result<SerializationStats> {
-  let witness = rz.witness();
+/// Serializes each value's path from the focus of `rz` into `.paths` data written to `target`
+///
+/// The `fv` closure is called for each path, permitting values to be serialized separately
+/// and associated with path indices
+pub fn serialize_paths_with_auxdata<'a, V : TrieValue, RZ : ZipperValues<V> + ZipperIteration, W: std::io::Write, F: FnMut(usize, &[u8], &V) -> ()>(mut rz: RZ, target: &mut W, mut fv: F) -> std::io::Result<SerializationStats> {
   let mut k = 0;
-  for_each_path_serialize(target, || {
-     match rz.to_next_get_val_with_witness(&witness) {
-       None => { Ok(None) }
-       Some(v) => {
-         fv(k, rz.path(), v);
-         k += 1;
-         Ok(Some(unsafe { std::mem::transmute(rz.path()) }))
-       }
-     }
+  //GOAT, old implementation.  Delete.
+  // serialize_paths_from_func(target, &mut rz, |rz| {
+  //    match rz.to_next_get_val_with_witness(&witness) {
+  //      None => { Ok(None) }
+  //      Some(v) => {
+  //        let path = rz.path();
+  //        fv(k, path, v);
+  //        k += 1;
+
+  //        //SAFETY: `for_each_path_serialize` finishes with the path returned from this closure
+  //        // before it invokes the closure again.  The `rz` path() will remain valid until the `rz`
+  //        // is modified again, and we have ownership of the rz and only modify it within this closure
+  //        //
+  //        Ok(Some(unsafe { std::mem::transmute(path) }))
+  //      }
+  //    }
+  // })
+  serialize_paths_from_funcs(target, &mut rz, |rz| Ok(rz.to_next_val()), |rz| {
+    let path = rz.path();
+    fv(k, path, rz.val().unwrap());
+    k += 1;
+    Some(path)
   })
 }
 
-/// Serialize all paths in under path `k`
+/// Generates `.paths` data by invoking arbitrary closures
+///
 /// Warning: the size of the individual path serialization can be double exponential in the size of the PathMap
-/// Returns the target output, total serialized bytes (uncompressed), and total number of paths
-pub fn for_each_path_serialize<'p, W: std::io::Write, F: FnMut() -> std::io::Result<Option<&'p [u8]>>>(target: &mut W, mut f: F) -> std::io::Result<SerializationStats> {
+///
+///NOTE: This function takes two closures because of a limitation in the borrow checker.
+/// borrowck isn't smart enough to allow one closure to take a mutable borrow of the `PathSrc`
+/// object, and return a const reborrow, and then allow the original mutable reference to
+/// be used again after the reborrow was dropped.  Doing the reborrow in the loop works around
+/// this limitation.
+///
+///When the borrow checker becomes more capable, we can try to collapse this function to take
+/// one closure instead of two.
+pub fn serialize_paths_from_funcs<PathSrc, AdvanceF, PathF, W>(target: &mut W, src: &mut PathSrc, mut advance_f: AdvanceF, mut path_f: PathF) -> std::io::Result<SerializationStats>
+where
+  AdvanceF: FnMut(&mut PathSrc) -> std::io::Result<bool>,
+  PathF: FnMut(&PathSrc) -> Option<&[u8]>,
+  W: std::io::Write,
+{
   const CHUNK: usize = 4096; // not tuned yet
   let mut buffer = [0u8; CHUNK];
 
@@ -50,11 +111,18 @@ pub fn for_each_path_serialize<'p, W: std::io::Write, F: FnMut() -> std::io::Res
   // a PR because their build and validation process is very confusing.
   let mut strm: z_stream = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
   let mut ret = unsafe { zng_deflateInit(&mut strm, 7) };
-  if ret != Z_OK { panic!("init failed") }
+  assert_eq!(ret, Z_OK);
 
   let mut total_paths : usize = 0;
-  while let Some(p) = f()? {
+  while advance_f(src)? {
+    let p = match path_f(src) {
+      Some(p) => p,
+      None => continue,
+    };
+
+    // println!("healthy {:?}", unsafe { slice_from_raw_parts(&strm as *const z_stream as *const u8, 104).as_ref() });
     let l = p.len();
+    // println!("({l}) {:?}", p);
     let mut lin = (l as u32).to_le_bytes();
     strm.avail_in = 4;
     strm.next_in = lin.as_mut_ptr();
@@ -106,11 +174,18 @@ pub fn for_each_path_serialize<'p, W: std::io::Write, F: FnMut() -> std::io::Res
   })
 }
 
-pub fn deserialize_paths_<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A>, R: std::io::Read>(wz: WZ, source: R, v: V) -> std::io::Result<DeserializationStats> {
-  deserialize_paths(wz, source, |_, _| v.clone())
+/// Deserializes each path from the `.paths` data in `source`, and grafts the resulting data at
+/// the focus of `wz`
+pub fn deserialize_paths<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A>, R: std::io::Read>(wz: WZ, source: R, v: V) -> std::io::Result<DeserializationStats> {
+  deserialize_paths_with_auxdata(wz, source, |_, _| v.clone())
 }
 
-pub fn deserialize_paths<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A>, R: std::io::Read, F: Fn(usize, &[u8]) -> V>(mut wz: WZ, source: R, fv: F) -> std::io::Result<DeserializationStats> {
+/// Deserializes each path from the `.paths` data in `source`, and grafts the resulting data at
+/// the focus of `wz`
+///
+/// Values are constructed with the supplied `fv` closure.
+/// See [serialize_paths_with_auxdata]
+pub fn deserialize_paths_with_auxdata<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A>, R: std::io::Read, F: Fn(usize, &[u8]) -> V>(mut wz: WZ, source: R, fv: F) -> std::io::Result<DeserializationStats> {
   let mut submap = PathMap::new_in(wz.alloc());
   let r = for_each_deserialized_path(source, |k, p| {
     let v = fv(k, p);
@@ -121,8 +196,7 @@ pub fn deserialize_paths<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A>, R
   r
 }
 
-/// Deserialize bytes that were serialized by `serialize_paths` under path `k`
-/// Returns the source input, total deserialized bytes (uncompressed), and total number of path insert attempts
+/// Deserializes each path from the `.paths` data in `source`, calling `f` for each path
 pub fn for_each_deserialized_path<R: std::io::Read, F: FnMut(usize, &[u8]) -> std::io::Result<()>>(mut source: R, mut f: F) -> std::io::Result<DeserializationStats> {
   use libz_ng_sys::*;
   const IN: usize = 1024;
@@ -195,7 +269,6 @@ pub fn for_each_deserialized_path<R: std::io::Read, F: FnMut(usize, &[u8]) -> st
 
   unsafe { inflateEnd(&mut strm) };
 
-  
   Ok(DeserializationStats {
     bytes_in   : strm.total_in,
     bytes_out  : strm.total_out, 
@@ -215,13 +288,13 @@ mod test {
     let rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
     rs.iter().for_each(|r| { btm.set_val_at(r.as_bytes(), ()); });
     let mut v = vec![];
-    match serialize_paths_(btm.read_zipper(), &mut v) {
+    match serialize_paths(btm.read_zipper(), &mut v) {
       Ok(SerializationStats { bytes_out : c, bytes_in : bw, path_count : pw}) => {
         println!("ser {} {} {}", c, bw, pw);
         println!("vlen {}", v.len());
 
         let mut restored_btm = PathMap::new();
-        match deserialize_paths_(restored_btm.write_zipper(), v.as_slice(), ()) {
+        match deserialize_paths(restored_btm.write_zipper(), v.as_slice(), ()) {
           Ok(DeserializationStats { bytes_in : c, bytes_out : bw, path_count : pw}) => {
             println!("de {} {} {}", c, bw, pw);
 
@@ -255,13 +328,13 @@ mod test {
       rs.iter().for_each(|r| { btm.set_val_at(r.as_bytes(), ()); });
 
       let mut v = vec![];
-      match serialize_paths_(btm.read_zipper(), &mut v) {
+      match serialize_paths(btm.read_zipper(), &mut v) {
         Ok(SerializationStats { bytes_out : c, bytes_in : bw, path_count : pw}) => {
           println!("ser {} {} {}", c, bw, pw);
           println!("vlen {}", v.len());
 
           let mut restored_btm = PathMap::new();
-          match deserialize_paths_(restored_btm.write_zipper(), v.as_slice(), ()) {
+          match deserialize_paths(restored_btm.write_zipper(), v.as_slice(), ()) {
           Ok(DeserializationStats { bytes_in : c, bytes_out : bw, path_count : pw}) => {
               println!("de {} {} {}", c, bw, pw);
 
@@ -291,14 +364,14 @@ mod test {
     rs.iter().enumerate().for_each(|(i, r)| { btm.set_val_at(r.as_bytes(), i); });
     let mut values = vec![];
     let mut v = vec![];
-    match serialize_paths(btm.read_zipper(), &mut v,
+    match serialize_paths_with_auxdata(btm.read_zipper(), &mut v,
                           |c, _p, value| { assert_eq!(values.len(), c); values.push(*value) }) {
       Ok(SerializationStats { bytes_out : c, bytes_in : bw, path_count : pw}) => {
         println!("ser {} {} {}", c, bw, pw);
         println!("vlen {}", v.len());
 
         let mut restored_btm = PathMap::new();
-        match deserialize_paths(restored_btm.write_zipper(), v.as_slice(), |c, _p| values[c]) {
+        match deserialize_paths_with_auxdata(restored_btm.write_zipper(), v.as_slice(), |c, _p| values[c]) {
           Ok(DeserializationStats { bytes_in : c, bytes_out : bw, path_count : pw}) => {
             println!("de {} {} {}", c, bw, pw);
 
@@ -317,5 +390,80 @@ mod test {
       }
       Err(e) => { println!("ser e {}", e) }
     }
+  }
+
+  #[cfg(not(miri))] // miri really hates the zlib-ng-sys C API
+  #[test]
+  fn path_serialize_deserialize_long_paths_cross_chunk_boundary() {
+    // Paths chosen around the internal 4096-byte compression CHUNK. The dense
+    // representation cannot safely build a single path much longer than 2048
+    // bytes on the test thread, so its fixture uses two such paths to cross the
+    // chunk while still exercising the decompressor's 2048-byte output buffer.
+    // Deterministic xorshift contents make failures reproduce.
+    let mut state = 0x9e3779b97f4a7c15_u64;
+    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+    #[cfg(feature = "all_dense_nodes")]
+    let lengths = [7usize, 2049, 2049];
+    #[cfg(not(feature = "all_dense_nodes"))]
+    let lengths = [7usize, 2049, 4097, 24000];
+    let mut btm = PathMap::new();
+    let mut paths = vec![];
+    for &len in &lengths {
+      let path: Vec<u8> = (0..len).map(|_| (next() >> 33) as u8).collect();
+      btm.set_val_at(&path[..], ());
+      paths.push(path);
+    }
+
+    let mut v = vec![];
+    let ser = serialize_paths(btm.read_zipper(), &mut v).unwrap();
+    assert_eq!(ser.path_count, lengths.len());
+    assert!(ser.bytes_in > 4096, "the input must span the compression chunk size");
+
+    let mut restored = PathMap::new();
+    let de = deserialize_paths(restored.write_zipper(), v.as_slice(), ()).unwrap();
+    assert_eq!(de.path_count, lengths.len());
+
+    for path in &paths {
+      assert!(restored.contains(&path[..]), "path of len {} lost in round-trip", path.len());
+    }
+    let mut rz = restored.read_zipper();
+    let mut restored_count = 0;
+    while rz.to_next_val() { restored_count += 1; }
+    assert_eq!(restored_count, lengths.len(), "no extra paths may appear");
+  }
+
+  #[cfg(all(not(miri), not(feature = "all_dense_nodes")))]
+  #[test]
+  fn path_serialize_deserialize_very_long_paths_cross_multiple_chunks() {
+    // Keep coverage for paths that individually span multiple decompressor
+    // output buffers. Dense byte nodes cannot construct these paths without
+    // overflowing the test thread's stack.
+    let mut state = 0x9e3779b97f4a7c15_u64;
+    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+    let lengths = [7usize, 2049, 4097, 24000];
+    let mut btm = PathMap::new();
+    let mut paths = vec![];
+    for &len in &lengths {
+      let path: Vec<u8> = (0..len).map(|_| (next() >> 33) as u8).collect();
+      btm.set_val_at(&path[..], ());
+      paths.push(path);
+    }
+
+    let mut v = vec![];
+    let ser = serialize_paths(btm.read_zipper(), &mut v).unwrap();
+    assert_eq!(ser.path_count, lengths.len());
+    assert!(ser.bytes_in > 4096, "the input must span the compression chunk size");
+
+    let mut restored = PathMap::new();
+    let de = deserialize_paths(restored.write_zipper(), v.as_slice(), ()).unwrap();
+    assert_eq!(de.path_count, lengths.len());
+
+    for path in &paths {
+      assert!(restored.contains(&path[..]), "path of len {} lost in round-trip", path.len());
+    }
+    let mut rz = restored.read_zipper();
+    let mut restored_count = 0;
+    while rz.to_next_val() { restored_count += 1; }
+    assert_eq!(restored_count, lengths.len(), "no extra paths may appear");
   }
 }

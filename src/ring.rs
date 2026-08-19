@@ -530,6 +530,19 @@ impl<V> FatAlgebraicResult<V> {
 
 /// Implements basic algebraic behavior (union & intersection) for a type
 pub trait Lattice {
+    /// Indicates whether the lattice operations are idempotent for the purpose of
+    /// evaluating algebraic operations on shared subtries.
+    ///
+    /// If `IDEMPOTENT = true` the implementor is asserting that:
+    /// `pjoin(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
+    /// `join_into(self) -> AlgebraicStatus::Identity`,
+    /// `pmeet(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
+    ///
+    /// WARNING! This constant is currently informational only.  The node-level and zipper
+    /// algebra implementations do not yet consult it, so changing it has no effect
+    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    const IDEMPOTENT: bool = true;
+
     /// Implements the union operation between two instances of a type in a partial lattice, resulting in
     /// the creation of a new result instance
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
@@ -600,6 +613,17 @@ pub trait LatticeRef {
 
 /// Implements subtract behavior for a type
 pub trait DistributiveLattice {
+    /// Indicates whether the subtraction operation is idempotent for the purpose of
+    /// evaluating algebraic operations on shared subtries.
+    ///
+    /// If `IDEMPOTENT = true` the implementor is asserting that:
+    /// `psubtract(self) -> AlgebraicResult::None`,
+    ///
+    /// WARNING! This constant is currently informational only.  The node-level and zipper
+    /// algebra implementations do not yet consult it, so changing it has no effect
+    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    const IDEMPOTENT: bool = true;
+
     /// Implements the partial subtract operation
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
 
@@ -640,7 +664,7 @@ pub(crate) trait HeteroLattice<OtherT> {
         in_place_default_impl(result, self, other, |_s| {}, |e| Self::convert(e))
     }
     fn pmeet(&self, other: &OtherT) -> AlgebraicResult<Self> where Self: Sized;
-    fn join_all(xs: &[&Self]) -> Self where Self: Sized;
+    // fn join_all(xs: &[&Self]) -> Self where Self: Sized; //HeteroLattice will entirely disappear with the policy refactor, so it's not worth worying about this anymore
     fn convert(other: OtherT) -> Self;
 }
 
@@ -960,48 +984,48 @@ pub trait SetLattice {
 #[macro_export]
 macro_rules! set_lattice {
     ( $type_ident:ident $(< $( $lt:tt $( : $clt:tt $(+ $dlt:tt )* )? ),+ >)? ) => {
-        impl $(< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? Lattice for $type_ident $(< $( $lt ),+ >)? where Self: SetLattice, <Self as SetLattice>::V: Lattice {
-            fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
-                let self_len = SetLattice::len(self);
-                let other_len = SetLattice::len(other);
-                let mut result = <Self as SetLattice>::with_capacity(self_len.max(other_len));
+        impl $(< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $crate::ring::Lattice for $type_ident $(< $( $lt ),+ >)? where Self: $crate::ring::SetLattice, <Self as $crate::ring::SetLattice>::V: $crate::ring::Lattice {
+            fn pjoin(&self, other: &Self) -> $crate::ring::AlgebraicResult<Self> {
+                let self_len = $crate::ring::SetLattice::len(self);
+                let other_len = $crate::ring::SetLattice::len(other);
+                let mut result = <Self as $crate::ring::SetLattice>::with_capacity(self_len.max(other_len));
                 let mut is_ident = self_len >= other_len;
                 let mut is_counter_ident = self_len <= other_len;
-                for (key, self_val) in SetLattice::iter(self) {
-                    if let Some(other_val) = SetLattice::get(other, key) {
+                for (key, self_val) in $crate::ring::SetLattice::iter(self) {
+                    if let Some(other_val) = $crate::ring::SetLattice::get(other, key) {
                         // A key in both sets
                         let inner_result = self_val.pjoin(other_val);
-                        set_lattice_update_ident_flags_with_result(
+                        $crate::ring::set_lattice_update_ident_flags_with_result(
                             &mut result, inner_result, key, self_val, other_val, &mut is_ident, &mut is_counter_ident
                         );
                     } else {
                         // A key in self, but not in other
-                        SetLattice::insert(&mut result, key.clone(), self_val.clone());
+                        $crate::ring::SetLattice::insert(&mut result, key.clone(), self_val.clone());
                         is_counter_ident = false;
                     }
                 }
                 for (key, value) in SetLattice::iter(other) {
-                    if !SetLattice::contains_key(self, key) {
+                    if !$crate::ring::SetLattice::contains_key(self, key) {
                         // A key in other, but not in self
-                        SetLattice::insert(&mut result, key.clone(), value.clone());
+                        $crate::ring::SetLattice::insert(&mut result, key.clone(), value.clone());
                         is_ident = false;
                     }
                 }
-                set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self_len, other_len)
+                $crate::ring::set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self_len, other_len)
             }
-            fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
-                let mut result = <Self as SetLattice>::with_capacity(0);
+            fn pmeet(&self, other: &Self) -> $crate::ring::AlgebraicResult<Self> {
+                let mut result = <Self as $crate::ring::SetLattice>::with_capacity(0);
                 let mut is_ident = true;
                 let mut is_counter_ident = true;
-                let (smaller, larger, switch) = if SetLattice::len(self) < SetLattice::len(other) {
+                let (smaller, larger, switch) = if $crate::ring::SetLattice::len(self) < $crate::ring::SetLattice::len(other) {
                     (self, other, false)
                 } else {
                     (other, self, true)
                 };
-                for (key, self_val) in SetLattice::iter(smaller) {
-                    if let Some(other_val) = SetLattice::get(larger, key) {
+                for (key, self_val) in $crate::ring::SetLattice::iter(smaller) {
+                    if let Some(other_val) = $crate::ring::SetLattice::get(larger, key) {
                         let inner_result = self_val.pmeet(other_val);
-                        set_lattice_update_ident_flags_with_result(
+                        $crate::ring::set_lattice_update_ident_flags_with_result(
                             &mut result, inner_result, key, self_val, other_val, &mut is_ident, &mut is_counter_ident
                         );
                     } else {
@@ -1011,7 +1035,7 @@ macro_rules! set_lattice {
                 if switch {
                     core::mem::swap(&mut is_ident, &mut is_counter_ident);
                 }
-                set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self.len(), other.len())
+                $crate::ring::set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self.len(), other.len())
             }
         }
     }
@@ -1019,7 +1043,8 @@ macro_rules! set_lattice {
 
 /// Internal function to integrate an `AlgebraicResult` from an element in a set into the set's own overall result
 #[inline]
-fn set_lattice_update_ident_flags_with_result<S: SetLattice>(
+#[doc(hidden)]
+pub fn set_lattice_update_ident_flags_with_result<S: SetLattice>(
     result_set: &mut S,
     result: AlgebraicResult<S::V>,
     key: &S::K,
@@ -1057,7 +1082,8 @@ fn set_lattice_update_ident_flags_with_result<S: SetLattice>(
 
 /// Internal function to make an `AlgebraicResult` from a new result set and flags
 #[inline]
-fn set_lattice_integrate_into_result<S: SetLattice>(
+#[doc(hidden)]
+pub fn set_lattice_integrate_into_result<S: SetLattice>(
     result_set: S,
     is_ident: bool,
     is_counter_ident: bool,
@@ -1087,31 +1113,31 @@ fn set_lattice_integrate_into_result<S: SetLattice>(
 #[macro_export]
 macro_rules! set_dist_lattice {
     ( $type_ident:ident $(< $( $lt:tt $( : $clt:tt $(+ $dlt:tt )* )? ),+ >)? ) => {
-        impl $(< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? DistributiveLattice for $type_ident $(< $( $lt ),+ >)? where Self: SetLattice + Clone, <Self as SetLattice>::V: DistributiveLattice {
-            fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+        impl $(< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $crate::ring::DistributiveLattice for $type_ident $(< $( $lt ),+ >)? where Self: $crate::ring::SetLattice + Clone, <Self as $crate::ring::SetLattice>::V: $crate::ring::DistributiveLattice {
+            fn psubtract(&self, other: &Self) -> $crate::ring::AlgebraicResult<Self> {
                 let mut is_ident = true;
                 let mut result = self.clone();
                 //Two code paths, so that we only iterate over the smaller set
-                if SetLattice::len(self) > SetLattice::len(other) {
-                    for (key, other_val) in SetLattice::iter(other) {
-                        if let Some(self_val) = SetLattice::get(self, key) {
+                if $crate::ring::SetLattice::len(self) > $crate::ring::SetLattice::len(other) {
+                    for (key, other_val) in $crate::ring::SetLattice::iter(other) {
+                        if let Some(self_val) = $crate::ring::SetLattice::get(self, key) {
                             set_lattice_subtract_element(&mut result, key, self_val, other_val, &mut is_ident)
                         }
                     }
                 } else {
-                    for (key, self_val) in SetLattice::iter(self) {
-                        if let Some(other_val) = SetLattice::get(other, key) {
+                    for (key, self_val) in $crate::ring::SetLattice::iter(self) {
+                        if let Some(other_val) = $crate::ring::SetLattice::get(other, key) {
                             set_lattice_subtract_element(&mut result, key, self_val, other_val, &mut is_ident)
                         }
                     }
                 }
-                if SetLattice::len(&result) == 0 {
-                    AlgebraicResult::None
+                if $crate::ring::SetLattice::len(&result) == 0 {
+                    $crate::ring::AlgebraicResult::None
                 } else if is_ident {
-                    AlgebraicResult::Identity(SELF_IDENT)
+                    $crate::ring::AlgebraicResult::Identity(SELF_IDENT)
                 } else {
-                    SetLattice::shrink_to_fit(&mut result);
-                    AlgebraicResult::Element(result)
+                    $crate::ring::SetLattice::shrink_to_fit(&mut result);
+                    $crate::ring::AlgebraicResult::Element(result)
                 }
             }
         }
@@ -1189,229 +1215,538 @@ impl<'a, K> Iterator for HashSetIterWrapper<'a, K> {
 set_lattice!(HashSet<K>);
 set_dist_lattice!(HashSet<K>);
 
-#[test]
-fn set_lattice_join_test1() {
-    let mut a = HashSet::new();
-    let mut b = HashSet::new();
+#[cfg(test)]
+mod tests {
+    use super::{AlgebraicResult, SetLattice, COUNTER_IDENT, SELF_IDENT};
+    use crate::ring::{DistributiveLattice, Lattice};
+    use std::collections::{HashMap, HashSet};
+    use std::fmt::Debug;
 
-    //Test None result
-    let joined_result = a.pjoin(&b);
-    assert_eq!(joined_result, AlgebraicResult::None);
+    type NestedSetMap = HashMap<u8, HashSet<u16>>;
 
-    //Straightforward join
-    a.insert("A");
-    b.insert("B");
-    let joined_result = a.pjoin(&b);
-    assert!(joined_result.is_element());
-    let joined = joined_result.unwrap([&a, &b]);
-    assert_eq!(joined.len(), 2);
-    assert!(joined.get("A").is_some());
-    assert!(joined.get("B").is_some());
+    fn assert_binary_result<T>(
+        result: AlgebraicResult<T>,
+        self_value: &T,
+        counter_value: &T,
+        expected: &T,
+        allow_counter_identity: bool,
+        context: &str,
+    ) where
+        T: Clone + Default + Eq + Debug,
+    {
+        match &result {
+            AlgebraicResult::None => {
+                assert_eq!(expected, &T::default(), "{context}: None result");
+            }
+            AlgebraicResult::Identity(mask) => {
+                assert_ne!(*mask, 0, "{context}: zero identity mask");
+                assert_eq!(
+                    *mask & !(SELF_IDENT | COUNTER_IDENT),
+                    0,
+                    "{context}: identity mask sets an out-of-arity bit"
+                );
+                if !allow_counter_identity {
+                    assert_eq!(
+                        *mask & COUNTER_IDENT,
+                        0,
+                        "{context}: non-commutative operation returned counter identity"
+                    );
+                }
+                if *mask & SELF_IDENT != 0 {
+                    assert_eq!(self_value, expected, "{context}: self identity mismatch");
+                }
+                if *mask & COUNTER_IDENT != 0 {
+                    assert_eq!(
+                        counter_value, expected,
+                        "{context}: counter identity mismatch"
+                    );
+                }
+            }
+            AlgebraicResult::Element(_) => {}
+        }
 
-    //Make "self" contain more entries
-    a.insert("C");
-    let joined_result = a.pjoin(&b);
-    assert!(joined_result.is_element());
-    let joined = joined_result.unwrap([&a, &b]);
-    assert_eq!(joined.len(), 3);
+        let actual = result.unwrap_or([self_value, counter_value], T::default());
+        assert_eq!(actual, *expected, "{context}: materialized result");
+    }
 
-    //Make "other" contain more entries
-    b.insert("D");
-    b.insert("F");
-    b.insert("H");
-    let joined_result = a.pjoin(&b);
-    assert!(joined_result.is_element());
-    let joined = joined_result.unwrap([&a, &b]);
-    assert_eq!(joined.len(), 6);
+    fn normalize_nested_map(map: &NestedSetMap) -> NestedSetMap {
+        map.iter()
+            .filter(|(_, values)| !values.is_empty())
+            .map(|(key, values)| (*key, values.clone()))
+            .collect()
+    }
 
-    //Test identity with self arg
-    let joined_result = joined.pjoin(&b);
-    assert_eq!(joined_result, AlgebraicResult::Identity(SELF_IDENT));
+    fn assert_nested_result(
+        result: AlgebraicResult<NestedSetMap>,
+        self_value: &NestedSetMap,
+        counter_value: &NestedSetMap,
+        expected: &NestedSetMap,
+        allow_counter_identity: bool,
+        context: &str,
+    ) {
+        match &result {
+            AlgebraicResult::None => {
+                assert!(expected.is_empty(), "{context}: None result");
+            }
+            AlgebraicResult::Identity(mask) => {
+                assert_ne!(*mask, 0, "{context}: zero identity mask");
+                assert_eq!(
+                    *mask & !(SELF_IDENT | COUNTER_IDENT),
+                    0,
+                    "{context}: identity mask sets an out-of-arity bit"
+                );
+                if !allow_counter_identity {
+                    assert_eq!(
+                        *mask & COUNTER_IDENT,
+                        0,
+                        "{context}: non-commutative operation returned counter identity"
+                    );
+                }
+                if *mask & SELF_IDENT != 0 {
+                    assert_eq!(
+                        normalize_nested_map(self_value),
+                        *expected,
+                        "{context}: self identity mismatch"
+                    );
+                }
+                if *mask & COUNTER_IDENT != 0 {
+                    assert_eq!(
+                        normalize_nested_map(counter_value),
+                        *expected,
+                        "{context}: counter identity mismatch"
+                    );
+                }
+            }
+            AlgebraicResult::Element(_) => {}
+        }
 
-    //Test identity with other arg
-    let joined_result = b.pjoin(&joined);
-    assert_eq!(joined_result, AlgebraicResult::Identity(COUNTER_IDENT));
+        let actual = result.unwrap_or([self_value, counter_value], NestedSetMap::new());
+        assert_eq!(
+            normalize_nested_map(&actual),
+            *expected,
+            "{context}: materialized result"
+        );
+    }
 
-    //Test mutual identity
-    let joined_result = joined.pjoin(&joined);
-    assert_eq!(joined_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
+    fn mixed(seed: u64) -> u64 {
+        let mut x = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    }
+
+    fn generated_set(seed: u64, salt: u64) -> HashSet<u16> {
+        let mut set = HashSet::new();
+        for value in 0..48 {
+            if mixed(seed ^ salt ^ ((value as u64) << 32)) % 5 < 2 {
+                set.insert(value);
+            }
+        }
+        set
+    }
+
+    fn generated_nested_map(seed: u64, salt: u64) -> NestedSetMap {
+        let mut map = NestedSetMap::new();
+        for key in 0..8 {
+            let key_seed = mixed(seed ^ salt ^ ((key as u64) << 24));
+            if key_seed % 4 == 0 {
+                continue;
+            }
+
+            let mut values = HashSet::new();
+            for value in 0..16 {
+                if mixed(key_seed ^ ((value as u64) << 32)) % 5 < 2 {
+                    values.insert(value);
+                }
+            }
+            if key_seed % 31 == 0 {
+                values.clear();
+            }
+            map.insert(key, values);
+        }
+        map
+    }
+
+    fn nested_join(a: &NestedSetMap, b: &NestedSetMap) -> NestedSetMap {
+        let mut result = normalize_nested_map(a);
+        for (key, values) in b {
+            if values.is_empty() {
+                continue;
+            }
+            result
+                .entry(*key)
+                .or_default()
+                .extend(values.iter().copied());
+        }
+        result
+    }
+
+    fn nested_meet(a: &NestedSetMap, b: &NestedSetMap) -> NestedSetMap {
+        let mut result = NestedSetMap::new();
+        for (key, a_values) in a {
+            let Some(b_values) = b.get(key) else {
+                continue;
+            };
+            let values = a_values
+                .intersection(b_values)
+                .copied()
+                .collect::<HashSet<_>>();
+            if !values.is_empty() {
+                result.insert(*key, values);
+            }
+        }
+        result
+    }
+
+    fn nested_subtract(a: &NestedSetMap, b: &NestedSetMap) -> NestedSetMap {
+        let mut result = NestedSetMap::new();
+        for (key, a_values) in a {
+            let values = if let Some(b_values) = b.get(key) {
+                a_values.difference(b_values).copied().collect()
+            } else {
+                a_values.clone()
+            };
+            if !values.is_empty() {
+                result.insert(*key, values);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn set_lattice_join_test1() {
+        let mut a = HashSet::new();
+        let mut b = HashSet::new();
+
+        //Test None result
+        let joined_result = a.pjoin(&b);
+        assert_eq!(joined_result, AlgebraicResult::None);
+
+        //Straightforward join
+        a.insert("A");
+        b.insert("B");
+        let joined_result = a.pjoin(&b);
+        assert!(joined_result.is_element());
+        let joined = joined_result.unwrap([&a, &b]);
+        assert_eq!(joined.len(), 2);
+        assert!(joined.get("A").is_some());
+        assert!(joined.get("B").is_some());
+
+        //Make "self" contain more entries
+        a.insert("C");
+        let joined_result = a.pjoin(&b);
+        assert!(joined_result.is_element());
+        let joined = joined_result.unwrap([&a, &b]);
+        assert_eq!(joined.len(), 3);
+
+        //Make "other" contain more entries
+        b.insert("D");
+        b.insert("F");
+        b.insert("H");
+        let joined_result = a.pjoin(&b);
+        assert!(joined_result.is_element());
+        let joined = joined_result.unwrap([&a, &b]);
+        assert_eq!(joined.len(), 6);
+
+        //Test identity with self arg
+        let joined_result = joined.pjoin(&b);
+        assert_eq!(joined_result, AlgebraicResult::Identity(SELF_IDENT));
+
+        //Test identity with other arg
+        let joined_result = b.pjoin(&joined);
+        assert_eq!(joined_result, AlgebraicResult::Identity(COUNTER_IDENT));
+
+        //Test mutual identity
+        let joined_result = joined.pjoin(&joined);
+        assert_eq!(joined_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
+    }
+
+    #[test]
+    fn set_lattice_meet_test1() {
+        let mut a = HashSet::new();
+        let mut b = HashSet::new();
+
+        //Test disjoint result
+        a.insert("A");
+        b.insert("B");
+        let meet_result = a.pmeet(&b);
+        assert_eq!(meet_result, AlgebraicResult::None);
+
+        //Straightforward meet
+        a.insert("A");
+        a.insert("C");
+        b.insert("B");
+        b.insert("C");
+        let meet_result = a.pmeet(&b);
+        assert!(meet_result.is_element());
+        let meet = meet_result.unwrap([&a, &b]);
+        assert_eq!(meet.len(), 1);
+        assert!(meet.get("A").is_none());
+        assert!(meet.get("B").is_none());
+        assert!(meet.get("C").is_some());
+
+        //Make "self" contain more entries
+        a.insert("D");
+        let meet_result = a.pmeet(&b);
+        assert!(meet_result.is_element());
+        let meet = meet_result.unwrap([&a, &b]);
+        assert_eq!(meet.len(), 1);
+
+        //Make "other" contain more entries
+        b.insert("D");
+        b.insert("E");
+        b.insert("F");
+        let meet_result = a.pmeet(&b);
+        assert!(meet_result.is_element());
+        let meet = meet_result.unwrap([&a, &b]);
+        assert_eq!(meet.len(), 2);
+
+        //Test identity with self arg
+        let meet_result = meet.pmeet(&b);
+        assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT));
+
+        //Test identity with other arg
+        let meet_result = b.pmeet(&meet);
+        assert_eq!(meet_result, AlgebraicResult::Identity(COUNTER_IDENT));
+
+        //Test mutual identity
+        let meet_result = meet.pmeet(&meet);
+        assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
+    }
+
+    #[test]
+    fn seeded_hash_set_operations_match_set_oracle() {
+        #[cfg(miri)]
+        const SEEDS: u64 = 1;
+        #[cfg(not(miri))]
+        const SEEDS: u64 = 256;
+
+        for seed in 0..SEEDS {
+            let a = generated_set(seed, 0x243f_6a88_85a3_08d3);
+            let b = generated_set(seed, 0x1319_8a2e_0370_7344);
+
+            let expected_join = a.union(&b).copied().collect::<HashSet<_>>();
+            assert_binary_result(
+                a.pjoin(&b),
+                &a,
+                &b,
+                &expected_join,
+                true,
+                &format!("HashSet join seed {seed}"),
+            );
+            let mut join_in_place = a.clone();
+            join_in_place.join_into(b.clone());
+            assert_eq!(
+                join_in_place, expected_join,
+                "HashSet join_into seed {seed}"
+            );
+
+            let expected_meet = a.intersection(&b).copied().collect::<HashSet<_>>();
+            assert_binary_result(
+                a.pmeet(&b),
+                &a,
+                &b,
+                &expected_meet,
+                true,
+                &format!("HashSet meet seed {seed}"),
+            );
+            let expected_subtract = a.difference(&b).copied().collect::<HashSet<_>>();
+            assert_binary_result(
+                a.psubtract(&b),
+                &a,
+                &b,
+                &expected_subtract,
+                false,
+                &format!("HashSet subtract seed {seed}"),
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_hash_map_operations_match_nested_set_oracle() {
+        #[cfg(miri)]
+        const SEEDS: u64 = 1;
+        #[cfg(not(miri))]
+        const SEEDS: u64 = 256;
+
+        for seed in 0..SEEDS {
+            let a = generated_nested_map(seed, 0x243f_6a88_85a3_08d3);
+            let b = generated_nested_map(seed, 0x1319_8a2e_0370_7344);
+            let c = generated_nested_map(seed, 0xa409_3822_299f_31d0);
+
+            let expected_join = nested_join(&a, &b);
+            assert_nested_result(
+                a.pjoin(&b),
+                &a,
+                &b,
+                &expected_join,
+                true,
+                &format!("HashMap join seed {seed}"),
+            );
+            let mut join_in_place = a.clone();
+            join_in_place.join_into(b.clone());
+            assert_eq!(
+                normalize_nested_map(&join_in_place),
+                expected_join,
+                "HashMap join_into seed {seed}"
+            );
+
+            let expected_meet = nested_meet(&a, &b);
+            assert_nested_result(
+                a.pmeet(&b),
+                &a,
+                &b,
+                &expected_meet,
+                true,
+                &format!("HashMap meet seed {seed}"),
+            );
+            let expected_subtract = nested_subtract(&a, &b);
+            assert_nested_result(
+                a.psubtract(&b),
+                &a,
+                &b,
+                &expected_subtract,
+                false,
+                &format!("HashMap subtract seed {seed}"),
+            );
+
+            let ab_join = a.pjoin(&b).unwrap_or([&a, &b], NestedSetMap::new());
+            let expected_chain = nested_subtract(&nested_join(&a, &b), &c);
+            assert_nested_result(
+                ab_join.psubtract(&c),
+                &ab_join,
+                &c,
+                &expected_chain,
+                false,
+                &format!("HashMap chained join/subtract seed {seed}"),
+            );
+        }
+    }
+
+    /// Used in [set_lattice_join_test2] and [set_lattice_meet_test2]
+    #[derive(Clone, Debug)]
+    struct Map<'a>(HashMap::<&'a str, HashMap<&'a str, ()>>);// TODO, should be struct Map<'a>(HashMap::<&'a str, Map<'a>>); see comment above about chalk
+    impl<'a> SetLattice for Map<'a> {
+        type K = &'a str;
+        type V = HashMap<&'a str, ()>; //Option<Box<Map<'a>>>; TODO, see comment above about chalk
+        type Iter<'it> = std::collections::hash_map::Iter<'it, Self::K, Self::V> where Self: 'it, Self::K: 'it, Self::V: 'it;
+        fn with_capacity(capacity: usize) -> Self { Map(HashMap::with_capacity(capacity)) }
+        fn len(&self) -> usize { self.0.len() }
+        fn is_empty(&self) -> bool { self.0.is_empty() }
+        fn contains_key(&self, key: &Self::K) -> bool { self.0.contains_key(key) }
+        fn insert(&mut self, key: Self::K, val: Self::V) { self.0.insert(key, val); }
+        fn get(&self, key: &Self::K) -> Option<&Self::V> { self.0.get(key) }
+        fn replace(&mut self, key: &Self::K, val: Self::V) { self.0.replace(key, val) }
+        fn remove(&mut self, key: &Self::K) { self.0.remove(key); }
+        fn iter<'it>(&'it self) -> Self::Iter<'it> { self.0.iter() }
+        fn shrink_to_fit(&mut self) { self.0.shrink_to_fit(); }
+    }
+    set_lattice!(Map<'a>);
+
+    #[test]
+    /// Tests a HashMap containing more HashMaps
+    //TODO: When the [chalk trait solver](https://github.com/rust-lang/chalk) lands in stable rust, it would be nice
+    // to promote this test to sample code and implement an arbitrarily deep recursive structure.  But currently
+    // that's not worth the complexity due to limits in the stable rust trait sovler.
+    fn set_lattice_join_test2() {
+        let mut a = Map::with_capacity(1);
+        let mut b = Map::with_capacity(1);
+
+        // Top level join
+        let mut inner_map_1 = HashMap::with_capacity(1);
+        inner_map_1.insert("1", ());
+        a.0.insert("A", inner_map_1.clone());
+        b.0.insert("B", inner_map_1);
+        a.0.insert("C", HashMap::new());
+        b.0.insert("C", HashMap::new());
+        let joined_result = a.pjoin(&b);
+        assert!(joined_result.is_element());
+        let joined = joined_result.unwrap([&a, &b]);
+        assert_eq!(joined.len(), 2);
+        assert!(joined.get(&"A").is_some());
+        assert!(joined.get(&"B").is_some());
+        assert!(joined.get(&"C").is_none()); //Empty sub-sets should not be merged
+        a.0.remove("C");
+        b.0.remove("C");
+
+        // Two level join, results should be Element even though the key existed in both args, because the values joined
+        let mut inner_map_2 = HashMap::with_capacity(1);
+        inner_map_2.insert("2", ());
+        b.0.remove("B");
+        b.0.insert("A", inner_map_2);
+        let joined_result = a.pjoin(&b);
+        assert!(joined_result.is_element());
+        let joined = joined_result.unwrap([&a, &b]);
+        assert_eq!(joined.len(), 1);
+        let joined_inner = joined.get(&"A").unwrap();
+        assert_eq!(joined_inner.len(), 2);
+        assert!(joined_inner.get(&"1").is_some());
+        assert!(joined_inner.get(&"2").is_some());
+
+        // Redoing the join should yield Identity
+        let joined_result = joined.pjoin(&a);
+        assert_eq!(joined_result.identity_mask().unwrap(), SELF_IDENT);
+        let joined_result = b.pjoin(&joined);
+        assert_eq!(joined_result.identity_mask().unwrap(), COUNTER_IDENT);
+    }
+
+    #[test]
+    /// Tests a HashMap containing more HashMaps.  See comments on [set_lattice_join_test2]
+    fn set_lattice_meet_test2() {
+        let mut a = Map::with_capacity(1);
+        let mut b = Map::with_capacity(1);
+
+        let mut inner_map_a = HashMap::new();
+        inner_map_a.insert("a", ());
+        let mut inner_map_b = HashMap::new();
+        inner_map_b.insert("b", ());
+        let mut inner_map_c = HashMap::new();
+        inner_map_c.insert("c", ());
+
+        // One level meet
+        a.0.insert("A", inner_map_a.clone());
+        a.0.insert("C", inner_map_c.clone());
+        b.0.insert("B", inner_map_b.clone());
+        b.0.insert("C", inner_map_c.clone());
+        let meet_result = a.pmeet(&b);
+        assert!(meet_result.is_element());
+        let meet = meet_result.unwrap([&a, &b]);
+        assert_eq!(meet.len(), 1);
+        assert!(meet.get(&"A").is_none());
+        assert!(meet.get(&"B").is_none());
+        assert!(meet.get(&"C").is_some());
+
+        // Two level meet, results should be None even though the key existed in both args, because the inner values don't overlap
+        let mut inner_map_1 = HashMap::with_capacity(1);
+        inner_map_1.insert("1", ());
+        a.0.insert("A", inner_map_1);
+        let mut inner_map_2 = HashMap::with_capacity(1);
+        inner_map_2.insert("2", ());
+        b.0.remove("B");
+        b.0.remove("C");
+        b.0.insert("A", inner_map_2.clone());
+        let meet_result = a.pmeet(&b);
+        assert!(meet_result.is_none());
+
+        // Two level meet, now should return Element, because the values have some overlap
+        inner_map_2.insert("1", ());
+        b.0.insert("A", inner_map_2);
+        let meet_result = a.pmeet(&b);
+        assert!(meet_result.is_element());
+        let meet = meet_result.unwrap([&a, &b]);
+        assert_eq!(meet.len(), 1);
+        let meet_inner = meet.get(&"A").unwrap();
+        assert_eq!(meet_inner.len(), 1);
+        assert!(meet_inner.get(&"1").is_some());
+        assert!(meet_inner.get(&"2").is_none());
+
+        // Redoing the meet should yield Identity
+        let meet_result = meet.pmeet(&a);
+        assert_eq!(meet_result.identity_mask().unwrap(), SELF_IDENT);
+        let meet_result = b.pmeet(&meet);
+        assert_eq!(meet_result.identity_mask().unwrap(), COUNTER_IDENT);
+    }
 }
-
-#[test]
-fn set_lattice_meet_test1() {
-    let mut a = HashSet::new();
-    let mut b = HashSet::new();
-
-    //Test disjoint result
-    a.insert("A");
-    b.insert("B");
-    let meet_result = a.pmeet(&b);
-    assert_eq!(meet_result, AlgebraicResult::None);
-
-    //Straightforward meet
-    a.insert("A");
-    a.insert("C");
-    b.insert("B");
-    b.insert("C");
-    let meet_result = a.pmeet(&b);
-    assert!(meet_result.is_element());
-    let meet = meet_result.unwrap([&a, &b]);
-    assert_eq!(meet.len(), 1);
-    assert!(meet.get("A").is_none());
-    assert!(meet.get("B").is_none());
-    assert!(meet.get("C").is_some());
-
-    //Make "self" contain more entries
-    a.insert("D");
-    let meet_result = a.pmeet(&b);
-    assert!(meet_result.is_element());
-    let meet = meet_result.unwrap([&a, &b]);
-    assert_eq!(meet.len(), 1);
-
-    //Make "other" contain more entries
-    b.insert("D");
-    b.insert("E");
-    b.insert("F");
-    let meet_result = a.pmeet(&b);
-    assert!(meet_result.is_element());
-    let meet = meet_result.unwrap([&a, &b]);
-    assert_eq!(meet.len(), 2);
-
-    //Test identity with self arg
-    let meet_result = meet.pmeet(&b);
-    assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT));
-
-    //Test identity with other arg
-    let meet_result = b.pmeet(&meet);
-    assert_eq!(meet_result, AlgebraicResult::Identity(COUNTER_IDENT));
-
-    //Test mutual identity
-    let meet_result = meet.pmeet(&meet);
-    assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
-}
-
-/// Used in [set_lattice_join_test2] and [set_lattice_meet_test2]
-#[derive(Clone, Debug)]
-struct Map<'a>(HashMap::<&'a str, HashMap<&'a str, ()>>);// TODO, should be struct Map<'a>(HashMap::<&'a str, Map<'a>>); see comment above about chalk
-impl<'a> SetLattice for Map<'a> {
-    type K = &'a str;
-    type V = HashMap<&'a str, ()>; //Option<Box<Map<'a>>>; TODO, see comment above about chalk
-    type Iter<'it> = std::collections::hash_map::Iter<'it, Self::K, Self::V> where Self: 'it, Self::K: 'it, Self::V: 'it;
-    fn with_capacity(capacity: usize) -> Self { Map(HashMap::with_capacity(capacity)) }
-    fn len(&self) -> usize { self.0.len() }
-    fn is_empty(&self) -> bool { self.0.is_empty() }
-    fn contains_key(&self, key: &Self::K) -> bool { self.0.contains_key(key) }
-    fn insert(&mut self, key: Self::K, val: Self::V) { self.0.insert(key, val); }
-    fn get(&self, key: &Self::K) -> Option<&Self::V> { self.0.get(key) }
-    fn replace(&mut self, key: &Self::K, val: Self::V) { self.0.replace(key, val) }
-    fn remove(&mut self, key: &Self::K) { self.0.remove(key); }
-    fn iter<'it>(&'it self) -> Self::Iter<'it> { self.0.iter() }
-    fn shrink_to_fit(&mut self) { self.0.shrink_to_fit(); }
-}
-set_lattice!(Map<'a>);
-
-#[test]
-/// Tests a HashMap containing more HashMaps
-//TODO: When the [chalk trait solver](https://github.com/rust-lang/chalk) lands in stable rust, it would be nice
-// to promote this test to sample code and implement an arbitrarily deep recursive structure.  But currently
-// that's not worth the complexity due to limits in the stable rust trait sovler.
-fn set_lattice_join_test2() {
-    let mut a = Map::with_capacity(1);
-    let mut b = Map::with_capacity(1);
-
-    // Top level join
-    let mut inner_map_1 = HashMap::with_capacity(1);
-    inner_map_1.insert("1", ());
-    a.0.insert("A", inner_map_1.clone());
-    b.0.insert("B", inner_map_1);
-    // b.0.insert("C", HashMap::new()); TODO: We might want to test collapse of empty items using the is_bottom() method
-    let joined_result = a.pjoin(&b);
-    assert!(joined_result.is_element());
-    let joined = joined_result.unwrap([&a, &b]);
-    assert_eq!(joined.len(), 2);
-    assert!(joined.get(&"A").is_some());
-    assert!(joined.get(&"B").is_some());
-    assert!(joined.get(&"C").is_none()); //Empty sub-sets should not be merged
-
-    // Two level join, results should be Element even though the key existed in both args, because the values joined
-    let mut inner_map_2 = HashMap::with_capacity(1);
-    inner_map_2.insert("2", ());
-    b.0.remove("B");
-    b.0.insert("A", inner_map_2);
-    let joined_result = a.pjoin(&b);
-    assert!(joined_result.is_element());
-    let joined = joined_result.unwrap([&a, &b]);
-    assert_eq!(joined.len(), 1);
-    let joined_inner = joined.get(&"A").unwrap();
-    assert_eq!(joined_inner.len(), 2);
-    assert!(joined_inner.get(&"1").is_some());
-    assert!(joined_inner.get(&"2").is_some());
-
-    // Redoing the join should yield Identity
-    let joined_result = joined.pjoin(&a);
-    assert_eq!(joined_result.identity_mask().unwrap(), SELF_IDENT);
-    let joined_result = b.pjoin(&joined);
-    assert_eq!(joined_result.identity_mask().unwrap(), COUNTER_IDENT);
-}
-
-#[test]
-/// Tests a HashMap containing more HashMaps.  See comments on [set_lattice_join_test2]
-fn set_lattice_meet_test2() {
-    let mut a = Map::with_capacity(1);
-    let mut b = Map::with_capacity(1);
-
-    let mut inner_map_a = HashMap::new();
-    inner_map_a.insert("a", ());
-    let mut inner_map_b = HashMap::new();
-    inner_map_b.insert("b", ());
-    let mut inner_map_c = HashMap::new();
-    inner_map_c.insert("c", ());
-
-    // One level meet
-    a.0.insert("A", inner_map_a.clone());
-    a.0.insert("C", inner_map_c.clone());
-    b.0.insert("B", inner_map_b.clone());
-    b.0.insert("C", inner_map_c.clone());
-    let meet_result = a.pmeet(&b);
-    assert!(meet_result.is_element());
-    let meet = meet_result.unwrap([&a, &b]);
-    assert_eq!(meet.len(), 1);
-    assert!(meet.get(&"A").is_none());
-    assert!(meet.get(&"B").is_none());
-    assert!(meet.get(&"C").is_some());
-
-    // Two level meet, results should be None even though the key existed in both args, because the inner values don't overlap
-    let mut inner_map_1 = HashMap::with_capacity(1);
-    inner_map_1.insert("1", ());
-    a.0.insert("A", inner_map_1);
-    let mut inner_map_2 = HashMap::with_capacity(1);
-    inner_map_2.insert("2", ());
-    b.0.remove("B");
-    b.0.remove("C");
-    b.0.insert("A", inner_map_2.clone());
-    let meet_result = a.pmeet(&b);
-    assert!(meet_result.is_none());
-
-    // Two level meet, now should return Element, because the values have some overlap
-    inner_map_2.insert("1", ());
-    b.0.insert("A", inner_map_2);
-    let meet_result = a.pmeet(&b);
-    assert!(meet_result.is_element());
-    let meet = meet_result.unwrap([&a, &b]);
-    assert_eq!(meet.len(), 1);
-    let meet_inner = meet.get(&"A").unwrap();
-    assert_eq!(meet_inner.len(), 1);
-    assert!(meet_inner.get(&"1").is_some());
-    assert!(meet_inner.get(&"2").is_none());
-
-    // Redoing the meet should yield Identity
-    let meet_result = meet.pmeet(&a);
-    assert_eq!(meet_result.identity_mask().unwrap(), SELF_IDENT);
-    let meet_result = b.pmeet(&meet);
-    assert_eq!(meet_result.identity_mask().unwrap(), COUNTER_IDENT);
-}
-
-//GOAT, do a test for the HashMap impl of psubtract
 //GOAT, do an impl of SetLattice for Vec as an indexed set
 
 
@@ -1429,10 +1764,10 @@ fn set_lattice_meet_test2() {
 // 3. Compose pseudorandom subsets of `set_a` and `set_b` and put them into HashSets
 // 4. Put corresponding concatenated paths (Cartesian product) into PathMaps.
 // 5. Select an operation to perform, and do the same operation to both the HashSets contining simple
-//   indices and to the PathMaps.  And validate the results match
-// 6. Loop back to 3, continuing to choose additional subsets to perform additional operations.
+// indices and to the PathMaps.  And validate the results match
+// 6. Loop back to 3, continuing to choose additional operations to perform.
 
 // The reason behind the cartesian product (concatenated paths) is because the chances of getting overlap
-//  beyond the first couple bytes of a random path are very slim.  So the Cartesian product appraoch
-//  means we are likely to get large common prefixes followed by splits deep in the trie, which will
-//  exercise the code more thoroughly.
+// beyond the first couple bytes of a random path are very slim.  The Cartesian product appraoch
+// means we are likely to get large common prefixes followed by splits deep in the trie, which will
+// exercise the code more thoroughly.

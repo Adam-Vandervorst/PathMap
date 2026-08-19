@@ -63,6 +63,7 @@ impl Clone for ZipperTracker<TrackingRead> {
     }
 }
 
+#[cfg(feature = "zipper_tracking")]
 impl<M: TrackingMode> ZipperTracker<M> {
     /// Returns the path that the tracker is guarding
     pub fn path(&self) -> &[u8] {
@@ -376,7 +377,7 @@ impl<M: TrackingMode> ZipperTracker<M> {
                 match write_zipper.get_val_mut() {
                     Some(cnt) => {
                         if *cnt == NonZero::<u32>::MIN {
-                            write_zipper.remove_val();
+                            write_zipper.remove_val(true);
                         } else {
                             *cnt = unsafe { NonZero::new_unchecked(cnt.get() - 1) };
                         };
@@ -388,7 +389,7 @@ impl<M: TrackingMode> ZipperTracker<M> {
                 let removed = paths
                     .written_paths
                     .write_zipper_at_path(this_path)
-                    .remove_val();
+                    .remove_val(true);
                 removed.is_some()
             }
         });

@@ -1,4 +1,19 @@
 
 [build]
-#rustflags = "-C target-cpu=native -C lto=fat -C embed-bitcode=yes -Z dylib-lto"
+
+[target.x86_64-unknown-linux-gnu]
+# rustflags = "-C target-cpu=native -C lto=fat -C embed-bitcode=yes -Z dylib-lto"
 rustflags = "-C target-cpu=native"
+
+# prerequisites:
+# sudo apt install qemu-user binutils-riscv64-linux-gnu gcc-riscv64-linux-gnu clang-22
+# rustup target add riscv64gc-unknown-linux-gnu 
+[target.riscv64gc-unknown-linux-gnu]
+rustflags = [
+    "-Ctarget-cpu=tt-ascalon-d8",
+    "-Clinker=clang-22",
+    "-Clink-args=--target=riscv64-unknown-linux-gnu",
+    "-Clink-args=-fuse-ld=lld",
+]
+# runner = "qemu-riscv64 -L /usr/riscv64-linux-gnu/"
+runner = "qemu-riscv64 -cpu tt-ascalon -L /usr/riscv64-linux-gnu/"

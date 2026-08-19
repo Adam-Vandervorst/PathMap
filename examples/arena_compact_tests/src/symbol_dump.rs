@@ -141,7 +141,7 @@ impl SymbolMmap {
         get_at_offset(&self.mapping, (self.offsets + index) * 8)
     }
 
-    pub fn get_range(&self, range: core::ops::Range<usize>) -> Option<SymbolIter> {
+    pub fn get_range<'a>(&'a self, range: core::ops::Range<usize>) -> Option<SymbolIter<'a>> {
         if range.start >= self.count || range.end > self.count {
             return None;
         }
@@ -152,7 +152,7 @@ impl SymbolMmap {
         })
     }
 
-    pub fn iter(&self) -> SymbolIter {
+    pub fn iter<'a>(&'a self) -> SymbolIter<'a> {
         SymbolIter {
             mapping: &*self.mapping,
             start: self.offsets,
@@ -198,7 +198,7 @@ impl<'mapping> DoubleEndedIterator for SymbolIter<'mapping> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{SymbolDumper, SymbolMmap};
+    use super::{SymbolDumper, SymbolMmap};
     #[test]
     fn test_roundtrip() {
         let symbols: &[&[u8]] = &["hello", "world", "123"]

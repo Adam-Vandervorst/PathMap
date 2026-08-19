@@ -8,36 +8,6 @@ use crate::alloc::Allocator;
 use crate::ring::*;
 use crate::utils::ByteMask;
 
-//OPTIMIZATION QUESTION 2, a note on Rc vs. rclite: Rc's payload bloat is 16 bytes, while rclite's is much smaller <8 Bytes.
-// That's a big deal on a DenseByteNode because it pushes it from a single cache line onto two.
-// However, rclite doesn't currently support DSTs. (like &dyn)  Therefore there are two options if we
-// want to keep Rc<DenseByteNode<_>> as a type that's a single cache line. (See OPTIMIZATION QUESTION 1)
-//
-// 1. try and add a PR to rclite.  However it's possible not supporting DSTs was a deliberate choice, so
-//  they may not even take the PR.  And it's also possible (likely) it's hard to do (given the original
-//  authors didn't do it alrady)... If I had to guess it's because the rclite header is at the end of
-//  the object, while the Rc header is at the beginning.
-// 2. hunt for a solution that lets us do something like: Vec<dyn TrieNode<_>> where TrieNode is only
-//  implementable on pointer types like Rc, Box, etc.  I don't think Rust lets you do that, but perhaps
-//  it should!
-//
-// use rclite::Rc;
-// use std::rc::Rc;
-
-
-//OPTIMIZATION QUESTION 1, figure out the best compromise with regard to where to put Rc...
-// Question: Is it true that it's always going to be cheaper to increment a refcount than to do a clone?
-//  and to decrement a refcount instead of free?  because that seems like it would argue for an Rc at every node.
-//
-// However, the mutable traversal loop calls `node_get_child_mut`, which, in turn, needs to check the
-// refcount imposing non-zero overhead.
-//
-// The bigger concern is that incrementing the refcount requires thread syncronization around the atomic
-// access and that could be painful
-//
-//Conclusion: Need a massively multi-threaded benchmark to decide what to do with Rc / RcLite
-//
-
 use crate::utils::BitMask;
 use crate::trie_node::*;
 use crate::line_list_node::LineListNode;
@@ -140,6 +110,15 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             alloc,
         }
     }
+    #[inline(always)]
+    fn slot_in_word(mask_word: u64, word_base: usize, bit_idx: u32) -> usize {
+        let preceding_bits = if bit_idx == 0 {
+            0
+        } else {
+            (1u64 << bit_idx) - 1
+        };
+        word_base + (mask_word & preceding_bits).count_ones() as usize
+    }
     #[inline]
     pub fn reserve_capacity(&mut self, additional: usize) {
         self.values.reserve(additional)
@@ -199,20 +178,33 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     #[inline]
-    pub fn remove_val(&mut self, k: u8) -> Option<V> {
+    pub fn remove_val(&mut self, k: u8, prune: bool) -> Option<V> {
         if self.mask.test_bit(k) {
             let ix = self.mask.index_of(k) as usize;
 
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
             let result = cf.take_val();
 
-            if !cf.has_rec() {
+            if prune && !cf.has_rec() {
                 self.mask.clear_bit(k);
                 self.values.remove(ix);
             }
             result
         } else {
             None
+        }
+    }
+
+    #[inline]
+    pub fn set_dangling_cf(&mut self, k: u8) -> bool {
+        let ix = self.mask.index_of(k) as usize;
+        if self.mask.test_bit(k) {
+            false
+        } else {
+            self.mask.set_bit(k);
+            let new_cf = CoFree::new(None, None);
+            self.values.insert(ix, new_cf);
+            true
         }
     }
 
@@ -310,14 +302,60 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     pub unsafe fn get_unchecked(&self, k: u8) -> &Cf {
         let ix = self.mask.index_of(k) as usize;
         // println!("pos ix {} {} {:b}", pos, ix, self.mask);
-        self.values.get_unchecked(ix)
+        unsafe{ self.values.get_unchecked(ix) }
     }
 
     #[inline]
     unsafe fn get_unchecked_mut(&mut self, k: u8) -> &mut Cf {
         let ix = self.mask.index_of(k) as usize;
         // println!("pos ix {} {} {:b}", pos, ix, self.mask);
-        self.values.get_unchecked_mut(ix)
+        unsafe{ self.values.get_unchecked_mut(ix) }
+    }
+
+    // ------ IterToken format for ByteNode ------
+    // Iter tokens pack the next byte position to inspect with the corresponding index into `values`.
+    // The low 9 bits store one more than the last returned byte, or 0 before iteration starts.  The
+    // upper bits store the index of the next CoFree in `values`, avoiding a `mask.index_of` recompute
+    // on every item.  `iter_token_for_path` computes the values index once for the requested path.
+    const ITER_TOKEN_BYTE_BITS: u64 = 9;
+    const ITER_TOKEN_BYTE_MASK: IterToken = (1 << Self::ITER_TOKEN_BYTE_BITS) - 1;
+
+    #[inline(always)]
+    fn iter_token(next_byte: u16, values_idx: u16) -> IterToken {
+        (values_idx as IterToken) << Self::ITER_TOKEN_BYTE_BITS | next_byte as IterToken
+    }
+
+    #[inline(always)]
+    fn iter_token_next_byte(token: IterToken) -> u16 {
+        (token & Self::ITER_TOKEN_BYTE_MASK) as u16
+    }
+
+    #[inline(always)]
+    fn iter_token_values_idx(token: IterToken) -> usize {
+        (token >> Self::ITER_TOKEN_BYTE_BITS) as usize
+    }
+
+    #[inline(always)]
+    fn next_iter_item_from(&self, token: IterToken) -> Option<(u8, usize)> {
+        let start = Self::iter_token_next_byte(token);
+        if start >= 256 {
+            return None;
+        }
+
+        let mut word_idx = (start >> 6) as usize;
+        let mut bit_idx = (start & 0x3F) as u32;
+        loop {
+            let word = unsafe { *self.mask.0.get_unchecked(word_idx) } & (!0u64 << bit_idx);
+            if word != 0 {
+                return Some(((word_idx as u8) * 64 + word.trailing_zeros() as u8, Self::iter_token_values_idx(token)));
+            }
+
+            word_idx += 1;
+            if word_idx == 4 {
+                return None;
+            }
+            bit_idx = 0;
+        }
     }
 
     #[inline]
@@ -377,23 +415,26 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 
                 //If there is an onward link, see if there is a matching link in other, and subtract them
                 if let Some(self_child) = cf.rec() {
-                    let other_child = other.get_node_at_key(&[key_byte]);
-                    match other_child.try_as_tagged() {
-                        Some(other_child) => {
-                            match self_child.as_tagged().psubtract_dyn(other_child) {
-                                AlgebraicResult::None => { is_identity = false; }
-                                AlgebraicResult::Identity(mask) => {
-                                    debug_assert_eq!(mask, SELF_IDENT); //subtract is not commutative
-                                    new_cf.set_rec(self_child.clone());
-                                },
-                                AlgebraicResult::Element(e) => {
-                                    is_identity = false;
-                                    new_cf.set_rec(e);
-                                },
+                    let self_child_tagged = self_child.as_tagged();
+                    if !self_child_tagged.node_is_empty() {
+                        let other_child = other.get_node_at_key(&[key_byte]);
+                        match other_child.try_as_tagged() {
+                            Some(other_child) => {
+                                match self_child_tagged.psubtract_dyn(other_child) {
+                                    AlgebraicResult::None => { is_identity = false; }
+                                    AlgebraicResult::Identity(mask) => {
+                                        debug_assert_eq!(mask, SELF_IDENT); //subtract is not commutative
+                                        new_cf.set_rec(self_child.clone());
+                                    },
+                                    AlgebraicResult::Element(e) => {
+                                        is_identity = false;
+                                        new_cf.set_rec(e);
+                                    },
+                                }
+                            },
+                            None => {
+                                new_cf.set_rec(self_child.clone())
                             }
-                        },
-                        None => {
-                            new_cf.set_rec(self_child.clone())
                         }
                     }
                 }
@@ -483,6 +524,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 
     /// Merges the entries in the ListNode into the ByteNode
     pub fn merge_from_list_node(&mut self, list_node: &LineListNode<V, A>) -> AlgebraicStatus where V: Clone + Lattice {
+        let self_was_empty = self.is_empty();
         self.reserve_capacity(2);
 
         let slot0_status = if list_node.is_used::<0>() {
@@ -496,7 +538,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 self.join_payload_into(key[0], payload)
             }
         } else {
-            AlgebraicStatus::None
+            if self_was_empty {
+                AlgebraicStatus::None
+            } else {
+                AlgebraicStatus::Identity
+            }
         };
 
         let slot1_status = if list_node.is_used::<1>() {
@@ -510,7 +556,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 self.join_payload_into(key[0], payload)
             }
         } else {
-            AlgebraicStatus::None
+            if self_was_empty {
+                AlgebraicStatus::None
+            } else {
+                AlgebraicStatus::Identity
+            }
         };
 
         //Note: (true, true) makes sense in the context of a join implementation because when the rec_status or
@@ -703,6 +753,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 requested_mask.clear_bit(byte);
                 match self.get(byte) {
                     Some(cf) => {
+                        // An exact value-only request does not enumerate an onward link stored in the
+                        // same CoFree.  The preceding stashed-value fast path means this branch is
+                        // reached only when that link was not requested separately.
+                        if key.len() == 1 && *expect_val && cf.has_rec() {
+                            unrequested_cofree_half = true;
+                        }
+
                         //A key longer than 1 byte or an explicit request for a rec link can be answered with a Child
                         if key.len() > 1 || !*expect_val {
                             match cf.rec() {
@@ -794,12 +851,68 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             }
         }
     }
-    fn node_remove_val(&mut self, key: &[u8]) -> Option<V> {
+    fn node_remove_val(&mut self, key: &[u8], prune: bool) -> Option<V> {
         if key.len() == 1 {
-            self.remove_val(key[0])
+            self.remove_val(key[0], prune)
         } else {
             None
         }
+    }
+    fn node_create_dangling(&mut self, key: &[u8]) -> Result<(bool, bool), TrieNodeODRc<V, A>> {
+        debug_assert!(key.len() > 0);
+        #[cfg(not(feature = "all_dense_nodes"))]
+        {
+            //Split a new node to hold everything after the first byte of the key
+            if key.len() > 1 {
+                {
+                    let mut child = crate::line_list_node::LineListNode::new_in(self.alloc.clone());
+                    child.node_create_dangling(&key[1..]).unwrap_or_else(|_| panic!());
+                    self.set_child(key[0], TrieNodeODRc::new_in(child, self.alloc.clone()));
+                }
+                Ok((true, true))
+            } else {
+                Ok((self.set_dangling_cf(key[0]), false))
+            }
+        }
+
+        #[cfg(feature = "all_dense_nodes")]
+        {
+            if key.len() > 1 {
+                let last_node = self.create_parent_path(key);
+                Ok((last_node.set_dangling_cf(key[key.len()-1]), true))
+            } else {
+                Ok((self.set_dangling_cf(key[key.len()-1]), false))
+            }
+        }
+    }
+    fn node_remove_dangling(&mut self, key: &[u8]) -> usize {
+        debug_assert!(key.len() > 0);
+        if key.len() == 1 {
+            let k = key[0];
+            if self.mask.test_bit(k) {
+                let ix = self.mask.index_of(k) as usize;
+                let cf = unsafe { self.values.get_unchecked_mut(ix) };
+                if !cf.has_rec() && !cf.has_val() {
+                    self.mask.clear_bit(k);
+                    self.values.remove(ix);
+                    return 1
+                }
+                //Clean up empty nodes too, which may have been left by a ZipperHead
+                match cf.rec() {
+                    Some(node) => if node.as_tagged().node_is_empty() {
+                        if cf.has_val() {
+                            cf.set_rec_option(None);
+                        } else {
+                            self.mask.clear_bit(k);
+                            self.values.remove(ix);
+                            return 1
+                        }
+                    },
+                    None => {}
+                }
+            }
+        }
+        0
     }
     fn node_set_branch(&mut self, key: &[u8], new_node: TrieNodeODRc<V, A>) -> Result<bool, TrieNodeODRc<V, A>> {
         debug_assert!(key.len() > 0);
@@ -837,7 +950,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             }
         }
     }
-    fn node_remove_all_branches(&mut self, key: &[u8]) -> bool {
+    fn node_remove_all_branches(&mut self, key: &[u8], prune: bool) -> bool {
         if key.len() > 1 {
             return false;
         }
@@ -852,8 +965,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                     true
                 },
                 (true, false) => {
-                    self.values.remove(ix);
-                    self.mask.clear_bit(k);
+                    if prune {
+                        self.values.remove(ix);
+                        self.mask.clear_bit(k);
+                    } else {
+                        cf.set_rec_option(None);
+                    }
                     true
                 },
                 (false, _) => {
@@ -868,49 +985,32 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         self.values.len() == 0
     }
     #[inline(always)]
-    fn new_iter_token(&self) -> u128 {
-        self.mask.0[0] as u128
+    fn new_iter_token(&self) -> IterToken {
+        Self::iter_token(0, 0)
     }
     #[inline(always)]
-    fn iter_token_for_path(&self, key: &[u8]) -> u128 {
+    fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
         if key.len() != 1 {
             self.new_iter_token()
         } else {
-            let k = *unsafe{ key.get_unchecked(0) } as usize;
-            let idx = (k & 0b11000000) >> 6;
-            let bit_i = k & 0b00111111;
-            debug_assert!(idx < 4);
-            let mask: u64 = if bit_i+1 < 64 {
-                (0xFFFFFFFFFFFFFFFF << bit_i+1) & unsafe{ self.mask.0.get_unchecked(idx) }
-            } else {
-                0
-            };
-            ((idx as u128) << 64) | (mask as u128)
+            let key_byte = unsafe{ *key.get_unchecked(0) };
+            let mut values_idx = self.mask.index_of(key_byte);
+            if self.mask.test_bit(key_byte) {
+                values_idx += 1;
+            }
+            Self::iter_token(key_byte as u16 + 1, values_idx as u16)
         }
     }
     #[inline(always)]
-    fn next_items(&self, token: u128) -> (u128, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
-        let mut i = (token >> 64) as u8;
-        let mut w = token as u64;
-        loop {
-            if w != 0 {
-                let wi = w.trailing_zeros() as u8;
-                w ^= 1u64 << wi;
-                let k = i*64 + wi;
+    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+        let Some((k, values_idx)) = self.next_iter_item_from(token) else {
+            return (NODE_ITER_FINISHED, &[], None, None);
+        };
 
-                let new_token = ((i as u128) << 64) | (w as u128);
-                let cf = unsafe{ self.get_unchecked(k) };
-                let k = k as usize;
-                return (new_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
-
-            } else if i < 3 {
-                i += 1;
-
-                w = unsafe { *self.mask.0.get_unchecked(i as usize) };
-            } else {
-                return (NODE_ITER_FINISHED, &[], None, None)
-            }
-        }
+        let next_token = Self::iter_token(k as u16 + 1, values_idx as u16 + 1);
+        let cf = unsafe{ self.values.get_unchecked(values_idx) };
+        let k = k as usize;
+        (next_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
     }
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
         //Discussion: These two implementations do the same thing but with a slightly different ordering of
@@ -935,6 +1035,33 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         return self.values.iter().rfold(0, |t, cf| {
             t + cf.has_val() as usize + cf.rec().map(|r| val_count_below_node(r, cache)).unwrap_or(0)
         });
+    }
+    fn node_goat_val_count(&self) -> usize {
+        return self.values.iter().rfold(0, |t, cf| {
+            t + cf.has_val() as usize
+        });
+    }
+    fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        for (pos, cf) in self.values.iter().enumerate() {
+            match cf.rec() {
+                Some(child) => {
+                    return ((pos+1) as u64, Some(child))
+                },
+                None => {}
+            }
+        }
+        (0, None)
+    }
+    fn node_child_iter_next(&self, token: u64) -> (u64, Option<&TrieNodeODRc<V, A>>) {
+        for (pos, cf) in self.values[(token as usize)..].iter().enumerate() {
+            match cf.rec() {
+                Some(child) => {
+                    return ((pos+1) as u64 + token, Some(child))
+                },
+                None => {}
+            }
+        }
+        (0, None)
     }
     #[cfg(feature = "counters")]
     fn item_count(&self) -> usize {
@@ -993,7 +1120,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         (Some(&ALL_BYTES[prefix..=prefix]), cf.rec().map(|cf| cf.as_tagged()))
     }
 
-    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask) {
+    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, _prune: bool) {
         debug_assert!(key.len() == 0);
         // in the future we can use `drain_filter`, but that's experimental
         let mut lead = 0;
@@ -1029,7 +1156,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             0 => self.mask,
             _ => {
                 //There are two ways we could get a length >= 1 key passed in. 1. The entry is a lone value (no children in the CF) or 2. The entry doesn't exist.  Either way, there are no onward child paths
-                debug_assert!(self.get(key[0]).and_then(|cf| cf.rec()).is_none());
+                debug_assert!({
+                    match self.get(key[0]).and_then(|cf| cf.rec()) {
+                        Some(child_node) => child_node.as_tagged().node_is_empty(),
+                        None => true,
+                    }
+                });
                 ByteMask::EMPTY
             },
         }
@@ -1041,7 +1173,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             0 => self.values.len(),
             _ => {
                 //There are two ways we could get a length >=1 key passed in. 1. The entry is a lone value (no children in the CF) or 2. The entry doesn't exist.  Either way, there are no onward child paths
-                debug_assert!(self.get(key[0]).and_then(|cf| cf.rec()).is_none());
+                debug_assert!({
+                    match self.get(key[0]).and_then(|cf| cf.rec()) {
+                        Some(child_node) => child_node.as_tagged().node_is_empty(),
+                        None => true,
+                    }
+                });
                 0
             }
         }
@@ -1109,12 +1246,23 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         }
     }
 
-    fn take_node_at_key(&mut self, key: &[u8]) -> Option<TrieNodeODRc<V, A>> {
+    fn take_node_at_key(&mut self, key: &[u8], prune: bool) -> Option<TrieNodeODRc<V, A>> {
         if key.len() < 2 {
             debug_assert!(key.len() == 1);
-            match self.get_mut(key[0]) {
-                Some(cf) => cf.take_rec(),
-                None => None
+            let k = key[0];
+            if self.mask.test_bit(k) {
+                let ix = self.mask.index_of(k) as usize;
+
+                let cf = unsafe { self.values.get_unchecked_mut(ix) };
+                let result = cf.take_rec();
+
+                if prune && !cf.has_val() {
+                    self.mask.clear_bit(k);
+                    self.values.remove(ix);
+                }
+                result
+            } else {
+                None
             }
         } else {
             None
@@ -1357,6 +1505,70 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNodeDowncast<V, A> for ByteNode<C
         //Already is a cell_node, and that fact should have been detected before calling this method
         unreachable!()
     }
+}
+
+/// Used in the optimized implementation of `graft_masked_branches`
+pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator, CfDst: CoFree<V=V, A=A>, CfSrc: CoFree<V=V, A=A>, const REMOVE_UNSET: bool>(
+    dst_node: &ByteNode<CfDst, A>,
+    src_node: &ByteNode<CfSrc, A>,
+    child_mask: ByteMask
+) -> TrieNodeODRc<V, A>
+where
+    ByteNode<CfDst, A>: TrieNodeDowncast<V, A>,
+{
+    let old_mask = dst_node.mask;
+    let combined_mask = if REMOVE_UNSET { child_mask } else { child_mask | old_mask };
+    let mut new_values = ValuesVec::with_capacity_in(combined_mask.count_bits(), dst_node.alloc.clone());
+    let mut prev_end = 0;
+    let mut new_mask = ByteMask::EMPTY;
+
+    //Loop over each contiguous range in `child_mask`
+    for range in child_mask.range_iter() {
+        let range_start = *range.start();
+        let range_end = *range.end();
+
+        if !REMOVE_UNSET && prev_end < range_start as usize {
+            let gap_start = prev_end as u8;
+            let gap_mask = old_mask & ByteMask::from_range(gap_start..range_start);
+            let gap_len = gap_mask.count_bits();
+            if gap_len > 0 {
+                let gap_ix = old_mask.index_of(gap_start) as usize;
+                for cf in &dst_node.values[gap_ix..gap_ix + gap_len] {
+                    new_values.v.push(CfDst::from_cf(cf.clone()));
+                }
+                new_mask = new_mask | gap_mask;
+            }
+        }
+
+        let src_range_mask = src_node.mask & ByteMask::from_range(range_start..=range_end);
+        let mut src_ix = src_node.mask.index_of(range_start) as usize;
+        for child_byte in src_range_mask.iter() {
+            let cf = unsafe { src_node.values.get_unchecked(src_ix) };
+            src_ix += 1;
+
+            if cf.has_rec() || cf.has_val() {
+                new_values.v.push(CfDst::from_cf(cf.clone()));
+                new_mask.set_bit(child_byte);
+            }
+        }
+
+        prev_end = range_end as usize + 1;
+    }
+
+    if !REMOVE_UNSET && prev_end < 256 {
+        let tail_start = prev_end as u8;
+        let tail_mask = old_mask & ByteMask::from_range(tail_start..);
+        let tail_len = tail_mask.count_bits();
+        if tail_len > 0 {
+            let tail_ix = old_mask.index_of(tail_start) as usize;
+            for cf in &dst_node.values[tail_ix..tail_ix + tail_len] {
+                new_values.v.push(CfDst::from_cf(cf.clone()));
+            }
+            new_mask = new_mask | tail_mask;
+        }
+    }
+
+    TrieNodeODRc::new_in(ByteNode::new_with_fields_in(new_mask, new_values, dst_node.alloc.clone()), dst_node.alloc.clone())
 }
 
 /// returns the position of the next/previous active bit in x
@@ -1653,13 +1865,23 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         rec_status.merge(val_status, true, true)
     }
     fn pmeet(&self, other: &OtherCf) -> AlgebraicResult<Self> {
+        //If one or the other cofree is dangling, it's an identity result for the dangling cofree
+        let mut identity_flag = 0;
+        if !self.has_rec() && !self.has_val() {identity_flag = SELF_IDENT;}
+        if !other.has_rec() && !other.has_val() {identity_flag |= COUNTER_IDENT;}
+        if identity_flag > 0 {
+            return AlgebraicResult::Identity(identity_flag)
+        }
+
+        //Otherwise actually work with what the cofrees contain
         let rec = self.rec().pmeet(&other.rec());
         let val = self.val().pmeet(&other.val());
         self.combine_algebraic_results(other, rec, val)
     }
-    fn join_all(_xs: &[&Self]) -> Self where Self: Sized {
-        unreachable!() //Currently not used
-    }
+    //GOAT, HeteroLattice will totally disappear when we do the policy refactor
+    // fn join_all(_xs: &[&Self]) -> Self where Self: Sized {
+    //     unreachable!() //Currently not used
+    // }
     fn convert(other: OtherCf) -> Self {
         Self::from_cf(other)
     }
@@ -1667,7 +1889,8 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
 
 impl<V: Clone + Send + Sync + DistributiveLattice, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree<V=V, A=A>> HeteroDistributiveLattice<OtherCf> for Cf {
     fn psubtract(&self, other: &OtherCf) -> AlgebraicResult<Self> where Self: Sized {
-        let rec = self.rec().psubtract(&other.rec());
+        let self_rec = self.rec().filter(|child| !child.as_tagged().node_is_empty());
+        let rec = self_rec.psubtract(&other.rec());
         let val = self.val().psubtract(&other.val());
         self.combine_algebraic_results(other, rec, val)
     }
@@ -1675,8 +1898,7 @@ impl<V: Clone + Send + Sync + DistributiveLattice, A: Allocator, Cf: CoFree<V=V,
 
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree<V=V, A=A>> HeteroQuantale<OtherCf> for Cf {
     fn prestrict(&self, other: &OtherCf) -> AlgebraicResult<Self> {
-        debug_assert!(self.has_rec() || self.has_val());
-        if other.has_val() { AlgebraicResult::Identity(SELF_IDENT) } // assumes self can never be CoFree{None, None}
+        if other.has_val() { AlgebraicResult::Identity(SELF_IDENT) }
         else {
             match (self.rec(), other.rec()) {
                 (Some(l), Some(r)) => {
@@ -1737,7 +1959,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree
                 if new_mask > 0 {
                     AlgebraicResult::Identity(new_mask)
                 } else {
-                    AlgebraicResult::Element(Self::new(None, self.val().cloned()))
+                    let val = if val_mask & SELF_IDENT > 0 {
+                        self.val().cloned()
+                    } else {
+                        other.val().cloned()
+                    };
+                    AlgebraicResult::Element(Self::new(None, val))
                 }
             },
             (AlgebraicResult::Identity(rec_mask), AlgebraicResult::None) => {
@@ -1751,7 +1978,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree
                 if new_mask > 0 {
                     AlgebraicResult::Identity(new_mask)
                 } else {
-                    AlgebraicResult::Element(Self::new(self.rec().cloned(), None))
+                    let rec = if rec_mask & SELF_IDENT > 0 {
+                        self.rec().cloned()
+                    } else {
+                        other.rec().cloned()
+                    };
+                    AlgebraicResult::Element(Self::new(rec, None))
                 }
             },
             (rec_el, val_el) => {
@@ -1930,10 +2162,8 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
     }
 
     fn pmeet(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> {
-        // TODO this technically doesn't need to calculate and iterate over jm
-        // iterating over mm and calculating m such that the following suffices
-        // c_{self,other} += popcnt(m & {self,other})
-        let jm: ByteMask = self.mask | other.mask;
+        // Iterate the overlap mask directly. Slot indexes are recovered with
+        // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
 
         let mut is_identity = self.mask == mm;
@@ -1945,58 +2175,55 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         let mut v = ValuesVec::with_capacity_in(len, self.alloc.clone());
         let new_v = v.v.spare_capacity_mut();
 
-        let mut l = 0;
-        let mut r = 0;
         let mut c = 0;
+        let mut self_word_base = 0;
+        let mut other_word_base = 0;
 
         for i in 0..4 {
-            let mut lm = jm.0[i];
+            let self_word = self.mask.0[i];
+            let other_word = other.mask.0[i];
+            let mut lm = mm.0[i];
             while lm != 0 {
                 let index = lm.trailing_zeros();
+                let l = Self::slot_in_word(self_word, self_word_base, index);
+                let r = Self::slot_in_word(other_word, other_word_base, index);
 
-                if ((1u64 << index) & mm.0[i]) != 0 {
-                    //This runs for cofrees that exist in both nodes
-
-                    let lv = unsafe { self.values.get_unchecked(l) };
-                    let rv = unsafe { other.values.get_unchecked(r) };
-                    match lv.pmeet(rv) {
-                        AlgebraicResult::None => {
-                            is_counter_identity = false;
+                //This runs for cofrees that exist in both nodes
+                let lv = unsafe { self.values.get_unchecked(l) };
+                let rv = unsafe { other.values.get_unchecked(r) };
+                match lv.pmeet(rv) {
+                    AlgebraicResult::None => {
+                        is_counter_identity = false;
+                        is_identity = false;
+                        mm.0[i] ^= 1u64 << index;
+                    },
+                    AlgebraicResult::Identity(mask) => {
+                        debug_assert!((mask & SELF_IDENT > 0) || (mask & COUNTER_IDENT > 0));
+                        if mask & SELF_IDENT == 0 {
                             is_identity = false;
-                            mm.0[i] ^= 1u64 << index;
-                        },
-                        AlgebraicResult::Identity(mask) => {
-                            debug_assert!((mask & SELF_IDENT > 0) || (mask & COUNTER_IDENT > 0));
-                            if mask & SELF_IDENT == 0 {
-                                is_identity = false;
-                            }
-                            if mask & COUNTER_IDENT == 0 {
-                                is_counter_identity = false;
-                            }
-                            if mask & SELF_IDENT > 0 {
-                                unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
-                            } else {
-                                let new_cf = Cf::from_cf(rv.clone());
-                                unsafe { new_v.get_unchecked_mut(c).write(new_cf) };
-                            }
-                            c += 1;
-                        },
-                        AlgebraicResult::Element(jv) => {
-                            is_identity = false;
+                        }
+                        if mask & COUNTER_IDENT == 0 {
                             is_counter_identity = false;
-                            unsafe { new_v.get_unchecked_mut(c).write(jv) };
-                            c += 1;
-                        },
-                    }
-                    l += 1;
-                    r += 1;
-                } else if ((1u64 << index) & self.mask.0[i]) != 0 {
-                    l += 1;
-                } else {
-                    r += 1;
+                        }
+                        if mask & SELF_IDENT > 0 {
+                            unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
+                        } else {
+                            let new_cf = Cf::from_cf(rv.clone());
+                            unsafe { new_v.get_unchecked_mut(c).write(new_cf) };
+                        }
+                        c += 1;
+                    },
+                    AlgebraicResult::Element(jv) => {
+                        is_identity = false;
+                        is_counter_identity = false;
+                        unsafe { new_v.get_unchecked_mut(c).write(jv) };
+                        c += 1;
+                    },
                 }
                 lm ^= 1u64 << index;
             }
+            self_word_base += self_word.count_ones() as usize;
+            other_word_base += other_word.count_ones() as usize;
         }
 
         unsafe{ v.v.set_len(c); }
@@ -2014,40 +2241,41 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         }
     }
 
-    fn join_all(xs: &[&Self]) -> Self {
-        let alloc = xs[0].alloc.clone();
-        let mut jm: ByteMask = ByteMask::EMPTY;
-        for x in xs.iter() {
-            jm |= x.mask;
-        }
+    //GOAT, kept for now, for reference, but this code is unreachable using the current Lattice interface
+    // fn join_all(xs: &[&Self]) -> Self {
+    //     let alloc = xs[0].alloc.clone();
+    //     let mut jm: ByteMask = ByteMask::EMPTY;
+    //     for x in xs.iter() {
+    //         jm |= x.mask;
+    //     }
 
-        let jmc = [jm.0[0].count_ones(), jm.0[1].count_ones(), jm.0[2].count_ones(), jm.0[3].count_ones()];
+    //     let jmc = [jm.0[0].count_ones(), jm.0[1].count_ones(), jm.0[2].count_ones(), jm.0[3].count_ones()];
 
-        let len = (jmc[0] + jmc[1] + jmc[2] + jmc[3]) as usize;
-        let mut v = ValuesVec::with_capacity_in(len, alloc.clone());
-        let new_v = v.v.spare_capacity_mut();
+    //     let len = (jmc[0] + jmc[1] + jmc[2] + jmc[3]) as usize;
+    //     let mut v = ValuesVec::with_capacity_in(len, alloc.clone());
+    //     let new_v = v.v.spare_capacity_mut();
 
-        let mut c = 0;
+    //     let mut c = 0;
 
-        for i in 0..4 {
-            let mut lm = jm.0[i];
-            while lm != 0 {
-                // this body runs at most 256 times, in the case there is 100% overlap between full nodes
-                let index = lm.trailing_zeros();
+    //     for i in 0..4 {
+    //         let mut lm = jm.0[i];
+    //         while lm != 0 {
+    //             // this body runs at most 256 times, in the case there is 100% overlap between full nodes
+    //             let index = lm.trailing_zeros();
 
-                //GOAT, allocating a temp buffer likely undoes the gains from join_all
-                let to_join: Vec<&Cf> = xs.iter().enumerate().filter_map(|(i, x)| x.get(i as u8)).collect();
-                let joined = HeteroLattice::<Cf>::join_all(&to_join[..]);
-                unsafe { new_v.get_unchecked_mut(c).write(joined) };
+    //             //GOAT, allocating a temp buffer likely undoes the gains from join_all
+    //             let to_join: Vec<&Cf> = xs.iter().enumerate().filter_map(|(i, x)| x.get(i as u8)).collect();
+    //             let joined = HeteroLattice::<Cf>::join_all(&to_join[..]);
+    //             unsafe { new_v.get_unchecked_mut(c).write(joined) };
 
-                lm ^= 1u64 << index;
-                c += 1;
-            }
-        }
+    //             lm ^= 1u64 << index;
+    //             c += 1;
+    //         }
+    //     }
 
-        unsafe{ v.v.set_len(c); }
-        return Self::new_with_fields_in(jm, v, alloc);
-    }
+    //     unsafe{ v.v.set_len(c); }
+    //     return Self::new_with_fields_in(jm, v, alloc);
+    // }
     fn convert(other: ByteNode<OtherCf, A>) -> Self {
         let mut values = ValuesVec::with_capacity_in(other.values.len(), other.alloc.clone());
         for other_cf in other.values {
@@ -2108,13 +2336,10 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V,
 // `other` be differently parameterized types
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> {
     fn prestrict<OtherCf: CoFree<V=V, A=A>>(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> where Self: Sized {
-        let mut is_identity = true;
-
-        // TODO this technically doesn't need to calculate and iterate over jm
-        // iterating over mm and calculating m such that the following suffices
-        // c_{self,other} += popcnt(m & {self,other})
-        let jm: ByteMask = self.mask | other.mask;
+        // Iterate the overlap mask directly. Slot indexes are recovered with
+        // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
+        let mut is_identity = self.mask == mm && other.mask == mm;
 
         let mmc = [mm.0[0].count_ones(), mm.0[1].count_ones(), mm.0[2].count_ones(), mm.0[3].count_ones()];
 
@@ -2122,48 +2347,43 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         let mut v = ValuesVec::with_capacity_in(len, self.alloc.clone());
         let new_v = v.v.spare_capacity_mut();
 
-        let mut l = 0;
-        let mut r = 0;
         let mut c = 0;
+        let mut self_word_base = 0;
+        let mut other_word_base = 0;
 
         for i in 0..4 {
-            let mut lm = jm.0[i];
+            let self_word = self.mask.0[i];
+            let other_word = other.mask.0[i];
+            let mut lm = mm.0[i];
             while lm != 0 {
                 let index = lm.trailing_zeros();
+                let l = Self::slot_in_word(self_word, self_word_base, index);
+                let r = Self::slot_in_word(other_word, other_word_base, index);
 
-                if ((1u64 << index) & mm.0[i]) != 0 {
-                    let lv = unsafe { self.values.get_unchecked(l) };
-                    let rv = unsafe { other.values.get_unchecked(r) };
-                    // println!("dense prestrict {}", index as usize + i*64);
+                let lv = unsafe { self.values.get_unchecked(l) };
+                let rv = unsafe { other.values.get_unchecked(r) };
+                // println!("dense prestrict {}", index as usize + i*64);
 
-                    match lv.prestrict(rv) {
-                        AlgebraicResult::None => {
-                            is_identity = false;
-                            mm.0[i] ^= 1u64 << index;
-                        }
-                        AlgebraicResult::Identity(mask) => {
-                            debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
-                            unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
-                            c += 1;
-                        },
-                        AlgebraicResult::Element(jv) => {
-                            is_identity = false;
-                            unsafe { new_v.get_unchecked_mut(c).write(jv) };
-                            c += 1;
-                        },
+                match lv.prestrict(rv) {
+                    AlgebraicResult::None => {
+                        is_identity = false;
+                        mm.0[i] ^= 1u64 << index;
                     }
-                    l += 1;
-                    r += 1;
-                } else {
-                    is_identity = false;
-                    if ((1u64 << index) & self.mask.0[i]) != 0 {
-                        l += 1;
-                    } else {
-                        r += 1;
-                    }
+                    AlgebraicResult::Identity(mask) => {
+                        debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
+                        unsafe { new_v.get_unchecked_mut(c).write(lv.clone()) };
+                        c += 1;
+                    },
+                    AlgebraicResult::Element(jv) => {
+                        is_identity = false;
+                        unsafe { new_v.get_unchecked_mut(c).write(jv) };
+                        c += 1;
+                    },
                 }
                 lm ^= 1u64 << index;
             }
+            self_word_base += self_word.count_ones() as usize;
+            other_word_base += other_word.count_ones() as usize;
         }
 
         unsafe{ v.v.set_len(c); }
@@ -2199,4 +2419,49 @@ fn bit_siblings() {
     assert_eq!(0, bit_sibling(0, 1, true));
     assert_eq!(63, bit_sibling(63, 1u64 << 63, false));
     assert_eq!(63, bit_sibling(63, 1u64 << 63, true));
+}
+
+#[test]
+fn byte_node_iter_token_crosses_mask_word_boundaries() {
+    let mut node = DenseByteNode::new_in(crate::alloc::global_alloc());
+    for byte in [0, 63, 64, 127, 128, 191, 192, 255] {
+        node.set_val(byte, byte);
+    }
+
+    let mut token = node.new_iter_token();
+    let mut visited = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(path.len(), 1);
+            assert_eq!(Some(&path[0]), value);
+            visited.push(path[0]);
+        }
+    }
+    assert_eq!(visited, [0, 63, 64, 127, 128, 191, 192, 255]);
+
+    let mut token = node.iter_token_for_path(&[127]);
+    let mut visited_after_127 = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(Some(&path[0]), value);
+            visited_after_127.push(path[0]);
+        }
+    }
+    assert_eq!(visited_after_127, [128, 191, 192, 255]);
+
+    let mut token = node.iter_token_for_path(&[65]);
+    let mut visited_after_missing_65 = Vec::new();
+    while token != NODE_ITER_FINISHED {
+        let (next_token, path, _child, value) = node.next_items(token);
+        token = next_token;
+        if token != NODE_ITER_FINISHED {
+            assert_eq!(Some(&path[0]), value);
+            visited_after_missing_65.push(path[0]);
+        }
+    }
+    assert_eq!(visited_after_missing_65, [127, 128, 191, 192, 255]);
 }

@@ -116,12 +116,12 @@ fn parallel_insert(bencher: Bencher, (elements, thread_cnt): (usize, &str)) {
 
     thread::scope(|scope| {
 
-        let mut zipper_senders: Vec<mpsc::Sender<WriteZipperUntracked<'_, '_, usize>>> = Vec::with_capacity(thread_cnt);
+        let mut zipper_senders: Vec<mpsc::Sender<WriteZipperTracked<'_, '_, usize>>> = Vec::with_capacity(thread_cnt);
         let mut signal_receivers: Vec<mpsc::Receiver<bool>> = Vec::with_capacity(thread_cnt);
 
         //Spawn all the threads
         for n in 0..thread_cnt {
-            let (zipper_tx, zipper_rx) = mpsc::channel::<WriteZipperUntracked<'_, '_, usize>>();
+            let (zipper_tx, zipper_rx) = mpsc::channel::<WriteZipperTracked<'_, '_, usize>>();
             zipper_senders.push(zipper_tx);
             let (signal_tx, signal_rx) = mpsc::channel::<bool>();
             signal_receivers.push(signal_rx);
@@ -198,7 +198,7 @@ fn parallel_copy_known_path(bencher: Bencher, (elements, thread_cnt): (usize, &s
 
     thread::scope(|scope| {
 
-        let mut zipper_senders: Vec<mpsc::Sender<(ReadZipperUntracked<'_, '_, usize>, WriteZipperUntracked<'_, '_, usize>)>> = Vec::with_capacity(thread_cnt);
+        let mut zipper_senders: Vec<mpsc::Sender<(ReadZipperTracked<'_, '_, usize>, WriteZipperTracked<'_, '_, usize>)>> = Vec::with_capacity(thread_cnt);
         let mut signal_receivers: Vec<mpsc::Receiver<bool>> = Vec::with_capacity(thread_cnt);
 
         //Spawn all the threads
@@ -214,10 +214,11 @@ fn parallel_copy_known_path(bencher: Bencher, (elements, thread_cnt): (usize, &s
                     match zipper_rx.recv() {
                         Ok((mut reader_z, mut writer_z)) => {
                             //We got the zippers, do the stuff
+                            let witness = reader_z.witness();
                             for i in (n * elements_per_thread)..((n+1) * elements_per_thread) {
                                 let buf = i.to_be_bytes();
                                 reader_z.move_to_path(&buf);
-                                let val = reader_z.get_val().unwrap();
+                                let val = reader_z.get_val_with_witness(&witness).unwrap();
 
                                 writer_z.move_to_path(&buf);
                                 writer_z.set_val(*val);
@@ -237,7 +238,7 @@ fn parallel_copy_known_path(bencher: Bencher, (elements, thread_cnt): (usize, &s
 
         bencher.with_inputs(|| {
             let mut writer_z = zipper_head.write_zipper_at_exclusive_path(b"out").unwrap();
-            writer_z.remove_branches();
+            writer_z.remove_branches(true);
         }).bench_local_values(|()| {
             if thread_cnt > 0 {
 
@@ -260,9 +261,10 @@ fn parallel_copy_known_path(bencher: Bencher, (elements, thread_cnt): (usize, &s
                 //No-thread case, to measure overhead of sync vs. 1-thread case
                 let mut writer_z = unsafe{ zipper_head.write_zipper_at_exclusive_path_unchecked(&[b'o', b'u', b't', 0]) };
                 let mut reader_z = unsafe{ zipper_head.read_zipper_at_path_unchecked(&[b'i', b'n', 0]) };
+                let witness = reader_z.witness();
                 for i in 0..elements {
                     reader_z.move_to_path(i.to_be_bytes());
-                    let val = reader_z.get_val().unwrap();
+                    let val = reader_z.get_val_with_witness(&witness).unwrap();
 
                     writer_z.move_to_path(i.to_be_bytes());
                     writer_z.set_val(*val);
@@ -294,7 +296,7 @@ fn parallel_copy_traverse(bencher: Bencher, (elements, thread_cnt): (usize, &str
 
     thread::scope(|scope| {
 
-        let mut zipper_senders: Vec<mpsc::Sender<(ReadZipperUntracked<'_, '_, usize>, WriteZipperUntracked<'_, '_, usize>)>> = Vec::with_capacity(thread_cnt);
+        let mut zipper_senders: Vec<mpsc::Sender<(ReadZipperTracked<'_, '_, usize>, WriteZipperTracked<'_, '_, usize>)>> = Vec::with_capacity(thread_cnt);
         let mut signal_receivers: Vec<mpsc::Receiver<bool>> = Vec::with_capacity(thread_cnt);
 
         //Spawn all the threads
@@ -312,7 +314,8 @@ fn parallel_copy_traverse(bencher: Bencher, (elements, thread_cnt): (usize, &str
                     match zipper_rx.recv() {
                         Ok((mut reader_z, mut writer_z)) => {
                             //We got the zippers, do the stuff
-                            while let Some(val) = reader_z.to_next_get_val() {
+                            let witness = reader_z.witness();
+                            while let Some(val) = reader_z.to_next_get_val_with_witness(&witness) {
                                 writer_z.move_to_path(reader_z.path());
                                 writer_z.set_val(*val);
 
@@ -335,7 +338,7 @@ fn parallel_copy_traverse(bencher: Bencher, (elements, thread_cnt): (usize, &str
 
         bencher.with_inputs(|| {
             let mut writer_z = zipper_head.write_zipper_at_exclusive_path(b"out").unwrap();
-            writer_z.remove_branches();
+            writer_z.remove_branches(true);
         }).bench_local_values(|()| {
             if thread_cnt > 0 {
 
@@ -359,7 +362,8 @@ fn parallel_copy_traverse(bencher: Bencher, (elements, thread_cnt): (usize, &str
                 let mut sanity_counter = 0;
                 let mut writer_z = unsafe{ zipper_head.write_zipper_at_exclusive_path_unchecked(&[b'o', b'u', b't', 0]) };
                 let mut reader_z = unsafe{ zipper_head.read_zipper_at_path_unchecked(&[b'i', b'n', 0]) };
-                while let Some(val) = reader_z.to_next_get_val() {
+                let witness = reader_z.witness();
+                while let Some(val) = reader_z.to_next_get_val_with_witness(&witness) {
                     writer_z.move_to_path(reader_z.path());
                     writer_z.set_val(*val);
                     sanity_counter += 1;

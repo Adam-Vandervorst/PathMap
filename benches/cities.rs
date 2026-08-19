@@ -21,7 +21,11 @@ fn read_data() -> Vec<(String, i32)> {
     // A geonames file may be downloaded from: [http://download.geonames.org/export/dump/cities500.zip]
     // for a large file, or "cities15000.zip" for a smaller file
     //NOTE: Benchmark timing depends on the cities file, so benchmarks with different files are incomparable
-    let file_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches").join("cities5000.txt");
+    let data_dir = match std::env::var("BENCH_DATA_DIR") {
+        Ok(val) => std::path::PathBuf::from(val),
+        Err(_) => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches"),
+    };
+    let file_path = data_dir.join("cities5000.txt");
     let file = File::open(file_path).unwrap();
 
     //Data structure to parse the GeoNames TSV file into

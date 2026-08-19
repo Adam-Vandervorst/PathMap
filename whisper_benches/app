@@ -1,0 +1,7 @@
+#!/usr/bin/bash
+set -o errexit
+set -o nounset
+
+cp -r lib /
+export BENCH_DATA_DIR="$(pwd)/data"
+./current_bench --bench

@@ -9,6 +9,16 @@ use crate::ring::{AlgebraicStatus, DistributiveLattice, Lattice};
 use crate::TrieValue;
 use crate::write_zipper::write_zipper_priv::WriteZipperPriv;
 
+#[cfg(feature = "serialization")]
+pub mod serialization;
+#[cfg(feature = "serialization")]
+pub mod tree_serialization;
+
+#[cfg(feature = "zipper_alg")]
+pub mod zipper_algebra;
+#[cfg(not(feature = "zipper_alg"))]
+mod zipper_algebra;
+
 struct FullZipper {
     path: Vec<u8>
 }
@@ -39,13 +49,11 @@ impl ZipperMoving for FullZipper {
     fn reset(&mut self) { self.path.clear() }
     fn path(&self) -> &[u8] { &self.path[..] }
     fn val_count(&self) -> usize { usize::MAX/2 } // usize::MAX is a dangerous default for overflow
-    fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) -> bool {
+    fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         self.path.extend_from_slice(k.as_ref());
-        true
     }
-    fn descend_to_byte(&mut self, k: u8) -> bool {
+    fn descend_to_byte(&mut self, k: u8) {
         self.path.push(k);
-        true
     }
     fn descend_indexed_byte(&mut self, idx: usize) -> bool {
         assert!(idx < 256);
@@ -100,8 +108,33 @@ impl FullZipper {
 // Doesn't seem as lawful as the above, still maybe useful for testing
 struct NullZipper {}
 
+impl Zipper for NullZipper {
+    fn path_exists(&self) -> bool { false }
+    fn is_val(&self) -> bool { false }
+    fn child_count(&self) -> usize { 0 }
+    fn child_mask(&self) -> ByteMask { ByteMask::EMPTY }
+}
+
+impl ZipperMoving for NullZipper {
+    fn at_root(&self) -> bool { true }
+    fn reset(&mut self) {}
+    fn path(&self) -> &[u8] { &[] }
+    fn val_count(&self) -> usize { 0 }
+    fn descend_to<K: AsRef<[u8]>>(&mut self, _k: K) {}
+    fn descend_to_byte(&mut self, _k: u8) {}
+    fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
+    fn descend_first_byte(&mut self) -> bool { false }
+    fn descend_until(&mut self) -> bool { false }
+    fn ascend(&mut self, _steps: usize) -> bool { false }
+    fn ascend_byte(&mut self) -> bool { false }
+    fn ascend_until(&mut self) -> bool { false }
+    fn ascend_until_branch(&mut self) -> bool { false }
+    fn to_next_sibling_byte(&mut self) -> bool { false }
+    fn to_prev_sibling_byte(&mut self) -> bool { false }
+}
+
 impl<V: TrieValue, A: Allocator> WriteZipperPriv<V, A> for NullZipper {
-    fn take_focus(&mut self) -> Option<TrieNodeODRc<V, A>> {
+    fn take_focus(&mut self, prune: bool) -> Option<TrieNodeODRc<V, A>> {
         None
     }
     fn take_root_prefix_path(&mut self) -> Vec<u8> {
@@ -112,29 +145,34 @@ impl<V: TrieValue, A: Allocator> WriteZipperPriv<V, A> for NullZipper {
     }
 }
 
-impl <V: TrieValue, A: Allocator> ZipperWriting<V, A> for NullZipper {
+impl <V: TrieValue + 'static, A: Allocator> ZipperWriting<V, A> for NullZipper {
     type ZipperHead<'z> = ZipperHead<'z, 'static, V> where Self: 'z;
 
     fn get_val_mut(&mut self) -> Option<&mut V> { None }
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { Box::leak(Box::new(default)) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { Box::leak(Box::new(func())) }
     fn set_val(&mut self, _val: V) -> Option<V> { None }
-    fn remove_val(&mut self) -> Option<V> { None }
+    fn remove_val(&mut self, _prune: bool) -> Option<V> { None }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { todo!() }
-    fn graft<Z: ZipperSubtries<V, A>>(&mut self, _read_zipper: &Z) {}
+    fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z) {}
+    fn graft_src_at<Z: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &Z, path: K) {}
     fn graft_map(&mut self, _map: PathMap<V, A>) {}
-    fn join<Z: ZipperSubtries<V, A>>(&mut self, _read_zipper: &Z) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
-    fn join_map(&mut self, _map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
-    fn join_into<Z: ZipperSubtries<V, A> + ZipperWriting<V, A>>(&mut self, _src_zipper: &mut Z) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
-    fn drop_head(&mut self, _byte_cnt: usize) -> bool where V: Lattice { false }
+    fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
+    fn join_map_into(&mut self, _map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
+    fn join_into_take<Z: ZipperInfallibleSubtries<V, A> + ZipperWriting<V, A>>(&mut self, _src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
+    fn join_k_path_into(&mut self, _byte_cnt: usize, _prune: bool) -> bool where V: Lattice { false }
+    fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { false }
     fn insert_prefix<K: AsRef<[u8]>>(&mut self, _prefix: K) -> bool { false }
     fn remove_prefix(&mut self, _n: usize) -> bool { false }
-    fn meet<Z: ZipperSubtries<V, A>>(&mut self, _read_zipper: &Z) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
-    fn meet_2<'z, ZA: ZipperSubtries<V, A>, ZB: ZipperSubtries<V, A>>(&mut self, _rz_a: &ZA, _rz_b: &ZB) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
-    fn subtract<Z: ZipperSubtries<V, A>>(&mut self, _read_zipper: &Z) -> AlgebraicStatus where V: DistributiveLattice { AlgebraicStatus::Element }
-    fn restrict<Z: ZipperSubtries<V, A>>(&mut self, _read_zipper: &Z) -> AlgebraicStatus { AlgebraicStatus::Element }
-    fn restricting<Z: ZipperSubtries<V, A>>(&mut self, _read_zipper: &Z) -> bool { false }
-    fn remove_branches(&mut self) -> bool { false }
-    fn take_map(&mut self) -> Option<PathMap<V, A>> { None }
-    fn remove_unmasked_branches(&mut self, _mask: ByteMask) {}
+    fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z, _prune: bool) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
+    fn meet_2<'z, ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, _rz_a: &ZA, _rz_b: &ZB) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
+    fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z, _prune: bool) -> AlgebraicStatus where V: DistributiveLattice { AlgebraicStatus::Element }
+    fn restrict<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z) -> AlgebraicStatus { AlgebraicStatus::Element }
+    fn restricting<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z) -> bool { false }
+    fn remove_branches(&mut self, prune: bool) -> bool { false }
+    fn take_map(&mut self, prune: bool) -> Option<PathMap<V, A>> { None }
+    fn remove_unmasked_branches(&mut self, _mask: ByteMask, prune: bool) {}
+    fn create_path(&mut self) -> bool { false }
+    fn prune_path(&mut self) -> usize { 0 }
+    fn prune_ascend(&mut self) -> usize { 0 }
 }

@@ -13,13 +13,13 @@ fn drop_symbol_head_byte<Z: ZipperWriting<usize> + Zipper + ZipperMoving>(loc: &
   let p = loc.path().to_vec();
   while let Some(b) = it.next() {
     if b == 0 { continue }
-    assert!(loc.descend_to(&[b]));
-    loc.drop_head(b as usize);
+    loc.descend_to_existing_byte(b);
+    loc.join_k_path_into(b as usize, true);
     assert!(loc.ascend(1));
   }
   loc.reset();
   loc.descend_to(&p[..]);
-  loc.drop_head(1);
+  loc.join_k_path_into(1, true);
 }
 
 fn encode_seq<F : Iterator<Item=BigInt>>(iter: F) -> Vec<u8> {
@@ -47,7 +47,12 @@ fn decode_seq(s: &[u8]) -> Vec<BigInt> {
 }
 
 fn load_sequences() -> Vec<Vec<u8>> {
-  let mut file = std::fs::File::open(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches").join("oeis_stripped.txt"))
+  let data_dir = match std::env::var("BENCH_DATA_DIR") {
+      Ok(val) => std::path::PathBuf::from(val),
+      Err(_) => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches"),
+  };
+  let file_path = data_dir.join("oeis_stripped.txt");
+  let mut file = std::fs::File::open(file_path)
     .expect("Should have been able to read the file");
   let mut s = String::new();
   file.read_to_string(&mut s).unwrap();

@@ -29,12 +29,12 @@ This still may be preferable to the currently-implemented design however, as it'
 
 ## Alternative 2: Redo the abstract node interface to change CoFree assumption
 
-The node contract expressed throught the [`TrieNode`] trait dictates that a node never holds a value at its root.  Instead the current trait dictates that an associated value is owned by the parent.  However this mismatch is in tension with the external API.
+The node contract expressed throught the `TrieNode` trait dictates that a node never holds a value at its root.  Instead the current trait dictates that an associated value is owned by the parent.  However this mismatch is in tension with the external API.
 
 I think my preferred fix would be to change the trait methods to reflect the implications of values associated with node roots.
 
 For example, a ByteNode currently is defined (conceptually) as:
-```rust
+```rust, ignore
     pub struct ByteNode<V> {
         mask: [u64; 4],
         values: Vec<CoFree<V>>,
@@ -46,7 +46,7 @@ For example, a ByteNode currently is defined (conceptually) as:
 ```
 
 Under the new proposal, it'd be defined (conceptually) as:
-```rust
+```rust, ignore
     pub struct ByteNode<V> {
         root: Option<V>,
         mask: [u64; 4],
@@ -65,3 +65,5 @@ Either of these changes have the promise to greatly simplify the code and probab
 I personally believe Alternative 2 is a better option, not least because I think the external API is actually ok as it is and avoiding big changes to that limits the disruption to the internals of PathMap.  However both options imply a massive amount of churn.
 
 Therefore, I think much more complete fuzz tests are a prerequisite to embarking on either change.
+
+{{#include api_links.md}}

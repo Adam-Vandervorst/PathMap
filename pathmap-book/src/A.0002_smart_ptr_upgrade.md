@@ -126,7 +126,7 @@ The alternative is to have a garbage collector of some sort.
 
 Let's look at the following tree:
 
-```
+```txt
 a - b - c
   \ d - e
 ```
@@ -134,7 +134,7 @@ a - b - c
 if you have references to `c,d`, `b,e`, and graft `d` onto `c`, then `b` onto `e`,
 this will create the following graph:
 
-```
+```txt
 a - b - c
  \    X
   \ d - e
@@ -146,14 +146,14 @@ which has a circular path `abedc(b)`. It seems to me that detecting this loop is
 
 > graft `d` onto `c`
 This leads to:
-```
+```txt
 a - b - c
  \    /
   \ d - e
 ```
 > then `b` onto `e`
 Will cause a copy-on-write of `d` and `e`, leading to"
-```
+```txt
 a - b - c - d - e
  \   ^------<.
   \ d' - e' -^
@@ -194,7 +194,7 @@ The new TrieNodeODRc would be a 64-bit type.  In that we want to encode the foll
 * node_id: 7 bits.  An id of a node, used to interpret the node's location within a block.  Usually corresponds to a node block chunk index.
 * spare: 10 bits.  Currently unused, by may permit tries that span multiple computers in the future.
 
-```
+```txt
        ┌07     ┌0F     ┌17     ┌1F     ┌27     ┌2F     ┌37     ┌3F
 ----------------------------------------------------------------
 
@@ -276,7 +276,7 @@ A `ByteSaturatedHead` chunk begins life as a `ByteUnsaturated` chunk, and has al
 Allocation can be skipped for `ByteSaturatedBody` chunks that have no set values.  Given the fact that encoding algorithms often cluster values together (i.e. integers, printable ascii, etc.) it has been observed to be common to have large runs of unused children even for nodes that have 60+ children.
 
 Mapping from a set bit in the `child_mask` to a location of a child node or value is acomplished with the following algorithm:
-```rust
+```rust, ignore
 if (byte & 0xF) != 0xF {
   let body_node = get_node_from_payload_ref(self.payloads[byte >> 4]);
   let (body_node, idx) = (body_node, byte & 0xF);
@@ -362,7 +362,7 @@ QUESTION: We could represent the bit_string in a depth-first encoding, rather th
 ### Examples of the LOUDS Chunk Format
 
 Example 1: Pair
-```
+```txt
 (h)
  |-----+
 (e)   (o)
@@ -388,3 +388,5 @@ Probably unneeded, as it only allows for a handful more path bytes above the LOU
 A format appropriate for zero-sized V types, able to express dangling paths or paths terminating in values with only 2 bits-per-path.
 
 GOAT TODO...  We should probably measure whether a Star node would ever get used.  In addition to identifying other node formats we could design to address frequently observed patterns.
+
+{{#include api_links.md}}

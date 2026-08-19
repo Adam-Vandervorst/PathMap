@@ -34,7 +34,7 @@ pub fn serialize_fork<V : TrieValue, RZ : Catamorphism<V>, F: FnMut(usize, &[u8]
 }
 
 /// WIP
-pub fn deserialize_fork<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A> + zipper::ZipperMoving, F: Fn(usize, &[u8]) -> V>(node: usize, wz: &mut WZ, source: &[u8], fv: F) -> std::io::Result<usize> {
+pub fn deserialize_fork<V: TrieValue + 'static, A: Allocator, WZ : ZipperWriting<V, A> + zipper::ZipperMoving, F: Fn(usize, &[u8]) -> V>(node: usize, wz: &mut WZ, source: &[u8], fv: F) -> std::io::Result<usize> {
     unsafe {
     // let mut recovered = 0;
     new_map_from_ana_jumping(wz, node, |n: usize, path: &[u8]| {
@@ -56,10 +56,11 @@ pub fn deserialize_fork<V: TrieValue, A: Allocator, WZ : ZipperWriting<V, A> + z
 
 #[cfg(test)]
 mod tests {
-    use crate::tree_serialization::{serialize_fork, deserialize_fork};
+    use crate::experimental::tree_serialization::{serialize_fork, deserialize_fork};
+    use crate::morphisms::Catamorphism;
     use crate::PathMap;
 
-    #[ignore] //GOAT, re-enable if/when this code is ready.
+    #[ignore] //GOAT, re-enable if/when this code is ready. Fails under Miri due to Stacked Borrows UB in deserialize_fork's ptr::read.
     #[test]
     fn tree_serde_2() {
         let keys = [vec![12, 13, 14], vec![12, 13, 14, 100, 101]];
@@ -69,6 +70,6 @@ mod tests {
         let Ok(top_node) = serialize_fork(btm.read_zipper(), &mut v, |_1, _2, _3| {}) else { unreachable!() };
         let mut recovered = PathMap::new();
         deserialize_fork(top_node, &mut recovered.write_zipper(), &v[..], |_, _p| ()).unwrap();
-        assert_eq!(btm.hash(|_| 0), recovered.hash(|_| 0));
+        assert_eq!(btm.hash_with(|_| 0), recovered.hash_with(|_| 0));
     }
 }

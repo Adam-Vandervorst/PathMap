@@ -196,7 +196,7 @@ mod clock_monotonic {
             tv_nsec: i32,
         }
 
-        extern "C" {
+        unsafe extern "C" {
             fn clock_gettime(clockid: i32, tp: &mut timespec) -> i32;
         }
         pub fn get_time() -> u64 {
@@ -221,7 +221,7 @@ mod clock_monotonic {
             tv_sec: u64,
             tv_nsec: i32,
         }
-        extern "C" {
+        unsafe extern "C" {
             // host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &cclock);
             // fn clock_get_time(clock_serv: &mut u64, cur_time: &mut mach_timespec) -> i64;
             // mach_port_deallocate(mach_task_self(), cclock);
