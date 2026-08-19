@@ -1743,11 +1743,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             Some(src) => {
                 match self.take_focus(false) {
                     Some(mut self_node) => {
-                        let (status, result) = self_node.make_mut().join_into_dyn(src);
-                        match result {
-                            Ok(()) => self.graft_internal(Some(self_node)),
-                            Err(replacement_node) => self.graft_internal(Some(replacement_node)),
-                        }
+                        let status = self_node.join_into(src);
+                        self.graft_internal(Some(self_node));
                         status
                     },
                     None => {

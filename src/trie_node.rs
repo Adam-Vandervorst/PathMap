@@ -1399,7 +1399,9 @@ mod tagged_node_ref {
         }
 
         pub fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
-            if self.shared_node_id() == other.shared_node_id() {
+            //A node joined with itself is only itself when the value join is idempotent.
+            // See [Lattice::IDEMPOTENT]
+            if <V as Lattice>::IDEMPOTENT && self.shared_node_id() == other.shared_node_id() {
                 return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
             }
             match self {
@@ -1412,7 +1414,8 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
-            if self.shared_node_id() == other.shared_node_id() {
+            //See the note in `pjoin_dyn`.  [Lattice::IDEMPOTENT] covers both operations
+            if <V as Lattice>::IDEMPOTENT && self.shared_node_id() == other.shared_node_id() {
                 return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
             }
             match self {
@@ -1425,7 +1428,9 @@ mod tagged_node_ref {
         }
 
         pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
-            if self.shared_node_id() == other.shared_node_id() {
+            //A node subtracted from itself only leaves nothing when the value subtract is
+            // idempotent.  See [DistributiveLattice::IDEMPOTENT]
+            if <V as DistributiveLattice>::IDEMPOTENT && self.shared_node_id() == other.shared_node_id() {
                 return AlgebraicResult::None;
             }
             match self {
@@ -2034,7 +2039,9 @@ mod tagged_node_ref {
         }
 
         pub fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
-            if self.ptr == other.ptr {
+            //A node joined with itself is only itself when the value join is idempotent.
+            // See [Lattice::IDEMPOTENT]
+            if <V as Lattice>::IDEMPOTENT && self.ptr == other.ptr {
                 return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
             }
             let (ptr, tag) = self.ptr.get_raw_parts();
@@ -2049,7 +2056,8 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
-            if self.ptr == other.ptr {
+            //See the note in `pjoin_dyn`.  [Lattice::IDEMPOTENT] covers both operations
+            if <V as Lattice>::IDEMPOTENT && self.ptr == other.ptr {
                 return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
             }
             let (ptr, tag) = self.ptr.get_raw_parts();
@@ -2064,7 +2072,9 @@ mod tagged_node_ref {
         }
 
         pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
-            if self.ptr == other.ptr {
+            //A node subtracted from itself only leaves nothing when the value subtract is
+            // idempotent.  See [DistributiveLattice::IDEMPOTENT]
+            if <V as DistributiveLattice>::IDEMPOTENT && self.ptr == other.ptr {
                 return AlgebraicResult::None;
             }
             let (ptr, tag) = self.ptr.get_raw_parts();
@@ -3116,7 +3126,9 @@ mod opaque_dyn_rc_trie_node {
 impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
     #[inline]
     pub fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
-        if self.ptr_eq(other) {
+        //A shared subtrie joined with itself is only itself when the value join is idempotent.
+        // See [Lattice::IDEMPOTENT]
+        if <V as Lattice>::IDEMPOTENT && self.ptr_eq(other) {
             AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
         } else {
             self.as_tagged().pjoin_dyn(other.as_tagged())
@@ -3133,6 +3145,12 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
     }
     #[inline]
     pub fn join_into(&mut self, node: TrieNodeODRc<V, A>) -> AlgebraicStatus {
+        //Joining a shared subtrie into itself is a no-op when the value join is idempotent.  This
+        // is worth checking up front because `make_mut` below deep-copies the node when it's shared,
+        // which is exactly the situation where `node` is likely to be the same pointer as `self`
+        if <V as Lattice>::IDEMPOTENT && self.ptr_eq(&node) {
+            return AlgebraicStatus::Identity
+        }
         let (status, result) = self.make_mut().join_into_dyn(node);
         match result {
             Ok(()) => {},
@@ -3144,7 +3162,8 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
     }
     #[inline]
     pub fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
-        if self.ptr_eq(other) {
+        //See the note in `pjoin`.  [Lattice::IDEMPOTENT] covers both operations
+        if <V as Lattice>::IDEMPOTENT && self.ptr_eq(other) {
             AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
         } else {
             self.as_tagged().pmeet_dyn(other.as_tagged())
@@ -3155,7 +3174,9 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
 //See above, pseudo-impl for [DistributiveLattice] trait
 impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
     pub fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
-        if self.ptr_eq(other) {
+        //Subtracting a shared subtrie from itself only leaves nothing when the value subtract is
+        // idempotent.  See [DistributiveLattice::IDEMPOTENT]
+        if <V as DistributiveLattice>::IDEMPOTENT && self.ptr_eq(other) {
             AlgebraicResult::None
         } else {
             self.as_tagged().psubtract_dyn(other.as_tagged())

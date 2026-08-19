@@ -538,9 +538,16 @@ pub trait Lattice {
     /// `join_into(self) -> AlgebraicStatus::Identity`,
     /// `pmeet(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
     ///
-    /// WARNING! This constant is currently informational only.  The node-level and zipper
-    /// algebra implementations do not yet consult it, so changing it has no effect
-    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    /// The node-level algebra consults this constant to decide whether an operation between two
+    /// references to the *same* shared subtrie can be answered without descending into it.  Leaving
+    /// it at the `true` default is correct for every set-like or "last writer wins" value type,
+    /// including `()`.  Set it to `false` for a value type whose join or meet actually combines the
+    /// operands, such as a multiset that adds multiplicities, otherwise structurally shared branches
+    /// will be silently skipped instead of combined.
+    ///
+    /// NOTE: this constant covers `pjoin`, `join_into` and `pmeet` together.  A type that is
+    /// idempotent under one but not the other must declare `false`.  Subtraction is governed
+    /// separately, by [DistributiveLattice::IDEMPOTENT].
     const IDEMPOTENT: bool = true;
 
     /// Implements the union operation between two instances of a type in a partial lattice, resulting in
@@ -619,9 +626,12 @@ pub trait DistributiveLattice {
     /// If `IDEMPOTENT = true` the implementor is asserting that:
     /// `psubtract(self) -> AlgebraicResult::None`,
     ///
-    /// WARNING! This constant is currently informational only.  The node-level and zipper
-    /// algebra implementations do not yet consult it, so changing it has no effect
-    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    /// The node-level algebra consults this constant to decide whether subtracting a shared subtrie
+    /// from itself can be answered as "nothing survives" without descending into it.  Set it to
+    /// `false` for a value type where `x - x` leaves something behind, such as a multiset that
+    /// removes one occurrence per subtraction.
+    ///
+    /// See also [Lattice::IDEMPOTENT], which governs join and meet.
     const IDEMPOTENT: bool = true;
 
     /// Implements the partial subtract operation
