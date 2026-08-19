@@ -412,7 +412,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         }
     }
     #[inline]
-    unsafe fn child_in_slot<const SLOT: usize>(&self) -> &TrieNodeODRc<V, A> {
+    pub(crate) unsafe fn child_in_slot<const SLOT: usize>(&self) -> &TrieNodeODRc<V, A> {
         match SLOT {
             0 => unsafe{ &*self.val_or_child0.child },
             1 => unsafe{ &*self.val_or_child1.child },

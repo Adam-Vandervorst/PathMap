@@ -277,6 +277,8 @@ pub struct MemProfile {
     pub both_slots: usize,
     pub key_bytes_used: usize,
     pub at_cap: usize,
+    pub empty_nodes: usize,
+    pub dangling_slots: usize,
     pub node_klen_hist: Vec<usize>,
     pub allval_nodes: usize,
     pub allval_klen_hist: Vec<usize>,
@@ -295,6 +297,7 @@ impl MemProfile {
         if self.allval_klen_hist.len() < o.allval_klen_hist.len() { self.allval_klen_hist.resize(o.allval_klen_hist.len(), 0); }
         for (i, c) in o.allval_klen_hist.iter().enumerate() { self.allval_klen_hist[i] += c; }
         self.allval_nodes += o.allval_nodes;
+        self.empty_nodes += o.empty_nodes; self.dangling_slots += o.dangling_slots;
         self
     }
     pub fn total_bytes(&self) -> usize { self.list_bytes + self.dense_bytes + self.cell_bytes }
@@ -332,6 +335,7 @@ impl MemProfile {
             self.dense_items as f64 / self.dense_nodes.max(1) as f64);
         println!("  dense slots: len {} cap {} ({:.1}% over-allocated)", self.dense_items, self.dense_cap, (self.dense_cap as f64/self.dense_items.max(1) as f64 - 1.0)*100.0);
         println!("  cell  nodes {:>9}  bytes {:>11}  ({:4.1}% of trie)  items {}", self.cell_nodes, self.cell_bytes, self.cell_bytes as f64/t*100.0, self.cell_items);
+        println!("  empty (allocated) nodes {}   dangling sentinel slots {}", self.empty_nodes, self.dangling_slots);
         println!("  TOTAL bytes {:>9}   = {:.1} bytes/value", self.total_bytes(), t / vals.max(1) as f64);
     }
 }
@@ -348,8 +352,13 @@ pub fn memory_profile<V: Clone + Send + Sync + Unpin + 'static>(map: &PathMap<V>
     let Some(root) = map.root() else { return MemProfile::default() };
     traverse_physical(root, move |node, ctx: MemProfile| {
         let mut c = ctx;
+        if node.item_count() == 0 { c.empty_nodes += 1; }
         if let Some(l) = node.as_list() {
             c.list_nodes += 1; c.list_bytes += list_sz;
+            //A slot whose child link is the empty sentinel is a dangling path: the path exists but
+            //carries no value and leads nowhere
+            if l.is_used_child_0() && unsafe{ l.child_in_slot::<0>() }.is_empty() { c.dangling_slots += 1 }
+            if l.is_used_child_1() && unsafe{ l.child_in_slot::<1>() }.is_empty() { c.dangling_slots += 1 }
             let (k0, k1) = l.get_both_keys();
             if c.klen_hist.len() < crate::line_list_node::KEY_BYTES_CNT + 1 { c.klen_hist.resize(crate::line_list_node::KEY_BYTES_CNT + 1, 0); }
             c.klen_hist[k0.len()] += 1;

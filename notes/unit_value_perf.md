@@ -12,6 +12,13 @@ survey of places the trie pays for a value that carries no information.
 A fourth change -- packing the CoFree value flag into its child pointer -- was
 built and measured but **not merged**; see [below](#shelved-packing-the-value-presence-flag-into-the-child-pointer).
 
+**A note on the survey these came from.** Its estimates were made by reading
+struct definitions, and three of them did not survive measurement: S3 was not
+implementable *and* worthless, S4 turned out to cost nothing to begin with, and
+S1's headline ("2x node memory") was true per-node but meant 5% on
+MORK-shaped data, because dense nodes are only a fifth of those bytes. Measure
+first; the profiler in `9f73907` exists for that.
+
 ## Results
 
 Min of 3 runs per side, each run itself the min of 7 timed repetitions, every
@@ -238,8 +245,35 @@ here, so halving their per-slot box would have saved nothing.
 
 ## Negative results
 
-These three were measured and rejected. Recording them so they are not
+These four were measured and rejected. Recording them so they are not
 re-attempted from first principles.
+
+### S4 -- replacing the dangling-path sentinel with a bit: nothing to save
+
+The earlier survey claimed that a path kept alive by `remove_val(prune = false)`
+costs "a pointer + node per pruned leaf", because a `LineListNode` records it by
+pointing the slot's child link at `TrieNodeODRc::new_empty()`. Measured, it costs
+nothing at all:
+
+- **The sentinel never allocates.** `new_empty()` is a bogus address
+  (`0xBAADF00D`) carrying `EMPTY_NODE_TAG`. There is no node.
+- **The payload word exists regardless.** A `LineListNode` is a fixed-size
+  struct, so the union the sentinel sits in is there whether the slot uses it or
+  not. Marking the slot "dangling" in the header instead would free zero bytes.
+- **A `DenseByteNode` already does what S4 proposed.** It represents a dangling
+  path as a CoFree holding neither a child nor a value -- there is no sentinel in
+  a dense node to begin with.
+
+The measurement: taking shakespeare and removing half its values with
+`prune = false` produces 14,212 dangling slots and leaves the trie **byte for
+byte identical**, 4,095,744 before and after. `tests/memory_profile.rs` asserts
+this so the claim does not have to be re-derived.
+
+Also checked, since it was the only caller that really allocates: a `WriteZipper`
+opened on a path that does not exist allocates an empty `LineListNode` for its
+root, but does **not** leave it behind -- creating 2000 such zippers and dropping
+them without writing moved the byte count by exactly 0, and no allocated empty
+node was ever observed in any trie profiled here.
 
 ### S3 -- reclaiming value-slot bytes for list-node keys: not possible, and worthless
 

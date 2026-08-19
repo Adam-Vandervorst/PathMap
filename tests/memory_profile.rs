@@ -40,6 +40,45 @@ fn survey(label: &str, paths: &[Vec<u8>]) {
         prof.total_bytes(), prof.list_nodes, prof.dense_nodes, build_ms, iter_ms, get_ms);
 }
 
+/// Dangling paths: paths that exist but carry no value. `remove_val(prune=false)` is how they are
+/// made, and a `LineListNode` records one by pointing the slot at the empty-node sentinel.
+#[test]
+fn dangling_path_survey() {
+    use pathmap::zipper::ZipperWriting;
+    let words: Vec<Vec<u8>> = std::fs::read_to_string("benches/shakespeare.txt").unwrap()
+        .split_ascii_whitespace().map(|w| w.as_bytes().to_vec()).collect::<std::collections::BTreeSet<_>>()
+        .into_iter().collect();
+
+    let mut m: PathMap<()> = PathMap::new();
+    for w in &words { m.set_val_at(&w[..], ()); }
+    let before = memory_profile(&m);
+    before.report("shakespeare, no dangling paths", m.val_count());
+
+    // strip every other value without pruning -- the maximal dangling-path case
+    for (i, w) in words.iter().enumerate() {
+        if i % 2 == 0 {
+            let mut wz = m.write_zipper_at_path(&w[..]);
+            wz.remove_val(false);
+        }
+    }
+    let after = memory_profile(&m);
+    after.report("shakespeare, half the values removed with prune=false", m.val_count());
+    println!("DANGLING  bytes {} -> {}   empty nodes {} -> {}   sentinel slots {} -> {}",
+        before.total_bytes(), after.total_bytes(),
+        before.empty_nodes, after.empty_nodes, before.dangling_slots, after.dangling_slots);
+
+    //A dangling path costs nothing over the value it replaced.  The empty-node sentinel is a bogus
+    //address rather than an allocation, and the payload word it sits in is part of a fixed-size
+    //`LineListNode` whether it is used or not -- so turning 14k values into dangling paths moves
+    //the byte count not at all.  A `DenseByteNode` does not use the sentinel in the first place: it
+    //represents a dangling path as a CoFree holding neither a child nor a value.
+    assert!(after.dangling_slots > 10_000, "the fixture should have produced plenty of dangling paths");
+    assert_eq!(after.total_bytes(), before.total_bytes(),
+        "dangling paths must cost nothing over the values they replaced");
+    assert_eq!(after.empty_nodes, 0, "the sentinel must never become an allocated node");
+    assert_eq!(before.empty_nodes, 0);
+}
+
 #[test]
 fn memory_profile_survey() {
     // MORK-representative
