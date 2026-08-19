@@ -363,7 +363,7 @@ fn int_range_generator_5() {
     drop(buildz);
     let mut z = zh.read_zipper_at_path(&[0]).unwrap();
 
-    z.descend_until(&mut ());
+    z.descend_until();
     z.descend_first_byte();
     let _z2 = zh.read_zipper_at_path(z.origin_path()).unwrap();
 

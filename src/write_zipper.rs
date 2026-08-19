@@ -426,7 +426,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
     fn descend_to_byte(&mut self, k: u8) { self.z.descend_to_byte(k) }
     fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> { self.z.descend_indexed_byte(child_idx) }
     fn descend_first_byte(&mut self) -> Option<u8> { self.z.descend_first_byte() }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool { self.z.descend_until(obs) }
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool { self.z.descend_until_observed(obs) }
     fn to_next_sibling_byte(&mut self) -> Option<u8> { self.z.to_next_sibling_byte() }
     fn to_prev_sibling_byte(&mut self) -> Option<u8> { self.z.to_prev_sibling_byte() }
     fn ascend(&mut self, steps: usize) -> usize { self.z.ascend(steps) }
@@ -591,7 +591,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
     fn descend_to_byte(&mut self, k: u8) { self.z.descend_to_byte(k) }
     fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> { self.z.descend_indexed_byte(child_idx) }
     fn descend_first_byte(&mut self) -> Option<u8> { self.z.descend_first_byte() }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool { self.z.descend_until(obs) }
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool { self.z.descend_until_observed(obs) }
     fn to_next_sibling_byte(&mut self) -> Option<u8> { self.z.to_next_sibling_byte() }
     fn to_prev_sibling_byte(&mut self) -> Option<u8> { self.z.to_prev_sibling_byte() }
     fn ascend(&mut self, steps: usize) -> usize { self.z.ascend(steps) }
@@ -2848,6 +2848,7 @@ mod mut_node_stack {
 #[cfg(test)]
 mod tests {
     use crate::ring::AlgebraicStatus;
+    use crate::ring::{AlgebraicResult, DistributiveLattice, Lattice};
     use crate::trie_map::*;
     use crate::utils::ByteMask;
     use crate::zipper::*;
@@ -5216,7 +5217,7 @@ mod tests {
 
         assert_eq!(zipper.path(), b"");
         assert_eq!(zipper.val_count(), 2);
-        assert_eq!(zipper.descend_until(&mut ()), true);
+        assert_eq!(zipper.descend_until(), true);
         assert_eq!(zipper.path(), b"arrow");
         assert_eq!(zipper.val_count(), 1);
     }
@@ -5690,6 +5691,77 @@ mod tests {
         assert_eq!(dst.get_val_at(b"4"), Some(&7));
         assert_eq!(dst.get_val_at(b"5"), Some(&8));
         assert_eq!(dst.get_val_at(b"6789"), Some(&9));
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ProbeState {
+        Original,
+        Cloned,
+        Joined,
+        Met,
+        Subtracted,
+    }
+
+    /// Test object to record what happens to a value in the trie during some algebraic ops
+    #[derive(Debug, PartialEq)]
+    struct LatticeProbe(ProbeState);
+
+    impl Clone for LatticeProbe {
+        fn clone(&self) -> Self {
+            Self(ProbeState::Cloned)
+        }
+    }
+
+    impl Lattice for LatticeProbe {
+        fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
+            let _ = other;
+            AlgebraicResult::Element(Self(ProbeState::Joined))
+        }
+
+        fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
+            let _ = other;
+            AlgebraicResult::Element(Self(ProbeState::Met))
+        }
+    }
+
+    impl DistributiveLattice for LatticeProbe {
+        fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+            let _ = other;
+            AlgebraicResult::Element(Self(ProbeState::Subtracted))
+        }
+    }
+
+    #[test]
+    fn write_zipper_shared_root_skips_lattice_methods() {
+        let mut join_map = PathMap::single(b"k", LatticeProbe(ProbeState::Original));
+        let join_source = join_map.clone();
+        let join_status = join_map
+            .write_zipper()
+            .join_into(&join_source.read_zipper());
+        assert_eq!(join_status, AlgebraicStatus::Identity);
+        assert_eq!(join_map.get(b"k"), Some(&LatticeProbe(ProbeState::Original)));
+
+        let mut join_map = PathMap::single(b"k", LatticeProbe(ProbeState::Original));
+        let join_source = join_map.clone();
+        let join_status = join_map.write_zipper().join_map_into(join_source);
+        assert_eq!(join_status, AlgebraicStatus::Identity);
+        assert_eq!(join_map.get(b"k"), Some(&LatticeProbe(ProbeState::Original)));
+
+        let mut meet_map = PathMap::single(b"k", LatticeProbe(ProbeState::Original));
+        let meet_source = meet_map.clone();
+        let meet_status = meet_map
+            .write_zipper()
+            .meet_into(&meet_source.read_zipper(), true);
+        assert_eq!(meet_status, AlgebraicStatus::Identity);
+        assert_eq!(meet_map.get(b"k"), Some(&LatticeProbe(ProbeState::Original)));
+
+        let mut subtract_map = PathMap::single(b"k", LatticeProbe(ProbeState::Original));
+        let subtract_source = subtract_map.clone();
+        let subtract_status = subtract_map
+            .write_zipper()
+            .subtract_into(&subtract_source.read_zipper(), true);
+        assert_eq!(subtract_status, AlgebraicStatus::None);
+        assert_eq!(subtract_map.get(b"k"), None);
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(write_zipper,

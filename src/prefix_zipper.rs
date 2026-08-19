@@ -448,7 +448,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         self.descend_indexed_byte(0)
     }
 
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         if self.position.is_invalid() {
             return false;
         }
@@ -456,7 +456,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         // return value even when the source zipper can't descend any further
         let descended_prefix = self.consume_prefix(obs);
         //Fan the descended bytes out to our own path buffer as well as the caller's observer
-        descended_prefix | self.source.descend_until(&mut (&mut self.path, &mut *obs))
+        descended_prefix | self.source.descend_until_observed(&mut (&mut self.path, &mut *obs))
     }
 
     #[inline]
@@ -941,7 +941,7 @@ mod tests {
         let mut rz = PrefixZipper::new(b"prefix", map.read_zipper());
         assert_eq!(rz.path(), b"");
 
-        let moved = rz.descend_until(&mut ());
+        let moved = rz.descend_until();
 
         //The focus advanced across the whole prefix...
         assert_eq!(rz.path(), b"prefix");

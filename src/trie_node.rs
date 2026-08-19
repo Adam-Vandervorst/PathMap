@@ -1381,6 +1381,9 @@ mod tagged_node_ref {
         }
 
         pub fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.shared_node_id() == other.shared_node_id() {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             match self {
                 Self::DenseByteNode(node) => node.pjoin_dyn(other),
                 Self::LineListNode(node) => node.pjoin_dyn(other),
@@ -1391,6 +1394,9 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.shared_node_id() == other.shared_node_id() {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             match self {
                 Self::DenseByteNode(node) => node.pmeet_dyn(other),
                 Self::LineListNode(node) => node.pmeet_dyn(other),
@@ -1401,6 +1407,9 @@ mod tagged_node_ref {
         }
 
         pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+            if self.shared_node_id() == other.shared_node_id() {
+                return AlgebraicResult::None;
+            }
             match self {
                 Self::DenseByteNode(node) => node.psubtract_dyn(other),
                 Self::LineListNode(node) => node.psubtract_dyn(other),
@@ -2007,6 +2016,9 @@ mod tagged_node_ref {
         }
 
         pub fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.ptr == other.ptr {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => crate::empty_node::EmptyNode.pjoin_dyn(other),
@@ -2019,6 +2031,9 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.ptr == other.ptr {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => AlgebraicResult::None,
@@ -2031,6 +2046,9 @@ mod tagged_node_ref {
         }
 
         pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+            if self.ptr == other.ptr {
+                return AlgebraicResult::None;
+            }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => AlgebraicResult::None,

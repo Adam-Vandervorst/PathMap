@@ -254,10 +254,10 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.ensure_descend_next_factor();
         result
     }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         while self.z.child_count() == 1 {
-            moved |= self.z.descend_until(&mut *obs);
+            moved |= self.z.descend_until_observed(&mut *obs);
             self.ensure_descend_next_factor();
             if self.z.is_val() {
                 break;
@@ -734,7 +734,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
     fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         self.enter_factors();
         while self.child_count() == 1 {
@@ -743,9 +743,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
                 //secondary descends.  Mirroring the movement keeps it in step without buffering
                 //the bytes.
                 let zipper = &mut self.secondary[idx];
-                zipper.descend_until(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
+                zipper.descend_until_observed(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
             } else {
-                self.primary.descend_until(&mut *obs)
+                self.primary.descend_until_observed(&mut *obs)
             };
             self.enter_factors();
             if self.is_val() {
@@ -956,7 +956,7 @@ mod tests {
             //Descend into the secondary factor with `descend_until`
             let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
             pz.descend_to(b"X");
-            let moved = pz.descend_until(&mut ());
+            let moved = pz.descend_until();
 
             //An independent zipper walked to the same place with `descend_to`
             let mut expected = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
@@ -972,7 +972,7 @@ mod tests {
         }
     }
 
-    /// The observer passed to `descend_until` must receive exactly the bytes the focus moved over,
+    /// The observer passed to `descend_until_observed` must receive exactly the bytes the focus moved over,
     /// no matter how many segments the underlying descent was reported in
     #[test]
     fn product_zipper_descend_until_observer_matches_movement() {
@@ -988,7 +988,7 @@ mod tests {
             let before = pz.path().to_vec();
 
             let mut observed = Vec::new();
-            pz.descend_until(&mut observed);
+            pz.descend_until_observed(&mut observed);
 
             let mut expected_observed = pz.path().to_vec();
             expected_observed.drain(..before.len());
@@ -1012,7 +1012,7 @@ mod tests {
 
         let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
         //Drive the whole product path using only `descend_until`
-        while pz.descend_until(&mut ()) {}
+        while pz.descend_until() {}
 
         let mut full = b"X".to_vec();
         full.extend_from_slice(&mid);
@@ -1683,11 +1683,131 @@ mod tests {
         assert_eq!(pz.is_val(), false);
 
         // test descend_until
-        assert_eq!(pz.descend_until(&mut ()), true);
+        assert_eq!(pz.descend_until(), true);
         assert_eq!(pz.path(), full_path);
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 0);
         assert_eq!(pz.is_val(), false);
+    }
+
+    /// Repeated reset-and-redescend cycles must each land in the same place.  A zipper that
+    /// unwinds its factor state incompletely on reset will diverge on the second or later pass.
+    #[test]
+    fn product_zipper_repeated_reset_test() {
+        let snip = b"-=**=-";
+        let mut map = PathMap::<()>::new();
+        map.create_path(snip);
+        $convert!(map);
+
+        let factors: Vec<_> = (0..3).into_iter().map(|_| map.read_zipper()).collect();
+        let mut pz = $ProductZipper::new(map.read_zipper(), factors);
+
+        let mut full_path = snip.to_vec();
+        for _ in 0..3 { full_path.extend(snip); }
+
+        //Every cycle must reproduce the first one exactly
+        for cycle in 0..4 {
+            pz.reset();
+            assert_eq!(pz.path(), b"", "cycle {cycle}: reset should return to the root");
+            pz.descend_to(&full_path);
+            assert_eq!(pz.path(), full_path, "cycle {cycle}: path mismatch");
+            assert_eq!(pz.path_exists(), true, "cycle {cycle}: path_exists mismatch");
+            assert_eq!(pz.child_count(), 0, "cycle {cycle}: child_count mismatch");
+        }
+    }
+
+    /// Ascending back to the root and descending again must reproduce the original position,
+    /// for each of the three ascent methods
+    #[test]
+    fn product_zipper_ascend_redescend_test() {
+        let snip = b"-=**=-";
+        let mut map = PathMap::<()>::new();
+        map.create_path(snip);
+        $convert!(map);
+
+        let mut full_path = snip.to_vec();
+        for _ in 0..3 { full_path.extend(snip); }
+
+        //Each ascent method gets a fresh zipper, then has to descend the same path twice
+        for mode in 0..3 {
+            let factors: Vec<_> = (0..3).into_iter().map(|_| map.read_zipper()).collect();
+            let mut pz = $ProductZipper::new(map.read_zipper(), factors);
+
+            pz.descend_to(&full_path);
+            assert_eq!(pz.path(), full_path, "mode {mode}: first descent");
+
+            match mode {
+                0 => { pz.ascend(full_path.len()); },
+                1 => { while pz.ascend_until() > 0 {} },
+                _ => { while pz.ascend_until_branch() > 0 {} },
+            }
+            assert_eq!(pz.path(), b"", "mode {mode}: should have returned to the root");
+
+            //The second descent must reach exactly the same place as the first
+            pz.descend_to(&full_path);
+            assert_eq!(pz.path(), full_path, "mode {mode}: second descent");
+            assert_eq!(pz.path_exists(), true, "mode {mode}: path_exists after redescent");
+            assert_eq!(pz.child_count(), 0, "mode {mode}: child_count after redescent");
+        }
+    }
+
+    /// Sibling movement that crosses a factor boundary must keep the factors consistent, so a
+    /// subsequent descent still works
+    #[test]
+    fn product_zipper_sibling_across_factor_test() {
+        //The primary branches, so there are siblings to step between
+        let l = PathMap::from_iter([(b"a".as_slice(), ()), (b"b".as_slice(), ())]);
+        let r = PathMap::from_iter([(b"XY".as_slice(), ())]);
+        $convert!(l);
+        $convert!(r);
+
+        let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
+
+        //Descend into the first branch and on into the secondary factor
+        pz.descend_to(b"aXY");
+        assert_eq!(pz.path(), b"aXY");
+        assert_eq!(pz.path_exists(), true);
+
+        //Ascend back to the branch point and step to the sibling
+        pz.ascend(2);
+        assert_eq!(pz.path(), b"a");
+        assert!(pz.to_next_sibling_byte().is_some());
+        assert_eq!(pz.path(), b"b");
+
+        //The sibling must be able to descend into its own copy of the secondary factor
+        pz.descend_to(b"XY");
+        assert_eq!(pz.path(), b"bXY", "sibling should descend into the secondary factor");
+        assert_eq!(pz.path_exists(), true);
+    }
+
+    /// Factors of differing lengths must stitch together correctly, unlike the repeated-identical
+    /// factors used elsewhere, where an off-by-one in factor bookkeeping can go unnoticed
+    #[test]
+    fn product_zipper_uneven_factors_test() {
+        let l = PathMap::from_iter([(b"A".as_slice(), ())]);
+        let r = PathMap::from_iter([(b"BBBBBBBB".as_slice(), ())]);
+        let e = PathMap::from_iter([(b"CC".as_slice(), ())]);
+        $convert!(l);
+        $convert!(r);
+        $convert!(e);
+
+        let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
+        let full_path = b"ABBBBBBBBCC";
+
+        pz.descend_to(full_path);
+        assert_eq!(pz.path(), full_path);
+        assert_eq!(pz.path_exists(), true);
+        assert_eq!(pz.child_count(), 0);
+
+        //Ascend into the middle factor and back out again
+        pz.ascend(3);
+        assert_eq!(pz.path(), b"ABBBBBBB");
+        assert_eq!(pz.path_exists(), true);
+
+        pz.reset();
+        pz.descend_to(full_path);
+        assert_eq!(pz.path(), full_path, "path after reset and redescent");
+        assert_eq!(pz.path_exists(), true);
     }
 
     #[test]
