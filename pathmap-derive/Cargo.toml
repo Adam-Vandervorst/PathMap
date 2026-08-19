@@ -1,6 +1,6 @@
 [package]
 name = "pathmap-derive"
-version = "0.3"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 description = "Macros and support functionality for the pathmap crate"
