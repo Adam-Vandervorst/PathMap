@@ -219,7 +219,7 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
         Some(byte)
     }
 
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         //Descending happens in buffer-sized chunks, so neither source can outrun what we're able
         // to capture.  As long as both sources fill a whole chunk and agree on every byte of it,
         // the chunk is committed and we go around again.  Any other outcome ends the descent and
@@ -236,8 +236,8 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
         loop {
             path_a.clear();
             path_b.clear();
-            let desc_a = self.a.descend_until_max_bytes(CHUNK, &mut path_a);
-            let desc_b = self.b.descend_until_max_bytes(CHUNK, &mut path_b);
+            let desc_a = self.a.descend_until_max_bytes_observed(CHUNK, &mut path_a);
+            let desc_b = self.b.descend_until_max_bytes_observed(CHUNK, &mut path_b);
 
             if !desc_a && !desc_b {
                 break;
@@ -468,7 +468,7 @@ mod tests {
         let (mut a, mut b) = (PathMap::new(), PathMap::new());
         let mut oz = overlay_of(&key, &key, &mut a, &mut b);
 
-        let moved = oz.descend_until(&mut ());
+        let moved = oz.descend_until();
         assert_eq!(moved, true, "len={len}: should have descended");
         assert_eq!(oz.path(), &key[..], "len={len}: should reach the end of the path");
     }
@@ -494,7 +494,7 @@ mod tests {
         let mut oz = overlay_of(&key, &key, &mut a, &mut b);
 
         let mut observed = Vec::new();
-        let moved = oz.descend_until(&mut observed);
+        let moved = oz.descend_until_observed(&mut observed);
         assert_eq!(moved, true);
         assert_eq!(observed, oz.path(), "observer must match the resulting path");
         assert_eq!(observed, key);
@@ -509,7 +509,7 @@ mod tests {
         let mut oz = overlay_of(&key_a, &key_b, &mut a, &mut b);
 
         let mut observed = Vec::new();
-        let moved = oz.descend_until(&mut observed);
+        let moved = oz.descend_until_observed(&mut observed);
 
         assert_eq!(moved, common_len > 0, "common_len={common_len}");
         assert_eq!(oz.path(), &vec![b'x'; common_len][..],
@@ -540,7 +540,7 @@ mod tests {
         let mut oz = overlay_of(&short, &long, &mut a, &mut b);
 
         let mut observed = Vec::new();
-        let moved = oz.descend_until(&mut observed);
+        let moved = oz.descend_until_observed(&mut observed);
         assert_eq!(moved, true);
         assert_eq!(observed, oz.path(), "observer must match the resulting path");
     }

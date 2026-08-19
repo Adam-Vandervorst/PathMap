@@ -1421,7 +1421,7 @@ fn build_arena_tree_cached<V, Z, F>(mut z: Z, map_val: F) -> ArenaCompactTree<Ve
             // Descend to the next forking point, or to a leaf
             let mut is_leaf = false;
             while z.child_count() < 2 {
-                if !z.descend_until(&mut ()) {
+                if !z.descend_until() {
                     is_leaf = true;
                     break;
                 }
@@ -3042,7 +3042,7 @@ where Storage: AsRef<[u8]>
 
     /// Descends the zipper's focus until a branch or a value is encountered.  Returns `true` if the focus
     /// moved otherwise returns `false`
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.trace_pos();
         let mut descended = false;
         'descend: while self.child_count() == 1 {

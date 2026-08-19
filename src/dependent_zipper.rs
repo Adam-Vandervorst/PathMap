@@ -397,7 +397,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         self.enter_factors();
         while self.child_count() == 1 {
@@ -406,9 +406,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
                 //secondary descends.  Mirroring the movement keeps it in step without buffering
                 //the bytes.
                 let zipper = &mut self.secondary[idx];
-                zipper.descend_until(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
+                zipper.descend_until_observed(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
             } else {
-                self.primary.descend_until(&mut *obs)
+                self.primary.descend_until_observed(&mut *obs)
             };
             self.enter_factors();
             if self.is_val() {

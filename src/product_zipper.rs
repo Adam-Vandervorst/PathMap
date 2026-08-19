@@ -253,10 +253,10 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.ensure_descend_next_factor();
         result
     }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         while self.z.child_count() == 1 {
-            moved |= self.z.descend_until(&mut *obs);
+            moved |= self.z.descend_until_observed(&mut *obs);
             self.ensure_descend_next_factor();
             if self.z.is_val() {
                 break;
@@ -732,7 +732,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
     fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         self.enter_factors();
         while self.child_count() == 1 {
@@ -741,9 +741,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
                 //secondary descends.  Mirroring the movement keeps it in step without buffering
                 //the bytes.
                 let zipper = &mut self.secondary[idx];
-                zipper.descend_until(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
+                zipper.descend_until_observed(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
             } else {
-                self.primary.descend_until(&mut *obs)
+                self.primary.descend_until_observed(&mut *obs)
             };
             self.enter_factors();
             if self.is_val() {
@@ -954,7 +954,7 @@ mod tests {
             //Descend into the secondary factor with `descend_until`
             let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
             pz.descend_to(b"X");
-            let moved = pz.descend_until(&mut ());
+            let moved = pz.descend_until();
 
             //An independent zipper walked to the same place with `descend_to`
             let mut expected = $ProductZipper::new(l.read_zipper(), [r.read_zipper()]);
@@ -970,7 +970,7 @@ mod tests {
         }
     }
 
-    /// The observer passed to `descend_until` must receive exactly the bytes the focus moved over,
+    /// The observer passed to `descend_until_observed` must receive exactly the bytes the focus moved over,
     /// no matter how many segments the underlying descent was reported in
     #[test]
     fn product_zipper_descend_until_observer_matches_movement() {
@@ -986,7 +986,7 @@ mod tests {
             let before = pz.path().to_vec();
 
             let mut observed = Vec::new();
-            pz.descend_until(&mut observed);
+            pz.descend_until_observed(&mut observed);
 
             let mut expected_observed = pz.path().to_vec();
             expected_observed.drain(..before.len());
@@ -1010,7 +1010,7 @@ mod tests {
 
         let mut pz = $ProductZipper::new(l.read_zipper(), [r.read_zipper(), e.read_zipper()]);
         //Drive the whole product path using only `descend_until`
-        while pz.descend_until(&mut ()) {}
+        while pz.descend_until() {}
 
         let mut full = b"X".to_vec();
         full.extend_from_slice(&mid);
@@ -1678,7 +1678,7 @@ mod tests {
         assert_eq!(pz.is_val(), false);
 
         // test descend_until
-        assert_eq!(pz.descend_until(&mut ()), true);
+        assert_eq!(pz.descend_until(), true);
         assert_eq!(pz.path(), full_path);
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 0);

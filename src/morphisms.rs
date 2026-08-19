@@ -474,7 +474,7 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
         //Descend to the next forking point, or leaf
         let mut is_leaf = false;
         while z.child_count() < 2 {
-            if !z.descend_until(&mut ()) {
+            if !z.descend_until() {
                 is_leaf = true;
                 break;
             }
@@ -798,7 +798,7 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
             // Descend until leaf or branch
             let mut is_leaf = false;
             'descend: while zipper.child_count() < 2 {
-                if !zipper.descend_until(&mut ()) {
+                if !zipper.descend_until() {
                     is_leaf = true;
                     break 'descend;
                 }
@@ -891,7 +891,7 @@ fn into_cata_jumping_naive<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>
 
         // Descend until leaf or branch
         'descend: while z.child_count() < 2 {
-            if !z.descend_until(&mut ()) {
+            if !z.descend_until() {
                 is_leaf = true;
                 break 'descend;
             }

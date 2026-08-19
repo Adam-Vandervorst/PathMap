@@ -65,7 +65,7 @@ impl ZipperMoving for FullZipper {
         self.path.push(0);
         Some(0)
     }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.path.push(0); // not sure?
         obs.descend_to_byte(0);
         true
@@ -127,7 +127,7 @@ impl ZipperMoving for NullZipper {
     fn descend_to_byte(&mut self, _k: u8) {}
     fn descend_indexed_byte(&mut self, _idx: usize) -> Option<u8> { None }
     fn descend_first_byte(&mut self) -> Option<u8> { None }
-    fn descend_until<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
+    fn descend_until_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn ascend(&mut self, _steps: usize) -> usize { 0 }
     fn ascend_byte(&mut self) -> bool { false }
     fn ascend_until(&mut self) -> usize { 0 }

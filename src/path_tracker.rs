@@ -113,9 +113,9 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
         self.path.push(byte);
         Some(byte)
     }
-    fn descend_until<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         //Fan the descended bytes out to our own path buffer as well as the caller's observer
-        self.zipper.descend_until(&mut (&mut self.path, &mut *obs))
+        self.zipper.descend_until_observed(&mut (&mut self.path, &mut *obs))
     }
     fn ascend(&mut self, steps: usize) -> usize {
         let ascended = self.zipper.ascend(steps);

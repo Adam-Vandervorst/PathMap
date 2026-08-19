@@ -96,7 +96,7 @@ fn superdense_descend_until(bencher: Bencher, n: u64) {
             if start > 0 {
                 zipper.descend_to(&key[..start]);
             }
-            if zipper.descend_until(&mut ()) {
+            if zipper.descend_until() {
                 sink += 1;
             }
         }
@@ -123,7 +123,7 @@ fn superdense_descend_until_max_bytes(bencher: Bencher, n: u64) {
             if start > 0 {
                 zipper.descend_to_existing(&key[..start]);
             }
-            if zipper.descend_until_max_bytes(DESCEND_UNTIL_MAX_BYTES, &mut ()) {
+            if zipper.descend_until_max_bytes(DESCEND_UNTIL_MAX_BYTES) {
                 sink += 1;
             }
         }
