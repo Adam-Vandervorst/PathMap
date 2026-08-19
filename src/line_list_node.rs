@@ -37,7 +37,7 @@ pub struct LineListNode<V: Clone + Send + Sync, A: Allocator> {
 #[cfg(feature = "slim_ptrs")]
 pub(crate) const KEY_BYTES_CNT: usize = 42;
 #[cfg(not(feature = "slim_ptrs"))]
-pub(crate) const KEY_BYTES_CNT: usize = 14;
+pub(crate) const KEY_BYTES_CNT: usize = 42;
 
 // Only the slim_ptrs layout is asserted. The not(slim_ptrs) TrieNodeODRc has no
 // empty-sentinel representation yet (`new_empty`/`is_empty`/`make_unique`/`==`
@@ -47,7 +47,9 @@ pub(crate) const KEY_BYTES_CNT: usize = 14;
 // asserted until the sentinel design lands.
 #[cfg(all(feature = "slim_ptrs", target_arch = "x86_64", not(miri)))]
 const _: [(); core::mem::size_of::<LineListNode<[u8; 1024], crate::alloc::GlobalAlloc>>()] =
-    [(); 64];
+    [(); LINE_LIST_NODE_SIZE];
+/// refcnt 4 + header 2 + two 8-byte payload slots + the key area, rounded up to 8-byte alignment
+pub(crate) const LINE_LIST_NODE_SIZE: usize = ((4 + 2 + 16 + KEY_BYTES_CNT) + 7) / 8 * 8;
 
 const SLOT_0_USED_MASK: u16 = 1 << 15;
 const SLOT_1_USED_MASK: u16 = 1 << 14;

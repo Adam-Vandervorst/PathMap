@@ -250,6 +250,131 @@ pub(crate) fn record_make_unique(cloned: bool) {
     }
 }
 
+/// The key-byte capacity of a single [LineListNode](crate::line_list_node), and the resulting node size
+pub const LIST_NODE_KEY_BYTES: usize = crate::line_list_node::KEY_BYTES_CNT;
+/// The size in bytes of a single `LineListNode`, derived from [LIST_NODE_KEY_BYTES]
+pub const LIST_NODE_SIZE: usize = crate::line_list_node::LINE_LIST_NODE_SIZE;
+
+/// Memory attribution for a trie, broken down by node type
+///
+/// Walks physical (deduplicated) nodes, so structurally shared subtries are counted once. Use it to
+/// decide where layout work pays: the split between list-node and dense-node bytes varies enormously
+/// with key shape, and is what determines whether a given optimization is worth anything.
+#[derive(Clone, Default, Debug)]
+pub struct MemProfile {
+    pub list_nodes: usize,
+    pub list_bytes: usize,
+    pub dense_nodes: usize,
+    pub dense_items: usize,
+    pub dense_cap: usize,
+    pub dense_bytes: usize,
+    pub cell_nodes: usize,
+    pub cell_items: usize,
+    pub cell_bytes: usize,
+    pub klen_hist: Vec<usize>,
+    pub val_slots: usize,
+    pub child_slots: usize,
+    pub both_slots: usize,
+    pub key_bytes_used: usize,
+    pub at_cap: usize,
+    pub node_klen_hist: Vec<usize>,
+    pub allval_nodes: usize,
+    pub allval_klen_hist: Vec<usize>,
+}
+impl MemProfile {
+    fn merge(mut self, o: Self) -> Self {
+        self.list_nodes += o.list_nodes; self.list_bytes += o.list_bytes;
+        self.dense_nodes += o.dense_nodes; self.dense_items += o.dense_items; self.dense_bytes += o.dense_bytes; self.dense_cap += o.dense_cap;
+        self.cell_nodes += o.cell_nodes; self.cell_items += o.cell_items; self.cell_bytes += o.cell_bytes;
+        self.val_slots += o.val_slots; self.child_slots += o.child_slots;
+        self.both_slots += o.both_slots; self.key_bytes_used += o.key_bytes_used; self.at_cap += o.at_cap;
+        if self.klen_hist.len() < o.klen_hist.len() { self.klen_hist.resize(o.klen_hist.len(), 0); }
+        for (i, c) in o.klen_hist.iter().enumerate() { self.klen_hist[i] += c; }
+        if self.node_klen_hist.len() < o.node_klen_hist.len() { self.node_klen_hist.resize(o.node_klen_hist.len(), 0); }
+        for (i, c) in o.node_klen_hist.iter().enumerate() { self.node_klen_hist[i] += c; }
+        if self.allval_klen_hist.len() < o.allval_klen_hist.len() { self.allval_klen_hist.resize(o.allval_klen_hist.len(), 0); }
+        for (i, c) in o.allval_klen_hist.iter().enumerate() { self.allval_klen_hist[i] += c; }
+        self.allval_nodes += o.allval_nodes;
+        self
+    }
+    pub fn total_bytes(&self) -> usize { self.list_bytes + self.dense_bytes + self.cell_bytes }
+    pub fn report_list_slots(&self) {
+        let tot: usize = self.klen_hist.iter().sum();
+        println!("  list slot key-length histogram ({} slots, {} value-slots, {} child-slots):", tot, self.val_slots, self.child_slots);
+        let mut acc = 0;
+        for (len, cnt) in self.klen_hist.iter().enumerate() {
+            if *cnt == 0 { continue }
+            acc += cnt;
+            println!("     len {:>2}: {:>9}  ({:4.1}%)  cum {:4.1}%", len, cnt, *cnt as f64/tot as f64*100.0, acc as f64/tot as f64*100.0);
+        }
+        println!("  nodes with both slots used: {}   total key bytes used per node avg: {:.1} of {}",
+            self.both_slots, self.key_bytes_used as f64 / self.list_nodes.max(1) as f64, crate::line_list_node::KEY_BYTES_CNT);
+        let tn: usize = self.node_klen_hist.iter().sum();
+        let mut cum = 0usize; let mut cum_av = 0usize;
+        println!("  per-NODE total key bytes (cumulative fit):");
+        for (len, cnt) in self.node_klen_hist.iter().enumerate() {
+            cum += cnt; cum_av += self.allval_klen_hist[len];
+            if [6usize,10,14,18,22,26,34,42,50,58,84].contains(&len) {
+                println!("     <= {:>2} bytes: {:5.1}% of all list nodes | {:5.1}% of the {} leaf-only nodes",
+                    len, cum as f64/tn as f64*100.0, cum_av as f64/self.allval_nodes.max(1) as f64*100.0, self.allval_nodes);
+            }
+        }
+        println!("  leaf-only nodes (no child slot): {} of {} ({:4.1}%)", self.allval_nodes, self.list_nodes, self.allval_nodes as f64/self.list_nodes.max(1) as f64*100.0);
+        println!("  nodes at the key cap (key0+key1 >= {}): {}", crate::line_list_node::KEY_BYTES_CNT, self.at_cap);
+    }
+    pub fn report(&self, label: &str, vals: usize) {
+        let t = self.total_bytes() as f64;
+        println!("--- {label} ---");
+        println!("  values                {vals}");
+        println!("  list  nodes {:>9}  bytes {:>11}  ({:4.1}% of trie)", self.list_nodes, self.list_bytes, self.list_bytes as f64/t*100.0);
+        println!("  dense nodes {:>9}  bytes {:>11}  ({:4.1}% of trie)  items {}  avg {:.1}/node",
+            self.dense_nodes, self.dense_bytes, self.dense_bytes as f64/t*100.0, self.dense_items,
+            self.dense_items as f64 / self.dense_nodes.max(1) as f64);
+        println!("  dense slots: len {} cap {} ({:.1}% over-allocated)", self.dense_items, self.dense_cap, (self.dense_cap as f64/self.dense_items.max(1) as f64 - 1.0)*100.0);
+        println!("  cell  nodes {:>9}  bytes {:>11}  ({:4.1}% of trie)  items {}", self.cell_nodes, self.cell_bytes, self.cell_bytes as f64/t*100.0, self.cell_items);
+        println!("  TOTAL bytes {:>9}   = {:.1} bytes/value", self.total_bytes(), t / vals.max(1) as f64);
+    }
+}
+
+/// Builds a [MemProfile] for `map`.  See the type docs
+pub fn memory_profile<V: Clone + Send + Sync + Unpin + 'static>(map: &PathMap<V>) -> MemProfile {
+    use crate::trie_node::traverse_physical;
+    use crate::alloc::GlobalAlloc;
+    let cf = core::mem::size_of::<crate::dense_byte_node::OrdinaryCoFree<V, GlobalAlloc>>();
+    let cellcf = core::mem::size_of::<crate::dense_byte_node::CellCoFree<V, GlobalAlloc>>();
+    let list_sz = core::mem::size_of::<crate::line_list_node::LineListNode<V, GlobalAlloc>>();
+    let dense_sz = core::mem::size_of::<crate::dense_byte_node::DenseByteNode<V, GlobalAlloc>>();
+    let cell_sz = core::mem::size_of::<crate::dense_byte_node::CellByteNode<V, GlobalAlloc>>();
+    let Some(root) = map.root() else { return MemProfile::default() };
+    traverse_physical(root, move |node, ctx: MemProfile| {
+        let mut c = ctx;
+        if let Some(l) = node.as_list() {
+            c.list_nodes += 1; c.list_bytes += list_sz;
+            let (k0, k1) = l.get_both_keys();
+            if c.klen_hist.len() < crate::line_list_node::KEY_BYTES_CNT + 1 { c.klen_hist.resize(crate::line_list_node::KEY_BYTES_CNT + 1, 0); }
+            c.klen_hist[k0.len()] += 1;
+            if k1.len() > 0 { c.klen_hist[k1.len()] += 1; c.both_slots += 1; }
+            c.key_bytes_used += k0.len() + k1.len();
+            if k0.len() + k1.len() >= crate::line_list_node::KEY_BYTES_CNT { c.at_cap += 1; }
+            let ktot = k0.len() + k1.len();
+            if c.node_klen_hist.len() < 2*crate::line_list_node::KEY_BYTES_CNT + 2 { c.node_klen_hist.resize(2*crate::line_list_node::KEY_BYTES_CNT + 2, 0); c.allval_klen_hist.resize(2*crate::line_list_node::KEY_BYTES_CNT + 2, 0); }
+            c.node_klen_hist[ktot] += 1;
+            let has_child = l.is_used_child_0() || l.is_used_child_1();
+            if !has_child { c.allval_nodes += 1; c.allval_klen_hist[ktot] += 1; }
+            if l.is_used_value_0() { c.val_slots += 1 } else if l.is_used_child_0() { c.child_slots += 1 }
+            if l.is_used_value_1() { c.val_slots += 1 } else if l.is_used_child_1() { c.child_slots += 1 }
+        }
+        else if let Some(d) = node.as_dense() {
+            c.dense_nodes += 1; c.dense_items += d.slot_count(); c.dense_cap += d.slot_capacity(); c.dense_bytes += dense_sz + d.slot_capacity()*cf;
+        } else if node.tag() == crate::trie_node::CELL_BYTE_NODE_TAG {
+            let n = node.item_count();
+            // each CellCoFree additionally owns a boxed OrdinaryCoFree
+            c.cell_nodes += 1; c.cell_items += n; c.cell_bytes += cell_sz + n*(cellcf + cf);
+        }
+        c
+    }, |a, b| a.merge(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{cow_counters, reset_cow_counters};

@@ -119,6 +119,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         };
         word_base + (mask_word & preceding_bits).count_ones() as usize
     }
+    /// Number of allocated `CoFree` slots, including unused `Vec` capacity
+    #[inline]
+    pub fn slot_capacity(&self) -> usize { self.values.capacity() }
+    /// Number of occupied `CoFree` slots.  Note this differs from [Self::item_count], which counts
+    /// a slot's child link and value as two separate items
+    #[inline]
+    pub fn slot_count(&self) -> usize { self.values.len() }
     #[inline]
     pub fn reserve_capacity(&mut self, additional: usize) {
         self.values.reserve(additional)
