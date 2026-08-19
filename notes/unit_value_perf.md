@@ -245,8 +245,44 @@ here, so halving their per-slot box would have saved nothing.
 
 ## Negative results
 
-These four were measured and rejected. Recording them so they are not
+These five were measured and rejected. Recording them so they are not
 re-attempted from first principles.
+
+### F3 -- eliding the value hash in `merkleize`: nothing to elide, and the obvious version is a bug
+
+The survey said `merkleize` "requires `V: Hash` to hash nothing". The natural
+reading -- put a const branch around `val.hash(&mut hasher)` -- is wrong twice.
+
+Both sites hash `Option<&V>`, not `V`, and the `Option` is what carries the
+information:
+
+| expression | bytes written | hash |
+| --- | ---: | --- |
+| `().hash(h)` | **0** | -- |
+| `Option::<&()>::None` | 8 | `0` |
+| `Option::<&()>::Some(&())` | 8 | `27512614111` |
+
+So the value payload *already* costs nothing at `()` -- `impl Hash for ()` writes
+zero bytes and the call folds away. What the 8 bytes carry is the discriminant,
+and for a set trie that discriminant is the only information there is: whether
+the path is a member. Skipping it would make a path with a value hash identically
+to one without, and `merkleize` would merge structurally distinct tries. That is
+a correctness bug, not an optimization.
+
+The `V: Hash` bound cannot come off either -- it is needed for a general `V`, and
+`()` implements `Hash`, so it costs nothing to satisfy.
+
+One adjacent remnant is real but too small to take: the "value, no child" branch
+builds a fresh `GxHasher` per leaf value to compute what is, for any zero-sized
+`V`, a constant. Priced directly:
+
+    merkleize, big_logic.metta   21.03 ms for 91,692 values  (229 ns/value)
+    merkleize, shakespeare        5.65 ms for 67,505 values  ( 84 ns/value)
+    the per-leaf hasher            3.03 ns x 91,692 leaves = 0.28 ms
+
+0.28 ms of 21.03 ms is **1.3%** -- below this machine's measured noise floor, in
+the one routine where a subtle change silently corrupts structural sharing.
+Not worth it.
 
 ### S4 -- replacing the dangling-path sentinel with a bit: nothing to save
 
