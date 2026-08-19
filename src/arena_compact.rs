@@ -1283,7 +1283,7 @@ impl CachedBuilder {
             let old_len = z.origin_path().len();
             let old_val = z.val().map(map_val);
             let ascended = z.ascend_until();
-            debug_assert!(ascended);
+            debug_assert!(ascended > 0);
 
             // The byte we ascended over into a fork (or into a value) belongs
             // to that node's child mask, the rest of them are the line
@@ -1406,7 +1406,7 @@ fn build_arena_tree_cached<V, Z, F>(mut z: Z, map_val: F) -> ArenaCompactTree<Ve
         let top = stack.len() - 1;
         if stack[top].child_idx < stack[top].child_cnt {
             let descended = z.descend_indexed_byte(stack[top].child_idx);
-            debug_assert!(descended);
+            debug_assert!(descended.is_some());
             stack[top].child_idx += 1;
             let child_addr = z.shared_node_id();
             stack[top].child_addr = child_addr;
@@ -1421,7 +1421,7 @@ fn build_arena_tree_cached<V, Z, F>(mut z: Z, map_val: F) -> ArenaCompactTree<Ve
             // Descend to the next forking point, or to a leaf
             let mut is_leaf = false;
             while z.child_count() < 2 {
-                if !z.descend_until() {
+                if !z.descend_until(&mut ()) {
                     is_leaf = true;
                     break;
                 }
@@ -3283,7 +3283,7 @@ where
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
     use crate::{
-        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperPath, ZipperValues}
+        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues}
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,

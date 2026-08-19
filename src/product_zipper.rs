@@ -1733,8 +1733,8 @@ mod tests {
 
             match mode {
                 0 => { pz.ascend(full_path.len()); },
-                1 => { while pz.ascend_until() {} },
-                _ => { while pz.ascend_until_branch() {} },
+                1 => { while pz.ascend_until() > 0 {} },
+                _ => { while pz.ascend_until_branch() > 0 {} },
             }
             assert_eq!(pz.path(), b"", "mode {mode}: should have returned to the root");
 
@@ -1766,7 +1766,7 @@ mod tests {
         //Ascend back to the branch point and step to the sibling
         pz.ascend(2);
         assert_eq!(pz.path(), b"a");
-        assert_eq!(pz.to_next_sibling_byte(), true);
+        assert!(pz.to_next_sibling_byte().is_some());
         assert_eq!(pz.path(), b"b");
 
         //The sibling must be able to descend into its own copy of the secondary factor
