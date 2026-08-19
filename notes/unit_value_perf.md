@@ -9,6 +9,7 @@ survey of places the trie pays for a value that carries no information.
 | `18d40ec` | Honor `Lattice::IDEMPOTENT` in the node algebra, and short-circuit `join_into` |
 | `9f73907` | Memory attribution by node type under the `counters` feature |
 | `d75b0fb` | Don't clone a dense node until a subtraction actually changes it (**A1**) |
+| `424ea5e` | Fix `restrict` dropping the value on a path that branches (**correctness**) |
 
 A fourth change -- packing the CoFree value flag into its child pointer -- was
 built and measured but **not merged**; see [below](#shelved-packing-the-value-presence-flag-into-the-child-pointer).
@@ -390,11 +391,11 @@ That was the machine drifting between the two measurement windows. Any compariso
 here has to interleave the two sides and carry an untouched control, or it will
 measure the room temperature.
 
-## A correctness bug in `restrict`, found while testing the above
+## A correctness bug in `restrict`, found while testing the above -- fixed
 
-`restrict(a, a)` should be `a` for any `a`: every path of `a` has a value at
-itself in `a`, and the `CoFree` rule keeps everything below a value in the other
-operand. It does not hold when a path both carries a value and branches:
+`restrict(a, a)` must be `a` for any `a`: every path of `a` has a value at itself
+in `a`, and the rule is to keep everything at or below a value in the other
+operand. It did not hold when a path both carried a value and branched:
 
 | input | `restrict(a, a)` | dropped |
 | --- | --- | --- |
@@ -403,16 +404,29 @@ operand. It does not hold when a path both carries a value and branches:
 | `{a, ab, abc}` | `{ab, abc}` | **`a`** |
 | `{ab, abc, abd, abe, abf}` | 4 of 5 | **`ab`** |
 
-One child is fine; two or more and the value is silently dropped. This is not
-from any change in this branch -- it reproduces identically on `master`
-(`8b8802a`). It went unnoticed because the existing differential tests cover
-join, meet and subtract but not restrict, which reaches `Identity` down a
-different route: a dense node can only answer `self` when *both* operand masks
-equal their intersection.
+One child was fine; two or more and the value was silently dropped. It predates
+this branch -- it reproduced identically on `master` (`8b8802a`).
 
-`tests/pathmap_algebra_differential.rs` carries the repro and a `BTreeSet` oracle
-for `restrict`, `#[ignore]`d so it does not fail the suite. Run it with
-`cargo test -- --ignored`.
+**The cause.** `follow_path_to_value` walked the other operand following onward
+links, and only looked for a value once the walk ran out of them. A node can hold
+a value *and* a child under the same key -- a path that both ends there and
+continues -- and in that case the walk took the link and reported "no value, path
+continues", so `restrict_slot_contents` discarded the value. The check now happens
+at every node before the link is taken, which also covers a value sitting at a
+prefix of the key being followed. Fixed in `424ea5e`.
+
+**Cost:** none measurable. Interleaved against the untouched `meet` as a control,
+restrict moves -1.5% to +0.6% across five operand shapes; the control moves -1.4%
+to +1.6%.
+
+**Why it survived.** `restrict` was the only one of the four algebraic operations
+without a differential test. It now has a `BTreeSet` oracle -- a path of `self`
+survives when some prefix of it, the empty prefix and the path itself included,
+carries a value in `other` -- run over prefix-free and prefix-heavy sets and the
+minimal shapes above.
+
+A standalone repro lives on branch `restrict-branching-value-repro`, branched
+from `master`: three tests, two of which fail there and all of which pass here.
 
 ## The thing the F4 profile actually found
 
