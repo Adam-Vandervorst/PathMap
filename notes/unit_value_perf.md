@@ -353,9 +353,66 @@ The last two have nothing to reclaim and sit in the noise floor. `meet`, whose
 code is untouched, moved -8.9% to +0.1% across the same operands -- that is the
 floor. Verified with the differential algebra test and miri.
 
-`pjoin` and `prestrict` waste work identically but build a fresh slot vector
-instead of cloning, so deferring them needs a back-fill of the prefix from
-whichever operand was still identity. Not attempted.
+### The same fix does not pay for `pjoin` or `prestrict`
+
+Both were implemented -- deferring the slot vector until the first result that is
+neither `SELF_IDENT` nor `COUNTER_IDENT`, back-filling the prefix from whichever
+operand was still identity, which the flags make recoverable because a live flag
+implies that operand's mask equals the result mask, so the slots line up by index.
+Correct, and reverted anyway.
+
+Interleaved runs, min of 4 per side, with `meet` and `subtract` as untouched
+controls:
+
+| join | before | after | |
+| --- | ---: | ---: | --- |
+| disjoint | 46.28 ms | 51.19 ms | **+10.6%** |
+| 5% overlap | 49.25 ms | 52.25 ms | +6.1% |
+| 25% subset | 40.33 ms | 34.91 ms | **-13.4%** |
+| 95% subset | 60.90 ms | 57.13 ms | -6.2% |
+| identical | 61.43 ms | 59.67 ms | -2.9% |
+
+Replacing `Vec::push` with an unchecked write into the reserved slot brought the
+disjoint regression from +10.6% to +3.7%, but did not grow the wins. `prestrict`
+landed inside the noise in both directions across two runs.
+
+**Why it pays for `psubtract` and not these two.** `psubtract` cloned the *whole
+node* up front, and on disjoint operands it barely recurses -- few bytes are in
+both masks -- so the clone was nearly the entire cost of the call and removing it
+took 42% off. `pjoin` and `prestrict` only skip the *slot vector*; the recursive
+descent still happens on every overlapping byte and dominates. F4 measured 99.6%
+of `pjoin`'s slot clones as wasted at 95% overlap, and eliminating all of them
+bought ~6%, which is where the recursion leaves room.
+
+A measurement note worth keeping: a first pass showed everything regressing 11-24%
+*including the two controls*, which share their code with the baseline exactly.
+That was the machine drifting between the two measurement windows. Any comparison
+here has to interleave the two sides and carry an untouched control, or it will
+measure the room temperature.
+
+## A correctness bug in `restrict`, found while testing the above
+
+`restrict(a, a)` should be `a` for any `a`: every path of `a` has a value at
+itself in `a`, and the `CoFree` rule keeps everything below a value in the other
+operand. It does not hold when a path both carries a value and branches:
+
+| input | `restrict(a, a)` | dropped |
+| --- | --- | --- |
+| `{ab, abc}` | `{ab, abc}` | -- |
+| `{ab, abc, abd}` | `{abc, abd}` | **`ab`** |
+| `{a, ab, abc}` | `{ab, abc}` | **`a`** |
+| `{ab, abc, abd, abe, abf}` | 4 of 5 | **`ab`** |
+
+One child is fine; two or more and the value is silently dropped. This is not
+from any change in this branch -- it reproduces identically on `master`
+(`8b8802a`). It went unnoticed because the existing differential tests cover
+join, meet and subtract but not restrict, which reaches `Identity` down a
+different route: a dense node can only answer `self` when *both* operand masks
+equal their intersection.
+
+`tests/pathmap_algebra_differential.rs` carries the repro and a `BTreeSet` oracle
+for `restrict`, `#[ignore]`d so it does not fail the suite. Run it with
+`cargo test -- --ignored`.
 
 ## The thing the F4 profile actually found
 
