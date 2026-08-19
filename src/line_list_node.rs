@@ -60,28 +60,24 @@ impl<V: Clone + Send + Sync, A: Allocator> Drop for LineListNode<V, A> {
         // pathological paths are almost entirely non-branching.  Therefore, we will invoke a recursive
         // drop function if the node branches, and an iterative drop if it doesn't
 
-        let slot0_used = self.is_used::<0>();
-        let slot1_used = self.is_used::<1>();
-        let slot0_child = self.is_child_ptr::<0>();
-        let slot1_child = self.is_child_ptr::<1>();
+        //NOTE: when `V` needs no drop work (`PathMap<()>`, and any small `Copy` value type), the
+        // value arms below fold away, and a node holding two values drops without touching them
+        let slot0_child = self.is_used_child_0();
+        let slot1_child = self.is_used_child_1();
 
-        if  (slot0_used && slot0_child) != (slot1_used && slot1_child)  {
+        if  slot0_child != slot1_child  {
             //If there is exactly one child, do the non-recursive drop
             list_node_iterative_drop(self);
         } else {
-            if slot0_used {
-                if slot0_child {
-                    unsafe{ ManuallyDrop::drop(&mut self.val_or_child0.child) }
-                } else {
-                    unsafe{ ManuallyDrop::drop(&mut self.val_or_child0.val) }
-                }
+            if slot0_child {
+                unsafe{ ManuallyDrop::drop(&mut self.val_or_child0.child) }
+            } else if val_slot_needs_drop::<V>() && self.is_used::<0>() {
+                unsafe{ ManuallyDrop::drop(&mut self.val_or_child0.val) }
             }
-            if slot1_used {
-                if slot1_child {
-                    unsafe{ ManuallyDrop::drop(&mut self.val_or_child1.child) }
-                } else {
-                    unsafe{ ManuallyDrop::drop(&mut self.val_or_child1.val) }
-                }
+            if slot1_child {
+                unsafe{ ManuallyDrop::drop(&mut self.val_or_child1.child) }
+            } else if val_slot_needs_drop::<V>() && self.is_used::<1>() {
+                unsafe{ ManuallyDrop::drop(&mut self.val_or_child1.val) }
             }
         }
     }
@@ -117,7 +113,7 @@ fn list_node_take_child_to_drop<V: Clone + Send + Sync, A: Allocator>(node: &mut
     let child1 = node.is_used_child_1();
     match (child0, child1) {
         (true, false) => {
-            if node.is_used::<1>() {
+            if val_slot_needs_drop::<V>() && node.is_used::<1>() {
                 unsafe{ ManuallyDrop::drop(&mut node.val_or_child1.val) }
             }
             node.header = 0;
@@ -129,7 +125,7 @@ fn list_node_take_child_to_drop<V: Clone + Send + Sync, A: Allocator>(node: &mut
             }
         },
         (false, true) => {
-            if node.is_used::<0>() {
+            if val_slot_needs_drop::<V>() && node.is_used::<0>() {
                 unsafe{ ManuallyDrop::drop(&mut node.val_or_child0.val) }
             }
             node.header = 0;

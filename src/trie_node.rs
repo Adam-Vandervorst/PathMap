@@ -484,12 +484,30 @@ impl<V: Clone + Send + Sync, A: Allocator> ValOrChild<V, A> {
     }
 }
 
+/// The inline storage budget for a value held in a [ValOrChildUnion].  A `V` larger than this is
+/// boxed by [LocalOrHeap], and therefore owns a heap allocation that must be freed
+#[cfg(feature = "slim_ptrs")]
+pub(crate) type ValSlotStorage = [u8; 8];
+#[cfg(not(feature = "slim_ptrs"))]
+pub(crate) type ValSlotStorage = [u8; 16];
+
+/// Returns `true` if the value in a [ValOrChildUnion] needs any drop work at all
+///
+/// [LocalOrHeap] carries an unconditional `Drop` impl, so `needs_drop::<LocalOrHeap<..>>()` is
+/// always `true` and tells us nothing.  The slot only really needs dropping when `V` has drop glue
+/// of its own, or when `V` is too big to store inline and therefore owns a heap allocation.
+///
+/// This depends only on `V`, so it folds to a constant at monomorphization and the branches it
+/// guards vanish.  For a unit-valued trie (`PathMap<()>`), and for any other trie whose value is a
+/// small `Copy` type, that removes the value arms from the node drop paths entirely.
+#[inline(always)]
+pub(crate) const fn val_slot_needs_drop<V>() -> bool {
+    core::mem::needs_drop::<V>() || core::mem::size_of::<V>() > core::mem::size_of::<ValSlotStorage>()
+}
+
 pub union ValOrChildUnion<V: Clone + Send + Sync, A: Allocator> {
     pub child: ManuallyDrop<TrieNodeODRc<V, A>>,
-    #[cfg(feature = "slim_ptrs")]
-    pub val: ManuallyDrop<LocalOrHeap<V, [u8; 8]>>,
-    #[cfg(not(feature = "slim_ptrs"))]
-    pub val: ManuallyDrop<LocalOrHeap<V, [u8; 16]>>,
+    pub val: ManuallyDrop<LocalOrHeap<V, ValSlotStorage>>,
     pub _unused: ()
 }
 
@@ -3244,6 +3262,32 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLat
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod val_slot_drop_tests {
+    use super::{ValSlotStorage, val_slot_needs_drop};
+
+    /// The whole point of [val_slot_needs_drop] is that it is `false` for the value types whose
+    /// drop work the node paths can skip.  If these ever flip to `true` the elision silently stops
+    /// happening, so pin them down.
+    #[test]
+    fn val_slot_needs_drop_is_false_for_trivial_values() {
+        assert!(!val_slot_needs_drop::<()>());
+        assert!(!val_slot_needs_drop::<bool>());
+        assert!(!val_slot_needs_drop::<u32>());
+        assert!(!val_slot_needs_drop::<[u8; 4]>());
+    }
+
+    /// A value with drop glue always needs the drop, and so does one too big to live inline,
+    /// because [local_or_heap::LocalOrHeap] boxes it
+    #[test]
+    fn val_slot_needs_drop_is_true_when_there_is_work_to_do() {
+        assert!(val_slot_needs_drop::<Vec<u8>>()); //drop glue
+        assert!(val_slot_needs_drop::<String>()); //drop glue
+        assert!(val_slot_needs_drop::<[u8; 64]>()); //no drop glue, but heap-allocated
+        assert!(core::mem::size_of::<[u8; 64]>() > core::mem::size_of::<ValSlotStorage>());
     }
 }
 
