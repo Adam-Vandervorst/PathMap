@@ -530,6 +530,19 @@ impl<V> FatAlgebraicResult<V> {
 
 /// Implements basic algebraic behavior (union & intersection) for a type
 pub trait Lattice {
+    /// Indicates whether the lattice operations are idempotent for the purpose of
+    /// evaluating algebraic operations on shared subtries.
+    ///
+    /// If `IDEMPOTENT = true` the implementor is asserting that:
+    /// `pjoin(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
+    /// `join_into(self) -> AlgebraicStatus::Identity`,
+    /// `pmeet(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
+    ///
+    /// WARNING! This constant is currently informational only.  The node-level and zipper
+    /// algebra implementations do not yet consult it, so changing it has no effect
+    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    const IDEMPOTENT: bool = true;
+
     /// Implements the union operation between two instances of a type in a partial lattice, resulting in
     /// the creation of a new result instance
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
@@ -600,6 +613,17 @@ pub trait LatticeRef {
 
 /// Implements subtract behavior for a type
 pub trait DistributiveLattice {
+    /// Indicates whether the subtraction operation is idempotent for the purpose of
+    /// evaluating algebraic operations on shared subtries.
+    ///
+    /// If `IDEMPOTENT = true` the implementor is asserting that:
+    /// `psubtract(self) -> AlgebraicResult::None`,
+    ///
+    /// WARNING! This constant is currently informational only.  The node-level and zipper
+    /// algebra implementations do not yet consult it, so changing it has no effect
+    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    const IDEMPOTENT: bool = true;
+
     /// Implements the partial subtract operation
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
 
