@@ -5,12 +5,11 @@ survey of places the trie pays for a value that carries no information.
 
 | commit | change |
 | --- | --- |
-| `218a256` | Skip value-drop work in `LineListNode` when `V` has none to do |
-| `18d40ec` | Honor `Lattice::IDEMPOTENT` in the node algebra, and short-circuit `join_into` |
-| `9f73907` | Memory attribution by node type under the `counters` feature |
-| `d75b0fb` | Don't clone a dense node until a subtraction actually changes it (**A1**) |
-| `424ea5e` | Fix `restrict` dropping the value on a path that branches (**correctness**) |
-| `8440428` | Join a dense node in place when the other side brings no new bytes (**A5**) |
+| `e2755ed` | Skip value-drop work in `LineListNode` when `V` has none to do |
+| `12edc03` | Honor `Lattice::IDEMPOTENT` in the node algebra, and short-circuit `join_into` |
+| `f480236` | Memory attribution by node type under the `counters` feature |
+| `67004f8` | Don't clone a dense node until a subtraction actually changes it (**A1**) |
+| `2398bf7` | Join a dense node in place when the other side brings no new bytes (**A5**) |
 
 A fourth change -- packing the CoFree value flag into its child pointer -- was
 built and measured but **not merged**; see [below](#shelved-packing-the-value-presence-flag-into-the-child-pointer).
@@ -20,7 +19,7 @@ struct definitions, and three of them did not survive measurement: S3 was not
 implementable *and* worthless, S4 turned out to cost nothing to begin with, and
 S1's headline ("2x node memory") was true per-node but meant 5% on
 MORK-shaped data, because dense nodes are only a fifth of those bytes. Measure
-first; the profiler in `9f73907` exists for that.
+first; the profiler in `f480236` exists for that.
 
 ## Results
 
@@ -97,7 +96,7 @@ threshold cannot drift away from the layout. `cargo miri test` covers the
 
 ### `IDEMPOTENT`: a correctness fix, not a speedup
 
-The gating half of `18d40ec` costs and saves nothing at `()`, because
+The gating half of `12edc03` costs and saves nothing at `()`, because
 `IDEMPOTENT` is `true` there and folds away. Its value is that the constant now
 means something. Six sites take the shared-subtrie shortcut — not the three that
 grepping for `ptr_eq` finds, but also the `TaggedNodeRef` dispatchers underneath,
@@ -129,7 +128,7 @@ harness is in the tree -- `cargo test --release --features counters,serializatio
 
 ## Where the memory actually is
 
-`memory_profile` (`9f73907`) walks physical nodes and attributes bytes by node type.
+`memory_profile` (`f480236`) walks physical nodes and attributes bytes by node type.
 Three tries, all `PathMap<()>`:
 
 | dataset | values | list nodes | dense nodes | bytes/value |
@@ -235,7 +234,7 @@ Two notes for anyone touching this again:
   be able to carry the flag like any other node pointer. A static assertion
   enforces that bit 0 is clear.
 - `ptr_eq` and `shared_node_id` mask the bit off. Leaving it in would have
-  silently defeated the shared-subtrie shortcuts from `18d40ec` and weakened the
+  silently defeated the shared-subtrie shortcuts from `12edc03` and weakened the
   catamorphism cache, without failing a single test.
 
 ### S2 -- the CellCoFree box: not worth doing
@@ -451,7 +450,7 @@ a value *and* a child under the same key -- a path that both ends there and
 continues -- and in that case the walk took the link and reported "no value, path
 continues", so `restrict_slot_contents` discarded the value. The check now happens
 at every node before the link is taken, which also covers a value sitting at a
-prefix of the key being followed. Fixed in `424ea5e`.
+prefix of the key being followed. Fixed on `master` in `b2a0c09`; this branch no longer carries it.
 
 **Cost:** none measurable. Interleaved against the untouched `meet` as a control,
 restrict moves -1.5% to +0.6% across five operand shapes; the control moves -1.4%
