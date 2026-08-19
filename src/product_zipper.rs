@@ -1477,7 +1477,7 @@ mod tests {
         assert_eq!(z.path_exists(), true);
         //This steps across a factor boundary, so it checks the reporting through the seam
         let mut observed = z.path().to_vec();
-        assert_eq!(z.to_next_k_path(2, &mut observed), true);
+        assert_eq!(z.to_next_k_path_observed(2, &mut observed), true);
         assert_eq!(z.path_exists(), true);
         assert_eq!(&observed[..], z.path());
         assert_eq!(z.child_mask(), ByteMask::from_iter([3]));

@@ -532,26 +532,26 @@ impl<'prefix, Z> ZipperAbsolutePath for PrefixZipper<'prefix, Z>
 impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
     where Z: ZipperIteration
 {
-    fn to_next_val<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         if self.position.is_invalid() {
             return false;
         }
         //Values only exist within the source, and the source's own root may hold one, so the prefix
         //is consumed without descending any further before handing off
         self.consume_prefix(obs);
-        self.source.to_next_val(&mut (&mut self.path, &mut *obs))
+        self.source.to_next_val_observed(&mut (&mut self.path, &mut *obs))
     }
 
-    fn descend_last_path<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_last_path_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         if self.position.is_invalid() {
             return false;
         }
         //As in `descend_until`, consuming the prefix is movement in its own right
         let descended_prefix = self.consume_prefix(obs);
-        descended_prefix | self.source.descend_last_path(&mut (&mut self.path, &mut *obs))
+        descended_prefix | self.source.descend_last_path_observed(&mut (&mut self.path, &mut *obs))
     }
 
-    fn descend_first_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+    fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         if self.position.is_invalid() {
             return false;
         }
@@ -569,7 +569,7 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
             return true
         }
         self.consume_prefix(obs);
-        if self.source.descend_first_k_path(k - prefix_rest, &mut (&mut self.path, &mut *obs)) {
+        if self.source.descend_first_k_path_observed(k - prefix_rest, &mut (&mut self.path, &mut *obs)) {
             true
         } else {
             self.ascend(prefix_rest);
@@ -578,7 +578,7 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
         }
     }
 
-    fn to_next_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         if self.position.is_invalid() || self.depth() < k {
             return false;
         }
@@ -591,7 +591,7 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
             return false
         }
         let clamped = k.min(source_depth);
-        if self.source.to_next_k_path(clamped, &mut (&mut self.path, &mut *obs)) {
+        if self.source.to_next_k_path_observed(clamped, &mut (&mut self.path, &mut *obs)) {
             true
         } else {
             //The source rewound to its root; ascend the rest of `k` back up through the prefix
@@ -802,7 +802,7 @@ mod tests {
         let mut z = make();
         let mut obs = Vec::<u8>::new();
         let mut found = vec![];
-        while z.to_next_val(&mut obs) {
+        while z.to_next_val_observed(&mut obs) {
             assert_eq!(&obs[..], z.path(), "observer diverged from path");
             found.push(z.path().to_vec());
         }
@@ -811,29 +811,29 @@ mod tests {
         //`descend_last_path` crosses the seam and lands on the last path by sort order
         let mut z = make();
         let mut obs = Vec::<u8>::new();
-        assert!(z.descend_last_path(&mut obs));
+        assert!(z.descend_last_path_observed(&mut obs));
         assert_eq!(z.path(), b"fix.b");
         assert_eq!(&obs[..], z.path());
 
         //k_path where `k` spans the seam: 5 bytes covers `fix.` plus one source byte
         let mut z = make();
         let mut obs = Vec::<u8>::new();
-        assert!(z.descend_first_k_path(5, &mut obs));
+        assert!(z.descend_first_k_path_observed(5, &mut obs));
         assert_eq!(z.path(), b"fix.a");
         assert_eq!(&obs[..], z.path());
-        assert!(z.to_next_k_path(5, &mut obs));
+        assert!(z.to_next_k_path_observed(5, &mut obs));
         assert_eq!(z.path(), b"fix.b");
         assert_eq!(&obs[..], z.path());
-        assert!(!z.to_next_k_path(5, &mut obs));
+        assert!(!z.to_next_k_path_observed(5, &mut obs));
         assert_eq!(&obs[..], z.path());
 
         //k_path where `k` lands inside the prefix, which is a single forced path with no siblings
         let mut z = make();
         let mut obs = Vec::<u8>::new();
-        assert!(z.descend_first_k_path(2, &mut obs));
+        assert!(z.descend_first_k_path_observed(2, &mut obs));
         assert_eq!(z.path(), b"fi");
         assert_eq!(&obs[..], z.path());
-        assert!(!z.to_next_k_path(2, &mut obs));
+        assert!(!z.to_next_k_path_observed(2, &mut obs));
         assert_eq!(&obs[..], z.path());
 
         //`k` deeper than anything the source can supply, so the prefix bytes descended on the way
@@ -841,7 +841,7 @@ mod tests {
         let mut z = make();
         let mut obs = Vec::<u8>::new();
         assert_eq!(z.path(), b"");
-        assert!(!z.descend_first_k_path(99, &mut obs));
+        assert!(!z.descend_first_k_path_observed(99, &mut obs));
         assert_eq!(z.path(), b"", "a failed descent must leave the focus unmoved");
         assert_eq!(&obs[..], z.path());
     }

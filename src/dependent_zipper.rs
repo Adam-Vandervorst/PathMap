@@ -506,7 +506,7 @@ mod tests {
 
         let mut full = String::new();
         let mut observed = Vec::<u8>::new();
-        while dpz.to_next_val(&mut observed) {
+        while dpz.to_next_val_observed(&mut observed) {
             assert_eq!(&observed[..], dpz.path());
             if dpz.child_count() == 0 {
                 full.push_str(std::str::from_utf8(dpz.path()).unwrap());
@@ -539,7 +539,7 @@ rubicundus.postfix
 
         let mut full = String::new();
         let mut observed = Vec::<u8>::new();
-        while dpz.to_next_val(&mut observed) {
+        while dpz.to_next_val_observed(&mut observed) {
             assert_eq!(&observed[..], dpz.path());
             if dpz.child_count() == 0 {
                 full.push_str(std::str::from_utf8(dpz.path()).unwrap());

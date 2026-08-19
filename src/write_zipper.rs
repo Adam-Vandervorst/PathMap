@@ -871,7 +871,7 @@ impl<V: Clone + Send + Sync + Unpin + 'static, A: Allocator + 'static> Iterator 
                 return Some((self.zipper.path().to_vec(), val))
             }
         }
-        if self.zipper.to_next_val(&mut ()) {
+        if self.zipper.to_next_val() {
             match self.zipper.remove_val(true) {
                 Some(val) => return Some((self.zipper.path().to_vec(), val)),
                 None => None
@@ -2890,7 +2890,7 @@ mod tests {
 
         let mut visited = vec![];
         let mut z = map.read_zipper();
-        while z.to_next_val(&mut ()) {
+        while z.to_next_val() {
             visited.push((z.path().to_vec(), *z.val().unwrap()));
             assert!(visited.len() <= 1, "iteration must terminate");
         }
@@ -2931,7 +2931,7 @@ mod tests {
 
         let mut visited = vec![];
         let mut z = map.read_zipper();
-        while z.to_next_val(&mut ()) {
+        while z.to_next_val() {
             visited.push((z.path().to_vec(), *z.val().unwrap()));
             assert!(visited.len() <= 2, "iteration must terminate");
         }
@@ -3074,7 +3074,7 @@ mod tests {
             let mut writer_z = unsafe{ zipper_head.write_zipper_at_exclusive_path_unchecked(b"out\0") };
             let mut reader_z = unsafe{ zipper_head.read_zipper_at_path_unchecked(b"in\0") };
             let witness = reader_z.witness();
-            while let Some(val) = reader_z.to_next_get_val_with_witness(&witness, &mut ()) {
+            while let Some(val) = reader_z.to_next_get_val_with_witness(&witness) {
                 writer_z.descend_to(reader_z.path());
                 writer_z.set_val(*val * 65536);
                 writer_z.reset();
@@ -3776,7 +3776,7 @@ mod tests {
         let mut rz = r.read_zipper();
         let mut count = 0;
         use crate::zipper::ZipperIteration;
-        while rz.to_next_val(&mut ()) { count += 1; }
+        while rz.to_next_val() { count += 1; }
         assert!(count > 0);
     }
 

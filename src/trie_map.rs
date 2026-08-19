@@ -53,7 +53,7 @@ impl<V: Clone + Send + Sync + Unpin + core::fmt::Debug, A: Allocator> core::fmt:
         let mut contains_all_ascii = true;
         let mut dbg_map = f.debug_map();
         let mut path_cnt = 0;
-        while rz.to_next_val(&mut ()) && path_cnt < MAX_DEBUG_PATHS  {
+        while rz.to_next_val() && path_cnt < MAX_DEBUG_PATHS  {
             if let Some(key) = crate::utils::debug::render_debug_path(rz.path(), crate::utils::debug::PathRenderMode::RequireAscii) {
                 dbg_map.entry(&key, rz.val().unwrap());
                 path_cnt += 1;
@@ -70,7 +70,7 @@ impl<V: Clone + Send + Sync + Unpin + core::fmt::Debug, A: Allocator> core::fmt:
         rz.reset();
         let mut dbg_struct = f.debug_struct("PathMap");
         let mut path_cnt = 0;
-        while rz.to_next_val(&mut ()) && path_cnt < MAX_DEBUG_PATHS  {
+        while rz.to_next_val() && path_cnt < MAX_DEBUG_PATHS  {
             let key = crate::utils::debug::render_debug_path(rz.path(), crate::utils::debug::PathRenderMode::ByteList).unwrap();
             dbg_struct.field(&key, rz.val().unwrap());
             path_cnt += 1;
@@ -1290,7 +1290,7 @@ mod tests {
         let expected = [3, 5, 4];
         let mut i = 0;
         let witness = zipper.witness();
-        while let Some(val) = zipper.to_next_get_val_with_witness(&witness, &mut ()) {
+        while let Some(val) = zipper.to_next_get_val_with_witness(&witness) {
             assert_eq!(*val, expected[i]);
             i += 1;
         }

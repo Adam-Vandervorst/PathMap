@@ -2924,7 +2924,7 @@ where Storage: AsRef<[u8]>
         if zipper.is_val() {
             count += 1;
         }
-        while zipper.to_next_val(&mut ()) {
+        while zipper.to_next_val() {
             count += 1;
         }
         count
@@ -3162,8 +3162,8 @@ where Storage: AsRef<[u8]>
     /// order
     ///
     /// Returns a reference to the value or `None` if the zipper has encountered the root.
-    fn to_next_val<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
-        while self.to_next_step(obs)  {
+    fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        while self.to_next_step_observed(obs)  {
             if self.is_val() {
                 return true;
             }
@@ -3181,7 +3181,7 @@ where Storage: AsRef<[u8]>
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
-    fn descend_first_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+    fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         for ii in 0..k {
             match self.descend_first_byte() {
                 Some(byte) => obs.descend_to_byte(byte),
@@ -3206,7 +3206,7 @@ where Storage: AsRef<[u8]>
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
-    fn to_next_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         let mut depth = k;
         'outer: loop {
             while depth > 0 && self.child_count() <= 1 {
@@ -3347,8 +3347,8 @@ mod tests {
         let mut btm_observed = Vec::<u8>::new();
         let mut act_observed = Vec::<u8>::new();
         loop {
-            btm_zipper.to_next_val(&mut btm_observed);
-            act_zipper.to_next_val(&mut act_observed);
+            btm_zipper.to_next_val_observed(&mut btm_observed);
+            act_zipper.to_next_val_observed(&mut act_observed);
 
             let btm_val = btm_zipper.val().copied();
             let act_val = act_zipper.val().copied();
@@ -3666,8 +3666,8 @@ mod tests {
         let mut b_observed = Vec::<u8>::new();
         let mut a_observed = Vec::<u8>::new();
         loop {
-            let more_b = bz.to_next_val(&mut b_observed);
-            let more_a = az.to_next_val(&mut a_observed);
+            let more_b = bz.to_next_val_observed(&mut b_observed);
+            let more_a = az.to_next_val_observed(&mut a_observed);
             assert_eq!(more_b, more_a, "walks end together");
             assert_eq!(bz.path(), az.path());
             assert_eq!(b_observed, a_observed);
@@ -3855,8 +3855,8 @@ mod tests {
         let mut cata_observed = Vec::<u8>::new();
         let mut stream_observed = Vec::<u8>::new();
         loop {
-            let cata_next = cata_zipper.to_next_val(&mut cata_observed);
-            let stream_next = stream_zipper.to_next_val(&mut stream_observed);
+            let cata_next = cata_zipper.to_next_val_observed(&mut cata_observed);
+            let stream_next = stream_zipper.to_next_val_observed(&mut stream_observed);
             assert_eq!(cata_next, stream_next);
             assert_eq!(cata_zipper.path(), stream_zipper.path());
             assert_eq!(cata_observed, stream_observed);
@@ -3981,8 +3981,8 @@ mod tests {
         let mut map_observed = Vec::<u8>::new();
         let mut act_observed = Vec::<u8>::new();
         loop {
-            let map_next = map_zipper.to_next_val(&mut map_observed);
-            assert_eq!(map_next, act_zipper.to_next_val(&mut act_observed));
+            let map_next = map_zipper.to_next_val_observed(&mut map_observed);
+            assert_eq!(map_next, act_zipper.to_next_val_observed(&mut act_observed));
             assert_eq!(map_zipper.path(), act_zipper.path());
             assert_eq!(map_observed, act_observed);
             assert_eq!(&map_observed[..], map_zipper.path());
@@ -4039,7 +4039,7 @@ mod tests {
         let map = random_pathmap(0xAC7_0002, 5000);
         let mut items: Vec<(Vec<u8>, u64)> = Vec::with_capacity(map.val_count());
         let mut zipper = map.read_zipper();
-        while zipper.to_next_val(&mut ()) {
+        while zipper.to_next_val() {
             items.push((zipper.path().to_vec(), *zipper.val().unwrap()));
         }
 

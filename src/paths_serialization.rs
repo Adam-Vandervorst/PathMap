@@ -78,7 +78,7 @@ pub fn serialize_paths_with_auxdata<'a, V : TrieValue, RZ : ZipperValues<V> + Zi
   //      }
   //    }
   // })
-  serialize_paths_from_funcs(target, &mut rz, |rz| Ok(rz.to_next_val(&mut ())), |rz| {
+  serialize_paths_from_funcs(target, &mut rz, |rz| Ok(rz.to_next_val()), |rz| {
     let path = rz.path();
     fv(k, path, rz.val().unwrap());
     k += 1;
@@ -300,12 +300,12 @@ mod test {
             println!("de {} {} {}", c, bw, pw);
 
             let mut lrz = restored_btm.read_zipper();
-            while lrz.to_next_val(&mut ()) {
+            while lrz.to_next_val() {
               assert!(btm.contains(lrz.path()), "{}", std::str::from_utf8(lrz.path()).unwrap());
             }
 
             let mut rrz = btm.read_zipper();
-            while rrz.to_next_val(&mut ()) {
+            while rrz.to_next_val() {
               assert!(restored_btm.contains(rrz.path()));
             }
           }
@@ -340,12 +340,12 @@ mod test {
               println!("de {} {} {}", c, bw, pw);
 
               let mut lrz = restored_btm.read_zipper();
-              while lrz.to_next_val(&mut ()) {
+              while lrz.to_next_val() {
                 assert!(btm.contains(lrz.path()), "{}", std::str::from_utf8(lrz.path()).unwrap());
               }
 
               let mut rrz = btm.read_zipper();
-              while rrz.to_next_val(&mut ()) {
+              while rrz.to_next_val() {
                 assert!(restored_btm.contains(rrz.path()));
               }
             }
@@ -377,12 +377,12 @@ mod test {
             println!("de {} {} {}", c, bw, pw);
 
             let mut lrz = restored_btm.read_zipper();
-            while lrz.to_next_val(&mut ()) {
+            while lrz.to_next_val() {
               assert_eq!(btm.get_val_at(lrz.path()), Some(lrz.val().unwrap()));
             }
 
             let mut rrz = btm.read_zipper();
-            while rrz.to_next_val(&mut ()) {
+            while rrz.to_next_val() {
               assert_eq!(restored_btm.get_val_at(rrz.path()), Some(rrz.val().unwrap()));
             }
           }
@@ -429,7 +429,7 @@ mod test {
     }
     let mut rz = restored.read_zipper();
     let mut restored_count = 0;
-    while rz.to_next_val(&mut ()) { restored_count += 1; }
+    while rz.to_next_val() { restored_count += 1; }
     assert_eq!(restored_count, lengths.len(), "no extra paths may appear");
   }
 
@@ -464,7 +464,7 @@ mod test {
     }
     let mut rz = restored.read_zipper();
     let mut restored_count = 0;
-    while rz.to_next_val(&mut ()) { restored_count += 1; }
+    while rz.to_next_val() { restored_count += 1; }
     assert_eq!(restored_count, lengths.len(), "no extra paths may appear");
   }
 }

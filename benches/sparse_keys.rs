@@ -296,8 +296,8 @@ fn sparse_k_path_iter(bencher: Bencher, n: u64) {
     bencher.bench_local(|| {
         let mut zipper = map.read_zipper();
         let mut count = 1;
-        zipper.descend_first_k_path(5, &mut ());
-        while zipper.to_next_k_path(5, &mut ()) {
+        zipper.descend_first_k_path(5);
+        while zipper.to_next_k_path(5) {
             count += 1;
         }
         assert_eq!(count, n);
@@ -318,7 +318,7 @@ fn sparse_zipper_cursor(bencher: Bencher, n: u64) {
     bencher.bench_local(|| {
         let mut count = 0;
         let mut zipper = map.read_zipper();
-        while zipper.to_next_val(&mut ()) {
+        while zipper.to_next_val() {
             count += 1;
         }
         assert_eq!(count, n);

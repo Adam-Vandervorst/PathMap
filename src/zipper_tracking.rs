@@ -137,7 +137,7 @@ impl Conflict {
             {
                 if zipper.depth() == path.len() {
                     let mut subtree = zipper.fork_read_zipper();
-                    match subtree.to_next_val(&mut ()) {
+                    match subtree.to_next_val() {
                         false => Ok(()),
                         true => Err(conflict_f(subtree.origin_path())),
                     }
@@ -159,7 +159,7 @@ impl Conflict {
             None => {
                 if zipper.depth() == path.len() {
                     let mut subtree = zipper.fork_read_zipper();
-                    match subtree.to_next_get_val(&mut ()) {
+                    match subtree.to_next_get_val() {
                         None => Ok(()),
                         Some(lock) => Err(conflict_f(
                             *lock,

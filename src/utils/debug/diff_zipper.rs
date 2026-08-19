@@ -249,22 +249,22 @@ impl<A: Zipper + ZipperPathBuffer, B: Zipper + ZipperPathBuffer> ZipperPathBuffe
 
 impl<A: Zipper + ZipperIteration, B: Zipper + ZipperIteration> ZipperIteration for DiffZipper<A, B>
 {
-    fn to_next_val<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
-        let a = self.a.to_next_val(obs);
-        let b = self.b.to_next_val(&mut ());
+    fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        let a = self.a.to_next_val_observed(obs);
+        let b = self.b.to_next_val();
         if self.log_moves {
             println!("DiffZipper: to_next_val")
         }
         assert_eq!(a, b);
         a
     }
-    fn descend_last_path<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+    fn descend_last_path_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         //`a`'s descent is forwarded to the caller as it happens, since a digest can't reconstruct
         //the bytes afterwards.  `b`'s is only hashed, and the two digests are compared.
         let mut hash_a = HashObserver::default();
         let mut hash_b = HashObserver::default();
-        let a = self.a.descend_last_path(&mut (&mut hash_a, &mut *obs));
-        let b = self.b.descend_last_path(&mut hash_b);
+        let a = self.a.descend_last_path_observed(&mut (&mut hash_a, &mut *obs));
+        let b = self.b.descend_last_path_observed(&mut hash_b);
         if self.log_moves {
             println!("DiffZipper: descend_last_path")
         }
@@ -272,18 +272,18 @@ impl<A: Zipper + ZipperIteration, B: Zipper + ZipperIteration> ZipperIteration f
         assert_eq!(hash_a, hash_b);
         a
     }
-    fn descend_first_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
-        let a = self.a.descend_first_k_path(k, obs);
-        let b = self.b.descend_first_k_path(k, &mut ());
+    fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        let a = self.a.descend_first_k_path_observed(k, obs);
+        let b = self.b.descend_first_k_path(k);
         if self.log_moves {
             println!("DiffZipper: descend_first_k_path k={k}")
         }
         assert_eq!(a, b);
         a
     }
-    fn to_next_k_path<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
-        let a = self.a.to_next_k_path(k, obs);
-        let b = self.b.to_next_k_path(k, &mut ());
+    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        let a = self.a.to_next_k_path_observed(k, obs);
+        let b = self.b.to_next_k_path(k);
         if self.log_moves {
             println!("DiffZipper: to_next_k_path k={k}")
         }

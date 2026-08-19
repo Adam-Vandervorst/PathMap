@@ -2189,7 +2189,7 @@ mod tests {
         let mut it = check.iter();
 
         let mut rz = btm.read_zipper();
-        while let Some(range) = rz.to_next_get_val(&mut ()) {
+        while let Some(range) = rz.to_next_get_val() {
             for language_idx in range.clone().into_iter() {
                 let greeting = std::str::from_utf8(rz.path()).unwrap();
                 let language = &greetings_vec[language_idx][rz.path().len()+1..];
@@ -2263,7 +2263,7 @@ mod tests {
 
         println!("test");
         let mut rz = counted.read_zipper();
-        while let Some(v) = rz.to_next_get_val(&mut ()) {
+        while let Some(v) = rz.to_next_get_val() {
             // todo write out useful print function, that shows the count submaps
             println!("v: {}, p: {}", v, std::str::from_utf8(rz.path()).unwrap());
         }
