@@ -245,8 +245,69 @@ here, so halving their per-slot box would have saved nothing.
 
 ## Negative results
 
-These six were measured and rejected. Recording them so they are not
+These seven were measured and rejected. Recording them so they are not
 re-attempted from first principles.
+
+### F4 -- "the result-merging machinery is what actually costs": off by an order of magnitude
+
+The survey claimed the generic algebra's result plumbing -- `AlgebraicResult`,
+`merge`, `combine_algebraic_results`, the `Hetero*` traits -- is where a
+`PathMap<()>` spends its time, because the identity masks keep it from folding
+away. Profiled with `perf` on 400k-path joins, meets and subtracts, attributing
+cycles by source line so inlined code lands on its own line:
+
+| source | cycles |
+| --- | ---: |
+| `malloc.c` | **29.72%** |
+| `dense_byte_node.rs` | 17.71% |
+| `trie_node.rs` | 13.31% |
+| `option.rs` | 3.82% |
+| `atomic.rs` (refcounts) | 2.71% |
+| `line_list_node.rs` | 2.48% |
+| **`ring.rs`** -- all of `AlgebraicResult` and the `Lattice` impls | **1.06%** |
+
+`combine_algebraic_results` shows up separately at 2.86%. So the merging
+machinery is roughly **4%**, against **30% in the allocator**. Rewriting it as
+bit arithmetic -- which is what the survey proposed, and which depended on the
+shelved S1 anyway -- would have chased about a twenty-fifth of the runtime.
+
+## The thing the F4 profile actually found
+
+Where the allocator time goes is worth its own section, because it is a real and
+fixable inefficiency, and it is not unit-value-specific.
+
+`ByteNode::pjoin` allocates the result slot vector and clones every slot into it
+*before* it knows whether the result is a new node or just one of its operands.
+When the answer turns out to be `Identity`, all of that is discarded. Instrumented
+on 400k-path joins:
+
+| operands | calls returning `Identity` | slot clones wasted |
+| --- | ---: | ---: |
+| disjoint | 0.0% | 0 of 789,291 (0.0%) |
+| one is a subset of the other | **99.7%** | 159,078 of 167,800 (**94.8%**) |
+| 95% overlap | **100.0%** | 449,799 of 451,600 (**99.6%**) |
+
+Each wasted slot clone is an atomic refcount increment plus a matching decrement
+on drop, and each wasted call is a `Vec` allocation and free. The effect is
+visible end to end, and it inverts what you would expect:
+
+| join | time |
+| --- | ---: |
+| disjoint operands -- builds a genuinely new 800k-path trie | 48.75 ms |
+| one operand a subset -- result equals the larger operand | 42.64 ms |
+| 95% overlap -- result is essentially the larger operand | **74.96 ms** |
+
+The join that has almost nothing to do takes **1.5x longer** than the one that
+doubles the trie, because it does the full copy and then throws it away. Joining
+a trie with something it already mostly contains is a common shape -- it is what
+incremental ingestion looks like -- so this is worth fixing.
+
+The fix is to defer materializing the vector until the first slot result that is
+neither `SELF_IDENT` nor `COUNTER_IDENT`. While both node-level identity flags
+are alive, the result prefix is exactly one operand's slots, so it can be
+back-filled at the point the flags die, using the side that was still identity.
+Recursive sub-joins that returned `Identity` allocated nothing themselves, so the
+saving is the whole per-node cost. Not attempted here.
 
 ### S5 -- `LocalOrHeap` "pins the payload union at 8 bytes": it does not
 
