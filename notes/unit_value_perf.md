@@ -10,6 +10,7 @@ survey of places the trie pays for a value that carries no information.
 | `9f73907` | Memory attribution by node type under the `counters` feature |
 | `d75b0fb` | Don't clone a dense node until a subtraction actually changes it (**A1**) |
 | `424ea5e` | Fix `restrict` dropping the value on a path that branches (**correctness**) |
+| `8440428` | Join a dense node in place when the other side brings no new bytes (**A5**) |
 
 A fourth change -- packing the CoFree value flag into its child pointer -- was
 built and measured but **not merged**; see [below](#shelved-packing-the-value-presence-flag-into-the-child-pointer).
@@ -353,6 +354,43 @@ split. Instrumented on 400k-path subtractions:
 The last two have nothing to reclaim and sit in the noise floor. `meet`, whose
 code is untouched, moved -8.9% to +0.1% across the same operands -- that is the
 floor. Verified with the differential algebra test and miri.
+
+### A5 -- `join_into` in place when the other side brings no new bytes
+
+`ByteNode::join_into` allocated a slot array sized to the union of the two masks
+and moved every slot into it, even when the union equals `self.mask`. Then nothing
+needs inserting and the overlapping slots can be joined where they sit. A5
+proposed this behind the shelved val-mask; it needs no such thing.
+
+The case is the norm for an incremental ingest -- a trie joined with a batch of
+paths it mostly already covers:
+
+| operands | calls where other's mask is a subset | slot moves avoidable |
+| --- | ---: | ---: |
+| disjoint | 0.3% | 5.2% |
+| batch, 1% new keys | **95.3%** | **95.3%** |
+| already contained (5%) | **100%** | 100% |
+| already contained (95%) | **100%** | 451,600 |
+
+Interleaved, min of 8 rounds, `join` as an untouched control:
+
+| join_into | before | after | |
+| --- | ---: | ---: | --- |
+| disjoint | 61.55 ms | 61.81 ms | +0.4% |
+| 1% new keys | 2.37 ms | 2.21 ms | -6.8% |
+| contained (5%) | 12.81 ms | 12.51 ms | -2.3% |
+| contained (95%) | 80.42 ms | 76.54 ms | **-4.8%** |
+| *join (control)* | | | *-0.8% to +0.5%* |
+
+Consistent in direction across all four shapes with the control flat, and no
+regression on the disjoint case the branch cannot help. The 1% figure sits on a
+2 ms measurement with 22-43% spread -- read it as "no worse"; the 95% case, at 8%
+spread, is the one to believe.
+
+Modest, and the reason is worth keeping: these are slot **moves**, a memcpy of the
+`CoFree`s, not the **clones** that made the same idea worth 42.8% in `psubtract`
+where each was an atomic refcount bump. What A5 avoids is one allocation and one
+memcpy per node.
 
 ### The same fix does not pay for `pjoin` or `prestrict`
 
