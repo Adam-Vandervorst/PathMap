@@ -3294,6 +3294,36 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLat
 }
 
 #[cfg(test)]
+mod payload_layout_tests {
+    use super::*;
+    use crate::alloc::GlobalAlloc;
+
+    /// [ValOrChild] is already as small as it can be, courtesy of the niche in the child pointer
+    ///
+    /// `Val(())` carries nothing, so rustc encodes it in the child pointer's null niche and the
+    /// whole enum is one word -- no discriminant, no padding. Adding a third variant, or any field
+    /// that defeats the niche, would silently double it for every unit-valued trie.
+    #[test]
+    fn val_or_child_is_niche_packed_for_a_unit_value() {
+        assert_eq!(
+            core::mem::size_of::<ValOrChild<(), GlobalAlloc>>(),
+            core::mem::size_of::<TrieNodeODRc<(), GlobalAlloc>>(),
+            "ValOrChild<()> should fit in the child pointer's niche"
+        );
+    }
+
+    /// [PayloadRef] cannot use that niche: it has *two* pointer-carrying variants plus `None`, so
+    /// one word goes to the discriminant regardless of `V`.  It is a transient -- built on the
+    /// stack during meets and never stored in a trie -- so its width costs memory nowhere.
+    #[test]
+    fn payload_ref_costs_a_discriminant_word_for_every_value_type() {
+        let w = core::mem::size_of::<&'static TrieNodeODRc<(), GlobalAlloc>>();
+        assert_eq!(core::mem::size_of::<PayloadRef<'static, (), GlobalAlloc>>(), 2 * w);
+        assert_eq!(core::mem::size_of::<PayloadRef<'static, String, GlobalAlloc>>(), 2 * w);
+    }
+}
+
+#[cfg(test)]
 mod val_slot_layout_tests {
     use super::*;
     use crate::alloc::GlobalAlloc;

@@ -245,8 +245,54 @@ here, so halving their per-slot box would have saved nothing.
 
 ## Negative results
 
-These seven were measured and rejected. Recording them so they are not
+These eight were measured and rejected. Recording them so they are not
 re-attempted from first principles.
+
+### F6 -- shrinking the payload enums: one is already optimal, the other is not where the time goes
+
+The survey wanted `ValOrChild` and `PayloadRef` collapsed to "a nullable pointer
+plus a bool -- one word". Measured:
+
+| `V` | `ValOrChild<V>` | `PayloadRef<V>` |
+| --- | ---: | ---: |
+| `()` | **8** | 16 |
+| `u64` | 16 | 16 |
+| `String` | 24 | 16 |
+
+**`ValOrChild<()>` is already one word.** `Val(())` carries nothing, so rustc
+encodes it in the child pointer's null niche -- no discriminant, no padding.
+There was nothing to do.
+
+**`PayloadRef` cannot use that niche**, because it has two pointer-carrying
+variants plus `None`, so one word goes to the discriminant. But it is 16 bytes
+for *every* `V`, so it is not a unit-value issue, and it is a transient -- built
+on the stack during meets, never stored in a trie -- so its width costs memory
+nowhere. `payload_layout_tests` pins both facts, since a third variant on
+`ValOrChild` would silently double it.
+
+The path *is* hot, which is the one place the survey was right. On a
+list-node-heavy set-algebra workload (long shared prefixes, meet/subtract/restrict):
+
+    node_get_payloads (LineListNode)   8.09%
+    pmeet_generic                      5.75%
+    pmeet_generic_internal             3.54%
+                                      ------
+                                      17.7%
+
+But the cycles inside it are not the enum:
+
+| line | what it is | cycles |
+| --- | --- | ---: |
+| `line_list_node.rs:248/249` | `is_used::<SLOT>` header bit tests | 4.38% |
+| `:391`, `:396` | key-length extraction from the header | 3.03% |
+| `:406`, `:551`, `:556` | building key slices, `get_both_keys` | 3.29% |
+| `trie_node.rs:620` | `pmeet_generic_internal` prologue, i.e. array spills | 1.97% |
+
+Only the last line is attributable to payload width at all, and shrinking a
+two-element `(usize, PayloadRef)` array from 48 bytes to 32 would reclaim a
+fraction of it. The rest is header decoding and key slicing -- inherent work for
+a node that packs two variable-length keys into a 16-bit header, and the thing to
+look at if this path ever needs to be faster.
 
 ### F4 -- "the result-merging machinery is what actually costs": off by an order of magnitude
 
