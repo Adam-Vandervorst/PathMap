@@ -9,6 +9,9 @@ survey of places the trie pays for a value that carries no information.
 | `18d40ec` | Honor `Lattice::IDEMPOTENT` in the node algebra, and short-circuit `join_into` |
 | `9f73907` | Memory attribution by node type under the `counters` feature |
 
+A fourth change -- packing the CoFree value flag into its child pointer -- was
+built and measured but **not merged**; see [below](#shelved-packing-the-value-presence-flag-into-the-child-pointer).
+
 ## Results
 
 Min of 3 runs per side, each run itself the min of 7 timed repetitions, every
@@ -139,6 +142,99 @@ MORK-shaped data, list nodes are four fifths of the trie.
 
 `Vec`'s amortized doubling, on arrays that top out at 256 slots and are usually
 built one byte at a time.
+
+## Shelved: packing the value-presence flag into the child pointer
+
+**Implemented, measured, and not merged.** It lives on branch
+`experiment/cofree-pointer-packing` (`2fd48be`), rebuilt on top of this branch's
+history. It works, it is miri-clean, and it buys real memory -- but it costs
+roughly 9% on iteration over MORK-shaped data, which is the workload that
+matters here, so the trade goes the wrong way. Kept as a branch to show the
+approach is viable and to record what it costs.
+
+
+A dense-node slot was `{ Option<TrieNodeODRc>, Option<V> }`: one word for the
+pointer, and a whole word more for `Option<V>` once alignment rounds it up. Node
+allocations are 8-byte aligned, so bits 0..3 of a node address are always zero.
+`OrdinaryCoFree` now stores an absent child as the empty-node sentinel instead of
+`None` -- so the word is never null -- and borrows bit 0 to say whether its
+`MaybeUninit<V>` is initialized.
+
+| slot | before | after |
+| --- | ---: | ---: |
+| `OrdinaryCoFree<()>` | 16 B | **8 B** |
+| `OrdinaryCoFree<u32>` | 16 B | 16 B |
+| `OrdinaryCoFree<u64>` | 24 B | **16 B** |
+
+Pinned by static assertions, so the layout cannot regress silently.
+
+### Result
+
+| dataset | memory | build | iterate | lookup |
+| --- | ---: | ---: | ---: | ---: |
+| `big_logic.metta` (MORK) | 9.58 -> 9.09 MB (**-5.1%**) | +3.3% | +9.3% | +0.7% |
+| 1M random 8-byte keys | 89.94 -> 78.21 MB (**-13.0%**) | -7.8% | -3.4% | -9.2% |
+| shakespeare words | 4.10 -> 3.52 MB (**-14.1%**) | -11.6% | -11.5% | -28.3% |
+
+Memory is a clean win and lands within a tenth of a percent of what the profiler
+predicted. **The timing is why this is shelved.** Shakespeare gets faster on every
+axis and random keys improve modestly, but MORK iteration measures ~9% slower.
+That is at the edge of what these benchmarks resolve, so it may be less than it
+looks -- but 5% memory is not worth risking 9% iteration on the target workload,
+and the burden of proof is on the change.
+
+The likely cause is that `has_rec()` went from an `Option` null check to
+`is_empty()`, which extracts and compares the pointer tag. That is a few
+instructions on a very hot path, and MORK's tries are list-node-heavy, so they
+pay it without getting much of the dense-node memory win in return. Anyone
+picking this up should start there. The algebra
+micro-benchmarks (`join`, `meet`, `subtract`, both disjoint and overlapping) all
+moved less than 5%.
+
+### Why the flag went in the pointer rather than a mask on the node
+
+The alternative was a second `ByteMask` on `ByteNode`. It would have been safer
+per-line but much larger: a `CoFree` would stop being self-describing, and the
+algebra clones and drops them *outside* the node that owns them --
+`pjoin`, `pmeet`, `psubtract` and `prestrict` each accumulate `CoFree`s into a
+fresh vector before any node exists to own it. Keeping the flag inside the slot
+left all ~108 call sites untouched.
+
+### The invariant, and what it cost
+
+The bit belongs to the **slot**, not to either node, so every in-place
+replacement of a `TrieNodeODRc` must preserve it. `replace_node` and `swap_node`
+do; plain assignment does not, and the failure is silent -- the slot's value just
+disappears. Converting the assignment sites broke six existing tests, and one
+more case (`ByteNode::node_replace_child`) that no existing test covered and that
+a regex over deref-assignments missed because of the method-call chain
+(`*cf.rec_mut().unwrap() = new_node`).
+
+Every failure was a slot holding a value *and* a child -- i.e. a path that is a
+proper prefix of another path. `tests/cofree_val_flag.rs` pins that down:
+copy-on-write of a shared trie, node upgrades under a write zipper, grafting over
+a slot that holds a value, algebra over prefix-heavy tries, and removal from a
+slot that holds both. All pass under miri, along with the differential algebra
+test and 118 filtered lib tests. The suite is kept on the main line as
+`tests/prefix_value_preservation.rs`, since the property is worth pinning down
+whatever the representation.
+
+Two notes for anyone touching this again:
+
+- The empty sentinel moved from `0xBAADF00D` to `0xBAADF00C`, because it has to
+  be able to carry the flag like any other node pointer. A static assertion
+  enforces that bit 0 is clear.
+- `ptr_eq` and `shared_node_id` mask the bit off. Leaving it in would have
+  silently defeated the shared-subtrie shortcuts from `18d40ec` and weakened the
+  catamorphism cache, without failing a single test.
+
+### S2 -- the CellCoFree box: not worth doing
+
+`CellCoFree` keeps the old `Option` layout under the name `PinnedCoFree`, because
+`CellByteNode::prepare_cf` hands a `WriteZipper` a `&mut Option<V>` that has to
+point at a real `Option`. That costs nothing measurable: cell nodes appear only
+under a `ZipperHead` and account for **zero bytes** in all three tries profiled
+here, so halving their per-slot box would have saved nothing.
 
 ## Negative results
 
