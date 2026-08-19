@@ -8,6 +8,7 @@ survey of places the trie pays for a value that carries no information.
 | `218a256` | Skip value-drop work in `LineListNode` when `V` has none to do |
 | `18d40ec` | Honor `Lattice::IDEMPOTENT` in the node algebra, and short-circuit `join_into` |
 | `9f73907` | Memory attribution by node type under the `counters` feature |
+| `d75b0fb` | Don't clone a dense node until a subtraction actually changes it (**A1**) |
 
 A fourth change -- packing the CoFree value flag into its child pointer -- was
 built and measured but **not merged**; see [below](#shelved-packing-the-value-presence-flag-into-the-child-pointer).
@@ -316,6 +317,45 @@ cycles by source line so inlined code lands on its own line:
 machinery is roughly **4%**, against **30% in the allocator**. Rewriting it as
 bit arithmetic -- which is what the survey proposed, and which depended on the
 shelved S1 anyway -- would have chased about a twenty-fifth of the runtime.
+
+## A1 -- landed, as the fix the profile pointed at rather than the one proposed
+
+A1 proposed rewriting the four dense-node operations as mask arithmetic. Checked
+against the code, two thirds of it was either impossible or already done:
+
+- **The narrowed descent already exists.** `pmeet` and `prestrict` iterate
+  `self.mask & other.mask`; `pjoin` iterates the union but only *recurses* on the
+  intersection; `psubtract` only recurses where `other` has the bit.
+- **The value dimension cannot become mask ops** without the per-node `val_mask`
+  from S1, which is shelved.
+
+What was left was A1's aside about `psubtract` opening with `self.clone()` before
+knowing the answer -- and that turned out to be the whole prize, and needs no mask
+split. Instrumented on 400k-path subtractions:
+
+| operands | calls returning `Identity` | slot clones wasted |
+| --- | ---: | ---: |
+| disjoint | **100.0%** | 431,714 of 431,714 (**100%**) |
+| 5% overlap | 71.2% | 251,481 of 432,028 (58.2%) |
+| a 25% subset | 0.0% | nothing to waste |
+
+`btn` is now an `Option`, left `None` while the result is still identical to
+`self` and cloned at the first real change. Min of 3 runs, 400k paths:
+
+| subtract | before | after | change |
+| --- | ---: | ---: | ---: |
+| disjoint operands | 30.04 ms | 17.18 ms | **-42.8%** |
+| 5% overlap | 34.87 ms | 25.18 ms | **-27.8%** |
+| a 25% subset | 40.43 ms | 39.20 ms | -3.0% |
+| a 95% subset | 69.96 ms | 69.44 ms | -0.7% |
+
+The last two have nothing to reclaim and sit in the noise floor. `meet`, whose
+code is untouched, moved -8.9% to +0.1% across the same operands -- that is the
+floor. Verified with the differential algebra test and miri.
+
+`pjoin` and `prestrict` waste work identically but build a fresh slot vector
+instead of cloning, so deferring them needs a back-fill of the prefix from
+whichever operand was still identity. Not attempted.
 
 ## The thing the F4 profile actually found
 
