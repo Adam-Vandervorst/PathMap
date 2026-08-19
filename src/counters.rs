@@ -279,6 +279,7 @@ pub struct MemProfile {
     pub at_cap: usize,
     pub empty_nodes: usize,
     pub dangling_slots: usize,
+    pub dense_val_slots: usize,
     pub node_klen_hist: Vec<usize>,
     pub allval_nodes: usize,
     pub allval_klen_hist: Vec<usize>,
@@ -298,6 +299,7 @@ impl MemProfile {
         for (i, c) in o.allval_klen_hist.iter().enumerate() { self.allval_klen_hist[i] += c; }
         self.allval_nodes += o.allval_nodes;
         self.empty_nodes += o.empty_nodes; self.dangling_slots += o.dangling_slots;
+        self.dense_val_slots += o.dense_val_slots;
         self
     }
     pub fn total_bytes(&self) -> usize { self.list_bytes + self.dense_bytes + self.cell_bytes }
@@ -336,6 +338,10 @@ impl MemProfile {
         println!("  dense slots: len {} cap {} ({:.1}% over-allocated)", self.dense_items, self.dense_cap, (self.dense_cap as f64/self.dense_items.max(1) as f64 - 1.0)*100.0);
         println!("  cell  nodes {:>9}  bytes {:>11}  ({:4.1}% of trie)  items {}", self.cell_nodes, self.cell_bytes, self.cell_bytes as f64/t*100.0, self.cell_items);
         println!("  empty (allocated) nodes {}   dangling sentinel slots {}", self.empty_nodes, self.dangling_slots);
+        let vs = self.val_slots + self.dense_val_slots;
+        println!("  values by home: list-node slots {} ({:.2}%)  dense-node slots {} ({:.2}%)",
+            self.val_slots, self.val_slots as f64 / vs.max(1) as f64 * 100.0,
+            self.dense_val_slots, self.dense_val_slots as f64 / vs.max(1) as f64 * 100.0);
         println!("  TOTAL bytes {:>9}   = {:.1} bytes/value", self.total_bytes(), t / vals.max(1) as f64);
     }
 }
@@ -374,7 +380,7 @@ pub fn memory_profile<V: Clone + Send + Sync + Unpin + 'static>(map: &PathMap<V>
             if l.is_used_value_1() { c.val_slots += 1 } else if l.is_used_child_1() { c.child_slots += 1 }
         }
         else if let Some(d) = node.as_dense() {
-            c.dense_nodes += 1; c.dense_items += d.slot_count(); c.dense_cap += d.slot_capacity(); c.dense_bytes += dense_sz + d.slot_capacity()*cf;
+            c.dense_nodes += 1; c.dense_items += d.slot_count(); c.dense_val_slots += d.val_slot_count(); c.dense_cap += d.slot_capacity(); c.dense_bytes += dense_sz + d.slot_capacity()*cf;
         } else if node.tag() == crate::trie_node::CELL_BYTE_NODE_TAG {
             let n = node.item_count();
             // each CellCoFree additionally owns a boxed OrdinaryCoFree

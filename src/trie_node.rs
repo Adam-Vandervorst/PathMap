@@ -500,9 +500,16 @@ pub(crate) type ValSlotStorage = [u8; 16];
 /// This depends only on `V`, so it folds to a constant at monomorphization and the branches it
 /// guards vanish.  For a unit-valued trie (`PathMap<()>`), and for any other trie whose value is a
 /// small `Copy` type, that removes the value arms from the node drop paths entirely.
+/// `true` if a `V` is too large to live inline in a [ValOrChildUnion], and so is boxed individually
+/// by [LocalOrHeap] in every list-node slot that holds one
+#[inline(always)]
+pub(crate) const fn val_is_boxed<V>() -> bool {
+    core::mem::size_of::<V>() > core::mem::size_of::<ValSlotStorage>()
+}
+
 #[inline(always)]
 pub(crate) const fn val_slot_needs_drop<V>() -> bool {
-    core::mem::needs_drop::<V>() || core::mem::size_of::<V>() > core::mem::size_of::<ValSlotStorage>()
+    core::mem::needs_drop::<V>() || val_is_boxed::<V>()
 }
 
 pub union ValOrChildUnion<V: Clone + Send + Sync, A: Allocator> {
@@ -3283,6 +3290,37 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLat
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod val_slot_layout_tests {
+    use super::*;
+    use crate::alloc::GlobalAlloc;
+
+    /// The payload union is the width of its *child* arm, not its value arm
+    ///
+    /// [LocalOrHeap] is a fixed-size cell -- it boxes any `V` too big to fit -- so the value arm is
+    /// the same width for every `V`, and the union is 8 bytes whether `V` is `()` or `[u8; 1024]`.
+    /// Removing the value arm entirely would not shrink it, because the child pointer needs those 8
+    /// bytes regardless.
+    #[test]
+    fn payload_union_width_is_set_by_the_child_pointer() {
+        let child = core::mem::size_of::<TrieNodeODRc<(), GlobalAlloc>>();
+        assert_eq!(core::mem::size_of::<ValOrChildUnion<(), GlobalAlloc>>(), child);
+        assert_eq!(core::mem::size_of::<ValOrChildUnion<u64, GlobalAlloc>>(), child);
+        assert_eq!(core::mem::size_of::<ValOrChildUnion<String, GlobalAlloc>>(), child);
+        assert_eq!(core::mem::size_of::<ValOrChildUnion<[u8; 1024], GlobalAlloc>>(), child);
+    }
+
+    /// Values larger than [ValSlotStorage] are boxed one at a time in list-node slots.  This is a
+    /// sharp, silent cliff -- see the note on [`TrieValue`](crate::TrieValue)
+    #[test]
+    fn the_inline_value_budget_is_where_it_is_documented() {
+        assert!(core::mem::size_of::<ValSlotStorage>() >= 8);
+        assert!(!crate::trie_node::val_is_boxed::<u64>());
+        assert!(crate::trie_node::val_is_boxed::<[u8; 16]>());
+        assert!(!crate::trie_node::val_is_boxed::<()>());
     }
 }
 

@@ -245,8 +245,56 @@ here, so halving their per-slot box would have saved nothing.
 
 ## Negative results
 
-These five were measured and rejected. Recording them so they are not
+These six were measured and rejected. Recording them so they are not
 re-attempted from first principles.
+
+### S5 -- `LocalOrHeap` "pins the payload union at 8 bytes": it does not
+
+The survey said the `LocalOrHeap<V, [u8; 8]>` arm is why a payload slot is 8
+bytes wide, and that a set-specialized node would have to replace it. Both halves
+are wrong.
+
+`LocalOrHeap` is a *fixed-size cell* -- it boxes anything too big to fit -- so
+the value arm is the same width for every `V`, and the union's width is set by
+its **other** arm, the child pointer:
+
+| `V` | `size_of::<V>()` | union | boxed? |
+| --- | ---: | ---: | --- |
+| `()` | 0 | 8 | no |
+| `u64` | 8 | 8 | no |
+| `String` | 24 | 8 | **yes** |
+| `[u8; 1024]` | 1024 | 8 | **yes** |
+
+Deleting the value arm entirely would not shrink the union by a byte, because the
+child pointer needs those 8 regardless. And for `()` the arm costs nothing at
+runtime either: `size_of::<()>() == 0`, so nothing is boxed.
+`val_slot_layout_tests` asserts both facts.
+
+**What it did surface, which is real but not a unit-value concern.** Values live
+overwhelmingly in list-node slots, and those are the ones that box:
+
+| dataset | values in list slots | in dense slots |
+| --- | ---: | ---: |
+| `big_logic.metta` (MORK) | **99.93%** | 0.07% |
+| 1M random 8-byte keys | **100.00%** | 0.00% |
+| shakespeare words | 53.44% | 46.56% |
+
+So for a `V` over the threshold, MORK-shaped data pays roughly one heap
+allocation *per value*. Priced on 91,692 paths:
+
+| value | size | boxed | build | drop |
+| --- | ---: | --- | ---: | ---: |
+| `u64` | 8 | no | 23.66 ms | 6.94 ms |
+| `[u8; 8]` | 8 | no | 23.76 ms | 6.96 ms |
+| `[u8; 9]` | 9 | **yes** | 28.22 ms (**+19%**) | 9.43 ms (**+36%**) |
+| `[u8; 16]` | 16 | yes | 26.02 ms | 9.13 ms |
+
+One byte over the line costs ~19% on insertion and ~36% on drop. Widening the
+cell would fix it, but only by making every node bigger for every `V` --
+including `()`, which needs none of it -- and sizing the cell per-`V` needs
+`generic_const_exprs`. So the actionable part is documentation: the cliff is now
+described on [`TrieValue`](../src/lib.rs), where someone choosing a value type
+will see it.
 
 ### F3 -- eliding the value hash in `merkleize`: nothing to elide, and the obvious version is a bug
 

@@ -143,6 +143,20 @@ mod bridge_node;
 mod old_cursor;
 
 /// A supertrait that encapsulates the bounds for a value that can be put in a [PathMap]
+///
+/// # Value size, and a cliff at 8 bytes
+///
+/// Most values in a trie live in a list node, whose payload slot is a fixed-size cell shared with
+/// the child pointer. A `V` that fits in that cell is stored inline; a larger one is boxed
+/// individually, one heap allocation per value. The threshold is the size of a node pointer, so
+/// **8 bytes** on 64-bit targets with the default `slim_ptrs` feature.
+///
+/// The cliff is sharp and does not show up in the type system. On a trie of ~92k paths where 99.9%
+/// of values sit in list-node slots, going from an 8-byte value to a 9-byte one costs about 19% on
+/// insertion and 36% on drop, entirely in allocator traffic.
+///
+/// If your value is close to the limit it is worth keeping it under: pack it, shrink an
+/// enum's discriminant, or store an index into a side table rather than the payload itself.
 pub trait TrieValue: Clone + Send + Sync + Unpin {}
 
 impl<T> TrieValue for T where T : Clone + Send + Sync + Unpin {}

@@ -122,6 +122,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     /// Number of allocated `CoFree` slots, including unused `Vec` capacity
     #[inline]
     pub fn slot_capacity(&self) -> usize { self.values.capacity() }
+    /// Number of slots holding a value
+    #[inline]
+    pub fn val_slot_count(&self) -> usize { self.values.iter().filter(|cf| cf.has_val()).count() }
     /// Number of occupied `CoFree` slots.  Note this differs from [Self::item_count], which counts
     /// a slot's child link and value as two separate items
     #[inline]
