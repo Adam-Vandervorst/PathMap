@@ -127,6 +127,10 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     ///
     /// Set bits that correspond to non-existent branches in `src` will be non-existent in `self` after this
     /// function completes.
+    ///
+    /// WARNING: The implementation may reserve space based on every set bit in `child_mask`, including for
+    /// branches that are absent from `src`. Don't use a mask with vastly more set bits than source branches to
+    /// avoid unnecessarily large allocations.
     fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
         if remove_unset {
             self.remove_branches(false);
@@ -4398,6 +4402,18 @@ mod tests {
         //Garfield was removed
         assert_eq!(wr.val(), None);
     }
+
+    #[test]
+    fn write_zipper_test_remove_unmasked_branches_non_existent_path() {
+        let mut map: PathMap<()> = PathMap::new();
+        for key in [b"a".as_slice(), b"b", b"c"] {
+            map.set_val_at(key, ());
+        }
+
+        let mut wz = map.write_zipper_at_path(b"a:x");
+        wz.remove_unmasked_branches(ByteMask::EMPTY, false);
+    }
+
     #[test]
     fn write_zipper_test_zipper_conversion() {
         let keys = [
