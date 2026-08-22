@@ -198,3 +198,57 @@ fn seeded_prefix_heavy_dual_distributivity_matches_btreeset_oracle() {
         );
     }
 }
+
+/// The oracle for `restrict`: a path of `self` survives when some prefix of it -- the empty prefix
+/// and the path itself both count -- carries a value in `other`.
+fn restrict_oracle(left: &KeySet, right: &KeySet) -> KeySet {
+    left.iter()
+        .filter(|path| (0..=path.len()).any(|split| right.contains(&path[..split].to_vec())))
+        .cloned()
+        .collect()
+}
+
+/// `restrict(a, a)` must be `a`, since every path of `a` has a value at itself in `a`.
+///
+/// It did not hold when a path both carried a value and branched: `{ab, abc, abd}` lost `ab`, and
+/// `{a, ab, abc}` lost `a`. `follow_path_to_value` only looked for a value once its walk ran out of
+/// onward links, so a node holding a value *and* a child under the same key reported "no value,
+/// path continues" and `restrict` dropped the value.
+#[test]
+fn restrict_matches_btreeset_oracle() {
+    //the minimal shapes first, since they say more than the seeded sets do
+    for paths in [
+        &[b"ab".as_slice(), b"abc"][..],
+        &[b"ab".as_slice(), b"abc", b"abd"][..],
+        &[b"a".as_slice(), b"ab", b"abc"][..],
+        //the value sits at a prefix of the key the walk descends through, rather than at it
+        &[b"a".as_slice(), b"abc", b"abd"][..],
+        &[b"a".as_slice(), b"ab", b"abc", b"abd", b"xy"][..],
+    ] {
+        let set: KeySet = paths.iter().map(|p| p.to_vec()).collect();
+        let map = map_from_set(&set);
+        assert_eq!(set_from_map(&map.restrict(&map)), set, "restrict(a, a) should be a, for {paths:?}");
+    }
+
+    #[cfg(not(miri))]
+    const SEEDS: u64 = 64;
+    #[cfg(miri)]
+    const SEEDS: u64 = 2;
+
+    for seed in 0..SEEDS {
+        for (name, left, right) in [
+            ("prefix_free", fixed_width_set(seed, 0xA1), fixed_width_set(seed, 0xB2)),
+            ("prefix_heavy", prefix_heavy_set(seed, 0xC3), prefix_heavy_set(seed, 0xD4)),
+            //deliberately lopsided, so the two masks overlap without being equal
+            ("lopsided", prefix_heavy_set(seed, 0xE5), fixed_width_set(seed, 0xF6)),
+            ("self_restrict", prefix_heavy_set(seed, 0x17), prefix_heavy_set(seed, 0x17)),
+        ] {
+            let restricted = map_from_set(&left).restrict(&map_from_set(&right));
+            assert_eq!(
+                set_from_map(&restricted),
+                restrict_oracle(&left, &right),
+                "restrict mismatch for {name} at seed {seed}"
+            );
+        }
+    }
+}
