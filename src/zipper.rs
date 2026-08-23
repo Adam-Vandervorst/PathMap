@@ -1019,6 +1019,24 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTra
         let core = ReadZipperCore::new_with_node_and_cloned_path_in(root_node, owned_root, path, root_prefix_len, root_key_start, root_val, alloc);
         Self { z: core, tracker }
     }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn detach(mut self) -> ZipperBuffer<V, A> {
+        let placeholder = ReadZipperCore::new_with_node_and_path_internal_in(
+            OwnedOrBorrowed::None,
+            &[],
+            0,
+            None,
+            self.z.alloc.clone(),
+        );
+        core::mem::replace(&mut self.z, placeholder).detach()
+    }
+
+    /// Moves this zipper's traversal buffers to a new zipper on `map`, at the
+    /// same path.
+    pub fn relocate<'map>(self, map: &'map PathMap<V, A>) -> ReadZipperUntracked<'map, 'static, V, A> {
+        self.detach().attach(map)
+    }
 }
 
 //GOAT, the standard prototype of IntoIterator isn't compatible with ReadZipperTracked anymore because 
@@ -1130,6 +1148,17 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
     pub(crate) fn new_forked_with_inner_zipper(core: ReadZipperCore<'a, 'path, V, A>) -> Self {
         ReadZipperUntracked{ z: core }
     }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn detach(self) -> ZipperBuffer<V, A> {
+        self.z.detach()
+    }
+
+    /// Moves this zipper's traversal buffers to a new zipper on `map`, at the
+    /// same path.
+    pub fn relocate<'map>(self, map: &'map PathMap<V, A>) -> ReadZipperUntracked<'map, 'static, V, A> {
+        self.detach().attach(map)
+    }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipperUntracked<'a, 'path, V, A> {
@@ -1217,6 +1246,17 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator> ReadZipperOwned<V, 
         let map = MaybeDangling::into_inner(self.map);
         *map
     }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn detach(self) -> ZipperBuffer<V, A> {
+        self.z.detach()
+    }
+
+    /// Moves this zipper's traversal buffers to a new zipper on `map`, at the
+    /// same path.
+    pub fn relocate<'map>(self, map: &'map PathMap<V, A>) -> ReadZipperUntracked<'map, 'static, V, A> {
+        self.detach().attach(map)
+    }
 }
 
 
@@ -1283,6 +1323,75 @@ pub(crate) const EXPECTED_DEPTH: usize = 16;
 /// Size in bytes to preallocate path storage in the zipper
 pub(crate) const EXPECTED_PATH_LEN: usize = 64;
 
+/// Buffers detached from a read zipper for reuse by another read zipper.
+///
+/// A zipper's path buffer and ancestor stack can grow substantially while it
+/// is being used.  A [`ZipperBuffer`] keeps those allocations alive after the
+/// zipper is dropped.  The entries in the ancestor stack are cleared when the
+/// buffer is detached, since they refer to the map belonging to the old
+/// zipper; its capacity is retained for the next zipper.
+pub struct ZipperBuffer<V: Clone + Send + Sync, A: Allocator = GlobalAlloc> {
+    prefix_buf: Vec<u8>,
+    // The vector is always empty while detached.  Its element type is kept
+    // only so that the allocation can be moved back into a zipper.
+    ancestors: Vec<(TaggedNodePtr<V, A>, IterToken, usize)>,
+    origin_path_len: usize,
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperBuffer<V, A> {
+    /// Attaches these buffers to a new read zipper on `map`.
+    ///
+    /// The path and ancestor entries from the old zipper are not retained as
+    /// cursor state.  Only their allocation is reused; the new zipper is
+    /// moved to the same path as the detached zipper.
+    pub fn attach<'map>(self, map: &'map PathMap<V, A>) -> ReadZipperUntracked<'map, 'static, V, A> {
+        let ZipperBuffer { prefix_buf, ancestors, origin_path_len } = self;
+        map.ensure_root();
+        let root_val = unsafe { (&*map.root_val.get()).as_ref() };
+        let path_len = prefix_buf.len();
+        debug_assert!(origin_path_len <= path_len);
+        let root_path = &prefix_buf[..origin_path_len];
+        let mut zipper = ReadZipperCore::new_with_node_and_path_in(
+            map.root().unwrap(),
+            false,
+            root_path,
+            origin_path_len,
+            0,
+            if origin_path_len == 0 { root_val } else { None },
+            map.alloc.clone(),
+        );
+        // `origin_path` initially borrows `self.prefix_buf`.  Replace it
+        // before erasing that temporary lifetime; all remaining references in
+        // the core borrow `map`.
+        zipper.origin_path = SliceOrLen::new_owned(origin_path_len);
+        let mut zipper = unsafe {
+            core::mem::transmute::<
+                ReadZipperCore<'map, '_, V, A>,
+                ReadZipperCore<'map, 'static, V, A>,
+            >(zipper)
+        };
+
+        // Keep the detached path as the source while rebuilding the cursor,
+        // and use the same allocation as the destination.  `detach` always
+        // prepares this vector first, so the movement below cannot reallocate
+        // it; the raw pointer therefore remains valid while bytes are copied
+        // one at a time.
+        let path_ptr = prefix_buf.as_ptr();
+        let mut prefix_buf = prefix_buf;
+        // The bytes preceding `origin_path_len` were initialized before the
+        // length was reduced and are the new zipper's root prefix.
+        unsafe { prefix_buf.set_len(origin_path_len); }
+        zipper.prefix_buf = prefix_buf;
+        zipper.ancestors = ancestors;
+        for i in origin_path_len..path_len {
+            let byte = unsafe { *path_ptr.add(i) };
+            zipper.descend_to_byte(byte);
+        }
+
+        ReadZipperUntracked { z: zipper }
+    }
+}
+
 pub(crate) mod read_zipper_core {
     use crate::PathMap;
     use crate::zipper::*;
@@ -1292,7 +1401,7 @@ pub(crate) mod read_zipper_core {
     /// (Internal type, but in private module so it can be part of sealed interface)
     pub struct ReadZipperCore<'a, 'path, V: Clone + Send + Sync, A: Allocator> {
         /// A reference to the entire origin path, of which `root_key` is the final subset
-        origin_path: SliceOrLen<'path>,
+        pub(super) origin_path: SliceOrLen<'path>,
         /// The byte offset in `origin_path` for the start of the root node's key.
         /// `root_key = origin_path[root_key_start..]`
         root_key_start: usize,
@@ -1313,10 +1422,10 @@ pub(crate) mod read_zipper_core {
         /// if iteration is not in-process
         focus_iter_token: IterToken,
         /// Stores the entire path from the root node, including the bytes from `root_key`
-        prefix_buf: Vec<u8>,
+        pub(super) prefix_buf: Vec<u8>,
         /// Stores a stack of parent node references.  Does not include the focus_node
         /// The tuple contains: `(node_ref, iter_token, key_offset_in_prefix_buf)`
-        ancestors: Vec<(TaggedNodeRef<'a, V, A>, IterToken, usize)>,
+        pub(super) ancestors: Vec<(TaggedNodePtr<V, A>, IterToken, usize)>,
         pub(crate) alloc: A,
     }
 
@@ -1532,7 +1641,7 @@ pub(crate) mod read_zipper_core {
 
                 let parent_node = match self.ancestors.last() {
                     Some((focus_node, _iter_tok, _prefix_offset)) => {
-                        *focus_node
+                        self.ancestor_node(focus_node)
                     },
                     None => {
                         self.root_node.as_ref().as_tagged()
@@ -1564,7 +1673,7 @@ pub(crate) mod read_zipper_core {
             self.ancestors.truncate(1);
             match self.ancestors.pop() {
                 Some((node, _tok, _prefix_len)) => {
-                    *self.focus_node = node;
+                    *self.focus_node = self.ancestor_node(&node);
                     self.focus_iter_token = NODE_ITER_INVALID;
                 },
                 None => {}
@@ -1636,7 +1745,7 @@ pub(crate) mod read_zipper_core {
             self.focus_iter_token = NODE_ITER_INVALID;
             if let Some((_consumed_byte_cnt, next_node)) = self.focus_node.node_get_child(self.node_key()) {
                 let next_node = next_node.as_tagged();
-                self.ancestors.push((*self.focus_node, self.focus_iter_token, self.prefix_buf.len()));
+                self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                 *self.focus_node = next_node;
             }
         }
@@ -1651,7 +1760,7 @@ pub(crate) mod read_zipper_core {
             if let Some((_consumed_byte_cnt, next_node)) = self.focus_node.node_get_child(node_key) {
                 self.focus_iter_token = NODE_ITER_INVALID;
                 let next_node = next_node.as_tagged();
-                self.ancestors.push((*self.focus_node, self.focus_iter_token, self.prefix_buf.len()));
+                self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                 *self.focus_node = next_node;
                 return true;
             }
@@ -1671,7 +1780,7 @@ pub(crate) mod read_zipper_core {
             match self.focus_node.nth_child_from_key(self.node_key(), child_idx) {
                 (Some(prefix), Some(child_node)) => {
                     self.prefix_buf.push(prefix);
-                    self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                    self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                     *self.focus_node = child_node;
                     self.focus_iter_token = NODE_ITER_INVALID;
                     true
@@ -1712,7 +1821,7 @@ pub(crate) mod read_zipper_core {
                     match child_node {
                         None => {},
                         Some(rec) => {
-                            self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
+                            self.ancestors.push(((*self.focus_node).as_ptr(), new_tok, self.prefix_buf.len()));
                             *self.focus_node = rec.as_tagged();
                             self.focus_iter_token = self.focus_node.new_iter_token();
                         },
@@ -1757,7 +1866,7 @@ pub(crate) mod read_zipper_core {
                     // Move to child node without consuming bytes.
                     if let Some(child_node) = child_node_opt {
                         moved = true;
-                        self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                        self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                         *self.focus_node = child_node;
                         self.focus_iter_token = NODE_ITER_INVALID;
                         continue;
@@ -1776,7 +1885,7 @@ pub(crate) mod read_zipper_core {
                 }
 
                 if let Some(child_node) = child_node_opt {
-                    self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                    self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                     *self.focus_node = child_node;
                     self.focus_iter_token = NODE_ITER_INVALID;
                 }
@@ -1896,7 +2005,7 @@ pub(crate) mod read_zipper_core {
                         match child_node {
                             None => {},
                             Some(rec) => {
-                                self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
+                                self.ancestors.push(((*self.focus_node).as_ptr(), new_tok, self.prefix_buf.len()));
                                 *self.focus_node = rec.as_tagged();
                                 self.focus_iter_token = NODE_ITER_INVALID
                             },
@@ -1927,7 +2036,7 @@ pub(crate) mod read_zipper_core {
                 if self.excess_key_len() == 0 {
                     match self.ancestors.pop() {
                         Some((node, iter_tok, _prefix_offset)) => {
-                            *self.focus_node = node;
+                            *self.focus_node = self.ancestor_node(&node);
                             self.focus_iter_token = iter_tok;
                         },
                         None => {
@@ -1950,7 +2059,7 @@ pub(crate) mod read_zipper_core {
             if self.excess_key_len() == 0 {
                 match self.ancestors.pop() {
                     Some((node, iter_tok, _prefix_offset)) => {
-                        *self.focus_node = node;
+                        *self.focus_node = self.ancestor_node(&node);
                         self.focus_iter_token = iter_tok;
                     },
                     None => {
@@ -2048,7 +2157,7 @@ pub(crate) mod read_zipper_core {
                 self.focus_node.node_get_val(key)
             } else {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
-                    parent.node_get_val(self.parent_key())
+                    self.ancestor_node(parent).node_get_val(self.parent_key())
                 } else {
                     if self.root_val.is_some() {
                         self.root_val
@@ -2088,7 +2197,7 @@ pub(crate) mod read_zipper_core {
                 false
             } else {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
-                    let (_key_len, focus_node) = parent.node_get_child(self.parent_key()).unwrap();
+                    let (_key_len, focus_node) = self.ancestor_node(parent).node_get_child(self.parent_key()).unwrap();
                     focus_node.refcount() > 1
                 } else {
                     match &self.root_node {
@@ -2282,10 +2391,32 @@ pub(crate) mod read_zipper_core {
             }
         }
 
+        /// Consumes the zipper and keeps its buffer allocations for reuse.
+        pub(crate) fn detach(mut self) -> ZipperBuffer<V, A> {
+            self.prepare_buffers();
+
+            // Ancestor entries contain references into this zipper's map.  No
+            // entry may survive detachment; clear the vector and retain only
+            // its allocation for the next zipper.
+            let origin_path_len = self.origin_path.len();
+            self.ancestors.clear();
+
+            ZipperBuffer {
+                prefix_buf: self.prefix_buf,
+                ancestors: self.ancestors,
+                origin_path_len,
+            }
+        }
+
         /// Returns the length of the `self.path()`, saving a couple instructions, but is internal because it may panic
         #[inline(always)]
         fn path_len(&self) -> usize {
             self.prefix_buf.len() - self.origin_path.len()
+        }
+
+        #[inline]
+        fn ancestor_node<'node>(&self, node: &TaggedNodePtr<V, A>) -> TaggedNodeRef<'node, V, A> {
+            unsafe { node.as_tagged() }
         }
 
         /// Ensures the zipper is in its regularized form
@@ -2300,7 +2431,7 @@ pub(crate) mod read_zipper_core {
         pub(crate) fn regularize(&mut self) {
             debug_assert!(self.prefix_buf.len() >= self.node_key_start()); //If this triggers, we have uninitialized buffers
             if let Some((_consumed_byte_cnt, next_node)) = self.focus_node.node_get_child(self.node_key()) {
-                self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                 *self.focus_node = next_node.as_tagged();
                 self.focus_iter_token = NODE_ITER_INVALID;
             }
@@ -2340,7 +2471,7 @@ pub(crate) mod read_zipper_core {
                 self.focus_node.node_get_val(key)
             } else {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
-                    parent.node_get_val(self.parent_key())
+                    self.ancestor_node(parent).node_get_val(self.parent_key())
                 } else {
                     //NOTE: It's true that we shouldn't have ZipperReadOnlyValues implemented on a type that comes from a ZipperHead, but
                     // we currently share the same implementation between `val()` and `get_val()` because the only difference is the return
@@ -2416,7 +2547,7 @@ pub(crate) mod read_zipper_core {
                     match child_node {
                         None => {},
                         Some(rec) => {
-                            self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
+                            self.ancestors.push(((*self.focus_node).as_ptr(), new_tok, self.prefix_buf.len()));
                             *self.focus_node = rec.as_tagged();
                             self.focus_iter_token = self.focus_node.new_iter_token();
                         },
@@ -2429,7 +2560,7 @@ pub(crate) mod read_zipper_core {
                 } else {
                     //Ascend
                     if let Some((focus_node, iter_tok, prefix_offset)) = self.ancestors.pop() {
-                        *self.focus_node = focus_node;
+                        *self.focus_node = self.ancestor_node(&focus_node);
                         self.focus_iter_token = iter_tok;
                         self.prefix_buf.truncate(prefix_offset);
                     } else {
@@ -2466,7 +2597,7 @@ pub(crate) mod read_zipper_core {
                 },
                 None => unreachable!()
             };
-            let (key_len, node) = parent_node.node_get_child(parent_key).unwrap();
+            let (key_len, node) = self.ancestor_node(&parent_node).node_get_child(parent_key).unwrap();
             debug_assert_eq!(key_len, parent_key.len());
             node
         }
@@ -2498,7 +2629,7 @@ pub(crate) mod read_zipper_core {
             while let Some((consumed_byte_cnt, next_node)) = self.focus_node.node_get_child(key) {
                 let next_node = next_node.as_tagged();
                 key_start += consumed_byte_cnt;
-                self.ancestors.push((*self.focus_node.clone(), NODE_ITER_INVALID, key_start));
+                self.ancestors.push(((*self.focus_node).as_ptr(), NODE_ITER_INVALID, key_start));
                 *self.focus_node = next_node;
                 if consumed_byte_cnt < key.len() {
                     key = &key[consumed_byte_cnt..]
@@ -2520,7 +2651,7 @@ pub(crate) mod read_zipper_core {
                 match self.focus_node.get_sibling_of_child(self.node_key(), next) {
                     (Some(prefix), Some(child_node)) => {
                         *self.prefix_buf.last_mut().unwrap() = prefix;
-                        self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                        self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                         *self.focus_node = child_node;
                         self.focus_iter_token = NODE_ITER_INVALID;
                         true
@@ -2536,7 +2667,7 @@ pub(crate) mod read_zipper_core {
                 let result = match self.ancestors.last() {
                     None => { false }
                     Some((parent, _iter_tok, _prefix_offset)) => {
-                        match parent.get_sibling_of_child(self.parent_key(), next) {
+                        match self.ancestor_node(parent).get_sibling_of_child(self.parent_key(), next) {
                             (Some(prefix), Some(child_node)) => {
                                 *self.prefix_buf.last_mut().unwrap() = prefix;
                                 *self.focus_node = child_node;
@@ -2556,7 +2687,7 @@ pub(crate) mod read_zipper_core {
                 };
                 if should_pop {
                     let (focus_node, iter_tok, _prefix_offset) = self.ancestors.pop().unwrap();
-                    *self.focus_node = focus_node;
+                    *self.focus_node = self.ancestor_node(&focus_node);
                     self.focus_iter_token = iter_tok;
                 }
                 result
@@ -2598,7 +2729,7 @@ pub(crate) mod read_zipper_core {
                     }
 
                     if let Some((focus_node, iter_tok, prefix_offset)) = self.ancestors.pop() {
-                        *self.focus_node = focus_node;
+                        *self.focus_node = self.ancestor_node(&focus_node);
                         self.focus_iter_token = iter_tok;
                         self.prefix_buf.truncate(prefix_offset);
                     } else {
@@ -2636,7 +2767,7 @@ pub(crate) mod read_zipper_core {
                         match child_node {
                             None => {},
                             Some(rec) => {
-                                self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
+                                self.ancestors.push(((*self.focus_node).as_ptr(), new_tok, self.prefix_buf.len()));
                                 *self.focus_node = rec.as_tagged();
                                 self.focus_iter_token = self.focus_node.new_iter_token();
                             },
@@ -2700,7 +2831,7 @@ pub(crate) mod read_zipper_core {
                 self.focus_node.node_contains_val(key)
             } else {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
-                    parent.node_contains_val(self.parent_key())
+                    self.ancestor_node(parent).node_contains_val(self.parent_key())
                 } else {
                     self.root_val.is_some()
                 }
@@ -2715,7 +2846,7 @@ pub(crate) mod read_zipper_core {
                 (Some(prefix), Some(child_node)) => {
                     //Step to a new node
                     self.prefix_buf.extend(prefix);
-                    self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+                    self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
                     *self.focus_node = child_node;
                     self.focus_iter_token = NODE_ITER_INVALID;
 
@@ -2806,7 +2937,7 @@ pub(crate) mod read_zipper_core {
         fn ascend_across_nodes(&mut self) {
             debug_assert!(self.node_key().len() == 0);
             if let Some((focus_node, iter_tok, _prefix_offset)) = self.ancestors.pop() {
-                *self.focus_node = focus_node;
+                *self.focus_node = self.ancestor_node(&focus_node);
                 self.focus_iter_token = iter_tok;
             } else {
                 self.focus_iter_token = NODE_ITER_INVALID;
@@ -2822,7 +2953,7 @@ pub(crate) mod read_zipper_core {
         /// Push a new node-path pair onto the zipper.  This is used in the internal implementation of
         /// the [crate::zipper::ProductZipper]
         pub(crate) fn push_node(&mut self, node: TaggedNodeRef<'a, V, A>) {
-            self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
+            self.ancestors.push(((*self.focus_node).as_ptr(), self.focus_iter_token, self.prefix_buf.len()));
             *self.focus_node = node;
             self.focus_iter_token = NODE_ITER_INVALID;
         }
@@ -2866,6 +2997,49 @@ pub(crate) mod read_zipper_core {
         assert_eq!(&rz.z.prefix_buf, b"hi-howdy");
         assert_eq!(&rz.path(), b"-howdy");
         assert_eq!(rz.origin_path(), b"hi-howdy");
+    }
+
+    #[test]
+    fn read_zipper_relocate_reuses_buffers_and_path() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alpha", 1);
+        map.set_val_at(b"alphabet", 2);
+
+        let mut zipper = map.read_zipper();
+        zipper.reserve_buffers(4096, 512);
+        zipper.descend_to(b"alphabet");
+        let prefix_ptr = zipper.z.prefix_buf.as_ptr();
+        let ancestors_ptr = zipper.z.ancestors.as_ptr();
+        let prefix_capacity = zipper.z.prefix_buf.capacity();
+        let ancestors_capacity = zipper.z.ancestors.capacity();
+
+        let mut relocated_map = PathMap::<usize>::new();
+        relocated_map.set_val_at(b"alphabet", 3);
+        let relocated = zipper.relocate(&relocated_map);
+
+        assert_eq!(relocated.path(), b"alphabet");
+        assert_eq!(relocated.val(), Some(&3));
+        assert_eq!(relocated.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(relocated.z.prefix_buf.capacity(), prefix_capacity);
+        assert_eq!(relocated.z.ancestors.as_ptr(), ancestors_ptr);
+        assert_eq!(relocated.z.ancestors.capacity(), ancestors_capacity);
+    }
+
+    #[test]
+    fn read_zipper_relocate_preserves_non_root_origin() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alphabet", 1);
+
+        let mut zipper = map.read_zipper_at_borrowed_path(b"alpha");
+        zipper.reserve_buffers(256, 32);
+        zipper.descend_to(b"bet");
+        assert_eq!(zipper.path(), b"bet");
+        assert_eq!(zipper.origin_path(), b"alphabet");
+
+        let relocated = zipper.relocate(&map);
+        assert_eq!(relocated.path(), b"bet");
+        assert_eq!(relocated.origin_path(), b"alphabet");
+        assert_eq!(relocated.val(), Some(&1));
     }
 }
 use read_zipper_core::*;

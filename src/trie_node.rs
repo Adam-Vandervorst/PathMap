@@ -849,6 +849,20 @@ mod tagged_node_ref {
         pub fn empty_node() -> Self {
             Self::EmptyNode
         }
+        /// Returns a lifetime-independent pointer representation of this
+        /// node reference.  The empty node is never used as an ancestor.
+        #[inline]
+        pub(crate) fn as_ptr(&self) -> TaggedNodePtr<V, A> {
+            match self {
+                Self::DenseByteNode(node) => TaggedNodePtr::DenseByteNode(NonNull::from(*node)),
+                Self::LineListNode(node) => TaggedNodePtr::LineListNode(NonNull::from(*node)),
+                #[cfg(feature = "bridge_nodes")]
+                Self::BridgeNode(node) => TaggedNodePtr::BridgeNode(NonNull::from(*node)),
+                Self::CellByteNode(node) => TaggedNodePtr::CellByteNode(NonNull::from(*node)),
+                Self::TinyRefNode(node) => TaggedNodePtr::TinyRefNode(NonNull::from(*node).cast()),
+                Self::EmptyNode => panic!("invalid ancestor node"),
+            }
+        }
         #[cfg(feature = "slim_ptrs")]
         #[inline]
         pub(super) fn from_slim_ptr(ptr: super::slim_node_ptr::SlimNodePtr<V, A>) -> Self {
@@ -1024,8 +1038,11 @@ mod tagged_node_ref {
         #[cfg(feature = "bridge_nodes")]
         BridgeNode(NonNull<BridgeNode<V, A>>),
         CellByteNode(NonNull<CellByteNode<V, A>>),
+        TinyRefNode(NonNull<()>),
     }
     impl<V: Clone + Send + Sync, A: Allocator> Copy for TaggedNodePtr<V, A> {}
+    unsafe impl<V: Clone + Send + Sync, A: Allocator> Send for TaggedNodePtr<V, A> {}
+    unsafe impl<V: Clone + Send + Sync, A: Allocator> Sync for TaggedNodePtr<V, A> {}
 
     impl<V: Clone + Send + Sync, A: Allocator> From<TaggedNodeRefMut<'_, V, A>> for TaggedNodePtr<V, A> {
         #[inline]
@@ -1051,6 +1068,7 @@ mod tagged_node_ref {
                 #[cfg(feature = "bridge_nodes")]
                 TaggedNodePtr::BridgeNode(mut node) => TaggedNodeRefMut::BridgeNode(unsafe{ node.as_mut() }),
                 TaggedNodePtr::CellByteNode(mut node) => TaggedNodeRefMut::CellByteNode(unsafe{ node.as_mut() }),
+                TaggedNodePtr::TinyRefNode(_) => unsafe{ unreachable_unchecked() },
             }
         }
         /// Returns a [TaggedNodeRef] from the `TaggedNodePtr`.  It is unsafe because the
@@ -1063,6 +1081,7 @@ mod tagged_node_ref {
                 #[cfg(feature = "bridge_nodes")]
                 TaggedNodePtr::BridgeNode(node) => TaggedNodeRef::BridgeNode(unsafe{ node.as_ref() }),
                 TaggedNodePtr::CellByteNode(node) => TaggedNodeRef::CellByteNode(unsafe{ node.as_ref() }),
+                TaggedNodePtr::TinyRefNode(node) => TaggedNodeRef::TinyRefNode(unsafe{ &*node.as_ptr().cast::<TinyRefNode<'_, V, A>>() }),
             }
         }
     }
@@ -1716,6 +1735,12 @@ mod tagged_node_ref {
         #[inline]
         pub(crate) fn empty_node() -> Self {
             Self { ptr: SlimNodePtr::from_raw_parts(core::ptr::without_provenance_mut::<usize>(0xBAADF00D), EMPTY_NODE_TAG), phantom: PhantomData }
+        }
+        /// Returns a lifetime-independent pointer representation of this
+        /// node reference.
+        #[inline]
+        pub(crate) fn as_ptr(&self) -> TaggedNodePtr<V, A> {
+            self.ptr
         }
         #[inline]
         pub(super) fn from_slim_ptr(ptr: SlimNodePtr<V, A>) -> Self {
