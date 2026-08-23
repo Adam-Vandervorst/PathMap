@@ -19,9 +19,9 @@ name = "pathmap"
 path = "src/lib.rs"
 
 [dependencies]
-span-timing = { version = "0.1.0", path = "../span-timing" }
 pathmap-derive = { version = "0.3.0", path = "./pathmap-derive" }
 maybe-dangling = "0.1.1"
+span-timing = { version = "0.1.0" }
 dyn-clone = "1.0.17" # NOTE, we can eliminate this when we eliminate `!slim_ptrs`
 local-or-heap = "0.1.0"
 reusing-vec = {version = "0.2.0", features = ["smallvec"]}
