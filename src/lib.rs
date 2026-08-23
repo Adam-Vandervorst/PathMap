@@ -1,10 +1,8 @@
-#![cfg_attr(feature = "nightly", allow(internal_features), feature(core_intrinsics))]
-#![cfg_attr(feature = "nightly", feature(portable_simd))]
+#![cfg_attr(feature = "nightly", allow(internal_features))]
 #![cfg_attr(feature = "nightly", feature(allocator_api))]
 #![cfg_attr(feature = "nightly", feature(coroutine_trait))]
 #![cfg_attr(feature = "nightly", feature(coroutines))]
 #![cfg_attr(feature = "nightly", feature(stmt_expr_attributes))]
-#![cfg_attr(feature = "nightly", feature(gen_blocks))]
 #![cfg_attr(feature = "nightly", feature(yield_expr))]
 
 #![doc = include_str!("../README.md")]
@@ -108,9 +106,9 @@ mod poly_zipper;
 /// Used to create multiple simultaneous zippers from the same parent
 mod zipper_head;
 
-/// Used for creating random paths, tries, and zipper movements
-#[cfg(feature = "fuzzer")]
-pub mod fuzzer;
+/// Used for creating random paths and tries, according to configurable distributions
+#[cfg(feature = "random")]
+pub mod random;
 
 /// Features to inspect performance properties of trees, for optimizing
 #[cfg(feature = "counters")]

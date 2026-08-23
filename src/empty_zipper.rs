@@ -90,6 +90,7 @@ impl ZipperIteration for EmptyZipper {
 
 impl<V> ZipperValues<V> for EmptyZipper {
     fn val(&self) -> Option<&V> { None }
+    fn val_at<K: AsRef<[u8]>>(&self, _path: K) -> Option<&V> { None }
 }
 
 impl<V> ZipperForking<V> for EmptyZipper {
@@ -99,6 +100,7 @@ impl<V> ZipperForking<V> for EmptyZipper {
 
 impl<'a, V: Clone + Send + Sync> ZipperReadOnlyValues<'a, V> for EmptyZipper {
     fn get_val(&self) -> Option<&'a V> { None }
+    fn get_val_at<K: AsRef<[u8]>>(&self, _path: K) -> Option<&'a V> { None }
 }
 
 impl<'a, V: Clone + Send + Sync> ZipperReadOnlyConditionalValues<'a, V> for EmptyZipper {

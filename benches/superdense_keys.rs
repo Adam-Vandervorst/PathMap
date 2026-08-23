@@ -80,6 +80,58 @@ fn superdense_get(bencher: Bencher, n: u64) {
 }
 
 #[divan::bench(args = [1000, 2000, 4000, 8000, 16000, 32000])]
+fn superdense_descend_until(bencher: Bencher, n: u64) {
+    let mut map: PathMap<u64> = PathMap::new();
+    for i in 0..n { map.set_val_at(prefix_key(&i), i); }
+    let keys: Vec<Vec<u8>> = (0..n).map(|i| prefix_key(&i).to_vec()).collect();
+
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let mut zipper = map.read_zipper();
+        let keys_len = keys.len().max(1);
+        for i in 0..n {
+            zipper.reset();
+            let key = &keys[(i as usize) % keys_len];
+            let start = (i as usize) % key.len().max(1);
+            if start > 0 {
+                zipper.descend_to(&key[..start]);
+            }
+            if zipper.descend_until() {
+                sink += 1;
+            }
+        }
+        black_box(sink);
+    });
+}
+
+const DESCEND_UNTIL_MAX_BYTES: usize = 2;
+
+#[divan::bench(args = [1000, 2000, 4000, 8000, 16000, 32000])]
+fn superdense_descend_until_max_bytes(bencher: Bencher, n: u64) {
+    let mut map: PathMap<u64> = PathMap::new();
+    for i in 0..n { map.set_val_at(prefix_key(&i), i); }
+    let keys: Vec<Vec<u8>> = (0..n).map(|i| prefix_key(&i).to_vec()).collect();
+
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let mut zipper = map.read_zipper();
+        let keys_len = keys.len().max(1);
+        for i in 0..n {
+            zipper.reset();
+            let key = &keys[(i as usize) % keys_len];
+            let start = (i as usize) % key.len().max(1);
+            if start > 0 {
+                zipper.descend_to_existing(&key[..start]);
+            }
+            if zipper.descend_until_max_bytes(DESCEND_UNTIL_MAX_BYTES) {
+                sink += 1;
+            }
+        }
+        black_box(sink);
+    });
+}
+
+#[divan::bench(args = [1000, 2000, 4000, 8000, 16000, 32000])]
 fn superdense_drop_head(bencher: Bencher, n: u64) {
 
     bencher.with_inputs(|| {
@@ -106,6 +158,26 @@ fn superdense_meet(bencher: Bencher, n: u64) {
     bencher.bench_local(|| {
         *black_box(&mut intersection) = l.meet(black_box(&r));
     });
+}
+
+/// This is the success case for dense meet's intersection-mask walk: both
+/// nodes have many children, but only a small fraction of those children are
+/// present in both nodes.
+#[divan::bench(args = [1000, 2000, 4000, 8000, 16000, 32000])]
+fn superdense_meet_low_overlap(bencher: Bencher, n: u64) {
+    let overlap = n / 16;
+    let offset = n - overlap;
+
+    let mut l: PathMap<u64> = PathMap::new();
+    for i in 0..n { l.set_val_at(prefix_key(&i), i); }
+    let mut r: PathMap<u64> = PathMap::new();
+    for i in offset..(offset + n) { r.set_val_at(prefix_key(&i), i); }
+
+    let mut intersection: PathMap<u64> = PathMap::new();
+    bencher.bench_local(|| {
+        *black_box(&mut intersection) = l.meet(black_box(&r));
+    });
+    assert_eq!(intersection.val_count(), overlap as usize);
 }
 
 /// This tests the performance of the meet op when there are already some shared nodes between the maps

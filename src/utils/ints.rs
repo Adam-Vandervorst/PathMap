@@ -49,7 +49,7 @@ impl PathInteger<16> for u128 {}
 /// ```
 pub fn indices_to_bob<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(xs: &[R], bob: &mut Vec<u8>) -> usize {
     assert!(xs.len() <= 8);
-    let mut steps = xs.into_iter().map(|x| (NUM_SIZE*8) - (x.leading_zeros() as usize)).max().unwrap_or(0);
+    let steps = xs.into_iter().map(|x| (NUM_SIZE*8) - (x.leading_zeros() as usize)).max().unwrap_or(0);
     for c in (0..steps).rev() {
         bob.push(0);
         for i in 0..xs.len() {
@@ -71,10 +71,10 @@ pub fn bob_to_indices<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(bob: &[u8
 }
 
 /// Encode multiple integers big-endian round-robin wise into a byte path.
-/// Does not pad to number bit length.
+/// Does not pad to number byte length.
 pub fn indices_to_weave<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(xs: &[usize], weave: &mut Vec<u8>) {
-    let mut steps = xs.into_iter().map(|x| (NUM_SIZE*8 - (x.leading_zeros() as usize)).div_ceil(8)).max().unwrap_or(0);
-    for c in (0..steps).rev() {
+    // let steps = xs.into_iter().map(|x| (NUM_SIZE*8 - (x.leading_zeros() as usize)).div_ceil(8).max(1)).max().unwrap_or(0);
+    for c in (0..NUM_SIZE).rev() {
         for i in 0..xs.len() {
             weave.push((xs[i] >> c*8) as u8)
         }
@@ -87,7 +87,7 @@ pub fn weave_to_indices<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(weave: 
     let n = xs.len();
     if n == 0 { return; }
     assert_eq!(weave.len() % n, 0);
-    let mut steps = weave.len()/n;
+    let steps = weave.len()/n;
     for c in (0..steps).rev() {
         for i in 0..xs.len() {
             unsafe { xs[i] |= R::from_u8(weave[n*c+i]).unwrap_unchecked() << (8*steps - (c+1)*8); }

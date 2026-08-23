@@ -233,7 +233,7 @@ enum AsciiEdgeTarget<V> {
     Value(*const V),
 }
 
-fn build_ascii_graph_logical<V: TrieValue + Debug, Z: zipper_priv::ZipperPriv + ZipperMoving + ZipperIteration + ZipperValues<V>>(
+fn build_ascii_graph_logical<V: TrieValue + Debug, A: Allocator, Z: ZipperInfallibleSubtries<V, A> + ZipperMoving + ZipperIteration + ZipperValues<V>>(
     mut z: Z,
     dc: &DrawConfig,
     ds: &mut DrawState,
@@ -548,7 +548,7 @@ fn update_node_hash<V : TrieValue + Debug + Hash, A : Allocator>(node: &TrieNode
     }
 }
 
-fn viz_zipper_logical<V : TrieValue + Debug + Hash, Z: zipper_priv::ZipperPriv + ZipperMoving + ZipperIteration + ZipperValues<V>>(mut z: Z, dc: &DrawConfig, ds: &mut DrawState) {
+fn viz_zipper_logical<V : TrieValue + Debug + Hash, A: Allocator, Z: ZipperInfallibleSubtries<V, A> + ZipperMoving + ZipperIteration + ZipperValues<V>>(mut z: Z, dc: &DrawConfig, ds: &mut DrawState) {
     let root_focus = z.get_focus();
     let root_node = root_focus.borrow().unwrap();
     let root_node_id = hash_pair(root_node.shared_node_id(), &[]);

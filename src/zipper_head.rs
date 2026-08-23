@@ -5,7 +5,6 @@ use crate::alloc::{Allocator, GlobalAlloc};
 use crate::PathMap;
 use crate::trie_node::*;
 use crate::zipper::*;
-use crate::zipper::zipper_priv::ZipperPriv;
 use crate::zipper_tracking::*;
 use crate::dense_byte_node::CellByteNode;
 
@@ -156,11 +155,9 @@ crate::impl_name_only_debug!(
 /// `ZipperHeadOwned` is useful when managing the lifetime of an ordinary `ZipperHead` is unwieldy, as
 /// often occurs in multi-threaded situations.
 ///
-/// TODO: `ZipperHeadOwned` should be benchmarked against an ordinary `ZipperHead` to see how much
-/// performance is lost.  There is a `Mutex` in `ZipperHeadOwned` so that it can be `Sync`, while the
-/// ordinary `ZipperHead` uses an `UnsafeCell`.  However in a scenario where all the zipper-creation
-/// activity was happening from the same thread, it's unclear how much cost in involved locking an
-/// unlocking the mutex.
+/// Benchmark note: `benches/zipper_head_owned.rs` compares same-thread read creation and write
+/// creation/cleanup against ordinary `ZipperHead`. The owned head pays for a `Mutex` so it can be
+/// `Sync`, while ordinary `ZipperHead` uses an `UnsafeCell`.
 pub struct ZipperHeadOwned<V: Clone + Send + Sync + 'static, A: Allocator + 'static = GlobalAlloc> {
     z: std::sync::Mutex<WriteZipperOwned<V, A>>,
     tracker_paths: SharedTrackerPaths,
@@ -308,7 +305,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             // has already been dismantled... So we are checking here in order to handle that situation gracefully
             if inner_z.focus_stack.top().is_some() {
                 inner_z.move_to_path(origin_path);
-                if inner_z.try_borrow_focus().unwrap().as_tagged().node_is_empty() {
+                if inner_z.try_borrow_focus().unwrap().0.as_tagged().node_is_empty() {
                     inner_z.prune_path();
                 }
                 inner_z.reset();

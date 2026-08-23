@@ -72,6 +72,68 @@ fn sparse_get(bencher: Bencher, n: u64) {
     });
 }
 
+#[divan::bench(args = [250, 500, 1000, 2000, 4000, 8000])]
+fn sparse_descend_until(bencher: Bencher, n: u64) {
+    let mut r = StdRng::seed_from_u64(1);
+    let keys: Vec<Vec<u8>> = (0..n).into_iter().map(|_| {
+        let len = (r.random::<u8>() % 18) + 3; //length between 3 and 20 chars
+        (0..len).into_iter().map(|_| r.random::<u8>()).collect()
+    }).collect();
+
+    let mut map: PathMap<u64> = PathMap::new();
+    for i in 0..n { map.set_val_at(&keys[i as usize], i); }
+
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let mut zipper = map.read_zipper();
+        let keys_len = keys.len().max(1);
+        for i in 0..n {
+            zipper.reset();
+            let key = &keys[(i as usize) % keys_len];
+            let start = (i as usize) % key.len().max(1);
+            if start > 0 {
+                zipper.descend_to(&key[..start]);
+            }
+            if zipper.descend_until() {
+                sink += 1;
+            }
+        }
+        black_box(sink);
+    });
+}
+
+const DESCEND_UNTIL_MAX_BYTES: usize = 2;
+
+#[divan::bench(args = [250, 500, 1000, 2000, 4000, 8000])]
+fn sparse_descend_until_max_bytes(bencher: Bencher, n: u64) {
+    let mut r = StdRng::seed_from_u64(1);
+    let keys: Vec<Vec<u8>> = (0..n).into_iter().map(|_| {
+        let len = (r.random::<u8>() % 18) + 3; //length between 3 and 20 chars
+        (0..len).into_iter().map(|_| r.random::<u8>()).collect()
+    }).collect();
+
+    let mut map: PathMap<u64> = PathMap::new();
+    for i in 0..n { map.set_val_at(&keys[i as usize], i); }
+
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let mut zipper = map.read_zipper();
+        let keys_len = keys.len().max(1);
+        for i in 0..n {
+            zipper.reset();
+            let key = &keys[(i as usize) % keys_len];
+            let start = (i as usize) % key.len().max(1);
+            if start > 0 {
+                zipper.descend_to(&key[..start]);
+            }
+            if zipper.descend_until_max_bytes(DESCEND_UNTIL_MAX_BYTES) {
+                sink += 1;
+            }
+        }
+        black_box(sink);
+    });
+}
+
 #[divan::bench(args = [125, 250, 500, 1000, 2000, 4000])]
 fn sparse_val_count_bench(bencher: Bencher, n: u64) {
 

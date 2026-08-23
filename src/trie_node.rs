@@ -188,26 +188,22 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
 
     /// Generates a new iter token, to iterate the children and values contained within this node
     ///
-    /// GOAT: Do we really *need* 128 bits for the iter token?  Or could we use 64?  The idea is that an
-    /// iter token can represent any position in any arbitrary node type, and involve a minimum of computation
-    /// to advance to the next position.  Currently the only node type that uses more than 64 bits is the
-    /// ByteNode, and that is because it represents the mask in the first 64 bits of the token.  However it
-    /// seems just as efficient (I think actually slightly more efficient) to store both one more than the path
-    /// byte returned by the last call (or 0 if iteration is starting) and the index in the values vec.  This means
-    /// we actually only need 16 bits for the byte node.
+    /// The iter token is a node-local cursor.  It must represent any position within a node type, and
+    /// should involve a minimum of computation to advance to the next position, but it does not need to
+    /// encode an arbitrary path through the trie.
     ///
-    /// To the more general question of whether it will be enough for any possible future node structure, that
-    /// is a more difficult consideration.  Currently MAX_NODE_KEY_BYTES is limited to 48, but there is no limit
-    /// on the branching factor within that node.  So even 128 bits is insufficient to encode all paths in theory.
-    /// However a fixed-size node structure has a physical limit on its complexity.  If we assume we will limit a
-    /// node to 4KB, 12 bits is enough to address any byte within that physical structure, so there is probably some
-    /// clever encoding that can address any path that it could contain, using 64 bits, with a reasonable time and
-    /// memory-fetch overhead.
-    fn new_iter_token(&self) -> u128;
+    /// To the more general question of whether 64 bits will be enough for any possible future node
+    /// structure, currently MAX_NODE_KEY_BYTES is limited to 48, but there is no limit on the branching
+    /// factor within that node.  So even 128 bits would be insufficient to encode all paths in theory.
+    /// However a fixed-size node structure has a physical limit on its complexity.  If we assume we will
+    /// limit a node to 4KB, 12 bits is enough to address any byte within that physical structure, so there
+    /// is probably some clever encoding that can address any position that it could contain, using 64 bits,
+    /// with a reasonable time and memory-fetch overhead.
+    fn new_iter_token(&self) -> IterToken;
 
     /// Generates an iter token that can be passed to [Self::next_items] to continue iteration from the
     /// specified path
-    fn iter_token_for_path(&self, key: &[u8]) -> u128;
+    fn iter_token_for_path(&self, key: &[u8]) -> IterToken;
 
     /// Steps to the next existing path within the node, in a depth-first order
     ///
@@ -217,7 +213,7 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// - `path` is relative to the start of `node`
     /// - `child_node` an onward node link, of `None`
     /// - `value` that exists at the path, or `None`
-    fn next_items(&self, token: u128) -> (u128, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
+    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
 
     /// Returns the total number of leaves contained within the whole subtree defined by the node
     /// GOAT, this should be deprecated
@@ -369,11 +365,14 @@ pub trait TrieNodeDowncast<V: Clone + Send + Sync, A: Allocator> {
     fn convert_to_cell_node(&mut self) -> TrieNodeODRc<V, A>;
 }
 
+/// Node-local cursor used by the trie-node iteration interface
+pub type IterToken = u64;
+
 /// Special sentinel token value indicating iteration of a node has not been initialized
-pub const NODE_ITER_INVALID: u128 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+pub const NODE_ITER_INVALID: IterToken = IterToken::MAX;
 
 /// Special sentinel token value indicating iteration of a node has concluded
-pub const NODE_ITER_FINISHED: u128 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE;
+pub const NODE_ITER_FINISHED: IterToken = IterToken::MAX - 1;
 
 /// Internal.  A pointer to an onward link or a value contained within a node
 pub(crate) enum PayloadRef<'a, V: Clone + Send + Sync, A: Allocator> {
@@ -712,6 +711,27 @@ fn pmeet_generic_recursive_reset<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allo
     }
 }
 
+/// An abstracted reference to the node at the zipper's focus, returned by [`crate::zipper::ZipperInfallibleSubtries::get_focus`]
+///
+/// The meaning of each returned value:
+/// - `AbstractNodeRef::None`
+/// The focus is on a non-existant path
+///
+/// - `BorrowedDyn(&'a dyn TrieNode<V>)`
+/// The focus is on an existing node, but the node's `TrieNodeODRc` is not available so
+/// a "shallow copy" i.e. refcount bump, is not possible
+///
+/// - `BorrowedRc(&'a TrieNodeODRc<V>)`
+/// The focus is on an existing node, and we can access the `TrieNodeODRc`.  This is the
+/// ideal situation. (fastest path)
+///
+/// - `BorrowedTiny(TinyRefNode<'a, V>)`
+/// The focus is on a position inside a node, and the TinyRefNode is effectively a pointer
+/// to that position
+///
+/// - `OwnedRc(TrieNodeODRc<V>)`
+/// We needed to make a brand new node to represent this position.  This is the worst case
+/// scenario for performance because allocation was necessary
 pub enum AbstractNodeRef<'a, V: Clone + Send + Sync, A: Allocator> {
     None,
     BorrowedDyn(TaggedNodeRef<'a, V, A>), //GOAT eliminate this variant!
@@ -1186,7 +1206,7 @@ mod tagged_node_ref {
         }
 
         #[inline(always)]
-        pub fn new_iter_token(&self) -> u128 {
+        pub fn new_iter_token(&self) -> IterToken {
             match self {
                 Self::DenseByteNode(node) => node.new_iter_token(),
                 Self::LineListNode(node) => node.new_iter_token(),
@@ -1198,7 +1218,7 @@ mod tagged_node_ref {
             }
         }
         #[inline(always)]
-        pub fn iter_token_for_path(&self, key: &[u8]) -> u128 {
+        pub fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
             match self {
                 Self::DenseByteNode(node) => node.iter_token_for_path(key),
                 Self::LineListNode(node) => node.iter_token_for_path(key),
@@ -1210,7 +1230,7 @@ mod tagged_node_ref {
             }
         }
         #[inline(always)]
-        pub fn next_items(&self, token: u128) -> (u128, &'a[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+        pub fn next_items(&self, token: IterToken) -> (IterToken, &'a[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
             match self {
                 Self::DenseByteNode(node) => node.next_items(token),
                 Self::LineListNode(node) => node.next_items(token),
@@ -1362,6 +1382,9 @@ mod tagged_node_ref {
         }
 
         pub fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.shared_node_id() == other.shared_node_id() {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             match self {
                 Self::DenseByteNode(node) => node.pjoin_dyn(other),
                 Self::LineListNode(node) => node.pjoin_dyn(other),
@@ -1372,6 +1395,9 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.shared_node_id() == other.shared_node_id() {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             match self {
                 Self::DenseByteNode(node) => node.pmeet_dyn(other),
                 Self::LineListNode(node) => node.pmeet_dyn(other),
@@ -1382,6 +1408,9 @@ mod tagged_node_ref {
         }
 
         pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+            if self.shared_node_id() == other.shared_node_id() {
+                return AlgebraicResult::None;
+            }
             match self {
                 Self::DenseByteNode(node) => node.psubtract_dyn(other),
                 Self::LineListNode(node) => node.psubtract_dyn(other),
@@ -1801,7 +1830,7 @@ mod tagged_node_ref {
         }
 
         #[inline]
-        pub fn new_iter_token(&self) -> u128 {
+        pub fn new_iter_token(&self) -> IterToken {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => 0,
@@ -1813,7 +1842,7 @@ mod tagged_node_ref {
             }
         }
         #[inline]
-        pub fn iter_token_for_path(&self, key: &[u8]) -> u128 {
+        pub fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => 0,
@@ -1825,7 +1854,7 @@ mod tagged_node_ref {
             }
         }
         #[inline]
-        pub fn next_items(&self, token: u128) -> (u128, &[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+        pub fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => (NODE_ITER_FINISHED, &[], None, None),
@@ -1988,6 +2017,9 @@ mod tagged_node_ref {
         }
 
         pub fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.ptr == other.ptr {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => crate::empty_node::EmptyNode.pjoin_dyn(other),
@@ -2000,6 +2032,9 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+            if self.ptr == other.ptr {
+                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+            }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => AlgebraicResult::None,
@@ -2012,6 +2047,9 @@ mod tagged_node_ref {
         }
 
         pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+            if self.ptr == other.ptr {
+                return AlgebraicResult::None;
+            }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => AlgebraicResult::None,
@@ -3028,6 +3066,9 @@ mod opaque_dyn_rc_trie_node {
             let (ptr, _tag) = self.ptr.get_raw_parts();
 
             if unsafe{ &*ptr }.compare_exchange(1, 0, Acquire, Relaxed).is_err() {
+                #[cfg(feature = "counters")]
+                crate::counters::record_make_unique(true);
+
                 // Another pointer exists, so we must clone.
                 let cloned_node = self.as_tagged().clone_self();
 
@@ -3035,6 +3076,9 @@ mod opaque_dyn_rc_trie_node {
                 *self = cloned_node;
 
             } else {
+                #[cfg(feature = "counters")]
+                crate::counters::record_make_unique(false);
+
                 // We were the sole reference so bump back up the  ref count.
                 unsafe{ &*ptr }.store(1, Release);
             }

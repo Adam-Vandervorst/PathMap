@@ -530,6 +530,19 @@ impl<V> FatAlgebraicResult<V> {
 
 /// Implements basic algebraic behavior (union & intersection) for a type
 pub trait Lattice {
+    /// Indicates whether the lattice operations are idempotent for the purpose of
+    /// evaluating algebraic operations on shared subtries.
+    ///
+    /// If `IDEMPOTENT = true` the implementor is asserting that:
+    /// `pjoin(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
+    /// `join_into(self) -> AlgebraicStatus::Identity`,
+    /// `pmeet(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
+    ///
+    /// WARNING! This constant is currently informational only.  The node-level and zipper
+    /// algebra implementations do not yet consult it, so changing it has no effect
+    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    const IDEMPOTENT: bool = true;
+
     /// Implements the union operation between two instances of a type in a partial lattice, resulting in
     /// the creation of a new result instance
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
@@ -600,6 +613,17 @@ pub trait LatticeRef {
 
 /// Implements subtract behavior for a type
 pub trait DistributiveLattice {
+    /// Indicates whether the subtraction operation is idempotent for the purpose of
+    /// evaluating algebraic operations on shared subtries.
+    ///
+    /// If `IDEMPOTENT = true` the implementor is asserting that:
+    /// `psubtract(self) -> AlgebraicResult::None`,
+    ///
+    /// WARNING! This constant is currently informational only.  The node-level and zipper
+    /// algebra implementations do not yet consult it, so changing it has no effect
+    /// on their behavior.  It is planned for gating implementation shortcuts in the future
+    const IDEMPOTENT: bool = true;
+
     /// Implements the partial subtract operation
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
 
@@ -1193,9 +1217,201 @@ set_dist_lattice!(HashSet<K>);
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashSet, HashMap};
-    use crate::ring::Lattice;
-    use super::{AlgebraicResult, SetLattice, SELF_IDENT, COUNTER_IDENT};
+    use super::{AlgebraicResult, SetLattice, COUNTER_IDENT, SELF_IDENT};
+    use crate::ring::{DistributiveLattice, Lattice};
+    use std::collections::{HashMap, HashSet};
+    use std::fmt::Debug;
+
+    type NestedSetMap = HashMap<u8, HashSet<u16>>;
+
+    fn assert_binary_result<T>(
+        result: AlgebraicResult<T>,
+        self_value: &T,
+        counter_value: &T,
+        expected: &T,
+        allow_counter_identity: bool,
+        context: &str,
+    ) where
+        T: Clone + Default + Eq + Debug,
+    {
+        match &result {
+            AlgebraicResult::None => {
+                assert_eq!(expected, &T::default(), "{context}: None result");
+            }
+            AlgebraicResult::Identity(mask) => {
+                assert_ne!(*mask, 0, "{context}: zero identity mask");
+                assert_eq!(
+                    *mask & !(SELF_IDENT | COUNTER_IDENT),
+                    0,
+                    "{context}: identity mask sets an out-of-arity bit"
+                );
+                if !allow_counter_identity {
+                    assert_eq!(
+                        *mask & COUNTER_IDENT,
+                        0,
+                        "{context}: non-commutative operation returned counter identity"
+                    );
+                }
+                if *mask & SELF_IDENT != 0 {
+                    assert_eq!(self_value, expected, "{context}: self identity mismatch");
+                }
+                if *mask & COUNTER_IDENT != 0 {
+                    assert_eq!(
+                        counter_value, expected,
+                        "{context}: counter identity mismatch"
+                    );
+                }
+            }
+            AlgebraicResult::Element(_) => {}
+        }
+
+        let actual = result.unwrap_or([self_value, counter_value], T::default());
+        assert_eq!(actual, *expected, "{context}: materialized result");
+    }
+
+    fn normalize_nested_map(map: &NestedSetMap) -> NestedSetMap {
+        map.iter()
+            .filter(|(_, values)| !values.is_empty())
+            .map(|(key, values)| (*key, values.clone()))
+            .collect()
+    }
+
+    fn assert_nested_result(
+        result: AlgebraicResult<NestedSetMap>,
+        self_value: &NestedSetMap,
+        counter_value: &NestedSetMap,
+        expected: &NestedSetMap,
+        allow_counter_identity: bool,
+        context: &str,
+    ) {
+        match &result {
+            AlgebraicResult::None => {
+                assert!(expected.is_empty(), "{context}: None result");
+            }
+            AlgebraicResult::Identity(mask) => {
+                assert_ne!(*mask, 0, "{context}: zero identity mask");
+                assert_eq!(
+                    *mask & !(SELF_IDENT | COUNTER_IDENT),
+                    0,
+                    "{context}: identity mask sets an out-of-arity bit"
+                );
+                if !allow_counter_identity {
+                    assert_eq!(
+                        *mask & COUNTER_IDENT,
+                        0,
+                        "{context}: non-commutative operation returned counter identity"
+                    );
+                }
+                if *mask & SELF_IDENT != 0 {
+                    assert_eq!(
+                        normalize_nested_map(self_value),
+                        *expected,
+                        "{context}: self identity mismatch"
+                    );
+                }
+                if *mask & COUNTER_IDENT != 0 {
+                    assert_eq!(
+                        normalize_nested_map(counter_value),
+                        *expected,
+                        "{context}: counter identity mismatch"
+                    );
+                }
+            }
+            AlgebraicResult::Element(_) => {}
+        }
+
+        let actual = result.unwrap_or([self_value, counter_value], NestedSetMap::new());
+        assert_eq!(
+            normalize_nested_map(&actual),
+            *expected,
+            "{context}: materialized result"
+        );
+    }
+
+    fn mixed(seed: u64) -> u64 {
+        let mut x = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    }
+
+    fn generated_set(seed: u64, salt: u64) -> HashSet<u16> {
+        let mut set = HashSet::new();
+        for value in 0..48 {
+            if mixed(seed ^ salt ^ ((value as u64) << 32)) % 5 < 2 {
+                set.insert(value);
+            }
+        }
+        set
+    }
+
+    fn generated_nested_map(seed: u64, salt: u64) -> NestedSetMap {
+        let mut map = NestedSetMap::new();
+        for key in 0..8 {
+            let key_seed = mixed(seed ^ salt ^ ((key as u64) << 24));
+            if key_seed % 4 == 0 {
+                continue;
+            }
+
+            let mut values = HashSet::new();
+            for value in 0..16 {
+                if mixed(key_seed ^ ((value as u64) << 32)) % 5 < 2 {
+                    values.insert(value);
+                }
+            }
+            if key_seed % 31 == 0 {
+                values.clear();
+            }
+            map.insert(key, values);
+        }
+        map
+    }
+
+    fn nested_join(a: &NestedSetMap, b: &NestedSetMap) -> NestedSetMap {
+        let mut result = normalize_nested_map(a);
+        for (key, values) in b {
+            if values.is_empty() {
+                continue;
+            }
+            result
+                .entry(*key)
+                .or_default()
+                .extend(values.iter().copied());
+        }
+        result
+    }
+
+    fn nested_meet(a: &NestedSetMap, b: &NestedSetMap) -> NestedSetMap {
+        let mut result = NestedSetMap::new();
+        for (key, a_values) in a {
+            let Some(b_values) = b.get(key) else {
+                continue;
+            };
+            let values = a_values
+                .intersection(b_values)
+                .copied()
+                .collect::<HashSet<_>>();
+            if !values.is_empty() {
+                result.insert(*key, values);
+            }
+        }
+        result
+    }
+
+    fn nested_subtract(a: &NestedSetMap, b: &NestedSetMap) -> NestedSetMap {
+        let mut result = NestedSetMap::new();
+        for (key, a_values) in a {
+            let values = if let Some(b_values) = b.get(key) {
+                a_values.difference(b_values).copied().collect()
+            } else {
+                a_values.clone()
+            };
+            if !values.is_empty() {
+                result.insert(*key, values);
+            }
+        }
+        result
+    }
 
     #[test]
     fn set_lattice_join_test1() {
@@ -1298,6 +1514,115 @@ mod tests {
         assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
     }
 
+    #[test]
+    fn seeded_hash_set_operations_match_set_oracle() {
+        #[cfg(miri)]
+        const SEEDS: u64 = 1;
+        #[cfg(not(miri))]
+        const SEEDS: u64 = 256;
+
+        for seed in 0..SEEDS {
+            let a = generated_set(seed, 0x243f_6a88_85a3_08d3);
+            let b = generated_set(seed, 0x1319_8a2e_0370_7344);
+
+            let expected_join = a.union(&b).copied().collect::<HashSet<_>>();
+            assert_binary_result(
+                a.pjoin(&b),
+                &a,
+                &b,
+                &expected_join,
+                true,
+                &format!("HashSet join seed {seed}"),
+            );
+            let mut join_in_place = a.clone();
+            join_in_place.join_into(b.clone());
+            assert_eq!(
+                join_in_place, expected_join,
+                "HashSet join_into seed {seed}"
+            );
+
+            let expected_meet = a.intersection(&b).copied().collect::<HashSet<_>>();
+            assert_binary_result(
+                a.pmeet(&b),
+                &a,
+                &b,
+                &expected_meet,
+                true,
+                &format!("HashSet meet seed {seed}"),
+            );
+            let expected_subtract = a.difference(&b).copied().collect::<HashSet<_>>();
+            assert_binary_result(
+                a.psubtract(&b),
+                &a,
+                &b,
+                &expected_subtract,
+                false,
+                &format!("HashSet subtract seed {seed}"),
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_hash_map_operations_match_nested_set_oracle() {
+        #[cfg(miri)]
+        const SEEDS: u64 = 1;
+        #[cfg(not(miri))]
+        const SEEDS: u64 = 256;
+
+        for seed in 0..SEEDS {
+            let a = generated_nested_map(seed, 0x243f_6a88_85a3_08d3);
+            let b = generated_nested_map(seed, 0x1319_8a2e_0370_7344);
+            let c = generated_nested_map(seed, 0xa409_3822_299f_31d0);
+
+            let expected_join = nested_join(&a, &b);
+            assert_nested_result(
+                a.pjoin(&b),
+                &a,
+                &b,
+                &expected_join,
+                true,
+                &format!("HashMap join seed {seed}"),
+            );
+            let mut join_in_place = a.clone();
+            join_in_place.join_into(b.clone());
+            assert_eq!(
+                normalize_nested_map(&join_in_place),
+                expected_join,
+                "HashMap join_into seed {seed}"
+            );
+
+            let expected_meet = nested_meet(&a, &b);
+            assert_nested_result(
+                a.pmeet(&b),
+                &a,
+                &b,
+                &expected_meet,
+                true,
+                &format!("HashMap meet seed {seed}"),
+            );
+            let expected_subtract = nested_subtract(&a, &b);
+            assert_nested_result(
+                a.psubtract(&b),
+                &a,
+                &b,
+                &expected_subtract,
+                false,
+                &format!("HashMap subtract seed {seed}"),
+            );
+
+            let ab_join = a.pjoin(&b).unwrap_or([&a, &b], NestedSetMap::new());
+            let expected_chain = nested_subtract(&nested_join(&a, &b), &c);
+            assert_nested_result(
+                ab_join.psubtract(&c),
+                &ab_join,
+                &c,
+                &expected_chain,
+                false,
+                &format!("HashMap chained join/subtract seed {seed}"),
+            );
+        }
+    }
+
     /// Used in [set_lattice_join_test2] and [set_lattice_meet_test2]
     #[derive(Clone, Debug)]
     struct Map<'a>(HashMap::<&'a str, HashMap<&'a str, ()>>);// TODO, should be struct Map<'a>(HashMap::<&'a str, Map<'a>>); see comment above about chalk
@@ -1332,7 +1657,8 @@ mod tests {
         inner_map_1.insert("1", ());
         a.0.insert("A", inner_map_1.clone());
         b.0.insert("B", inner_map_1);
-        // b.0.insert("C", HashMap::new()); TODO: We might want to test collapse of empty items using the is_bottom() method
+        a.0.insert("C", HashMap::new());
+        b.0.insert("C", HashMap::new());
         let joined_result = a.pjoin(&b);
         assert!(joined_result.is_element());
         let joined = joined_result.unwrap([&a, &b]);
@@ -1340,6 +1666,8 @@ mod tests {
         assert!(joined.get(&"A").is_some());
         assert!(joined.get(&"B").is_some());
         assert!(joined.get(&"C").is_none()); //Empty sub-sets should not be merged
+        a.0.remove("C");
+        b.0.remove("C");
 
         // Two level join, results should be Element even though the key existed in both args, because the values joined
         let mut inner_map_2 = HashMap::with_capacity(1);
@@ -1419,8 +1747,6 @@ mod tests {
         assert_eq!(meet_result.identity_mask().unwrap(), COUNTER_IDENT);
     }
 }
-
-//GOAT, do a test for the HashMap impl of psubtract
 //GOAT, do an impl of SetLattice for Vec as an indexed set
 
 
@@ -1438,10 +1764,10 @@ mod tests {
 // 3. Compose pseudorandom subsets of `set_a` and `set_b` and put them into HashSets
 // 4. Put corresponding concatenated paths (Cartesian product) into PathMaps.
 // 5. Select an operation to perform, and do the same operation to both the HashSets contining simple
-//   indices and to the PathMaps.  And validate the results match
-// 6. Loop back to 3, continuing to choose additional subsets to perform additional operations.
+// indices and to the PathMaps.  And validate the results match
+// 6. Loop back to 3, continuing to choose additional operations to perform.
 
 // The reason behind the cartesian product (concatenated paths) is because the chances of getting overlap
-//  beyond the first couple bytes of a random path are very slim.  So the Cartesian product appraoch
-//  means we are likely to get large common prefixes followed by splits deep in the trie, which will
-//  exercise the code more thoroughly.
+// beyond the first couple bytes of a random path are very slim.  The Cartesian product appraoch
+// means we are likely to get large common prefixes followed by splits deep in the trie, which will
+// exercise the code more thoroughly.

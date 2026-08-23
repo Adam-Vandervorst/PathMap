@@ -66,18 +66,19 @@
 //! However, the `side_effect` methods are useful in the implementation of things like serialization, etc.
 //!
 use core::convert::Infallible;
+use std::hash::Hasher;
+use std::ptr::slice_from_raw_parts;
 use reusing_vec::ReusingQueue;
 
 use crate::utils::*;
-use crate::alloc::Allocator;
+use crate::alloc::{Allocator, GlobalAlloc};
 use crate::PathMap;
 use crate::trie_node::TrieNodeODRc;
 use crate::trie_node::recursive_cata_cached;
 use crate::zipper;
 use crate::zipper::*;
-use crate::zipper::zipper_priv::ZipperPriv;
 
-use crate::gxhash::{HashMap, HashMapExt};
+use crate::gxhash::{self, HashMap, HashMapExt};
 
 /// Provides methods to perform a catamorphism on types that can reference or contain a trie
 pub trait Catamorphism<V> {
@@ -231,11 +232,39 @@ pub trait Catamorphism<V> {
         where
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>;
+
+    /// Hash the logical `PathMap` and all its values
+    fn hash(self) -> u128
+    where
+        Self: Sized,
+        V: std::hash::Hash
+    {
+        self.hash_with(|v| {
+            let mut hasher = gxhash::GxHasher::with_seed(0);
+            v.hash(&mut hasher);
+            hasher.finish_u128()
+        })
+    }
+
+    /// Hash the logical `PathMap`, using the provided function to hash values
+    fn hash_with<F>(self, val_hash: F) -> u128
+    where
+        Self: Sized,
+        F: Fn(&V) -> u128
+    {
+        self.into_cata_cached(|bm, hs, mv| {
+            let mut hasher = gxhash::GxHasher::with_seed(0b0100001010101101111110010110100110000010011000100100100111110111i64);
+            hasher.write(unsafe { slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap_unchecked() });
+            hasher.write(unsafe { slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap_unchecked() });
+            if let Some(v) = mv { hasher.write_u128(val_hash(v)) };
+            hasher.finish_u128()
+        })
+    }
 }
 
 /// Provides faster catamorphism methods for types backed by an in-memory trie, such as [`PathMap`]
 /// and some zipper implementations
-pub trait Summarization<V> {
+pub trait Summarization<V, A: Allocator = GlobalAlloc> {
 
     /// GOAT recursive cached cata.  If this dev branch is successful this should replace the caching cata flavors in the public API
     /// This is the JUMPING cata
@@ -471,7 +500,7 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
     }
 }
 
-impl<'a, Z, V> Summarization<V> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperPriv<V=V> {
+impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
     fn recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
     where
         V: Clone + Send + Sync,
@@ -482,7 +511,7 @@ impl<'a, Z, V> Summarization<V> for Z where Z: Zipper + ZipperReadOnlyConditiona
         FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
     {
         let focus = self.get_focus();
-        let w = match focus.borrow() {
+        let w = match focus.0.borrow() {
             Some(node) => {
                 let mut cache = HashMap::new();
                 recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH>(node, collapse_f, branch_f, finalize_f, &mut cache)
@@ -518,7 +547,7 @@ impl<'a, Z, V> Summarization<V> for Z where Z: Zipper + ZipperReadOnlyConditiona
     }
 }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V> for PathMap<V, A> {
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathMap<V, A> {
     fn recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
     where
         V: Clone + Send + Sync,

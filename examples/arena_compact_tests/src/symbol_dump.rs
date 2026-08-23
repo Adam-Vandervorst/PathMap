@@ -198,7 +198,7 @@ impl<'mapping> DoubleEndedIterator for SymbolIter<'mapping> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{SymbolDumper, SymbolMmap};
+    use super::{SymbolDumper, SymbolMmap};
     #[test]
     fn test_roundtrip() {
         let symbols: &[&[u8]] = &["hello", "world", "123"]

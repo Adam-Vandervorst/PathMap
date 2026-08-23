@@ -817,8 +817,8 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
 
                              let [path_idx, node_idx] = node_buf.map(|x| x as usize);
 
-                             let Deserialized::Path(path) = &deserialized[path_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected path")); };
-                             let Deserialized::Node(node) = &deserialized[node_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
+                             let Deserialized::Path(path) = deserialized.get(path_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, path offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected path")); };
+                             let Deserialized::Node(node) = deserialized.get(node_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, node offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
 
                              let mut path_node = PathMap::new();
 
@@ -838,8 +838,8 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
 
                              let [val_idx, node_idx] = node_buf.map(|x| x as usize);
 
-                             let Deserialized::Value(value) = &deserialized[val_idx]  else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected value")); };
-                             let Deserialized::Node(node)   = &deserialized[node_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
+                             let Deserialized::Value(value) = deserialized.get(val_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, value offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected value")); };
+                             let Deserialized::Node(node)   = deserialized.get(node_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, node offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
 
                              let mut value_node = node.clone();
                              value_node.set_val_at(&[], value.clone());
@@ -852,10 +852,10 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
 
                              let [mask_idx, branches_idx] = node_buf.map(|x| x as usize);
 
-                             let Deserialized::ChildMask(mask) = &deserialized[mask_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected childmask as `(/?<hex_top><Hex_bot>)*`")); };
-                             let iter = crate::utils::ByteMaskIter::new(*mask);
+                             let Deserialized::ChildMask(mask) = deserialized.get(mask_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, childmask offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected childmask as `(/?<hex_top><Hex_bot>)*`")); };
+                             let iter: crate::utils::ByteMaskIter = (*mask).into();
 
-                             let Deserialized::Branches(r) = &deserialized[branches_idx] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected branches")); };
+                             let Deserialized::Branches(r) = deserialized.get(branches_idx).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, branches offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected branches")); };
                              let branches = &branches_buffer[r.start..r.end];
 
                              core::debug_assert_eq!(mask.into_iter().copied().map(u64::count_ones).sum::<u32>() as usize, branches.len());
@@ -864,7 +864,7 @@ pub fn deserialize_file<V: TrieValue>(file_path : impl AsRef<std::path::Path>, d
                              let mut wz = branch_node.write_zipper();
 
                              for (byte, &idx) in iter.into_iter().zip(branches) {
-                               let Deserialized::Node(node) = &deserialized[idx as usize] else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
+                               let Deserialized::Node(node) = deserialized.get(idx as usize).ok_or_else(|| std::io::Error::other("Malformed serialized ByteTrie, child node offset out of bounds"))? else { return Err(std::io::Error::other("Malformed serialized ByteTrie, expected node")); };
 
                                core::debug_assert!(!node.is_empty());
 
@@ -985,6 +985,50 @@ fn decompress_zeros_compression_child_mask(mut encoded_hex : &[u8], )->Result<[[
 mod test {
   use super::*;
   use std::sync::Arc;
+
+  fn write_serialized_fixture(name : &str, data : &[u8])->Option<PathBuf> {
+    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
+      Ok(manifest_dir) => manifest_dir,
+      _ => {
+        #[cfg(not(miri))]
+        panic!("Test should be running under Cargo");
+        return None;
+      }
+    };
+    let dir = PathBuf::from(manifest_dir).join(".tmp");
+    let _ = std::fs::create_dir(&dir);
+    let path = dir.join(name);
+    std::fs::write(&path, data).unwrap();
+    Some(path)
+  }
+
+  #[test]
+  fn deserialize_rejects_malformed_records() {
+    let Some(bad_tag) = write_serialized_fixture("serialization_bad_tag.data", b"header\n? bad\n") else {
+      return;
+    };
+    let err = deserialize_file::<Arc<[u8]>>(&bad_tag, |b| Arc::<[u8]>::from(b)).unwrap_err();
+    assert!(err.to_string().contains("expected `<tag byte><space>`"));
+
+    let Some(odd_path_hex) = write_serialized_fixture("serialization_odd_path_hex.data", b"header\np A\n") else {
+      return;
+    };
+    let err = deserialize_file::<Arc<[u8]>>(&odd_path_hex, |b| Arc::<[u8]>::from(b)).unwrap_err();
+    assert!(err.to_string().contains("expected path"));
+  }
+
+  #[test]
+  fn deserialize_rejects_forward_offsets_without_panic() {
+    let Some(path) = write_serialized_fixture(
+      "serialization_forward_offset.data",
+      b"header\nP x0000000000000001x0000000000000002\n"
+    ) else {
+      return;
+    };
+
+    let err = deserialize_file::<Arc<[u8]>>(&path, |b| Arc::<[u8]>::from(b)).unwrap_err();
+    assert!(err.to_string().contains("offset out of bounds"));
+  }
 
   #[test]
   fn serialization_trivial_test() {

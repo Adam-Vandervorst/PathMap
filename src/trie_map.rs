@@ -1,13 +1,12 @@
 use core::cell::UnsafeCell;
-use std::ptr::slice_from_raw_parts;
 use crate::alloc::{Allocator, GlobalAlloc, global_alloc};
-use crate::morphisms::{new_map_from_ana_in, Catamorphism, Summarization, TrieBuilder};
+use crate::morphisms::{new_map_from_ana_in, Summarization, TrieBuilder};
 use crate::trie_node::*;
 use crate::zipper::*;
 use crate::merkleization::{MerkleizeResult, merkleize_impl};
 use crate::ring::{AlgebraicResult, AlgebraicStatus, COUNTER_IDENT, SELF_IDENT, Lattice, LatticeRef, DistributiveLattice, DistributiveLatticeRef, Quantale};
 
-use crate::gxhash::{self, gxhash128};
+use crate::gxhash;
 
 /// A map type that uses a trie based on byte slices (`&[u8]`) known as "paths"
 ///
@@ -220,7 +219,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     pub fn trie_ref_at_path<K: AsRef<[u8]>>(&self, path: K) -> TrieRefBorrowed<'_, V, A> {
         self.ensure_root();
         let path = path.as_ref();
-        TrieRefBorrowed::new_with_key_and_path_in(self.root().unwrap(), self.root_val(), &[], path, self.alloc.clone())
+        TrieRefBorrowed::new_with_key_and_path_in(self.root().unwrap(), || self.root_val(), &[], path, self.alloc.clone())
     }
 
     /// Creates a new read-only [Zipper], starting at the root of a `PathMap`
@@ -521,22 +520,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         }
     }
 
-    pub const INVIS_HASH: u128 = 0b00001110010011001111100111000110011110101111001101110110011100001011010011010011001000100111101000001100011111110100001000000111;
-
-    /// Hash the logical `PathMap` and all its values with the provided hash function (which can return [PathMap::INVIS_HASH] to ignore values).
-    //GOAT, do we need to do anything to make sure Merkleization and this hash method are in harmony?
-    pub fn hash<VHash : Fn(&V) -> u128>(&self, vhash: VHash) -> u128 {
-        unsafe {
-        self.read_zipper().into_cata_cached(|bm, hs, mv| {
-            let mut state = [0u8; 48];
-            state[0..16].clone_from_slice(gxhash128(slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap(), 0b0100110001110010000010011111010011100011010000101101111001100110i64).to_le_bytes().as_slice());
-            state[16..32].clone_from_slice(gxhash128(slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap(), 0b0111010001001011011011011111010110111011111101100110101100010000i64).to_le_bytes().as_slice());
-            state[32..].clone_from_slice(mv.map(|v| vhash(v)).unwrap_or(Self::INVIS_HASH).to_le_bytes().as_slice());
-            gxhash128(state.as_slice(), 0b0100001010101101111110010110100110000010011000100100100111110111i64)
-        })
-        }
-    }
-
     /// Returns a new `PathMap` containing the union of the paths in `self` and the paths in `other`
     pub fn join(&self, other: &Self) -> Self where V: Lattice {
         result_into_map(self.pjoin(other), self, other, self.alloc.clone())
@@ -613,6 +596,21 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
             *self.root.get_mut() = Some(new_root);
         }
         result
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for PathMap<V, A> {
+    #[inline]
+    fn shared_node_id(&self) -> Option<u64> {
+        if self.root_val().is_some() || !self.is_shared() {
+            return None;
+        }
+        self.root().map(|root| root.as_tagged().shared_node_id())
+    }
+
+    #[inline]
+    fn is_shared(&self) -> bool {
+        self.root().is_some_and(|root| root.refcount() > 1)
     }
 }
 
@@ -1466,6 +1464,61 @@ mod tests {
         //Validate meet with all_but_root removes it
         let result_map = map.meet(&all_but_root_map);
         assert_eq!(result_map.iter().count(), 2);
+    }
+
+    #[test]
+    fn path_map_is_zipper_concrete_at_root() {
+        use crate::zipper::ZipperConcrete;
+
+        let mut map: PathMap<()> = PathMap::new();
+        map.insert(b"a", ());
+        let snapshot = map.clone();
+
+        assert!(map.is_shared());
+        let shared_id = map.shared_node_id();
+        assert_eq!(shared_id, snapshot.shared_node_id());
+
+        map.insert(b"b", ());
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot.is_shared());
+        assert_eq!(snapshot.shared_node_id(), None);
+
+        let snapshot_after_insert = map.clone();
+        assert!(map.is_shared());
+        assert_eq!(map.shared_node_id(), snapshot_after_insert.shared_node_id());
+
+        map.remove(b"b");
+        assert!(!map.is_shared());
+        assert_eq!(map.shared_node_id(), None);
+        assert!(!snapshot_after_insert.is_shared());
+        assert_eq!(snapshot_after_insert.shared_node_id(), None);
+
+        let mut with_root_value = snapshot.clone();
+        with_root_value.insert(b"", ());
+        assert!(with_root_value.is_shared());
+        assert_eq!(with_root_value.shared_node_id(), None);
+
+        // Root values live outside the root node, and inserting at the empty key goes through
+        // `set_root_val` without touching `root`, so these two maps share a root node while
+        // holding different contents. Asserted as a pair in both directions because that is the
+        // shape of the regression: a node-only identity check reports them the same.
+        assert!(snapshot.is_shared());
+        assert!(snapshot.shared_node_id().is_some());
+        assert_ne!(snapshot.shared_node_id(), with_root_value.shared_node_id());
+        assert_ne!(with_root_value.shared_node_id(), snapshot.shared_node_id());
+
+        let mut independent = PathMap::new();
+        independent.insert(b"a", ());
+        assert!(!independent.is_shared());
+        assert_eq!(independent.shared_node_id(), None);
+
+        let empty_a: PathMap<()> = PathMap::new();
+        let empty_b: PathMap<()> = PathMap::new();
+        assert!(!empty_a.is_shared());
+        assert!(!empty_b.is_shared());
+        assert_eq!(empty_a.shared_node_id(), None);
+        assert_eq!(empty_b.shared_node_id(), None);
     }
 }
 

@@ -1,9 +1,9 @@
 use rand::distr::Distribution;
 use rand::prelude::StdRng;
 use rand::SeedableRng;
-use pathmap::fuzzer::{unbiased_descend_first_policy, DescendFirstTrieValue};
+use pathmap::random::{unbiased_descend_first_policy, DescendFirstTrieValue};
 use pathmap::utils::ints::gen_int_range;
-use pathmap::viz::{viz_btms, DrawConfig};
+use pathmap::viz::{viz_maps, DrawConfig};
 use pathmap::zipper::{ZipperMoving, ZipperWriting};
 
 fn big() {
@@ -11,7 +11,7 @@ fn big() {
     // cutting of first bytes for example
     let mut wz = r.into_write_zipper(&[]);
     wz.descend_to(&[0, 0, 0]);
-    let pm = wz.take_map().unwrap();
+    let pm = wz.take_map(true).unwrap();
 
     let stv = DescendFirstTrieValue{ source: pm, policy: unbiased_descend_first_policy };
     let rng = StdRng::from_seed([0; 32]);
@@ -28,8 +28,12 @@ fn small() {
     let samples = stv.sample_iter(rng).take(10).collect::<Vec<_>>();
     println!("samples {:?}", samples);
     println!("https://mermaid.live/");
-    let dc = DrawConfig{ ascii: false, share_values: true, hide_values: true, color_mix: false };
-    unsafe { viz_btms(&[r], &dc); }
+    let mut dc = DrawConfig::default();
+    dc.ascii_path = false;
+    dc.minimize_values = true;
+    let mut out_buf = vec![];
+    viz_maps(&[r], &dc, &mut out_buf).unwrap();
+    println!("{}", String::from_utf8_lossy(&out_buf));
 }
 
 fn main() {

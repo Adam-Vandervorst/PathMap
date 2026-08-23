@@ -61,19 +61,14 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     /// Actual focus factor calculation.
     /// Returns a valid index into `self.factor_paths`, truncating to parents if requested.
     fn factor_idx(&self, truncate_up: bool) -> Option<usize> {
+        debug_assert_eq!(self.factor_paths.len(), self.secondary.len(),
+            "factor_paths and secondary must stay in step");
         let len = self.path().len();
         let mut factor = self.factor_paths.len().checked_sub(1)?;
         while truncate_up && self.factor_paths[factor] == len {
             factor = factor.checked_sub(1)?;
         }
         Some(factor)
-    }
-
-    /// Returns the number of factors composing the `DependentProductZipperG`
-    ///
-    /// The minimum returned value will be 1 because the primary factor is counted.
-    pub fn factor_count(&self) -> usize {
-        self.secondary.len() + 1
     }
 
     /// Returns a slice of the path indices that represent the end-points of the portion of the path from each
@@ -136,6 +131,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         loop {
             while self.factor_paths.last() == Some(&plen) {
                 self.factor_paths.pop();
+                self.secondary.pop();
             }
             if let Some(idx) = self.factor_idx(false) {
                 let zipper = &mut self.secondary[idx];
@@ -241,6 +237,13 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             self.primary.val()
         }
     }
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
+        if let Some(idx) = self.factor_idx(true) {
+            self.secondary[idx].val_at(path)
+        } else {
+            self.primary.val_at(path)
+        }
+    }
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperReadOnlyValues<'trie, V>
@@ -255,6 +258,13 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             self.secondary[idx].get_val()
         } else {
             self.primary.get_val()
+        }
+    }
+    fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'trie V> {
+        if let Some(idx) = self.factor_idx(true) {
+            self.secondary[idx].get_val_at(path)
+        } else {
+            self.primary.get_val_at(path)
         }
     }
 }
@@ -328,9 +338,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     }
     fn reset(&mut self) {
         self.factor_paths.clear();
-        for secondary in &mut self.secondary {
-            secondary.reset();
-        }
+        self.secondary.clear();
         self.primary.reset();
     }
     #[inline]

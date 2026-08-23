@@ -58,13 +58,13 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     }
     fn node_remove_unmasked_branches(&mut self, _key: &[u8], _mask: ByteMask, _prune: bool) {}
     fn node_is_empty(&self) -> bool { true }
-    fn new_iter_token(&self) -> u128 {
+    fn new_iter_token(&self) -> IterToken {
         0
     }
-    fn iter_token_for_path(&self, _key: &[u8]) -> u128 {
+    fn iter_token_for_path(&self, _key: &[u8]) -> IterToken {
         0
     }
-    fn next_items(&self, _token: u128) -> (u128, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+    fn next_items(&self, _token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
         (NODE_ITER_FINISHED, &[], None, None)
     }
     fn node_val_count(&self, _cache: &mut HashMap<u64, usize>) -> usize {

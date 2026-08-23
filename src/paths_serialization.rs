@@ -5,7 +5,6 @@
 //! `.paths` data does not contain values, so the `_auxdata` functions allow values to
 //! be associated with path indices.
 
-// GOAT both functions should be tested on long paths (larger than chunk size)
 use libz_ng_sys::*;
 use crate::PathMap;
 use crate::TrieValue;
@@ -391,5 +390,80 @@ mod test {
       }
       Err(e) => { println!("ser e {}", e) }
     }
+  }
+
+  #[cfg(not(miri))] // miri really hates the zlib-ng-sys C API
+  #[test]
+  fn path_serialize_deserialize_long_paths_cross_chunk_boundary() {
+    // Paths chosen around the internal 4096-byte compression CHUNK. The dense
+    // representation cannot safely build a single path much longer than 2048
+    // bytes on the test thread, so its fixture uses two such paths to cross the
+    // chunk while still exercising the decompressor's 2048-byte output buffer.
+    // Deterministic xorshift contents make failures reproduce.
+    let mut state = 0x9e3779b97f4a7c15_u64;
+    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+    #[cfg(feature = "all_dense_nodes")]
+    let lengths = [7usize, 2049, 2049];
+    #[cfg(not(feature = "all_dense_nodes"))]
+    let lengths = [7usize, 2049, 4097, 24000];
+    let mut btm = PathMap::new();
+    let mut paths = vec![];
+    for &len in &lengths {
+      let path: Vec<u8> = (0..len).map(|_| (next() >> 33) as u8).collect();
+      btm.set_val_at(&path[..], ());
+      paths.push(path);
+    }
+
+    let mut v = vec![];
+    let ser = serialize_paths(btm.read_zipper(), &mut v).unwrap();
+    assert_eq!(ser.path_count, lengths.len());
+    assert!(ser.bytes_in > 4096, "the input must span the compression chunk size");
+
+    let mut restored = PathMap::new();
+    let de = deserialize_paths(restored.write_zipper(), v.as_slice(), ()).unwrap();
+    assert_eq!(de.path_count, lengths.len());
+
+    for path in &paths {
+      assert!(restored.contains(&path[..]), "path of len {} lost in round-trip", path.len());
+    }
+    let mut rz = restored.read_zipper();
+    let mut restored_count = 0;
+    while rz.to_next_val() { restored_count += 1; }
+    assert_eq!(restored_count, lengths.len(), "no extra paths may appear");
+  }
+
+  #[cfg(all(not(miri), not(feature = "all_dense_nodes")))]
+  #[test]
+  fn path_serialize_deserialize_very_long_paths_cross_multiple_chunks() {
+    // Keep coverage for paths that individually span multiple decompressor
+    // output buffers. Dense byte nodes cannot construct these paths without
+    // overflowing the test thread's stack.
+    let mut state = 0x9e3779b97f4a7c15_u64;
+    let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+    let lengths = [7usize, 2049, 4097, 24000];
+    let mut btm = PathMap::new();
+    let mut paths = vec![];
+    for &len in &lengths {
+      let path: Vec<u8> = (0..len).map(|_| (next() >> 33) as u8).collect();
+      btm.set_val_at(&path[..], ());
+      paths.push(path);
+    }
+
+    let mut v = vec![];
+    let ser = serialize_paths(btm.read_zipper(), &mut v).unwrap();
+    assert_eq!(ser.path_count, lengths.len());
+    assert!(ser.bytes_in > 4096, "the input must span the compression chunk size");
+
+    let mut restored = PathMap::new();
+    let de = deserialize_paths(restored.write_zipper(), v.as_slice(), ()).unwrap();
+    assert_eq!(de.path_count, lengths.len());
+
+    for path in &paths {
+      assert!(restored.contains(&path[..]), "path of len {} lost in round-trip", path.len());
+    }
+    let mut rz = restored.read_zipper();
+    let mut restored_count = 0;
+    while rz.to_next_val() { restored_count += 1; }
+    assert_eq!(restored_count, lengths.len(), "no extra paths may appear");
   }
 }

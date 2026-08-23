@@ -14,6 +14,11 @@ pub mod serialization;
 #[cfg(feature = "serialization")]
 pub mod tree_serialization;
 
+#[cfg(feature = "zipper_alg")]
+pub mod zipper_algebra;
+#[cfg(not(feature = "zipper_alg"))]
+mod zipper_algebra;
+
 struct FullZipper {
     path: Vec<u8>
 }
@@ -150,6 +155,7 @@ impl <V: TrieValue + 'static, A: Allocator> ZipperWriting<V, A> for NullZipper {
     fn remove_val(&mut self, _prune: bool) -> Option<V> { None }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { todo!() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z) {}
+    fn graft_src_at<Z: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &Z, path: K) {}
     fn graft_map(&mut self, _map: PathMap<V, A>) {}
     fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
     fn join_map_into(&mut self, _map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice { AlgebraicStatus::Element }
