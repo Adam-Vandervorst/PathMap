@@ -82,6 +82,7 @@ use std::marker::PhantomData;
 use fast_slice_utils::starts_with;
 
 use crate::alloc::{GlobalAlloc, global_alloc};
+use crate::timed_span::{TimingEntries::*, COUNTERS, timed_span};
 use crate::{
     PathMap,
     morphisms::Catamorphism,
@@ -92,7 +93,6 @@ use crate::{
         ZipperConcrete, ZipperReadOnlyConditionalValues, TrieRef
     },
 };
-
 use crate::gxhash::{GxHasher, HashMap, HashMapExt};
 
 /// The identifier of a node (branch node or line node)
@@ -2886,6 +2886,7 @@ where Storage: AsRef<[u8]>
 
     /// Resets the zipper's focus back to the root
     fn reset(&mut self) {
+        timed_span!(Reset, COUNTERS);
         // self.ascend(self.path.len() - self.origin_depth);
         let (cur_node, _) = self.tree.get_node(self.stack[0].node_id);
         self.cur_node = cur_node;
@@ -2902,6 +2903,7 @@ where Storage: AsRef<[u8]>
     ///
     /// WARNING: This is not a cheap method. It may have an order-N cost
     fn val_count(&self) -> usize {
+        timed_span!(ValueCount, COUNTERS);
         let mut zipper = self.clone();
         zipper.reset();
         let mut count = 0;
@@ -2919,6 +2921,7 @@ where Storage: AsRef<[u8]>
     /// Returns `true` if the zipper points to an existing path within the tree, otherwise `false`.  The
     /// zipper's location will be updated, regardless of whether or not the path exists within the tree.
     fn descend_to<P: AsRef<[u8]>>(&mut self, path: P) {
+        timed_span!(DescendTo, COUNTERS);
         let path = path.as_ref();
         let depth = path.len();
         let descended = self.descend_to_existing(path);
@@ -2935,6 +2938,7 @@ where Storage: AsRef<[u8]>
     /// existing path after this method returns, unless the method was called with the focus on a
     /// non-existent path.
     fn descend_to_existing<P: AsRef<[u8]>>(&mut self, path: P) -> usize {
+        timed_span!(DescendToExisting, COUNTERS);
         self.descend_cond(path.as_ref(), false)
     }
 
@@ -2945,17 +2949,15 @@ where Storage: AsRef<[u8]>
     ///
     /// If the focus is already on a value, this method will descend to the *next* value along
     /// the path.
-    fn descend_to_value<K: AsRef<[u8]>>(&mut self, path: K) -> usize {
-        self.descend_cond(path.as_ref(), true)
-    }
-
     fn descend_to_val<K: AsRef<[u8]>>(&mut self, path: K) -> usize {
+        timed_span!(DescendToVal, COUNTERS);
         self.descend_cond(path.as_ref(), true)
     }
 
     /// Moves the zipper one byte deeper into the trie.  Identical in effect to [descend_to](Self::descend_to)
     /// with a 1-byte key argument
     fn descend_to_byte(&mut self, k: u8) {
+        timed_span!(DescendToByte, COUNTERS);
         self.descend_to(&[k])
     }
 
@@ -2967,6 +2969,7 @@ where Storage: AsRef<[u8]>
     /// to the trie.  This method should only be used as part of a directed traversal operation, but
     /// index-based paths may not be stored as locations within the trie.
     fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+        timed_span!(DescendIndexedByte, COUNTERS);
         if self.invalid > 0 {
             return false;
         }
@@ -3021,12 +3024,14 @@ where Storage: AsRef<[u8]>
     /// NOTE: This method should have identical behavior to passing `0` to [descend_indexed_byte](ZipperMoving::descend_indexed_byte),
     /// although with less overhead
     fn descend_first_byte(&mut self) -> bool {
+        timed_span!(DescendFirstByte, COUNTERS);
         self.descend_indexed_byte(0)
     }
 
     /// Descends the zipper's focus until a branch or a value is encountered.  Returns `true` if the focus
     /// moved otherwise returns `false`
     fn descend_until(&mut self) -> bool {
+        timed_span!(DescendUntil, COUNTERS);
         self.trace_pos();
         let mut descended = false;
         'descend: while self.child_count() == 1 {
@@ -3077,6 +3082,7 @@ where Storage: AsRef<[u8]>
     /// If the root is fewer than `n` steps from the zipper's position, then this method will stop at
     /// the root and return `false`
     fn ascend(&mut self, mut steps: usize) -> bool {
+        timed_span!(Ascend, COUNTERS);
         self.trace_pos();
         if !self.ascend_invalid(Some(&mut steps)) {
             return false;
@@ -3103,12 +3109,14 @@ where Storage: AsRef<[u8]>
 
     /// Ascends the zipper up a single byte.  Equivalent to passing `1` to [ascend](Self::ascend)
     fn ascend_byte(&mut self) -> bool {
+        timed_span!(AscendByte, COUNTERS);
         self.ascend(1)
     }
 
     /// Ascends the zipper to the nearest upstream branch point or value.  Returns `true` if the zipper
     /// focus moved upwards, otherwise returns `false` if the zipper was already at the root
     fn ascend_until(&mut self) -> bool {
+        timed_span!(AscendUntil, COUNTERS);
         self.ascend_to_branch(true)
     }
 
@@ -3116,16 +3124,19 @@ where Storage: AsRef<[u8]>
     /// `true` if the zipper focus moved upwards, otherwise returns `false` if the zipper was already at the
     /// root
     fn ascend_until_branch(&mut self) -> bool {
+        timed_span!(AscendUntilBranch, COUNTERS);
         self.ascend_to_branch(false)
     }
 
     #[inline]
     fn to_next_sibling_byte(&mut self) -> bool {
+        timed_span!(ToNextSiblingByte, COUNTERS);
         self.to_sibling(true)
     }
 
     #[inline]
     fn to_prev_sibling_byte(&mut self) -> bool {
+        timed_span!(ToPrevSiblingByte, COUNTERS);
         self.to_sibling(false)
     }
 
@@ -3141,6 +3152,7 @@ where Storage: AsRef<[u8]>
     ///
     /// Returns a reference to the value or `None` if the zipper has encountered the root.
     fn to_next_val(&mut self) -> bool {
+        timed_span!(ToNextVal, COUNTERS);
         while self.to_next_step()  {
             if self.is_val() {
                 return true;
@@ -3160,6 +3172,7 @@ where Storage: AsRef<[u8]>
     ///
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
     fn descend_first_k_path(&mut self, k: usize) -> bool {
+        timed_span!(DescendFirstKPath, COUNTERS);
         for ii in 0..k {
             if !self.descend_first_byte() {
                 self.ascend(ii);
@@ -3181,6 +3194,7 @@ where Storage: AsRef<[u8]>
     ///
     /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
     fn to_next_k_path(&mut self, k: usize) -> bool {
+        timed_span!(ToNextKPath, COUNTERS);
         let mut depth = k;
         'outer: loop {
             while depth > 0 && self.child_count() <= 1 {
