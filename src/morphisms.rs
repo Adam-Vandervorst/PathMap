@@ -536,11 +536,11 @@ impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z wher
         let w = match focus.0.borrow() {
             Some(node) => {
                 let mut cache = HashMap::new();
-                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, start_f, fold_child_f, finalize_f, &mut cache)
+                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.val(), start_f, fold_child_f, finalize_f, &mut cache)
             },
             None => finalize_f(&ByteMask::EMPTY, None, None, &[]),
         };
-        summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(self.val(), Some(w), &[], start_f, fold_child_f, finalize_f)
+        w
     }
 }
 
@@ -556,11 +556,11 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathM
         let w = match self.root() {
             Some(node) => {
                 let mut cache = HashMap::new();
-                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, start_f, fold_child_f, finalize_f, &mut cache)
+                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.root_val(), start_f, fold_child_f, finalize_f, &mut cache)
             },
             None => finalize_f(&ByteMask::EMPTY, None, None, &[]),
         };
-        summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(self.root_val(), Some(w), &[], start_f, fold_child_f, finalize_f)
+        w
     }
 }
 

@@ -388,7 +388,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     #[inline(always)]
-    pub(crate) fn node_recursive_cata<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
+    pub(crate) fn node_recursive_cata<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
     where
         W: Clone,
         StartF: Copy + Fn(&ByteMask) -> Acc,
@@ -409,11 +409,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             // like this gives the optimizer a site to specialize for each permutation
             match (cf.rec(), cf.val()) {
                 (Some(rec), Some(val)) => {
-                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, start_f, fold_child_f, finalize_f, cache);
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(Some(val), Some(w), path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, Some(val), start_f, fold_child_f, finalize_f, cache);
+                    fold_child_f(mask, w, unsafe { ws.as_mut().unwrap_unchecked() });
                 },
                 (Some(rec), None) => {
-                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, start_f, fold_child_f, finalize_f, cache);
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, None, start_f, fold_child_f, finalize_f, cache);
                     fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(None, Some(w), path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
                 },
                 (None, Some(val)) => {
@@ -424,7 +424,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 },
             }
         }
-        finalize_f(mask, None, Some(unsafe { std::mem::take(&mut ws).unwrap_unchecked() }), &[])
+        finalize_f(mask, passed_in_val, Some(unsafe { std::mem::take(&mut ws).unwrap_unchecked() }), &[])
     }
 }
 
