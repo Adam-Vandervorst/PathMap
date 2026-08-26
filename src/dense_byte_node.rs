@@ -395,27 +395,10 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
         FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
     {
-        let mut mask_idx = 0;
-        let mut lm = unsafe{ *self.mask.0.get_unchecked(0) };
         let mask = if COMPUTE_MASK { &self.mask } else { &ByteMask::EMPTY };
         let mut ws = Some(start_f(mask));
         for cf in self.values.iter() {
-            //Compute the key byte.  Hopefully this will all be stripped away by the compiler if the path isn't used
-            //UPDATE: alas, my hopes were dashed.  No amount of reorganizing this code, eliminating all traps,
-            // unrolling the loop, etc., could convince LLVM to elide it.  So we have to hit it with the const hammer.
-            let key_byte;
-            let path = if COMPUTE_PATH {
-                while lm == 0 {
-                    mask_idx += 1;
-                    lm = unsafe{ *self.mask.0.get_unchecked(mask_idx) };
-                }
-                let byte_index = lm.trailing_zeros();
-                lm ^= 1u64 << byte_index;
-                key_byte = 64*(mask_idx as u8) + (byte_index as u8);
-                core::slice::from_ref(&key_byte)
-            } else {
-                &[]
-            };
+            let path = &[];
 
             //Do the recursive calling
             //PERF NOTE: The reason we have four code paths around the call to `branch_f` instead of just doing
@@ -427,17 +410,17 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             match (cf.rec(), cf.val()) {
                 (Some(rec), Some(val)) => {
                     let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, start_f, fold_child_f, finalize_f, cache);
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_MASK>(Some(val), Some(w), path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(Some(val), Some(w), path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
                 },
                 (Some(rec), None) => {
                     let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, start_f, fold_child_f, finalize_f, cache);
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_MASK>(None, Some(w), path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(None, Some(w), path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
                 },
                 (None, Some(val)) => {
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_MASK>(Some(val), None, path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(Some(val), None, path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
                 },
                 (None, None) => {
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_MASK>(None, None, path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(None, None, path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
                 },
             }
         }

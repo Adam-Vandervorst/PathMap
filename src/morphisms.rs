@@ -540,7 +540,7 @@ impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z wher
             },
             None => finalize_f(&ByteMask::EMPTY, None, None, &[]),
         };
-        summarize_run::<_, _, _, _, _, _, COMPUTE_MASK>(self.val(), Some(w), &[], start_f, fold_child_f, finalize_f)
+        summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(self.val(), Some(w), &[], start_f, fold_child_f, finalize_f)
     }
 }
 
@@ -560,7 +560,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathM
             },
             None => finalize_f(&ByteMask::EMPTY, None, None, &[]),
         };
-        summarize_run::<_, _, _, _, _, _, COMPUTE_MASK>(self.root_val(), Some(w), &[], start_f, fold_child_f, finalize_f)
+        summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(self.root_val(), Some(w), &[], start_f, fold_child_f, finalize_f)
     }
 }
 
@@ -569,7 +569,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathM
 //NOTE: #[inline(always)] here leads to a huge bloating of the size of the a stack frame in the recursive cata
 // (about 2.5x bloat.  but #[inline(never)] costs about 25% performance.  Letting the compiler do its thing seems
 // to be the sweet spot.
-pub(crate) fn summarize_run<V, Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_MASK: bool>(
+pub(crate) fn summarize_run<V, Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(
     val: Option<&V>,
     downstream: Option<W>,
     prefix: &[u8],
@@ -582,14 +582,20 @@ where
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
     FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
 {
-    match downstream {
-        Some(w) => {
-            let mask = if COMPUTE_MASK && !prefix.is_empty() { ByteMask::from(prefix[0]) } else { ByteMask::EMPTY };
+    match (val, downstream, prefix) {
+        (None, Some(w), []) => w,
+        (val, Some(w), prefix) => {
+            let mask = if COMPUTE_MASK && !prefix.is_empty() { ByteMask::from(*prefix.last().unwrap()) } else { ByteMask::EMPTY };
             let mut acc = start_f(&mask);
             fold_child_f(&mask, w, &mut acc);
+            let prefix = if COMPUTE_PATH {
+                if prefix.is_empty() { prefix } else { &prefix[..prefix.len() - 1] }
+            } else {
+                &[]
+            };
             finalize_f(&mask, val, Some(acc), prefix)
         },
-        None => finalize_f(&ByteMask::EMPTY, val, None, prefix),
+        (val, None, prefix) => finalize_f(&ByteMask::EMPTY, val, None, if COMPUTE_PATH { prefix } else { &[] }),
     }
 }
 
@@ -2221,6 +2227,237 @@ mod tests {
             ).1;
             assert_eq!(sum, expected_sum);
         }
+    }
+
+    /// Ports the leaf-count portion of `cata_test2` to the summarization API and
+    /// compares both summarization traversals with the existing cached catas.
+    #[test]
+    fn recursive_cata_leaf_count_matches_cached_catas() {
+        let mut map = PathMap::new();
+        let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
+
+        let cached_stepping = map.read_zipper().into_cata_cached(|_mask, children: &mut [usize], val| {
+            if children.is_empty() {
+                assert!(val.is_some());
+                1
+            } else {
+                children.iter().sum()
+            }
+        });
+        let cached_jumping = map.read_zipper().into_cata_jumping_cached(|_mask, children: &mut [usize], val, _prefix| {
+            if children.is_empty() {
+                assert!(val.is_some());
+                1
+            } else {
+                children.iter().sum()
+            }
+        });
+
+        let jumping = map.recursive_cata::<usize, usize, _, _, _, false, true>(
+            |_| 0,
+            |_mask, child, total| *total += child,
+            |_mask, val, children, _prefix| match children {
+                Some(total) => total,
+                None => {
+                    assert!(val.is_some());
+                    1
+                },
+            },
+        );
+        let stepping = map.recursive_cata_stepping::<usize, usize, _, _, _, true>(
+            |_| 0,
+            |_mask, child, total| *total += child,
+            |_mask, val, children| match children {
+                Some(total) => total,
+                None => {
+                    assert!(val.is_some());
+                    1
+                },
+            },
+        );
+
+        assert_eq!(cached_stepping, 11);
+        assert_eq!(cached_jumping, cached_stepping);
+        assert_eq!(jumping, cached_jumping);
+        assert_eq!(stepping, cached_stepping);
+    }
+
+    /// Ports the pure longest-path calculation from `cata_test2`. The stepping
+    /// version deliberately uses the fold ordinal to associate each child with
+    /// the corresponding bit in the shared mask.
+    #[test]
+    fn recursive_cata_longest_path_matches_cached_cata() {
+        let mut map = PathMap::new();
+        let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
+
+        let cached = map.read_zipper().into_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
+            let mut longest = mask.iter().zip(children.iter_mut())
+                .max_by_key(|(_byte, rest)| rest.len())
+                .map_or_else(Vec::new, |(byte, rest)| {
+                    let mut path = std::mem::take(rest);
+                    path.insert(0, byte);
+                    path
+                });
+            let mut path = prefix.to_vec();
+            path.append(&mut longest);
+            path
+        });
+
+        // This uses allocation for readability; performance-sensitive code can fold a longest path directly.
+        let jumping = map.recursive_cata::<Vec<Vec<u8>>, Vec<u8>, _, _, _, true, true>(
+            |_| Vec::new(),
+            |_mask, child, children| children.push(child),
+            |mask, _val, children, prefix| {
+                let mut longest = children.map_or_else(Vec::new, |children| {
+                    if mask.is_empty_mask() {
+                        children.into_iter().max_by_key(|rest| rest.len()).unwrap_or_default()
+                    } else {
+                        mask.iter().zip(children)
+                            .max_by_key(|(_byte, rest)| rest.len())
+                            .map_or_else(Vec::new, |(byte, mut rest)| {
+                                rest.insert(0, byte);
+                                rest
+                            })
+                    }
+                });
+                let mut path = prefix.to_vec();
+                path.append(&mut longest);
+                path
+            },
+        );
+        let stepping = map.recursive_cata_stepping::<(usize, Vec<u8>), Vec<u8>, _, _, _, true>(
+            |_| (0, Vec::new()),
+            |mask, child, state| {
+                let mut path = Vec::with_capacity(child.len() + 1);
+                if let Some(byte) = mask.indexed_bit::<true>(state.0) {
+                    state.0 += 1;
+                    path.push(byte);
+                }
+                path.extend(child);
+                if path.len() > state.1.len() {
+                    state.1 = path;
+                }
+            },
+            |_mask, _val, state| state.map_or_else(Vec::new, |(_, path)| path),
+        );
+
+        assert_eq!(std::str::from_utf8(&cached).unwrap(), "rubicundus");
+        assert_eq!(jumping, cached);
+        assert_eq!(stepping, cached);
+    }
+
+    /// Ports the branch-value portion of `cata_test2` to both summarization
+    /// traversals. Values with no downstream results are deliberately omitted.
+    #[test]
+    fn recursive_cata_branch_values_matches_cached_catas() {
+        let mut map = PathMap::new();
+        let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
+
+        let cached_stepping = map.read_zipper().into_cata_cached(|_mask, children: &mut [Vec<usize>], val| {
+            if children.is_empty() {
+                Vec::new()
+            } else if let Some(val) = val {
+                vec![*val]
+            } else {
+                let mut values = children.first_mut().map_or_else(Vec::new, std::mem::take);
+                for child in &mut children[1..] {
+                    values.append(child);
+                }
+                values
+            }
+        });
+        let cached_jumping = map.read_zipper().into_cata_jumping_cached(|_mask, children: &mut [Vec<usize>], val, _prefix| {
+            if children.is_empty() {
+                Vec::new()
+            } else if let Some(val) = val {
+                vec![*val]
+            } else {
+                let mut values = children.first_mut().map_or_else(Vec::new, std::mem::take);
+                for child in &mut children[1..] {
+                    values.append(child);
+                }
+                values
+            }
+        });
+
+        let jumping = map.recursive_cata::<Vec<usize>, Vec<usize>, _, _, _, false, true>(
+            |_| Vec::new(),
+            |_mask, child, values| values.extend(child),
+            |_mask, val, children, _prefix| match children {
+                None => Vec::new(),
+                Some(values) => val.map_or(values, |val| vec![*val]),
+            },
+        );
+        let stepping = map.recursive_cata_stepping::<Vec<usize>, Vec<usize>, _, _, _, true>(
+            |_| Vec::new(),
+            |_mask, child, values| values.extend(child),
+            |_mask, val, children| match children {
+                None => Vec::new(),
+                Some(values) => val.map_or(values, |val| vec![*val]),
+            },
+        );
+
+        assert_eq!(cached_stepping, vec![3]);
+        assert_eq!(cached_jumping, cached_stepping);
+        assert_eq!(jumping, cached_jumping);
+        assert_eq!(stepping, cached_stepping);
+    }
+
+    /// Parallel port of `cata_test_cached`: the input deliberately contains
+    /// shared subtries, so this exercises Summarization's cached traversal.
+    #[test]
+    fn recursive_cata_cached_dag_matches_cached_cata() {
+        fn make_map() -> PathMap<u8> {
+            let mut map: PathMap<u8> = PathMap::from_iter([([0], 0)]);
+            for _level in 0..3 {
+                let previous = map.read_zipper();
+                let next = PathMap::new_from_ana(false, |quit, _val, children, _path| {
+                    if quit { return; }
+                    for byte in 0..=2 {
+                        children.graft_at_byte(byte, &previous);
+                    }
+                });
+                drop(previous);
+                map = next;
+            }
+            map
+        }
+
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        use std::rc::Rc;
+
+        #[derive(Clone, Debug, PartialEq)]
+        struct Node<V> {
+            value: Option<V>,
+            children: Vec<Rc<Node<V>>>,
+        }
+        impl<V: Clone> Node<V> {
+            fn new(value: Option<&V>, children: Option<Vec<Rc<Node<V>>>>) -> Self {
+                Self { value: value.cloned(), children: children.unwrap_or_default() }
+            }
+        }
+
+        let cached_calls = AtomicU64::new(0);
+        let cached: Rc<Node<u8>> = make_map().into_cata_cached(|_mask, children, value| {
+            cached_calls.fetch_add(1, Relaxed);
+            Rc::new(Node { value: value.cloned(), children: children.to_vec() })
+        });
+
+        let summarization_calls = AtomicU64::new(0);
+        let summarized = make_map().recursive_cata_stepping::<Vec<Rc<Node<u8>>>, Rc<Node<u8>>, _, _, _, true>(
+            |_| Vec::new(),
+            |_mask, child, children| children.push(child),
+            |_mask, value, children| {
+                summarization_calls.fetch_add(1, Relaxed);
+                Rc::new(Node::new(value, children))
+            },
+        );
+
+        assert_eq!(summarized, cached);
+        assert_eq!(summarization_calls.load(Relaxed), cached_calls.load(Relaxed));
     }
 
     /// Finds the path_depth at which the recursive cata hits a stack overflow
