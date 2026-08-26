@@ -307,7 +307,23 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
         CollapseF: Copy + Fn(Option<&V>, Option<W>) -> W,
         BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
         FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
-        Self: Sized;
+        Self: Sized
+    {
+        self.recursive_cata::<_, _, _, _, _, true>(
+            |val, downstream, prefix| {
+                let mut w = collapse_f(val, downstream);
+                for byte in prefix.iter().rev() {
+                    let mask = ByteMask::from(*byte);
+                    let mut acc = Acc::default();
+                    branch_f(&mask, w, &mut acc);
+                    w = finalize_f(&mask, acc);
+                }
+                w
+            },
+            branch_f,
+            finalize_f,
+        )
+    }
 
 }
 
@@ -520,31 +536,6 @@ impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z wher
         };
         collapse_f(self.val(), Some(w), &[])
     }
-
-    fn recursive_cata_stepping<Acc, W, CollapseF, BranchF, FinalizeF>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
-    where
-        V: Clone + Send + Sync,
-        Acc: Default,
-        W: Clone,
-        CollapseF: Copy + Fn(Option<&V>, Option<W>) -> W,
-        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
-    {
-        self.recursive_cata::<_, _, _, _, _, true>(
-            |val, downstream, prefix| {
-                let mut w = collapse_f(val, downstream);
-                for byte in prefix.iter().rev() {
-                    let mask = ByteMask::from(*byte);
-                    let mut acc = Acc::default();
-                    branch_f(&mask, w, &mut acc);
-                    w = finalize_f(&mask, acc);
-                }
-                w
-            },
-            branch_f,
-            finalize_f,
-        )
-    }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathMap<V, A> {
@@ -565,31 +556,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathM
             None => finalize_f(&ByteMask::EMPTY, Acc::default()),
         };
         collapse_f(self.root_val(), Some(w), &[])
-    }
-
-    fn recursive_cata_stepping<Acc, W, CollapseF, BranchF, FinalizeF>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF) -> W
-    where
-        V: Clone + Send + Sync,
-        Acc: Default,
-        W: Clone,
-        CollapseF: Copy + Fn(Option<&V>, Option<W>) -> W,
-        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
-    {
-        self.recursive_cata::<_, _, _, _, _, true>(
-            |val, downstream, prefix| {
-                let mut w = collapse_f(val, downstream);
-                for byte in prefix.iter().rev() {
-                    let mask = ByteMask::from(*byte);
-                    let mut acc = Acc::default();
-                    branch_f(&mask, w, &mut acc);
-                    w = finalize_f(&mask, acc);
-                }
-                w
-            },
-            branch_f,
-            finalize_f,
-        )
     }
 }
 
