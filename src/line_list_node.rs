@@ -1639,18 +1639,28 @@ fn follow_path<'a, 'k, V: Clone + Send + Sync, A: Allocator + 'a>(mut node: Tagg
 
 /// Follows a path from a node, returning `(true, _)` if a value was encountered along the path, returns
 /// `(false, Some)` if the path continues, and `(false, None)` if the path does not descend from the node
+//
+//NOTE: the value check has to happen at every node along the way, before following an onward link.
+// A node can hold a value *and* a child under the same key -- a path that both ends there and
+// continues -- and it can hold a value at a prefix of the key it is being asked about.  Checking
+// only after the walk ran out of links missed both, which made `restrict` silently drop the value
+// on any path that branches: `restrict(a, a)` lost "ab" from {ab, abc, abd}.
 fn follow_path_to_value<'a, 'k, V: Clone + Send + Sync, A: Allocator + 'a>(mut node: TaggedNodeRef<'a, V, A>, mut key: &'k[u8]) -> (bool, Option<(&'k[u8], TaggedNodeRef<'a, V, A>)>) {
-    while let Some((consumed_byte_cnt, next_node)) = node.node_get_child(key) {
-        if consumed_byte_cnt < key.len() {
-            let next_node = next_node.as_tagged();
-            node = next_node;
-            key = &key[consumed_byte_cnt..]
-        } else {
-            return (false, Some((key, node)));
-        };
-    }
-    if let Some(_) = node.node_first_val_depth_along_key(key) {
-        return (true, None);
+    loop {
+        if node.node_first_val_depth_along_key(key).is_some() {
+            return (true, None);
+        }
+        match node.node_get_child(key) {
+            Some((consumed_byte_cnt, next_node)) => {
+                if consumed_byte_cnt < key.len() {
+                    node = next_node.as_tagged();
+                    key = &key[consumed_byte_cnt..]
+                } else {
+                    return (false, Some((key, node)));
+                }
+            },
+            None => break,
+        }
     }
     if node.node_contains_partial_key(key) {
         (false, Some((key, node)))

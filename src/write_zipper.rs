@@ -127,6 +127,10 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     ///
     /// Set bits that correspond to non-existent branches in `src` will be non-existent in `self` after this
     /// function completes.
+    ///
+    /// WARNING: The implementation may reserve space based on every set bit in `child_mask`, including for
+    /// branches that are absent from `src`. Don't use a mask with vastly more set bits than source branches to
+    /// avoid unnecessarily large allocations.
     fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
         if remove_unset {
             self.remove_branches(false);
@@ -1520,66 +1524,100 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
-        match src.get_focus().try_as_tagged() {
-            Some(src_tagged) => {
-                // Split the focus if we're in the middle of another node
-                let self_focus_node = match self.try_borrow_focus_mut() {
-                    Some(node) => node,
+        match child_mask.count_bits() {
+            0 => {
+                if remove_unset {
+                    self.remove_branches(false);
+                }
+            }
+            1 => {
+                if remove_unset {
+                    self.remove_branches(false);
+                }
+
+                let byte = child_mask.indexed_bit::<true>(0).expect("one bit set");
+                self.descend_to_byte(byte);
+                self.graft_src_at(src, &[byte]);
+                self.ascend_byte();
+            }
+            2 => {
+                if remove_unset {
+                    self.remove_branches(false);
+                }
+
+                let first_byte = child_mask.indexed_bit::<true>(0).expect("some bit set");
+                self.descend_to_byte(first_byte);
+                self.graft_src_at(src, &[first_byte]);
+                self.ascend_byte();
+
+                let second_byte = child_mask.next_bit(first_byte).expect("two bits set");
+                self.descend_to_byte(second_byte);
+                self.graft_src_at(src, &[second_byte]);
+                self.ascend_byte();
+            }
+            _ => {
+                match src.get_focus().try_as_tagged() {
+                    Some(src_tagged) => {
+                        // Split the focus if we're in the middle of another node
+                        let self_focus_node = match self.try_borrow_focus_mut() {
+                            Some(node) => node,
+                            None => {
+                                self.split_at_focus();
+                                self.try_borrow_focus_mut().unwrap()
+                            }
+                        };
+                        match src_tagged {
+                            TaggedNodeRef::DenseByteNode(src_node) => {
+                                if remove_unset {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
+                                } else {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
+                                }
+                            },
+                            TaggedNodeRef::CellByteNode(src_node) => {
+                                if remove_unset {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
+                                } else {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
+                                }
+                            },
+                            TaggedNodeRef::LineListNode(src_node) => {
+                                let mut src_node = src_node.clone();
+                                let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
+                                let src_dense = src_dense.as_tagged().as_dense().unwrap();
+                                if remove_unset {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
+                                } else {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
+                                }
+                            },
+                            TaggedNodeRef::TinyRefNode(src_node) => {
+                                let mut src_node = src_node.into_full().unwrap();
+                                let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
+                                let src_dense = src_dense.as_tagged().as_dense().unwrap();
+                                if remove_unset {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
+                                } else {
+                                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
+                                }
+                            },
+                            TaggedNodeRef::EmptyNode => {
+                                if remove_unset {
+                                    self.remove_branches(false);
+                                } else {
+                                    self.remove_unmasked_branches(child_mask.not(), false);
+                                }
+                            },
+                        }
+                    },
                     None => {
-                        self.split_at_focus();
-                        self.try_borrow_focus_mut().unwrap()
-                    }
-                };
-                match src_tagged {
-                    TaggedNodeRef::DenseByteNode(src_node) => {
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::CellByteNode(src_node) => {
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::LineListNode(src_node) => {
-                        let mut src_node = src_node.clone();
-                        let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
-                        let src_dense = src_dense.as_tagged().as_dense().unwrap();
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::TinyRefNode(src_node) => {
-                        let mut src_node = src_node.into_full().unwrap();
-                        let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
-                        let src_dense = src_dense.as_tagged().as_dense().unwrap();
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::EmptyNode => {
+                        debug_assert_eq!(src.child_count(), 0);
                         if remove_unset {
                             self.remove_branches(false);
                         } else {
                             self.remove_unmasked_branches(child_mask.not(), false);
                         }
-                    },
-                }
-            },
-            None => {
-                debug_assert_eq!(src.child_count(), 0);
-                if remove_unset {
-                    self.remove_branches(false);
-                } else {
-                    self.remove_unmasked_branches(child_mask.not(), false);
+                    }
                 }
             }
         }
@@ -4386,6 +4424,18 @@ mod tests {
         //Garfield was removed
         assert_eq!(wr.val(), None);
     }
+
+    #[test]
+    fn write_zipper_test_remove_unmasked_branches_non_existent_path() {
+        let mut map: PathMap<()> = PathMap::new();
+        for key in [b"a".as_slice(), b"b", b"c"] {
+            map.set_val_at(key, ());
+        }
+
+        let mut wz = map.write_zipper_at_path(b"a:x");
+        wz.remove_unmasked_branches(ByteMask::EMPTY, false);
+    }
+
     #[test]
     fn write_zipper_test_zipper_conversion() {
         let keys = [
