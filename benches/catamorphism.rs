@@ -25,10 +25,27 @@ fn recursive_cata_jumping_val_count(bencher: Bencher) {
     let mut sink = 0usize;
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, false>(
-            |v, w, _| (v.is_some() as usize) + w.unwrap_or(0),
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, false, false>(
+            |_| 0usize,
             |_mask, w: usize, total| { *total += w },
-            |_mask, total: usize| { total },
+            |_mask, v, total, _| (v.is_some() as usize) + total.unwrap_or(0),
+        );
+    });
+    assert_eq!(sink, MAP_COUNT as usize);
+}
+
+/// Same summary as `recursive_cata_jumping_val_count`, but requests real masks.
+/// This isolates the cost of the `COMPUTE_MASK` specialization.
+#[divan::bench()]
+fn recursive_cata_jumping_val_count_with_masks(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, false, true>(
+            |_| 0usize,
+            |_mask, w: usize, total| { *total += w },
+            |_mask, v, total, _| (v.is_some() as usize) + total.unwrap_or(0),
         );
     });
     assert_eq!(sink, MAP_COUNT as usize);
@@ -57,24 +74,17 @@ fn recursive_cata_jumping_total_len(bencher: Bencher) {
     let mut sink = (0usize, 0usize);
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, true>(
-            |val, downstream, prefix| {
-                let (mut count, mut total_len) = downstream.unwrap_or((0, 0));
-                total_len += count * prefix.len();
-                if val.is_some() {
-                    count += 1;
-                    total_len += prefix.len();
-                }
-                (count, total_len)
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, true, true>(
+            |_| (0usize, 0usize),
+            |_mask: &ByteMask, w: (usize, usize), acc: &mut (usize, usize)| {
+                acc.0 += w.0;
+                acc.1 += w.1;
             },
-            |mask: &ByteMask, w: (usize, usize), acc: &mut (usize, usize, usize)| {
-                let byte = mask.indexed_bit::<true>(acc.0).unwrap();
-                let _ = byte; // byte value unused; only length matters
-                acc.0 += 1;
-                acc.1 += w.0;
-                acc.2 += w.1;
+            |_mask: &ByteMask, val, acc, prefix| {
+                let (count, total_len) = acc.unwrap_or((0, 0));
+                let count = count + val.is_some() as usize;
+                (count, total_len + count * prefix.len())
             },
-            |_mask: &ByteMask, acc: (usize, usize, usize)| { (acc.1, acc.2) },
         );
     });
     assert_eq!(sink.0, MAP_COUNT as usize);

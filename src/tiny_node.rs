@@ -9,12 +9,12 @@
 
 use core::mem::MaybeUninit;
 use core::fmt::{Debug, Formatter};
-use crate::gxhash::HashMap;
 
 use fast_slice_utils::{find_prefix_overlap, starts_with};
 use crate::utils::ByteMask;
 use crate::alloc::Allocator;
 use crate::trie_node::*;
+use crate::gxhash::HashMap;
 use crate::ring::*;
 
 /// A borrowed reference to a payload with a key stored elsewhere, contained in 16 Bytes
@@ -122,15 +122,14 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TinyRefNode<'a, V, A> {
         unsafe{ core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), self.key_len()) }
     }
 
-    pub(crate) fn node_recursive_cata<Acc, W, CollapseF, BranchF, FinalizeF, const COMPUTE_PATH: bool>(&self, collapse_f: CollapseF, branch_f: BranchF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
+    pub(crate) fn node_recursive_cata<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
     where
-        Acc: Default,
         W: Clone,
-        CollapseF: Copy + Fn(Option<&V>, Option<W>, &[u8]) -> W,
-        BranchF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Acc) -> W,
+        StartF: Copy + Fn(&ByteMask) -> Acc,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
+        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
     {
-        self.into_full().unwrap().node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH>(collapse_f, branch_f, finalize_f, cache)
+        self.into_full().unwrap().node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(start_f, fold_child_f, finalize_f, cache)
     }
 }
 

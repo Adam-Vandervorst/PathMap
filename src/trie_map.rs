@@ -507,16 +507,15 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
 
     /// GOAT, temporary method to do side-by-side comparison between abstracted val_count and bespoke version
     pub fn goat_val_count(&self) -> usize {
-        let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
         match self.root() {
             Some(_root) => {
-                self.recursive_cata::<_, _, _, _, _, false>(
-                    |v, w, _| { (v.is_some() as usize) + w.unwrap_or(0) }, // on values amongst a path
-                    |_mask, w: usize, total| { *total += w }, // on merging children into a node
-                    |_mask, total: usize| { total } // finalizing a node
-                ) + root_val
+                self.recursive_cata::<_, _, _, _, _, false, false>(
+                    |_| 0usize,
+                    |_mask, w: usize, total| { *total += w },
+                    |_mask, v, total, _| { (v.is_some() as usize) + total.unwrap_or(0) },
+                )
             },
-            None => root_val
+            None => unsafe{ &*self.root_val.get() }.is_some() as usize
         }
     }
 
