@@ -311,7 +311,7 @@ fn from_prefix_key(k: Vec<u8>) -> u64 {
     u64::from_le_bytes(buf) & (!0u64 >> shift)
 }
 
-#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000])]
+#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
 fn superdense_val_count_bench(bencher: Bencher, n: u64) {
 
     let mut map: PathMap<u64> = PathMap::new();
@@ -325,7 +325,7 @@ fn superdense_val_count_bench(bencher: Bencher, n: u64) {
     assert_eq!(sink, n as usize);
 }
 
-#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000])]
+#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
 fn superdense_goat_val_count_bench(bencher: Bencher, n: u64) {
 
     let mut map: PathMap<u64> = PathMap::new();
@@ -341,7 +341,7 @@ fn superdense_goat_val_count_bench(bencher: Bencher, n: u64) {
 
 
 #[cfg(feature="arena_compact")]
-#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000])]
+#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
 fn superdense_val_count_bench_act(bencher: Bencher, n: u64) {
     use pathmap::{
         arena_compact::ArenaCompactTree,

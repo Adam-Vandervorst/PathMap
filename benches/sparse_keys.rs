@@ -134,7 +134,7 @@ fn sparse_descend_until_max_bytes(bencher: Bencher, n: u64) {
     });
 }
 
-#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000])]
+#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000, 20_000, 100_000])]
 fn sparse_val_count_bench(bencher: Bencher, n: u64) {
 
     let mut r = StdRng::seed_from_u64(1);
@@ -154,7 +154,7 @@ fn sparse_val_count_bench(bencher: Bencher, n: u64) {
     assert_eq!(sink, n as usize);
 }
 
-#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000])]
+#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000, 20_000, 100_000])]
 fn sparse_goat_val_count_bench(bencher: Bencher, n: u64) {
 
     let mut r = StdRng::seed_from_u64(1);
