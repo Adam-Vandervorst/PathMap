@@ -2781,7 +2781,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     }
 
     #[inline(always)]
-    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
     where
         W: Clone,
         StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
@@ -2790,7 +2790,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     {
         macro_rules! summarize {
             ($val:expr, $downstream:expr, $prefix:expr) => {
-                summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>($val, $downstream, $prefix, start_f, fold_child_f, finalize_f)
+                summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>($val, $downstream, $prefix, start_f, fold_child_f, finalize_f)
             };
         }
         //Pair node can have the following permutations: (Slot0, Slot1)
@@ -2827,7 +2827,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             //Case 2 (Child, Empty) = (1 << 3) + (1 << 1) | (1 << 3) + (1 << 1) + 1
             10 | 11 => {
                 let child_node = unsafe{ self.child_in_slot::<0>() };
-                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
                 let path = unsafe{ self.key_unchecked::<0>() };
                 summarize!(passed_in_val, Some(child_w), path)
             },
@@ -2842,13 +2842,13 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     debug_assert_eq!(key0.len(), 1);
                     debug_assert_eq!(key1.len(), 1);
                     let val = unsafe { self.val_in_slot::<1>() };
-                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?;
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?;
                     summarize!(passed_in_val, Some(child_w), key0)
                 } else {
                     //Case 4
-                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
                     let path = &key0[1..];
-                    let mask = if COMPUTE_MASK { ByteMask::from((key0_byte, key1_byte)) } else { ByteMask::EMPTY };
+                    let mask = ByteMask::from((key0_byte, key1_byte));
                     let mut acc = start_f(&mask)?;
                     fold_child_f(&mask, summarize!(None, Some(child_w), path)?, &mut acc)?;
 
@@ -2866,14 +2866,14 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
                     let path0 = &key0[1..];
                     let path1 = &key1[1..];
-                    let mask = if COMPUTE_MASK { ByteMask::from((key0_byte, key1_byte)) } else { ByteMask::EMPTY };
+                    let mask = ByteMask::from((key0_byte, key1_byte));
                 let mut acc = start_f(&mask)?;
                 let child_node = unsafe{ self.child_in_slot::<0>() };
-                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
                 fold_child_f(&mask, summarize!(None, Some(child_w), path0)?, &mut acc)?;
 
                 let child_node = unsafe{ self.child_in_slot::<1>() };
-                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
                 fold_child_f(&mask, summarize!(None, Some(child_w), path1)?, &mut acc)?;
 
                 finalize_f(&mask, passed_in_val, Some(acc), &[])
@@ -2902,7 +2902,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     //Case 8 (Val, Val), different first bytes
                     let path0 = &key0[1..];
                     let path1 = &key1[1..];
-                    let mask = if COMPUTE_MASK { ByteMask::from((key0_byte, key1_byte)) } else { ByteMask::EMPTY };
+                    let mask = ByteMask::from((key0_byte, key1_byte));
                     let mut acc = start_f(&mask)?;
                     let val = unsafe{ self.val_in_slot::<0>() };
                     fold_child_f(&mask, summarize!(Some(val), None, path0)?, &mut acc)?;
@@ -2924,13 +2924,13 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     debug_assert_eq!(key0.len(), 1);
                     debug_assert_eq!(key1.len(), 1);
                     let val = unsafe { self.val_in_slot::<0>() };
-                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?;
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?;
                     summarize!(passed_in_val, Some(child_w), key0)
                 } else {
                     //Case 10 (Val, Child), different key bytes
-                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
                     let path = &key1[1..];
-                    let mask = if COMPUTE_MASK { ByteMask::from((key0_byte, key1_byte)) } else { ByteMask::EMPTY };
+                    let mask = ByteMask::from((key0_byte, key1_byte));
                     let mut acc = start_f(&mask)?;
                     fold_child_f(&mask, summarize!(None, Some(child_w), path)?, &mut acc)?;
 

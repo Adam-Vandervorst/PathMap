@@ -510,7 +510,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     pub fn goat_val_count(&self) -> usize {
         match self.root() {
             Some(_root) => {
-                match self.recursive_cata::<_, _, Infallible, _, _, _, false, false>(
+                match self.recursive_cata::<_, _, Infallible, _, _, _, false>(
                     |_| Ok(0usize),
                     |_mask, w: usize, total| { *total += w; Ok(()) },
                     |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),

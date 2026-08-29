@@ -295,11 +295,10 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
     ///
     /// Errors from any callback immediately stop traversal and are returned to the caller.
     ///
-    /// In a callback where `COMPUTE_MASK` is false, `child_mask` is [`ByteMask::EMPTY`]. This avoids
-    /// materializing masks for callers that do not use them. Similarly, `COMPUTE_PATH=false` avoids
-    /// materializing path runs and passes an empty `prefix`. These are independent controls: callers
-    /// which need masks but not paths should use `COMPUTE_PATH=false, COMPUTE_MASK=true`.
-    fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    /// `COMPUTE_PATH=false` avoids materializing path runs and passes an empty `prefix`.  This should
+    /// only be used when the algebra is agnostic to the path bytes, and only sensitive to values and/or
+    /// path endpoints.
+    fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         V: Clone + Send + Sync,
         W: Clone,
@@ -314,7 +313,7 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
     /// runs. Unlike the jumping version, `summarize_f` has no `prefix`: it is called once for every
     /// path byte. The callback roles and child-mask ordering are otherwise the same as for
     /// [`Summarization::recursive_cata`].
-    fn recursive_cata_stepping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    fn recursive_cata_stepping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         V: Clone + Send + Sync,
         W: Clone,
@@ -323,13 +322,13 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
         SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>) -> Result<W, Err>,
         Self: Sized
     {
-        self.recursive_cata::<_, _, _, _, _, _, true, COMPUTE_MASK>(
+        self.recursive_cata::<_, _, _, _, _, _, true>(
             new_acc_f,
             fold_child_f,
             |mask, val, acc, prefix| {
                 let mut w = summarize_f(mask, val, acc)?;
                 for byte in prefix.iter().rev() {
-                    let mask = if COMPUTE_MASK { ByteMask::from(*byte) } else { ByteMask::EMPTY };
+                    let mask = ByteMask::from(*byte);
                     let mut acc = new_acc_f(&mask)?;
                     fold_child_f(&mask, w, &mut acc)?;
                     w = summarize_f(&mask, None, Some(acc))?;
@@ -530,7 +529,7 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
 }
 
 impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
-    fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         V: Clone + Send + Sync,
         W: Clone,
@@ -542,7 +541,7 @@ impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z wher
         let w = match focus.0.borrow() {
             Some(node) => {
                 let mut cache = HashMap::new();
-                recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
+                recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
             },
             None => summarize_f(&ByteMask::EMPTY, None, None, &[]),
         };
@@ -551,7 +550,7 @@ impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z wher
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathMap<V, A> {
-    fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         V: Clone + Send + Sync,
         W: Clone,
@@ -562,7 +561,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathM
         let w = match self.root() {
             Some(node) => {
                 let mut cache = HashMap::new();
-                recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.root_val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
+                recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(node, self.root_val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
             },
             None => summarize_f(&ByteMask::EMPTY, None, None, &[]),
         };
@@ -575,7 +574,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathM
 //NOTE: #[inline(always)] here leads to a huge bloating of the size of the a stack frame in the recursive cata
 // (about 2.5x bloat.  but #[inline(never)] costs about 25% performance.  Letting the compiler do its thing seems
 // to be the sweet spot.
-pub(crate) fn summarize_run<V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(
+pub(crate) fn summarize_run<V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(
     val: Option<&V>,
     downstream: Option<W>,
     prefix: &[u8],
@@ -591,7 +590,7 @@ where
     match (val, downstream, prefix) {
         (None, Some(w), []) => Ok(w),
         (val, Some(w), prefix) => {
-            let mask = if COMPUTE_MASK && !prefix.is_empty() { ByteMask::from(*prefix.last().unwrap()) } else { ByteMask::EMPTY };
+            let mask = if !prefix.is_empty() { ByteMask::from(*prefix.last().unwrap()) } else { ByteMask::EMPTY };
             let mut acc = start_f(&mask)?;
             fold_child_f(&mask, w, &mut acc)?;
             let prefix = if COMPUTE_PATH {
@@ -2166,7 +2165,7 @@ mod tests {
 
         for (keys, expected_sum) in tests {
             let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
-            let sum = map.recursive_cata::<_, _, Infallible, _, _, _, true, true>(
+            let sum = map.recursive_cata::<_, _, Infallible, _, _, _, true>(
                 |_| Ok(SumAcc::default()),
                 |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
                     if let Some(byte) = mask.indexed_bit::<true>(acc.idx) {
@@ -2217,7 +2216,7 @@ mod tests {
 
         for (keys, expected_sum) in tests {
             let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
-            let sum = map.recursive_cata_stepping::<SumAcc, (bool, u32), Infallible, _, _, _, true>(
+            let sum = map.recursive_cata_stepping::<SumAcc, (bool, u32), Infallible, _, _, _>(
                 |_| Ok(SumAcc::default()),
                 |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
                     if let Some(byte) = mask.iter().nth(acc.idx) {
@@ -2262,7 +2261,7 @@ mod tests {
             }
         });
 
-        let jumping = map.recursive_cata::<usize, usize, Infallible, _, _, _, false, true>(
+        let jumping = map.recursive_cata::<usize, usize, Infallible, _, _, _, false>(
             |_| Ok(0),
             |_mask, child, total| { *total += child; Ok(()) },
             |_mask, val, children, _prefix| match children {
@@ -2273,7 +2272,7 @@ mod tests {
                 },
             },
         );
-        let stepping = map.recursive_cata_stepping::<usize, usize, Infallible, _, _, _, true>(
+        let stepping = map.recursive_cata_stepping::<usize, usize, Infallible, _, _, _>(
             |_| Ok(0),
             |_mask, child, total| { *total += child; Ok(()) },
             |_mask, val, children| match children {
@@ -2314,7 +2313,7 @@ mod tests {
         });
 
         // This uses allocation for readability; performance-sensitive code can fold a longest path directly.
-        let jumping = map.recursive_cata::<Vec<Vec<u8>>, Vec<u8>, Infallible, _, _, _, true, true>(
+        let jumping = map.recursive_cata::<Vec<Vec<u8>>, Vec<u8>, Infallible, _, _, _, true>(
             |_| Ok(Vec::new()),
             |_mask, child, children| { children.push(child); Ok(()) },
             |mask, _val, children, prefix| {
@@ -2335,7 +2334,7 @@ mod tests {
                 Ok(path)
             },
         );
-        let stepping = map.recursive_cata_stepping::<(usize, Vec<u8>), Vec<u8>, Infallible, _, _, _, true>(
+        let stepping = map.recursive_cata_stepping::<(usize, Vec<u8>), Vec<u8>, Infallible, _, _, _>(
             |_| Ok((0, Vec::new())),
             |mask, child, state| {
                 let mut path = Vec::with_capacity(child.len() + 1);
@@ -2392,7 +2391,7 @@ mod tests {
             }
         });
 
-        let jumping = map.recursive_cata::<Vec<usize>, Vec<usize>, Infallible, _, _, _, false, true>(
+        let jumping = map.recursive_cata::<Vec<usize>, Vec<usize>, Infallible, _, _, _, false>(
             |_| Ok(Vec::new()),
             |_mask, child, values| { values.extend(child); Ok(()) },
             |_mask, val, children, _prefix| match children {
@@ -2400,7 +2399,7 @@ mod tests {
                 Some(values) => Ok(val.map_or(values, |val| vec![*val])),
             },
         );
-        let stepping = map.recursive_cata_stepping::<Vec<usize>, Vec<usize>, Infallible, _, _, _, true>(
+        let stepping = map.recursive_cata_stepping::<Vec<usize>, Vec<usize>, Infallible, _, _, _>(
             |_| Ok(Vec::new()),
             |_mask, child, values| { values.extend(child); Ok(()) },
             |_mask, val, children| match children {
@@ -2456,7 +2455,7 @@ mod tests {
         });
 
         let summarization_calls = AtomicU64::new(0);
-        let summarized = make_map().recursive_cata_stepping::<Vec<Rc<Node<u8>>>, Rc<Node<u8>>, Infallible, _, _, _, true>(
+        let summarized = make_map().recursive_cata_stepping::<Vec<Rc<Node<u8>>>, Rc<Node<u8>>, Infallible, _, _, _>(
             |_| Ok(Vec::new()),
             |_mask, child, children| { children.push(child); Ok(()) },
             |_mask, value, children| {
@@ -2481,7 +2480,7 @@ mod tests {
         let path = vec![b'a'; PATH_LEN];
         map.set_val_at(&path, ());
 
-        let count = map.recursive_cata::<_, _, Infallible, _, _, _, false, false>(
+        let count = map.recursive_cata::<_, _, Infallible, _, _, _, false>(
             |_| Ok(0usize),
             |_mask, w: usize, total| { *total += w; Ok(()) },
             |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
@@ -2493,21 +2492,21 @@ mod tests {
     fn recursive_cata_propagates_callback_errors() {
         let map: PathMap<()> = [(b"a".as_slice(), ()), (b"b".as_slice(), ())].into_iter().collect();
 
-        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false, false>(
+        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false>(
             |_| Err("start"),
             |_mask, _child, _acc| Ok(()),
             |_mask, _value, _acc, _prefix| Ok(()),
         );
         assert_eq!(error, Err("start"));
 
-        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false, false>(
+        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false>(
             |_| Ok(()),
             |_mask, _child, _acc| Err("fold"),
             |_mask, _value, _acc, _prefix| Ok(()),
         );
         assert_eq!(error, Err("fold"));
 
-        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false, false>(
+        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false>(
             |_| Ok(()),
             |_mask, _child, _acc| Ok(()),
             |_mask, _value, _acc, _prefix| Err("summarize"),
@@ -2528,7 +2527,7 @@ mod tests {
         .collect();
         let summarize_calls = AtomicUsize::new(0);
 
-        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false, false>(
+        let error = map.recursive_cata::<(), (), &'static str, _, _, _, false>(
             |_| Ok(()),
             |_mask, _child, _acc| Ok(()),
             |_mask, _value, _acc, _prefix| {

@@ -122,14 +122,14 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TinyRefNode<'a, V, A> {
         unsafe{ core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), self.key_len()) }
     }
 
-    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
     where
         W: Clone,
         StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
         FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
     {
-        self.into_full().unwrap().node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache)
+        self.into_full().unwrap().node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(passed_in_val, start_f, fold_child_f, finalize_f, cache)
     }
 }
 
