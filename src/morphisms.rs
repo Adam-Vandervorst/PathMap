@@ -274,19 +274,23 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
     ///
     /// Closures:
     ///
-    /// `StartF`: Creates an accumulator for a logical node with more than one child branch (for jumping)
+    /// `StartF`: Creates an accumulator for a logical trie node with more than one child branch.
     /// `fn(child_mask: &ByteMask) -> Acc`
     ///
-    /// `FoldChildF`: Folds one downstream child branch's `W` into the accumulator. It is called once for each
-    /// downstream result, in the same order as the bits in `child_mask`. Each call for a given
-    /// logical node receives the same full child mask; the callback can use the ordinal of its calls
-    /// to associate a result with a particular mask bit.
+    /// `FoldChildF`: Folds one downstream child branch's `W` into the accumulator. It is called once
+    /// for each downstream child branch, in the same order as the bits in `child_mask`. Each call for
+    /// a given logical node receives the same full child mask; the callback must use the order of its
+    /// calls to associate a result with a particular byte.
     /// `fn(child_mask: &ByteMask, downstream: W, accumulator: &mut Acc)`
     ///
-    /// `FinalizeF`: Converts the value (if present) and the optional child accumulator (if one exists)
-    /// into the `W` which summarizes the subtrie. `accumulator` is `None` when there are no downstream
-    /// results, indicating that `StartF` and `FoldChildF` were not called. `prefix` is the non-branching
-    /// sub-path leading to this invocation.
+    /// `FinalizeF`: Produces the `W` for one logical trie node and a non-branching sub-path `prefix`
+    /// above it.  The returned `W` should summarize the subtrie from the start of `prefix`, including
+    /// the `value` and downstream children.
+    /// - `child_mask` describes the node's immediate child bytes.
+    /// - `accumulator` contains the results folded from those child branches.  `accumulator` is `None`
+    ///     when the node has no downstream branches.
+    /// - `prefix` is a non-branching sub-path above the logical node.  `prefix` never includes a
+    ///     path position that is also part of a `child_mask` for this or another call to `finalize_f`
     /// `fn(child_mask: &ByteMask, value: Option<&V>, accumulator: Option<Acc>, prefix: &[u8]) -> W`
     ///
     /// In a callback where `COMPUTE_MASK` is false, `child_mask` is [`ByteMask::EMPTY`]. This avoids
