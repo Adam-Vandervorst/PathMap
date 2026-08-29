@@ -269,12 +269,12 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
     ///
     /// JUMPING catamorphism implemented with recursion, for performance
     ///
-    /// Each invocation of `finalize_f` may represent a whole non-branching
+    /// Each invocation of `summarize_f` may represent a whole non-branching
     /// run of path bytes, supplied as `prefix`, rather than just one path byte.
     ///
     /// Closures:
     ///
-    /// `StartF`: Creates an accumulator for a logical trie node with more than one child branch.
+    /// `NewAccF`: Creates an accumulator for a logical trie node with more than one child branch.
     /// `fn(child_mask: &ByteMask) -> Acc`
     ///
     /// `FoldChildF`: Folds one downstream child branch's `W` into the accumulator. It is called once
@@ -283,54 +283,54 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
     /// calls to associate a result with a particular byte.
     /// `fn(child_mask: &ByteMask, downstream: W, accumulator: &mut Acc)`
     ///
-    /// `FinalizeF`: Produces the `W` for one logical trie node and a non-branching sub-path `prefix`
+    /// `SummarizeF`: Produces the `W` for one logical trie node and a non-branching sub-path `prefix`
     /// above it.  The returned `W` should summarize the subtrie from the start of `prefix`, including
     /// the `value` and downstream children.
     /// - `child_mask` describes the node's immediate child bytes.
     /// - `accumulator` contains the results folded from those child branches.  `accumulator` is `None`
     ///     when the node has no downstream branches.
     /// - `prefix` is a non-branching sub-path above the logical node.  `prefix` never includes a
-    ///     path position that is also part of a `child_mask` for this or another call to `finalize_f`
+    ///     path position that is also part of a `child_mask` for this or another call to `summarize_f`
     /// `fn(child_mask: &ByteMask, value: Option<&V>, accumulator: Option<Acc>, prefix: &[u8]) -> W`
     ///
     /// In a callback where `COMPUTE_MASK` is false, `child_mask` is [`ByteMask::EMPTY`]. This avoids
     /// materializing masks for callers that do not use them. Similarly, `COMPUTE_PATH=false` avoids
     /// materializing path runs and passes an empty `prefix`. These are independent controls: callers
     /// which need masks but not paths should use `COMPUTE_PATH=false, COMPUTE_MASK=true`.
-    fn recursive_cata<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF) -> W
+    fn recursive_cata<Acc, W, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> W
     where
         V: Clone + Send + Sync,
         W: Clone,
-        StartF: Copy + Fn(&ByteMask) -> Acc,
+        NewAccF: Copy + Fn(&ByteMask) -> Acc,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
         Self: Sized;
 
     /// A stepping (non-jumping) catamorphism for the trie.
     ///
     /// Use this when the cata must evaluate once per path byte, including bytes in non-branching
-    /// runs. Unlike the jumping version, `finalize_f` has no `prefix`: it is called once for every
+    /// runs. Unlike the jumping version, `summarize_f` has no `prefix`: it is called once for every
     /// path byte. The callback roles and child-mask ordering are otherwise the same as for
     /// [`Summarization::recursive_cata`].
-    fn recursive_cata_stepping<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_MASK: bool>(&self, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF) -> W
+    fn recursive_cata_stepping<Acc, W, NewAccF, FoldChildF, SummarizeF, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> W
     where
         V: Clone + Send + Sync,
         W: Clone,
-        StartF: Copy + Fn(&ByteMask) -> Acc,
+        NewAccF: Copy + Fn(&ByteMask) -> Acc,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>) -> W,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>) -> W,
         Self: Sized
     {
         self.recursive_cata::<_, _, _, _, _, true, COMPUTE_MASK>(
-            start_f,
+            new_acc_f,
             fold_child_f,
             |mask, val, acc, prefix| {
-                let mut w = finalize_f(mask, val, acc);
+                let mut w = summarize_f(mask, val, acc);
                 for byte in prefix.iter().rev() {
                     let mask = if COMPUTE_MASK { ByteMask::from(*byte) } else { ByteMask::EMPTY };
-                    let mut acc = start_f(&mask);
+                    let mut acc = new_acc_f(&mask);
                     fold_child_f(&mask, w, &mut acc);
-                    w = finalize_f(&mask, None, Some(acc));
+                    w = summarize_f(&mask, None, Some(acc));
                 }
                 w
             },
@@ -528,41 +528,41 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
 }
 
 impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
-    fn recursive_cata<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF) -> W
+    fn recursive_cata<Acc, W, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> W
     where
         V: Clone + Send + Sync,
         W: Clone,
-        StartF: Copy + Fn(&ByteMask) -> Acc,
+        NewAccF: Copy + Fn(&ByteMask) -> Acc,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
     {
         let focus = self.get_focus();
         let w = match focus.0.borrow() {
             Some(node) => {
                 let mut cache = HashMap::new();
-                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.val(), start_f, fold_child_f, finalize_f, &mut cache)
+                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
             },
-            None => finalize_f(&ByteMask::EMPTY, None, None, &[]),
+            None => summarize_f(&ByteMask::EMPTY, None, None, &[]),
         };
         w
     }
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for PathMap<V, A> {
-    fn recursive_cata<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF) -> W
+    fn recursive_cata<Acc, W, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> W
     where
         V: Clone + Send + Sync,
         W: Clone,
-        StartF: Copy + Fn(&ByteMask) -> Acc,
+        NewAccF: Copy + Fn(&ByteMask) -> Acc,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
     {
         let w = match self.root() {
             Some(node) => {
                 let mut cache = HashMap::new();
-                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.root_val(), start_f, fold_child_f, finalize_f, &mut cache)
+                recursive_cata_cached::<_, _, Acc, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, self.root_val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
             },
-            None => finalize_f(&ByteMask::EMPTY, None, None, &[]),
+            None => summarize_f(&ByteMask::EMPTY, None, None, &[]),
         };
         w
     }
