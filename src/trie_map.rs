@@ -1,4 +1,5 @@
 use core::cell::UnsafeCell;
+use core::convert::Infallible;
 use crate::alloc::{Allocator, GlobalAlloc, global_alloc};
 use crate::morphisms::{new_map_from_ana_in, Summarization, TrieBuilder};
 use crate::trie_node::*;
@@ -509,11 +510,14 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     pub fn goat_val_count(&self) -> usize {
         match self.root() {
             Some(_root) => {
-                self.recursive_cata::<_, _, _, _, _, false, false>(
-                    |_| 0usize,
-                    |_mask, w: usize, total| { *total += w },
-                    |_mask, v, total, _| { (v.is_some() as usize) + total.unwrap_or(0) },
-                )
+                match self.recursive_cata::<_, _, Infallible, _, _, _, false, false>(
+                    |_| Ok(0usize),
+                    |_mask, w: usize, total| { *total += w; Ok(()) },
+                    |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+                ) {
+                    Ok(count) => count,
+                    Err(never) => match never {},
+                }
             },
             None => unsafe{ &*self.root_val.get() }.is_some() as usize
         }

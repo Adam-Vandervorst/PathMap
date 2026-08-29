@@ -1,4 +1,5 @@
 use divan::{Divan, Bencher, black_box};
+use core::convert::Infallible;
 use pathmap::morphisms::{Catamorphism, Summarization};
 use pathmap::utils::ByteMask;
 use pathmap::utils::ints::gen_int_range;
@@ -25,11 +26,11 @@ fn recursive_cata_jumping_val_count(bencher: Bencher) {
     let mut sink = 0usize;
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, false, false>(
-            |_| 0usize,
-            |_mask, w: usize, total| { *total += w },
-            |_mask, v, total, _| (v.is_some() as usize) + total.unwrap_or(0),
-        );
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, Infallible, _, _, _, false, false>(
+            |_| Ok(0usize),
+            |_mask, w: usize, total| { *total += w; Ok(()) },
+            |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+        ).unwrap();
     });
     assert_eq!(sink, MAP_COUNT as usize);
 }
@@ -42,11 +43,11 @@ fn recursive_cata_jumping_val_count_with_masks(bencher: Bencher) {
     let mut sink = 0usize;
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, false, true>(
-            |_| 0usize,
-            |_mask, w: usize, total| { *total += w },
-            |_mask, v, total, _| (v.is_some() as usize) + total.unwrap_or(0),
-        );
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, Infallible, _, _, _, false, true>(
+            |_| Ok(0usize),
+            |_mask, w: usize, total| { *total += w; Ok(()) },
+            |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+        ).unwrap();
     });
     assert_eq!(sink, MAP_COUNT as usize);
 }
@@ -74,18 +75,19 @@ fn recursive_cata_jumping_total_len(bencher: Bencher) {
     let mut sink = (0usize, 0usize);
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = rz.recursive_cata::<_, _, _, _, _, true, true>(
-            |_| (0usize, 0usize),
+        *black_box(&mut sink) = rz.recursive_cata::<_, _, Infallible, _, _, _, true, true>(
+            |_| Ok((0usize, 0usize)),
             |_mask: &ByteMask, w: (usize, usize), acc: &mut (usize, usize)| {
                 acc.0 += w.0;
                 acc.1 += w.1;
+                Ok(())
             },
             |_mask: &ByteMask, val, acc, prefix| {
                 let (count, total_len) = acc.unwrap_or((0, 0));
                 let count = count + val.is_some() as usize;
-                (count, total_len + count * prefix.len())
+                Ok((count, total_len + count * prefix.len()))
             },
-        );
+        ).unwrap();
     });
     assert_eq!(sink.0, MAP_COUNT as usize);
 }

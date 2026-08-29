@@ -388,15 +388,15 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     #[inline(always)]
-    pub(crate) fn node_recursive_cata<Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> W
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
     where
         W: Clone,
-        StartF: Copy + Fn(&ByteMask) -> Acc,
-        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
-        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
+        StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
     {
         let mask = if COMPUTE_MASK { &self.mask } else { &ByteMask::EMPTY };
-        let mut ws = Some(start_f(mask));
+        let mut ws = Some(start_f(mask)?);
         for cf in self.values.iter() {
             let path = &[];
 
@@ -409,18 +409,18 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             // like this gives the optimizer a site to specialize for each permutation
             match (cf.rec(), cf.val()) {
                 (Some(rec), Some(val)) => {
-                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, Some(val), start_f, fold_child_f, finalize_f, cache);
-                    fold_child_f(mask, w, unsafe { ws.as_mut().unwrap_unchecked() });
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, Some(val), start_f, fold_child_f, finalize_f, cache)?;
+                    fold_child_f(mask, w, unsafe { ws.as_mut().unwrap_unchecked() })?;
                 },
                 (Some(rec), None) => {
-                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, None, start_f, fold_child_f, finalize_f, cache);
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(None, Some(w), path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(rec, None, start_f, fold_child_f, finalize_f, cache)?;
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(None, Some(w), path, start_f, fold_child_f, finalize_f)?, unsafe { ws.as_mut().unwrap_unchecked() })?;
                 },
                 (None, Some(val)) => {
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(Some(val), None, path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(Some(val), None, path, start_f, fold_child_f, finalize_f)?, unsafe { ws.as_mut().unwrap_unchecked() })?;
                 },
                 (None, None) => {
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(None, None, path, start_f, fold_child_f, finalize_f), unsafe { ws.as_mut().unwrap_unchecked() });
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(None, None, path, start_f, fold_child_f, finalize_f)?, unsafe { ws.as_mut().unwrap_unchecked() })?;
                 },
             }
         }

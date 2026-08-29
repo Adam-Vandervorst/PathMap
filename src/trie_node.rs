@@ -2412,21 +2412,21 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
 }
 
 /// Internal implementation of recursive_cata
-pub(crate) fn recursive_cata_cached<A, V, Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(
+pub(crate) fn recursive_cata_cached<A, V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(
     node: &TrieNodeODRc<V, A>,
     passed_in_val: Option<&V>,
     start_f: StartF,
     fold_child_f: FoldChildF,
     finalize_f: FinalizeF,
     cache: &mut HashMap<u64, W>,
-) -> W
+) -> Result<W, Err>
 where
     V: Clone + Send + Sync,
     A: Allocator,
     W: Clone,
-    StartF: Copy + Fn(&ByteMask) -> Acc,
-    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
-    FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
+    StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+    FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
 {
     // NOTE: A caller-supplied value can make this trie-node boundary fall inside one Summarization callback,
     // so its W is not reusable by node ID alone.
@@ -2435,40 +2435,40 @@ where
     if passed_in_val.is_none() && !node.is_empty() && node.refcount() > 1 {
         let hash = node.shared_node_id();
         match cache.get(&hash) {
-            Some(cached) => cached.clone(),
+            Some(cached) => Ok(cached.clone()),
             None => {
-                let w = recursive_cata_dispatch::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache);
+                let w = recursive_cata_dispatch::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)?;
                 cache.insert(hash, w.clone());
-                w
+                Ok(w)
             },
         }
     } else {
-        recursive_cata_dispatch::<_, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)
+        recursive_cata_dispatch::<_, _, _, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)
     }
 }
 
 #[inline(always)]
-fn recursive_cata_dispatch<A, V, Acc, W, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(
+fn recursive_cata_dispatch<A, V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool, const COMPUTE_MASK: bool>(
     node: &TrieNodeODRc<V, A>,
     passed_in_val: Option<&V>,
     start_f: StartF,
     fold_child_f: FoldChildF,
     finalize_f: FinalizeF,
     cache: &mut HashMap<u64, W>,
-) -> W
+) -> Result<W, Err>
 where
     V: Clone + Send + Sync,
     A: Allocator,
     W: Clone,
-    StartF: Copy + Fn(&ByteMask) -> Acc,
-    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc),
-    FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> W,
+    StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+    FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
 {
     match node.as_tagged() {
-        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
-        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
-        TaggedNodeRef::CellByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
-        TaggedNodeRef::TinyRefNode(node) => { node.node_recursive_cata::<_, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::CellByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::TinyRefNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH, COMPUTE_MASK>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
         TaggedNodeRef::EmptyNode => { finalize_f(&ByteMask::EMPTY, passed_in_val, None, &[]) }
     }
 }
