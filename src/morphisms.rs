@@ -187,11 +187,21 @@ pub trait CatamorphismCached<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>
     /// Allows the closure to return an error, stopping traversal immediately
     ///
     /// See [CatamorphismCached::into_cata_cached]
-//GOAT, write this in terms of `into_cata_jumping_cached_fallible`
     fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
         where
             W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>;
+            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>,
+            Self: Sized,
+    {
+        self.into_cata_jumping_cached_fallible(|mask, children, val, sub_path| {
+            let mut w = alg_f(mask, children, val)?;
+            for &byte in sub_path.iter().rev() {
+                let child_mask = ByteMask::from(byte);
+                w = alg_f(&child_mask, core::slice::from_mut(&mut w), None)?;
+            }
+            Ok(w)
+        })
+    }
 
     /// Applies a "jumping" catamorphism to the trie
     ///
@@ -604,9 +614,9 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
     }
 }
 
-//GOAT temporary impl using zipers
-// impl<'a, Z, V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
-//     fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+// //GOAT temporary impl using zipers
+// impl<'a, Z, V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCached<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
+//     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
 //     where
 //         V: Clone + Send + Sync,
 //         W: Clone,
@@ -627,16 +637,6 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
 
 //GOAT, Recursive impl
 impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
-    fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
-    {
-        into_cata_cached_body::<Self, V, W, E, _, DoCache, false, false>(self, |mask, children, val, sub_path, _debug_path, _z| {
-            debug_assert_eq!(sub_path.len(), 0);
-            alg_f(mask, children, val)
-        })
-    }
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         V: Clone + Send + Sync,
@@ -658,17 +658,6 @@ impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> 
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCached<V, A> for PathMap<V, A> {
-    fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
-    {
-        let rz = self.read_zipper();
-        into_cata_cached_body::<_, V, W, E, _, DoCache, false, false>(rz, |mask, children, val, sub_path, _debug_path, _z| {
-            debug_assert_eq!(sub_path.len(), 0);
-            alg_f(mask, children, val)
-        })
-    }
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         V: Clone + Send + Sync,

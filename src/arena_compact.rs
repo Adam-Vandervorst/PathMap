@@ -84,7 +84,7 @@ use fast_slice_utils::starts_with;
 use crate::alloc::{GlobalAlloc, global_alloc};
 use crate::{
     PathMap,
-    morphisms::{CatamorphismSideEffecting, CatamorphismCached},
+    morphisms::CatamorphismSideEffecting,
     utils::{BitMask, ByteMask, find_prefix_overlap},
     zipper::{
         Zipper, ZipperValues, ZipperForking, ZipperAbsolutePath, ZipperIteration,
