@@ -2419,6 +2419,18 @@ where Storage: AsRef<[u8]>
     }
 }
 
+crate::morphisms::impl_catamorphism_cached!(
+    crate::morphisms::IterativeCata;
+    impl<'tree, Storage> for ACTZipper<'tree, Storage, ()> as (), GlobalAlloc
+    where [Storage: AsRef<[u8]>];
+);
+
+crate::morphisms::impl_catamorphism_cached!(
+    crate::morphisms::IterativeCata;
+    impl<'tree, Storage> for ACTZipper<'tree, Storage, u64> as u64, GlobalAlloc
+    where [Storage: AsRef<[u8]>];
+);
+
 impl<'tree, Storage, Value> Zipper for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
@@ -3264,7 +3276,8 @@ where
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
     use crate::{
-        morphisms::CatamorphismSideEffecting, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperValues}
+        morphisms::CatamorphismSideEffecting,
+        PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperValues}
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,
@@ -3322,6 +3335,16 @@ mod tests {
             }
         }
     }
+
+    crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!(
+        act_zipper,
+        |keys: &[&[u8]]| {
+            let map = keys.iter().enumerate().map(|(idx, path)| (*path, idx as u64)).collect::<PathMap<u64>>();
+            ArenaCompactTree::from_zipper(map.read_zipper(), |&value| value)
+        },
+        |tree: &mut ArenaCompactTree<Vec<u8>>| tree.read_zipper_u64(),
+        crate::morphisms::IterativeCata
+    );
 
     /// Build `map` both ways and check the results describe the same trie.
     ///
