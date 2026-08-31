@@ -339,6 +339,99 @@ pub trait Summarization<V, A: Allocator = GlobalAlloc> {
     }
 }
 
+/// Shared child-result storage used to adapt [`Summarization`] to the single-function-algebra cata API.
+struct CataChildren<W> {
+    children: Vec<W>,
+    #[cfg(debug_assertions)]
+    allocations: Vec<(usize, usize)>,
+    #[cfg(debug_assertions)]
+    next_allocation: usize,
+}
+
+struct CataChildrenAcc {
+    start: usize,
+    #[cfg(debug_assertions)]
+    allocation: usize,
+}
+
+impl<W> CataChildren<W> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            children: Vec::new(),
+            #[cfg(debug_assertions)]
+            allocations: Vec::new(),
+            #[cfg(debug_assertions)]
+            next_allocation: 0,
+        }
+    }
+
+    #[inline]
+    fn new_acc(&mut self, capacity: usize) -> CataChildrenAcc {
+        let start = self.children.len();
+        self.children.reserve(capacity);
+        #[cfg(debug_assertions)]
+        let allocation = {
+            let allocation = self.next_allocation;
+            self.next_allocation += 1;
+            self.allocations.push((start, allocation));
+            allocation
+        };
+        CataChildrenAcc {
+            start,
+            #[cfg(debug_assertions)]
+            allocation,
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, _acc: &CataChildrenAcc, child: W) {
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(self.allocations.last(), Some(&(_acc.start, _acc.allocation)));
+        self.children.push(child);
+    }
+
+    #[inline]
+    fn summarize<R>(&mut self, acc: CataChildrenAcc, child_count: usize, summarize_f: impl FnOnce(&mut [W]) -> R) -> R {
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(self.allocations.pop(), Some((acc.start, acc.allocation)));
+        debug_assert!(acc.start <= self.children.len());
+        debug_assert_eq!(self.children.len() - acc.start, child_count);
+
+        let result = summarize_f(&mut self.children[acc.start..]);
+        self.children.truncate(acc.start);
+        result
+    }
+}
+
+//GOAT Implementation of adapted single-function-algebra cata
+fn into_cata_jumping_cached_from_summarization<V, A, S, W, E, AlgF>(source: &S, alg_f: AlgF) -> Result<W, E>
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    S: Summarization<V, A>,
+    W: Clone,
+    AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
+{
+    let children = std::cell::RefCell::new(CataChildren::<W>::new());
+    let children = &children;
+    let alg_f = &alg_f;
+
+    source.recursive_cata::<CataChildrenAcc, W, E, _, _, _, true>(
+        move |mask| Ok(children.borrow_mut().new_acc(mask.count_bits())),
+        move |_mask, child, acc| {
+            children.borrow_mut().push(acc, child);
+            Ok(())
+        },
+        move |mask, value, acc, prefix| match acc {
+            Some(acc) => children.borrow_mut().summarize(acc, mask.count_bits(), |children| {
+                alg_f(mask, children, value, prefix)
+            }),
+            None => alg_f(mask, &mut [], value, prefix),
+        },
+    )
+}
+
 //TODO GOAT!!: It would be nice to get rid of this Default bound on all morphism Ws.  In this case, the plan
 // for doing that would be to create a new type called a TakableSlice.  It would be able to deref
 // into a regular mutable slice of `T` so it would work just like an ordinary slice.  Additionally
@@ -2573,8 +2666,21 @@ mod tests {
             },
             |_mask, _val, state| Ok(state.map_or_else(Vec::new, |(_, path)| path)),
         );
+        let adapted = map.into_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
+            let mut longest = mask.iter().zip(children.iter_mut())
+                .max_by_key(|(_byte, rest)| rest.len())
+                .map_or_else(Vec::new, |(byte, rest)| {
+                    let mut path = std::mem::take(rest);
+                    path.insert(0, byte);
+                    path
+                });
+            let mut path = prefix.to_vec();
+            path.append(&mut longest);
+            path
+        });
 
         assert_eq!(std::str::from_utf8(&cached).unwrap(), "rubicundus");
+        assert_eq!(adapted, cached);
         assert_eq!(jumping.unwrap(), cached);
         assert_eq!(stepping.unwrap(), cached);
     }
@@ -2676,6 +2782,21 @@ mod tests {
             cached_calls.fetch_add(1, Relaxed);
             Rc::new(Node { value: value.cloned(), children: children.to_vec() })
         });
+
+        let jumping_calls = AtomicU64::new(0);
+        let jumping: Rc<Node<u8>> = make_map().read_zipper().into_cata_jumping_cached(|_mask, children, value, _prefix| {
+            jumping_calls.fetch_add(1, Relaxed);
+            Rc::new(Node { value: value.cloned(), children: children.to_vec() })
+        });
+
+        let adapted_calls = AtomicU64::new(0);
+        let adapted: Rc<Node<u8>> = make_map().into_cata_jumping_cached(|_mask, children, value, _prefix| {
+            adapted_calls.fetch_add(1, Relaxed);
+            Rc::new(Node { value: value.cloned(), children: children.to_vec() })
+        });
+
+        assert_eq!(adapted, jumping);
+        assert_eq!(adapted_calls.load(Relaxed), jumping_calls.load(Relaxed));
 
         let summarization_calls = AtomicU64::new(0);
         let summarized = make_map().recursive_cata_stepping::<Vec<Rc<Node<u8>>>, Rc<Node<u8>>, Infallible, _, _, _>(
