@@ -254,15 +254,22 @@ pub trait CatamorphismCached<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>
         let alg_f = &alg_f;
 
         self.factored_cata_jumping::<CataChildrenAcc, W, E, _, _, _, true>(
-            move |mask| Ok(children.borrow_mut().new_acc(mask.count_bits())),
+            move |mask| {
+                debug_assert!(children.try_borrow_mut().is_ok());
+                Ok(unsafe{&mut *children.as_ptr()}.new_acc(mask.count_bits()) )
+            },
             move |_mask, child, acc| {
-                children.borrow_mut().push(acc, child);
+                debug_assert!(children.try_borrow_mut().is_ok());
+                unsafe{&mut *children.as_ptr()}.push(acc, child);
                 Ok(())
             },
             move |mask, value, acc, prefix| match acc {
-                Some(acc) => children.borrow_mut().summarize(acc, mask.count_bits(), |children| {
-                    alg_f(mask, children, value, prefix)
-                }),
+                Some(acc) => {
+                    debug_assert!(children.try_borrow_mut().is_ok());
+                    unsafe{&mut *children.as_ptr()}.summarize(acc, mask.count_bits(), |children| {
+                        alg_f(mask, children, value, prefix)
+                    })
+                },
                 None => alg_f(mask, &mut [], value, prefix),
             },
         )
