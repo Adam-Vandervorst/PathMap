@@ -265,9 +265,9 @@ pub trait Catamorphism<V> {
 /// Provides faster catamorphism methods for types backed by an in-memory trie, such as [`PathMap`]
 /// and some zipper implementations
 pub trait Summarization<V, A: Allocator = GlobalAlloc> {
-    /// GOAT recursive cached cata. If this dev branch is successful this should replace the caching cata flavors in the public API.
+    /// GOAT cached cata. If this dev branch is successful this should replace the caching cata flavors in the public API.
     ///
-    /// JUMPING catamorphism implemented with recursion, for performance
+    /// JUMPING catamorphism implemented as an iterative zipper traversal.
     ///
     /// Each invocation of `summarize_f` may represent a whole non-branching
     /// run of path bytes, supplied as `prefix`, rather than just one path byte.
@@ -528,6 +528,28 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
     }
 }
 
+//GOAT temporary impl using zipers
+// impl<'a, Z, V: Clone + Send + Sync + Unpin, A: Allocator> Summarization<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
+//     fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+//     where
+//         V: Clone + Send + Sync,
+//         W: Clone,
+//         NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+//         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+//         SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+//     {
+//         let trie_ref = self.get_trie_ref();
+//         let zipper = trie_ref.fork_read_zipper();
+//         summarize_cached_body::<_, V, Acc, _, _, _, _, _, COMPUTE_PATH>(
+//             zipper,
+//             new_acc_f,
+//             fold_child_f,
+//             summarize_f,
+//         )
+//     }
+// }
+
+//GOAT, Recursive impl
 impl<'a, Z, V: Clone + Send + Sync, A: Allocator> Summarization<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
     fn recursive_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
@@ -910,6 +932,207 @@ pub(crate) struct DoCache;
 impl<W: Clone> CacheStrategy<W> for DoCache {
     const CACHING: bool = true;
     fn clone(w: &W) -> W { w.clone() }
+}
+
+/// Stack frame used in iterative (zipper-based) implementation of Summarizatino trait
+struct SummarizeStackFrame<Acc> {
+    child_idx: u16,
+    child_cnt: u16,
+    child_addr: Option<u64>,
+    accumulator: Acc,
+}
+
+impl<Acc> SummarizeStackFrame<Acc> {
+    #[inline]
+    fn new(child_cnt: usize, accumulator: Acc) -> Self {
+        Self {
+            child_idx: 0,
+            child_cnt: child_cnt as u16,
+            child_addr: None,
+            accumulator,
+        }
+    }
+}
+
+/// Ascend from a leaf or completed fork, summarizing each value and non-branching path run on the
+/// way to the parent fork.  This is the three-closure counterpart to [`ascend_to_fork`].
+#[inline(always)]
+fn summarize_ascend_to_fork<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+    zipper: &mut Z,
+    mut accumulator: Option<Acc>,
+    new_acc_f: NewAccF,
+    fold_child_f: FoldChildF,
+    summarize_f: SummarizeF,
+) -> Result<W, E>
+where
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,
+{
+    let witness = zipper.witness();
+    let mut child_mask = ByteMask::from(zipper.child_mask());
+
+    loop {
+        let old_path_len = zipper.origin_path().len();
+        let old_value = zipper.get_val_with_witness(&witness);
+        let ascended = zipper.ascend_until();
+        debug_assert!(ascended);
+
+        let origin_path = unsafe { zipper.origin_path_assert_len(old_path_len) };
+        let jump_len = if zipper.child_count() != 1 || zipper.is_val() {
+            old_path_len - (zipper.origin_path().len() + 1)
+        } else {
+            old_path_len - zipper.origin_path().len()
+        };
+        let prefix = if COMPUTE_PATH {
+            &origin_path[origin_path.len() - jump_len..]
+        } else {
+            &[]
+        };
+
+        let w = summarize_f(&child_mask, old_value, accumulator, prefix)?;
+
+        if zipper.child_count() != 1 || zipper.at_root() {
+            return Ok(w)
+        }
+
+        // SAFETY: The path buffer still contains the path we just ascended through.
+        let byte = *unsafe { zipper.origin_path_assert_len(old_path_len - jump_len) }
+            .last()
+            .unwrap();
+        child_mask = ByteMask::from(byte);
+        let mut next_accumulator = new_acc_f(&child_mask)?;
+        fold_child_f(&child_mask, w, &mut next_accumulator)?;
+        accumulator = Some(next_accumulator);
+    }
+}
+
+/// Iterative cached traversal behind [`Summarization::recursive_cata`].
+///
+/// This follows [`into_cata_cached_body`] closely, but completes a logical node with the three
+/// summarization closures instead of collecting a mutable child slice for one algebra closure.
+fn summarize_cached_body<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+    mut zipper: Z,
+    new_acc_f: NewAccF,
+    fold_child_f: FoldChildF,
+    summarize_f: SummarizeF,
+) -> Result<W, E>
+where
+    W: Clone,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,
+{
+    zipper.reset();
+    zipper.prepare_buffers();
+
+    let root_child_cnt = zipper.child_count();
+    if root_child_cnt == 0 {
+        return summarize_f(&ByteMask::EMPTY, zipper.val(), None, &[])
+    }
+
+    let passthrough_root = root_child_cnt == 1 && !zipper.is_val();
+    let mut stack = Vec::<SummarizeStackFrame<Acc>>::with_capacity(12);
+    if passthrough_root {
+        // A unary root without a value passes its child's W through unchanged, so it has no Acc.
+        zipper.descend_indexed_byte(0);
+        while zipper.child_count() < 2 {
+            if !zipper.descend_until() {
+                return summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+                    &mut zipper,
+                    None,
+                    new_acc_f,
+                    fold_child_f,
+                    summarize_f,
+                )
+            }
+        }
+        let accumulator = new_acc_f(&ByteMask::from(zipper.child_mask()))?;
+        stack.push(SummarizeStackFrame::new(zipper.child_count(), accumulator));
+    } else {
+        let accumulator = new_acc_f(&ByteMask::from(zipper.child_mask()))?;
+        stack.push(SummarizeStackFrame::new(zipper.child_count(), accumulator));
+    }
+
+    let mut cache = HashMap::<u64, W>::new();
+    'outer: loop {
+        let frame_mut = stack.last_mut()
+            .expect("summarization stack is emptied before we returned to root");
+
+        if frame_mut.child_idx < frame_mut.child_cnt {
+            zipper.descend_indexed_byte(frame_mut.child_idx as usize);
+            frame_mut.child_idx += 1;
+            frame_mut.child_addr = zipper.shared_node_id();
+
+            if let Some(cached) = DoCache::get(&cache, frame_mut.child_addr) {
+                zipper.ascend_byte();
+                let child_mask = ByteMask::from(zipper.child_mask());
+                fold_child_f(&child_mask, cached, &mut frame_mut.accumulator)?;
+                continue 'outer;
+            }
+
+            let mut is_leaf = false;
+            while zipper.child_count() < 2 {
+                if !zipper.descend_until() {
+                    is_leaf = true;
+                    break;
+                }
+            }
+
+            if is_leaf {
+                let cur_w = summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+                    &mut zipper,
+                    None,
+                    new_acc_f,
+                    fold_child_f,
+                    summarize_f,
+                )?;
+                DoCache::insert(&mut cache, frame_mut.child_addr, &cur_w);
+                let child_mask = ByteMask::from(zipper.child_mask());
+                fold_child_f(&child_mask, cur_w, &mut frame_mut.accumulator)?;
+                continue 'outer;
+            }
+
+            let accumulator = new_acc_f(&ByteMask::from(zipper.child_mask()))?;
+            stack.push(SummarizeStackFrame::new(zipper.child_count(), accumulator));
+            continue 'outer;
+        }
+
+        let frame = stack.pop()
+            .expect("we just checked that the summarization stack is not empty");
+
+        if stack.is_empty() {
+            return if passthrough_root {
+                summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+                    &mut zipper,
+                    Some(frame.accumulator),
+                    new_acc_f,
+                    fold_child_f,
+                    summarize_f,
+                )
+            } else {
+                debug_assert!(zipper.at_root(), "must be at root when summarization is done");
+                let child_mask = ByteMask::from(zipper.child_mask());
+                summarize_f(&child_mask, zipper.val(), Some(frame.accumulator), &[])
+            };
+        }
+
+        let cur_w = summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+            &mut zipper,
+            Some(frame.accumulator),
+            new_acc_f,
+            fold_child_f,
+            summarize_f,
+        )?;
+
+        let frame_mut = stack.last_mut()
+            .expect("when we're not at root, expect a parent summarization stack frame");
+        DoCache::insert(&mut cache, frame_mut.child_addr, &cur_w);
+        let child_mask = ByteMask::from(zipper.child_mask());
+        fold_child_f(&child_mask, cur_w, &mut frame_mut.accumulator)?;
+    }
 }
 
 /// Internal implementation behind all cached catas
@@ -2466,6 +2689,101 @@ mod tests {
 
         assert_eq!(summarized.unwrap(), cached);
         assert_eq!(summarization_calls.load(Relaxed), cached_calls.load(Relaxed));
+
+        let iterative_calls = AtomicU64::new(0);
+        let iterative_map = make_map();
+        let iterative = iterative_map.read_zipper().recursive_cata_stepping::<Vec<Rc<Node<u8>>>, Rc<Node<u8>>, Infallible, _, _, _>(
+            |_| Ok(Vec::new()),
+            |_mask, child, children| { children.push(child); Ok(()) },
+            |_mask, value, children| {
+                iterative_calls.fetch_add(1, Relaxed);
+                Ok(Rc::new(Node::new(value, children)))
+            },
+        );
+
+        assert_eq!(iterative.unwrap(), cached);
+        assert_eq!(iterative_calls.load(Relaxed), cached_calls.load(Relaxed));
+    }
+
+    #[test]
+    fn recursive_cata_on_zipper_uses_its_focus_as_root() {
+        let map: PathMap<()> = [
+            (b"a".as_slice(), ()),
+            (b"ab".as_slice(), ()),
+            (b"ac".as_slice(), ()),
+            (b"z".as_slice(), ()),
+        ]
+        .into_iter()
+        .collect();
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"a");
+
+        let count = zipper.recursive_cata::<usize, usize, Infallible, _, _, _, false>(
+            |_| Ok(0),
+            |_mask, child, total| { *total += child; Ok(()) },
+            |_mask, value, children, _prefix| {
+                Ok(value.is_some() as usize + children.unwrap_or(0))
+            },
+        );
+
+        assert_eq!(count.unwrap(), 3);
+        assert_eq!(zipper.path(), b"a");
+    }
+
+    #[test]
+    fn iterative_summarization_folds_each_child_immediately() {
+        use std::cell::RefCell;
+
+        let map: PathMap<usize> = [
+            (b"a".as_slice(), 1),
+            (b"b".as_slice(), 2),
+        ]
+        .into_iter()
+        .collect();
+        let events = RefCell::new(Vec::new());
+
+        let result = map.read_zipper().recursive_cata::<Vec<usize>, usize, Infallible, _, _, _, false>(
+            |_mask| {
+                events.borrow_mut().push("new");
+                Ok(Vec::new())
+            },
+            |_mask, child, accumulator| {
+                events.borrow_mut().push(if child == 1 { "fold 1" } else { "fold 2" });
+                accumulator.push(child);
+                Ok(())
+            },
+            |_mask, value, accumulator, _prefix| {
+                match value {
+                    Some(1) => events.borrow_mut().push("summarize 1"),
+                    Some(2) => events.borrow_mut().push("summarize 2"),
+                    _ => events.borrow_mut().push("summarize root"),
+                }
+                Ok(value.copied().unwrap_or_else(|| accumulator.unwrap().into_iter().sum()))
+            },
+        );
+
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(
+            events.into_inner(),
+            ["new", "summarize 1", "fold 1", "summarize 2", "fold 2", "summarize root"],
+        );
+    }
+
+    #[test]
+    fn iterative_summarization_does_not_accumulate_at_passthrough_root() {
+        let map: PathMap<()> = [(b"abc".as_slice(), ())].into_iter().collect();
+
+        let result = map.read_zipper().recursive_cata::<(), Vec<u8>, Infallible, _, _, _, true>(
+            |_| panic!("a unary valueless root must not create an accumulator"),
+            |_mask, _child, _accumulator| panic!("a unary valueless root must not fold a child"),
+            |_mask, value, accumulator, prefix| {
+                assert!(value.is_some());
+                assert!(accumulator.is_none());
+                Ok(prefix.to_vec())
+            },
+        );
+
+        assert_eq!(result.unwrap(), b"abc");
     }
 
     /// Finds the path_depth at which the recursive cata hits a stack overflow
@@ -2473,7 +2791,7 @@ mod tests {
     /// Empirically seems to be somewhere between 8 and 10 KBytes.  But more branching, and thus fewer
     /// bytes-per-node, will mean it will fail on shorter paths.
     #[test]
-    fn recursive_cata_stack_overflow_smoke() {
+    fn recursive_cata_deep_path_smoke() {
         const PATH_LEN: usize = 8_000;
 
         let mut map = PathMap::<()>::new();
