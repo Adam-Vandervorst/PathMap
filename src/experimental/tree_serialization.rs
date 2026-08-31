@@ -3,12 +3,12 @@ use std::io::Write;
 use std::ptr::slice_from_raw_parts;
 use crate::alloc::Allocator;
 use crate::{zipper, TrieValue};
-use crate::morphisms::{Catamorphism, new_map_from_ana_jumping};
+use crate::morphisms::{CatamorphismSideEffecting, new_map_from_ana_jumping};
 use crate::utils::{BitMask, ByteMask};
 use crate::write_zipper::ZipperWriting;
 
 /// WIP
-pub fn serialize_fork<V : TrieValue, RZ : Catamorphism<V>, F: FnMut(usize, &[u8], &V) -> ()>(rz: RZ, target: &mut Vec<u8>, _fv: F) -> std::io::Result<usize> {
+pub fn serialize_fork<V : TrieValue, RZ : CatamorphismSideEffecting<V>, F: FnMut(usize, &[u8], &V) -> ()>(rz: RZ, target: &mut Vec<u8>, _fv: F) -> std::io::Result<usize> {
     unsafe {
     thread_local! {
         static WRITTEN: UnsafeCell<usize> = UnsafeCell::new(0)
@@ -57,7 +57,7 @@ pub fn deserialize_fork<V: TrieValue + 'static, A: Allocator, WZ : ZipperWriting
 #[cfg(test)]
 mod tests {
     use crate::experimental::tree_serialization::{serialize_fork, deserialize_fork};
-    use crate::morphisms::Catamorphism;
+    use crate::morphisms::{CatamorphismCached, CatamorphismSideEffecting};
     use crate::PathMap;
 
     #[ignore] //GOAT, re-enable if/when this code is ready. Fails under Miri due to Stacked Borrows UB in deserialize_fork's ptr::read.

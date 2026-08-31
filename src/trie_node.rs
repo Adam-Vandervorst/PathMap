@@ -2411,7 +2411,7 @@ pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &
     }
 }
 
-/// Internal implementation of recursive_cata
+/// Internal implementation of `CatamorphismCached::factored_cata_jumping`
 pub(crate) fn recursive_cata_cached<A, V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(
     node: &TrieNodeODRc<V, A>,
     passed_in_val: Option<&V>,
@@ -2428,8 +2428,8 @@ where
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
     FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
 {
-    // NOTE: A caller-supplied value can make this trie-node boundary fall inside one Summarization callback,
-    // so its W is not reusable by node ID alone.
+    // NOTE: A caller-supplied value can make this trie-node boundary fall within a factored_cata callback,
+    // therefore the W is not cacheable based on node ID alone.
     // FUTURE: When the node contract associates values at the root of nodes with the node and not with the parent,
     // then the `passed_in_val.is_none()` check can be removed
     if passed_in_val.is_none() && !node.is_empty() && node.refcount() > 1 {

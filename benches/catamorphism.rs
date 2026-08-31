@@ -1,6 +1,6 @@
 use divan::{Divan, Bencher, black_box};
 use core::convert::Infallible;
-use pathmap::morphisms::{Catamorphism, Summarization};
+use pathmap::morphisms::CatamorphismCached;
 use pathmap::utils::ByteMask;
 use pathmap::utils::ints::gen_int_range;
 use pathmap::PathMap;
@@ -42,7 +42,7 @@ fn recursive_cata_jumping_val_count(bencher: Bencher) {
     let mut sink = 0usize;
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = rz.recursive_cata::<_, _, Infallible, _, _, _, false>(
+        *black_box(&mut sink) = rz.factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
             |_| Ok(0usize),
             |_mask, w: usize, total| { *total += w; Ok(()) },
             |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
@@ -58,7 +58,7 @@ fn recursive_cata_binary_tree_leaf_count(bencher: Bencher) {
     bencher.bench_local(|| {
         let rz = map.read_zipper();
         *black_box(&mut sink) = rz
-            .recursive_cata::<_, _, Infallible, _, _, _, false>(
+            .factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
                 |_| Ok(0usize),
                 |_mask, child_count: usize, total| {
                     *total += child_count;
@@ -94,7 +94,7 @@ fn recursive_cata_jumping_total_len(bencher: Bencher) {
     let mut sink = (0usize, 0usize);
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = rz.recursive_cata::<_, _, Infallible, _, _, _, true>(
+        *black_box(&mut sink) = rz.factored_cata_jumping::<_, _, Infallible, _, _, _, true>(
             |_| Ok((0usize, 0usize)),
             |_mask: &ByteMask, w: (usize, usize), acc: &mut (usize, usize)| {
                 acc.0 += w.0;

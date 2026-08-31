@@ -84,7 +84,7 @@ use fast_slice_utils::starts_with;
 use crate::alloc::{GlobalAlloc, global_alloc};
 use crate::{
     PathMap,
-    morphisms::Catamorphism,
+    morphisms::{CatamorphismSideEffecting, CatamorphismCached},
     utils::{BitMask, ByteMask, find_prefix_overlap},
     zipper::{
         Zipper, ZipperValues, ZipperForking, ZipperAbsolutePath, ZipperIteration,
@@ -895,7 +895,7 @@ impl ArenaCompactTree<Vec<u8>> {
     pub fn from_zipper<V, Z, M>(zipper: Z, map: M) -> Self
     where
         V: Clone + Send + Sync + Unpin,
-        Z: Catamorphism<V>,
+        Z: CatamorphismSideEffecting<V>,
         M: Fn(&V) -> u64,
     {
         build_arena_tree(zipper, map)
@@ -1065,7 +1065,7 @@ impl ArenaCompactTree<Mmap> {
     ) -> Result<Self, std::io::Error>
         where
             V: Clone + Send + Sync + Unpin,
-            Z: Catamorphism<V>,
+            Z: CatamorphismSideEffecting<V>,
             F: Fn(&V) -> u64,
             P: AsRef<Path>
     {
@@ -1145,7 +1145,7 @@ impl NodeBranch {
 fn build_arena_tree<V, Z, F>(zipper: Z, map_val: F) -> ArenaCompactTree<Vec<u8>>
     where
         V: Clone + Send + Sync + Unpin,
-        Z: Catamorphism<V>,
+        Z: CatamorphismSideEffecting<V>,
         F: Fn(&V) -> u64,
 {
     let mut arena = ArenaCompactTree::new();
@@ -1356,7 +1356,7 @@ struct CachedFrame {
 /// The traversal itself is the jumping catamorphism, unrolled (see
 /// `morphisms::into_cata_cached_body`, which this follows closely).  It is
 /// spelled out here rather than delegating to
-/// [`Catamorphism::into_cata_jumping_cached`] for two reasons:
+/// [`CatamorphismCached::into_cata_jumping_cached`] for two reasons:
 /// - the cached cata only consults its cache one byte below a fork, whereas we
 ///   also consult it at the fork we land on after jumping over a chain of
 ///   bytes.  That is where a subtrie grafted under a multi-byte path shows up,
@@ -1575,7 +1575,7 @@ fn dump_arena_tree<V, Z, F, P>(
 ) -> Result<ArenaCompactTree<FileDumper>, std::io::Error>
     where
         V: Clone + Send + Sync + Unpin,
-        Z: Catamorphism<V>,
+        Z: CatamorphismSideEffecting<V>,
         F: Fn(&V) -> u64,
         P: AsRef<Path>,
 {
@@ -3264,7 +3264,7 @@ where
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
     use crate::{
-        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperValues}
+        morphisms::CatamorphismSideEffecting, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperValues}
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,

@@ -905,7 +905,7 @@ mod tests {
     use crate::utils::ByteMask;
     use crate::zipper::*;
     use crate::PathMap;
-    use crate::morphisms::Catamorphism;
+    use crate::morphisms::CatamorphismSideEffecting;
 
     macro_rules! impl_product_zipper_tests {
         ($mod:ident, $ProductZipper:ident, $convert:ident) => {
