@@ -137,6 +137,13 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
         BZipper: ZipperMoving + ZipperPath + ZipperValues<BV>,
         Mapping: for<'a> Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>,
 {
+    #[inline]
+    fn depth(&self) -> usize {
+        let depth = self.a.depth();
+        debug_assert_eq!(depth, self.b.depth());
+        depth
+    }
+
     fn at_root(&self) -> bool {
         self.a.at_root() || self.b.at_root()
     }

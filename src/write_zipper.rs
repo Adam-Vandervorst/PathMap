@@ -421,6 +421,7 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubt
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperTracked<'a, 'path, V, A> {
+    #[inline] fn depth(&self) -> usize { self.z.depth() }
     fn at_root(&self) -> bool { self.z.at_root() }
     #[inline] fn focus_byte(&self) -> Option<u8> { self.z.focus_byte() }
     fn reset(&mut self) { self.z.reset() }
@@ -585,6 +586,7 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubt
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperUntracked<'a, 'path, V, A> {
+    #[inline] fn depth(&self) -> usize { self.z.depth() }
     fn at_root(&self) -> bool { self.z.at_root() }
     #[inline] fn focus_byte(&self) -> Option<u8> { self.z.focus_byte() }
     fn reset(&mut self) { self.z.reset() }
@@ -1011,6 +1013,11 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperCore<'a, 
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperCore<'a, 'path, V, A> {
+    #[inline]
+    fn depth(&self) -> usize {
+        self.key.prefix_buf.len().saturating_sub(self.key.origin_path.len())
+    }
+
     #[inline]
     fn at_root(&self) -> bool {
         self.key.prefix_buf.len() <= self.key.origin_path.len()

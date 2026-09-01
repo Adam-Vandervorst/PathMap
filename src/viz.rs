@@ -233,7 +233,7 @@ enum AsciiEdgeTarget<V> {
     Value(*const V),
 }
 
-fn build_ascii_graph_logical<V: TrieValue + Debug, A: Allocator, Z: ZipperInfallibleSubtries<V, A> + ZipperMoving + ZipperIteration + ZipperValues<V>>(
+fn build_ascii_graph_logical<V: TrieValue + Debug, A: Allocator, Z: ZipperInfallibleSubtries<V, A> + ZipperMoving + ZipperPath + ZipperIteration + ZipperValues<V>>(
     mut z: Z,
     dc: &DrawConfig,
     ds: &mut DrawState,
@@ -301,7 +301,7 @@ fn build_ascii_graph_logical<V: TrieValue + Debug, A: Allocator, Z: ZipperInfall
             let parent_node_id = graph_stack.last().unwrap().1;
             let edge_path = &path[graph_stack.last().unwrap().0..];
             let graph_node_id = hash_pair(node_addr, node_key);
-            graph_stack.push((z.path().len(), graph_node_id));
+            graph_stack.push((z.depth(), graph_node_id));
 
             let shared_addr = node_is_shared.then_some(node_addr);
             ensure_ascii_graph_node(&mut graph, graph_node_id, shared_addr);
@@ -548,7 +548,7 @@ fn update_node_hash<V : TrieValue + Debug + Hash, A : Allocator>(node: &TrieNode
     }
 }
 
-fn viz_zipper_logical<V : TrieValue + Debug + Hash, A: Allocator, Z: ZipperInfallibleSubtries<V, A> + ZipperMoving + ZipperIteration + ZipperValues<V>>(mut z: Z, dc: &DrawConfig, ds: &mut DrawState) {
+fn viz_zipper_logical<V : TrieValue + Debug + Hash, A: Allocator, Z: ZipperInfallibleSubtries<V, A> + ZipperMoving + ZipperPath + ZipperIteration + ZipperValues<V>>(mut z: Z, dc: &DrawConfig, ds: &mut DrawState) {
     let root_focus = z.get_focus();
     let root_node = root_focus.borrow().unwrap();
     let root_node_id = hash_pair(root_node.shared_node_id(), &[]);
@@ -611,7 +611,7 @@ fn viz_zipper_logical<V : TrieValue + Debug + Hash, A: Allocator, Z: ZipperInfal
             let edge_path = &path[graph_stack.last().unwrap().0..];
 
             let graph_node_id = hash_pair(node_addr, node_key);
-            graph_stack.push((z.path().len(), graph_node_id));
+            graph_stack.push((z.depth(), graph_node_id));
 
             ds.cmds.push(DrawCmd::Edge(parent_node_id, graph_node_id, edge_path.to_smallvec()));
             if !skip_node {

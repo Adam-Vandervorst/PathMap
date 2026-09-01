@@ -60,6 +60,7 @@ impl<Z: Zipper> Zipper for PathTracker<Z> {
 }
 
 impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
+    #[inline] fn depth(&self) -> usize { self.path.len() - self.origin_len }
     #[inline] fn at_root(&self) -> bool { self.zipper.at_root() }
     fn reset(&mut self) {
         self.zipper.reset();
@@ -140,6 +141,9 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
         self.path.truncate(self.path.len() - ascended);
         ascended
     }
+    fn to_next_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.to_next_step_observed(&mut (&mut self.path, &mut *obs))
+    }
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let byte = self.zipper.to_next_sibling_byte()?;
         *self.path.last_mut().expect("path must not be empty") = byte;
@@ -153,7 +157,22 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
 }
 
 
-impl<Z: ZipperMoving> ZipperIteration for PathTracker<Z> { }
+impl<Z: ZipperIteration> ZipperIteration for PathTracker<Z> {
+    //Each method delegates to the wrapped zipper, so it can use its own native implementation, and
+    //fans the reported movements out to this tracker's path buffer as well as the caller's observer
+    fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.to_next_val_observed(&mut (&mut self.path, &mut *obs))
+    }
+    fn descend_last_path_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.descend_last_path_observed(&mut (&mut self.path, &mut *obs))
+    }
+    fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        self.zipper.descend_first_k_path_observed(k, &mut (&mut self.path, &mut *obs))
+    }
+    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        self.zipper.to_next_k_path_observed(k, &mut (&mut self.path, &mut *obs))
+    }
+}
 
 impl<Z: ZipperMoving> ZipperPath for PathTracker<Z> {
     fn path(&self) -> &[u8] { &self.path[self.origin_len..] }

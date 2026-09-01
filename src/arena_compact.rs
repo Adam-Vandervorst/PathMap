@@ -2892,6 +2892,9 @@ where Storage: AsRef<[u8]>
 impl<'tree, Storage, Value> ZipperMoving for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
+    #[inline]
+    fn depth(&self) -> usize { self.path.len().saturating_sub(self.origin_depth) }
+
     /// Returns `true` if the zipper cannot ascend further, otherwise returns `false`
     fn at_root(&self) -> bool { self.path.len() <= self.origin_depth }
 
@@ -3160,7 +3163,7 @@ where Storage: AsRef<[u8]>
     }
 
     // default
-    // fn to_next_step(&mut self) -> bool;
+    // fn to_next_step<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool;
 }
 
 impl<Storage, Value> ZipperIteration for ACTZipper<'_, Storage, Value>
@@ -3170,9 +3173,9 @@ where Storage: AsRef<[u8]>
     /// order
     ///
     /// Returns a reference to the value or `None` if the zipper has encountered the root.
-    fn to_next_val(&mut self) -> bool {
+    fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         timed_span!(ToNextVal, COUNTERS);
-        while self.to_next_step()  {
+        while self.to_next_step_observed(obs)  {
             if self.is_val() {
                 return true;
             }
@@ -3190,12 +3193,16 @@ where Storage: AsRef<[u8]>
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
-    fn descend_first_k_path(&mut self, k: usize) -> bool {
+    fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         timed_span!(DescendFirstKPath, COUNTERS);
         for ii in 0..k {
-            if self.descend_first_byte().is_none() {
-                self.ascend(ii);
-                return false;
+            match self.descend_first_byte() {
+                Some(byte) => obs.descend_to_byte(byte),
+                None => {
+                    self.ascend(ii);
+                    obs.ascend(ii);
+                    return false;
+                }
             }
         }
         return true;
@@ -3212,7 +3219,7 @@ where Storage: AsRef<[u8]>
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
-    fn to_next_k_path(&mut self, k: usize) -> bool {
+    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         timed_span!(ToNextKPath, COUNTERS);
         let mut depth = k;
         'outer: loop {
@@ -3220,28 +3227,39 @@ where Storage: AsRef<[u8]>
                 if self.ascend(1) == 0 {
                     break 'outer;
                 }
+                obs.ascend(1);
                 depth -= 1;
             }
             let stack = self.stack.last_mut().unwrap();
             let idx = stack.child_index + 1;
             if idx >= stack.child_count {
-                if depth == 0 || self.ascend(1) == 0 {
+                if depth == 0 {
                     break 'outer;
                 }
+                if self.ascend(1) == 0 {
+                    break 'outer;
+                }
+                obs.ascend(1);
                 depth -= 1;
                 continue 'outer;
             }
-            assert!(self.descend_indexed_byte(idx).is_some());
+            //The loops above already ascended, so this is a plain descent of one byte
+            match self.descend_indexed_byte(idx) {
+                Some(byte) => obs.descend_to_byte(byte),
+                None => unreachable!("idx was bounds-checked against child_count above"),
+            }
             depth += 1;
             for _ii in 0..k - depth {
-                if self.descend_first_byte().is_none() {
-                    continue 'outer;
+                match self.descend_first_byte() {
+                    Some(byte) => obs.descend_to_byte(byte),
+                    None => continue 'outer,
                 }
                 depth += 1;
             }
             return true;
         }
         self.ascend(depth);
+        obs.ascend(depth);
         false
     }
 }
@@ -3340,14 +3358,18 @@ mod tests {
         let mut btm_zipper = btm.read_zipper();
         let mut act_zipper = act.read_zipper_u64();
 
+        let mut btm_observed = Vec::<u8>::new();
+        let mut act_observed = Vec::<u8>::new();
         loop {
-            btm_zipper.to_next_val();
-            act_zipper.to_next_val();
+            btm_zipper.to_next_val_observed(&mut btm_observed);
+            act_zipper.to_next_val_observed(&mut act_observed);
 
             let btm_val = btm_zipper.val().copied();
             let act_val = act_zipper.val().copied();
 
             assert_eq!(btm_zipper.path(), act_zipper.path());
+            assert_eq!(btm_observed, act_observed);
+            assert_eq!(&btm_observed[..], btm_zipper.path());
             assert_eq!(btm_val, act_val);
 
             if act_val.is_none() {
@@ -3655,11 +3677,15 @@ mod tests {
         let btm = PathMap::from_iter(items.iter().map(|&(k, v)| (k, v)));
         let mut bz = btm.read_zipper();
         let mut az = act.read_zipper_u64();
+        let mut b_observed = Vec::<u8>::new();
+        let mut a_observed = Vec::<u8>::new();
         loop {
-            let more_b = bz.to_next_val();
-            let more_a = az.to_next_val();
+            let more_b = bz.to_next_val_observed(&mut b_observed);
+            let more_a = az.to_next_val_observed(&mut a_observed);
             assert_eq!(more_b, more_a, "walks end together");
             assert_eq!(bz.path(), az.path());
+            assert_eq!(b_observed, a_observed);
+            assert_eq!(&b_observed[..], bz.path());
             assert_eq!(bz.val().copied(), az.val().copied());
             if !more_a {
                 break;
@@ -3840,11 +3866,15 @@ mod tests {
         let act = ArenaCompactTree::from_zipper(btm.read_zipper(), |&v| v);
         let mut cata_zipper = act.read_zipper_u64();
         let mut stream_zipper = tree.read_zipper_u64();
+        let mut cata_observed = Vec::<u8>::new();
+        let mut stream_observed = Vec::<u8>::new();
         loop {
-            let cata_next = cata_zipper.to_next_val();
-            let stream_next = stream_zipper.to_next_val();
+            let cata_next = cata_zipper.to_next_val_observed(&mut cata_observed);
+            let stream_next = stream_zipper.to_next_val_observed(&mut stream_observed);
             assert_eq!(cata_next, stream_next);
             assert_eq!(cata_zipper.path(), stream_zipper.path());
+            assert_eq!(cata_observed, stream_observed);
+            assert_eq!(&cata_observed[..], cata_zipper.path());
             assert_eq!(cata_zipper.get_val(), stream_zipper.get_val());
             if !cata_next {
                 break;
@@ -3962,10 +3992,14 @@ mod tests {
     fn assert_act_matches_map(map: &PathMap<u64>, tree: &ArenaCompactTree<super::Mmap>) {
         let mut map_zipper = map.read_zipper();
         let mut act_zipper = tree.read_zipper_u64();
+        let mut map_observed = Vec::<u8>::new();
+        let mut act_observed = Vec::<u8>::new();
         loop {
-            let map_next = map_zipper.to_next_val();
-            assert_eq!(map_next, act_zipper.to_next_val());
+            let map_next = map_zipper.to_next_val_observed(&mut map_observed);
+            assert_eq!(map_next, act_zipper.to_next_val_observed(&mut act_observed));
             assert_eq!(map_zipper.path(), act_zipper.path());
+            assert_eq!(map_observed, act_observed);
+            assert_eq!(&map_observed[..], map_zipper.path());
             assert_eq!(map_zipper.val().copied(), act_zipper.val().copied());
             if !map_next { break }
         }

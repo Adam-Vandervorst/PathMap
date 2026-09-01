@@ -15,6 +15,7 @@ enum PolyZipperTrait {
     ZipperMoving,
     ZipperIteration,
     ZipperConcrete,
+    ZipperPath,
     ZipperAbsolutePath,
     ZipperPathBuffer,
     ZipperSubtries,
@@ -33,6 +34,7 @@ impl PolyZipperTrait {
             "ZipperMoving" => Some(Self::ZipperMoving),
             "ZipperIteration" => Some(Self::ZipperIteration),
             "ZipperConcrete" => Some(Self::ZipperConcrete),
+            "ZipperPath" => Some(Self::ZipperPath),
             "ZipperAbsolutePath" => Some(Self::ZipperAbsolutePath),
             "ZipperPathBuffer" => Some(Self::ZipperPathBuffer),
             "ZipperSubtries" => Some(Self::ZipperSubtries),
@@ -54,6 +56,7 @@ fn all_poly_zipper_traits() -> BTreeSet<PolyZipperTrait> {
         ZipperMoving,
         ZipperIteration,
         ZipperConcrete,
+        ZipperPath,
         ZipperAbsolutePath,
         ZipperPathBuffer,
         ZipperSubtries,
@@ -98,6 +101,11 @@ fn add_trait_dependencies(traits: &mut BTreeSet<PolyZipperTrait>) {
             }
         }
         if traits.contains(&ZipperAbsolutePath) {
+            if traits.insert(ZipperPath) {
+                changed = true;
+            }
+        }
+        if traits.contains(&ZipperPath) {
             if traits.insert(ZipperMoving) {
                 changed = true;
             }
@@ -459,19 +467,16 @@ fn derive_poly_zipper_with_traits(
             quote! {}
         };
         Some(quote! {
-            impl #impl_generics pathmap::zipper::ZipperPath for #enum_name #ty_generics
-            #zipper_moving_where
-            {
-                fn path(&self) -> &[u8] {
-                    match self {
-                        #(#variant_arms => inner.path(),)*
-                    }
-                }
-            }
-
             impl #impl_generics pathmap::zipper::ZipperMoving for #enum_name #ty_generics
             #zipper_moving_where
             {
+                #[inline]
+                fn depth(&self) -> usize {
+                    match self {
+                        #(#variant_arms => inner.depth(),)*
+                    }
+                }
+
                 fn at_root(&self) -> bool {
                     match self {
                         #(#variant_arms => inner.at_root(),)*
@@ -572,6 +577,33 @@ fn derive_poly_zipper_with_traits(
         None
     };
 
+    // Generate ZipperPath trait implementation
+    let zipper_path_impl = if traits.contains(&PolyZipperTrait::ZipperPath) {
+        let variant_arms = &variant_arms;
+        let zipper_path_where = if include_where_clause {
+            quote! {
+                where
+                    #(#inner_types: pathmap::zipper::ZipperPath,)*
+                    #where_clause
+            }
+        } else {
+            quote! {}
+        };
+        Some(quote! {
+            impl #impl_generics pathmap::zipper::ZipperPath for #enum_name #ty_generics
+            #zipper_path_where
+            {
+                fn path(&self) -> &[u8] {
+                    match self {
+                        #(#variant_arms => inner.path(),)*
+                    }
+                }
+            }
+        })
+    } else {
+        None
+    };
+
     // Generate ZipperAbsolutePath trait implementation
     let zipper_absolute_path_impl = if traits.contains(&PolyZipperTrait::ZipperAbsolutePath) {
         let variant_arms = &variant_arms;
@@ -660,27 +692,27 @@ fn derive_poly_zipper_with_traits(
             impl #impl_generics pathmap::zipper::ZipperIteration for #enum_name #ty_generics
             #zipper_iteration_where
             {
-                fn to_next_val(&mut self) -> bool {
+                fn to_next_val_observed<Obs: pathmap::zipper::PathObserver>(&mut self, obs: &mut Obs) -> bool {
                     match self {
-                        #(#variant_arms => inner.to_next_val(),)*
+                        #(#variant_arms => inner.to_next_val_observed(obs),)*
                     }
                 }
 
-                fn descend_last_path(&mut self) -> bool {
+                fn descend_last_path_observed<Obs: pathmap::zipper::PathObserver>(&mut self, obs: &mut Obs) -> bool {
                     match self {
-                        #(#variant_arms => inner.descend_last_path(),)*
+                        #(#variant_arms => inner.descend_last_path_observed(obs),)*
                     }
                 }
 
-                fn descend_first_k_path(&mut self, k: usize) -> bool {
+                fn descend_first_k_path_observed<Obs: pathmap::zipper::PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
                     match self {
-                        #(#variant_arms => inner.descend_first_k_path(k),)*
+                        #(#variant_arms => inner.descend_first_k_path_observed(k, obs),)*
                     }
                 }
 
-                fn to_next_k_path(&mut self, k: usize) -> bool {
+                fn to_next_k_path_observed<Obs: pathmap::zipper::PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
                     match self {
-                        #(#variant_arms => inner.to_next_k_path(k),)*
+                        #(#variant_arms => inner.to_next_k_path_observed(k, obs),)*
                     }
                 }
             }
@@ -705,9 +737,9 @@ fn derive_poly_zipper_with_traits(
             impl #impl_generics pathmap::zipper::ZipperReadOnlyIteration<'trie, V> for #enum_name #ty_generics
             #zipper_read_only_iteration_where
             {
-                fn to_next_get_val(&mut self) -> Option<&'trie V> {
+                fn to_next_get_val_observed<Obs: pathmap::zipper::PathObserver>(&mut self, obs: &mut Obs) -> Option<&'trie V> {
                     match self {
-                        #(#variant_arms => inner.to_next_get_val(),)*
+                        #(#variant_arms => inner.to_next_get_val_observed(obs),)*
                     }
                 }
             }
@@ -731,9 +763,9 @@ fn derive_poly_zipper_with_traits(
             impl #impl_generics pathmap::zipper::ZipperReadOnlyConditionalIteration<'trie, V> for #enum_name #ty_generics
             #zipper_read_only_conditional_iteration_where
             {
-                fn to_next_get_val_with_witness<'w>(&mut self, witness: &'w Self::WitnessT) -> Option<&'w V> where 'trie: 'w {
+                fn to_next_get_val_with_witness_observed<'w, Obs: pathmap::zipper::PathObserver>(&mut self, witness: &'w Self::WitnessT, obs: &mut Obs) -> Option<&'w V> where 'trie: 'w {
                     match (self, witness) {
-                        #((Self::#variant_names(inner), #witness_enum_name::#variant_names(w)) => inner.to_next_get_val_with_witness(w),)*
+                        #((Self::#variant_names(inner), #witness_enum_name::#variant_names(w)) => inner.to_next_get_val_with_witness_observed(w, obs),)*
                         _ => {
                             debug_assert!(false, "Witness variant must match zipper variant");
                             None
@@ -847,6 +879,7 @@ fn derive_poly_zipper_with_traits(
         // #zipper_forking_impl
         #zipper_moving_impl
         #zipper_concrete_impl
+        #zipper_path_impl
         #zipper_absolute_path_impl
         #zipper_path_buffer_impl
         #zipper_iteration_impl
