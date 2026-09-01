@@ -2322,9 +2322,9 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend(&mut self, steps: usize) -> usize {
-            let mut remaining = steps;
             timed_span!(Ascend, COUNTERS);
             debug_assert!(self.is_regularized());
+            let mut remaining = steps;
             while remaining > 0 {
                 if self.excess_key_len() == 0 {
                     match self.ancestors.pop() {
