@@ -980,12 +980,6 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperReadOnlyConditionalIteration<'trie, V> for ReadZipperTracked<'trie, '_, V, A> { }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperAbsolutePath for ReadZipperTracked<'trie, '_, V, A> { zipper_impl_lens!(ZipperAbsolutePath self => self.z); }
 
-crate::morphisms::impl_catamorphism_cached!(
-    crate::morphisms::RecursiveCata;
-    impl<'trie, 'path, V, A> for ReadZipperTracked<'trie, 'path, V, A> as V, A
-    where [V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie];
-);
-
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperTracked<'_, '_, V, A>{
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
@@ -1072,12 +1066,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Read
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperUntracked<'_, '_, V, A> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ReadZipperUntracked<'trie, '_, V, A> { zipper_impl_lens!(ZipperMoving self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ReadZipperUntracked<'_, '_, V, A> { zipper_impl_lens!(ZipperConcrete self => self.z); }
-
-crate::morphisms::impl_catamorphism_cached!(
-    crate::morphisms::RecursiveCata;
-    impl<'trie, 'path, V, A> for ReadZipperUntracked<'trie, 'path, V, A> as V, A
-    where [V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie];
-);
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperUntracked<'_, '_, V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
@@ -1240,12 +1228,6 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperIteration for ReadZipperOwned<V, A> { zipper_impl_lens!(ZipperIteration self => self.z); }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperReadOnlyConditionalIteration<'trie, V> for ReadZipperOwned<V, A> { }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperAbsolutePath for ReadZipperOwned<V, A> { zipper_impl_lens!(ZipperAbsolutePath self => self.z); }
-
-crate::morphisms::impl_catamorphism_cached!(
-    crate::morphisms::RecursiveCata;
-    impl<V, A> for ReadZipperOwned<V, A> as V, A
-    where [V: Clone + Send + Sync + Unpin + 'static, A: Allocator + 'static];
-);
 
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for ReadZipperOwned<V, A> {
@@ -4493,7 +4475,14 @@ mod tests {
         read_zipper,
         |keys: &[&[u8]]| keys.iter().enumerate().map(|(idx, path)| (*path, idx as u64)).collect::<PathMap<u64>>(),
         |map: &mut PathMap<u64>| map.read_zipper(),
-        crate::morphisms::IterativeCata
+        CatamorphismCached
+    );
+
+    crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!(
+        read_zipper,
+        |keys: &[&[u8]]| keys.iter().enumerate().map(|(idx, path)| (*path, idx as u64)).collect::<PathMap<u64>>(),
+        |map: &mut PathMap<u64>| map.read_zipper(),
+        CatamorphismCachedIterative
     );
 
     super::zipper_moving_tests::zipper_moving_tests!(read_zipper,

@@ -2419,18 +2419,6 @@ where Storage: AsRef<[u8]>
     }
 }
 
-crate::morphisms::impl_catamorphism_cached!(
-    crate::morphisms::IterativeCata;
-    impl<'tree, Storage> for ACTZipper<'tree, Storage, ()> as (), GlobalAlloc
-    where [Storage: AsRef<[u8]>];
-);
-
-crate::morphisms::impl_catamorphism_cached!(
-    crate::morphisms::IterativeCata;
-    impl<'tree, Storage> for ACTZipper<'tree, Storage, u64> as u64, GlobalAlloc
-    where [Storage: AsRef<[u8]>];
-);
-
 impl<'tree, Storage, Value> Zipper for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
@@ -3343,7 +3331,7 @@ mod tests {
             ArenaCompactTree::from_zipper(map.read_zipper(), |&value| value)
         },
         |tree: &mut ArenaCompactTree<Vec<u8>>| tree.read_zipper_u64(),
-        crate::morphisms::IterativeCata
+        CatamorphismCachedIterative
     );
 
     /// Build `map` both ways and check the results describe the same trie.
