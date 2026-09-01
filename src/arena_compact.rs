@@ -1356,7 +1356,7 @@ struct CachedFrame {
 /// The traversal itself is the jumping catamorphism, unrolled (see
 /// `morphisms::into_cata_cached_body`, which this follows closely).  It is
 /// spelled out here rather than delegating to
-/// [`CatamorphismCached::into_cata_jumping_cached`] for two reasons:
+/// [`CatamorphismCached::cata_jumping_cached`] for two reasons:
 /// - the cached cata only consults its cache one byte below a fork, whereas we
 ///   also consult it at the fork we land on after jumping over a chain of
 ///   bytes.  That is where a subtrie grafted under a multi-byte path shows up,
@@ -1367,7 +1367,7 @@ struct CachedFrame {
 /// - the cached cata's algebra is an `Fn`, so writing to the arena from it
 ///   would need interior mutability.
 ///
-/// TODO: GOAT: introduce an abstraction/modify `into_cata_jumping_cached`,
+/// TODO: GOAT: introduce an abstraction/modify `cata_jumping_cached`,
 ///  to address the problems listed above.  The suggested API is to have
 ///  `FnMut` variant for the caching catamorphism.
 ///

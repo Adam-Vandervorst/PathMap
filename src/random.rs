@@ -143,7 +143,7 @@ impl <T : TrieValue + 'static> Distribution<(Vec<u8>, Option<T>)> for FairTriePa
     //TODO: There has to be a more efficient way to implement this than making two passes through the whole trie
     use crate::morphisms::{CatamorphismSideEffecting, CatamorphismCached};
     // it's much cheaper to draw many samples at once, but the current Distribution API is broken
-    let size = self.source.clone().into_cata_cached(|_: &ByteMask, ws: &mut [usize], _mv: Option<&T>| {
+    let size = self.source.cata_cached(|_: &ByteMask, ws: &mut [usize], _mv: Option<&T>| {
       ws.iter().sum::<usize>() + 1
     });
     let target = rng.random_range(0..size);

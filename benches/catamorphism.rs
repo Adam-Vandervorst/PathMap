@@ -78,7 +78,7 @@ fn cached_jumping_cata_val_count(bencher: Bencher) {
     let mut sink = 0usize;
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = CatamorphismCachedWithEngine::<(), GlobalAlloc, RecursiveCata>::into_cata_jumping_cached(rz, |_mask: &ByteMask, children: &mut [usize], val, _sub_path| {
+        *black_box(&mut sink) = CatamorphismCachedWithEngine::<(), GlobalAlloc, RecursiveCata>::cata_jumping_cached(&rz, |_mask: &ByteMask, children: &mut [usize], val, _sub_path| {
             let mut sum: usize = children.iter().sum();
             if val.is_some() {
                 sum += 1;
@@ -118,7 +118,7 @@ fn cached_jumping_cata_total_len(bencher: Bencher) {
     let mut sink = (0usize, 0usize);
     bencher.bench_local(|| {
         let rz = map.read_zipper();
-        *black_box(&mut sink) = CatamorphismCachedWithEngine::<(), GlobalAlloc, RecursiveCata>::into_cata_jumping_cached(rz, |mask: &ByteMask, children: &mut [(usize, usize)], val, sub_path| {
+        *black_box(&mut sink) = CatamorphismCachedWithEngine::<(), GlobalAlloc, RecursiveCata>::cata_jumping_cached(&rz, |mask: &ByteMask, children: &mut [(usize, usize)], val, sub_path| {
             let mut count = 0usize;
             let mut total_len = 0usize;
             let prefix_len = sub_path.len();

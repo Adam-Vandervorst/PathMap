@@ -154,14 +154,15 @@ pub trait CatamorphismSideEffecting<V> {
 pub struct RecursiveCata;
 
 /// Selects the iterative zipper-based implementation of [`CatamorphismCached`].  Use this to avoid
-/// stack overflows caused by [`RecursiveCata`]
+/// stack overflows caused by [`RecursiveCata`]. This engine requires that a zipper can be created
+/// or cloned because it uses a zipper for traversal.
 pub struct IterativeCata;
 
 /// Provides cached (pure) catamorphisms using an explicitly selected implementation engine
 ///
 /// Set `Engine` to either [`RecursiveCata`] or [`IterativeCata`] depending on the implementation
-/// desired / available
-pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = GlobalAlloc, Engine = RecursiveCata> {
+/// desired / available.
+pub trait CatamorphismCachedWithEngine<V, A: Allocator = GlobalAlloc, Engine = RecursiveCata> {
 
     /// Applies a **cached**, **stepping**, catamorphism to the trie descending from the zipper's
     /// root, running the `alg_f` at every step (at every byte)
@@ -184,27 +185,27 @@ pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = Gl
     /// ## Behavior
     ///
     /// The focus position of the zipper will be ignored and it will be immediately reset to the root.
-    fn into_cata_cached<W, AlgF>(self, alg_f: AlgF) -> W
+    fn cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
         where
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
         Self: Sized
     {
-        self.into_cata_cached_fallible(|mask, children, val| -> Result<W, Infallible> {
+        self.cata_cached_fallible(|mask, children, val| -> Result<W, Infallible> {
             Ok(alg_f(mask, children, val))
         }).unwrap()
     }
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
-    /// See [CatamorphismCached::into_cata_cached]
-    fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
+    /// See [CatamorphismCached::cata_cached]
+    fn cata_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
         where
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>,
             Self: Sized,
     {
-        self.into_cata_jumping_cached_fallible(|mask, children, val, sub_path| {
+        self.cata_jumping_cached_fallible(|mask, children, val, sub_path| {
             let mut w = alg_f(mask, children, val)?;
             for &byte in sub_path.iter().rev() {
                 let child_mask = ByteMask::from(byte);
@@ -239,26 +240,26 @@ pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = Gl
     /// 3. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"ort")`
     /// 4. `alg_f(ByteMask::from_iter([b'b', b'e', b'f']), &[..], None, b"com")`
     ///
-    /// See [into_cata_cached](CatamorphismCached::into_cata_cached) for explanation of other arguments and behavior
-    fn into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
+    /// See [cata_cached](CatamorphismCached::cata_cached) for explanation of other arguments and behavior
+    fn cata_jumping_cached<W, AlgF>(&self, alg_f: AlgF) -> W
         where
         W: Clone,
         AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
         Self: Sized
     {
-        self.into_cata_jumping_cached_fallible(|mask, children, val, sub_path| -> Result<W, Infallible> {
+        self.cata_jumping_cached_fallible(|mask, children, val, sub_path| -> Result<W, Infallible> {
             Ok(alg_f(mask, children, val, sub_path))
         }).unwrap()
     }
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
-    /// See [CatamorphismCached::into_cata_jumping_cached]
-    fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
+    /// See [CatamorphismCached::cata_jumping_cached]
+    fn cata_jumping_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
         where
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
-            Self: Sized //GOAT, remove uneeded when we take &self
+            Self: Sized
     {
         let children = std::cell::RefCell::new(CataChildren::<W>::new());
         let children = &children;
@@ -287,7 +288,7 @@ pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = Gl
     }
 
     /// Hash the logical `PathMap` and all its values
-    fn hash(self) -> u128
+    fn hash(&self) -> u128
     where
         Self: Sized,
         V: std::hash::Hash
@@ -300,12 +301,12 @@ pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = Gl
     }
 
     /// Hash the logical `PathMap`, using the provided function to hash values
-    fn hash_with<F>(self, val_hash: F) -> u128
+    fn hash_with<F>(&self, val_hash: F) -> u128
     where
         Self: Sized,
         F: Fn(&V) -> u128
     {
-        self.into_cata_cached(|bm, hs, mv| {
+        self.cata_cached(|bm, hs, mv| {
             let mut hasher = gxhash::GxHasher::with_seed(0b0100001010101101111110010110100110000010011000100100100111110111i64);
             hasher.write(unsafe { slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap_unchecked() });
             hasher.write(unsafe { slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap_unchecked() });
@@ -345,7 +346,6 @@ pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = Gl
     /// path endpoints.
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
-        V: Clone + Send + Sync,
         W: Clone,
         NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
@@ -360,7 +360,6 @@ pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = Gl
     /// [`CatamorphismCached::factored_cata_jumping`].
     fn factored_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
-        V: Clone + Send + Sync,
         W: Clone,
         NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
@@ -389,40 +388,40 @@ pub trait CatamorphismCachedWithEngine<V: Clone + Send + Sync, A: Allocator = Gl
 ///
 /// [`Self::Engine`] selects that strategy.  [`CatamorphismCachedWithEngine`] is the lower-level
 /// interface for explicitly selecting a different catamorphism engine.
-pub trait CatamorphismCached<V: Clone + Send + Sync, A: Allocator = GlobalAlloc> {
+pub trait CatamorphismCached<V, A: Allocator = GlobalAlloc> {
     /// The catamorphism engine selected as the default for this zipper type.
     type Engine;
 
-    /// Calls [`CatamorphismCachedWithEngine::into_cata_cached`] with this zipper type's selected
+    /// Calls [`CatamorphismCachedWithEngine::cata_cached`] with this zipper type's selected
     /// [`Self::Engine`].
-    fn into_cata_cached<W, AlgF>(self, alg_f: AlgF) -> W
+    fn cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
     where
         W: Clone,
         AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
         Self: Sized,
     ;
 
-    /// Calls [`CatamorphismCachedWithEngine::into_cata_cached_fallible`] with this zipper type's
+    /// Calls [`CatamorphismCachedWithEngine::cata_cached_fallible`] with this zipper type's
     /// selected [`Self::Engine`].
-    fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
+    fn cata_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
     where
         W: Clone,
         AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>,
         Self: Sized,
     ;
 
-    /// Calls [`CatamorphismCachedWithEngine::into_cata_jumping_cached`] with this zipper type's
+    /// Calls [`CatamorphismCachedWithEngine::cata_jumping_cached`] with this zipper type's
     /// selected [`Self::Engine`].
-    fn into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
+    fn cata_jumping_cached<W, AlgF>(&self, alg_f: AlgF) -> W
     where
         W: Clone,
         AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
         Self: Sized,
     ;
 
-    /// Calls [`CatamorphismCachedWithEngine::into_cata_jumping_cached_fallible`] with this zipper
+    /// Calls [`CatamorphismCachedWithEngine::cata_jumping_cached_fallible`] with this zipper
     /// type's selected [`Self::Engine`].
-    fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
+    fn cata_jumping_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
     where
         W: Clone,
         AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
@@ -431,7 +430,7 @@ pub trait CatamorphismCached<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>
 
     /// Calls [`CatamorphismCachedWithEngine::hash`] with this zipper type's selected
     /// [`Self::Engine`].
-    fn hash(self) -> u128
+    fn hash(&self) -> u128
     where
         Self: Sized,
         V: std::hash::Hash,
@@ -439,7 +438,7 @@ pub trait CatamorphismCached<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>
 
     /// Calls [`CatamorphismCachedWithEngine::hash_with`] with this zipper type's selected
     /// [`Self::Engine`].
-    fn hash_with<F>(self, val_hash: F) -> u128
+    fn hash_with<F>(&self, val_hash: F) -> u128
     where
         Self: Sized,
         F: Fn(&V) -> u128,
@@ -503,51 +502,51 @@ macro_rules! impl_catamorphism_cached {
             type Engine = $engine;
 
             #[inline]
-            fn into_cata_cached<W, AlgF>(self, alg_f: AlgF) -> W
+            fn cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
             where
                 W: Clone,
                 AlgF: Fn(&$crate::utils::ByteMask, &mut [W], Option<&$value>) -> W,
                 Self: Sized,
             {
                 $crate::morphisms::CatamorphismCachedWithEngine::<$value, $allocator, $engine>
-                    ::into_cata_cached(self, alg_f)
+                    ::cata_cached(self, alg_f)
             }
 
             #[inline]
-            fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
+            fn cata_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
             where
                 W: Clone,
                 AlgF: Fn(&$crate::utils::ByteMask, &mut [W], Option<&$value>) -> Result<W, E>,
                 Self: Sized,
             {
                 $crate::morphisms::CatamorphismCachedWithEngine::<$value, $allocator, $engine>
-                    ::into_cata_cached_fallible(self, alg_f)
+                    ::cata_cached_fallible(self, alg_f)
             }
 
             #[inline]
-            fn into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
+            fn cata_jumping_cached<W, AlgF>(&self, alg_f: AlgF) -> W
             where
                 W: Clone,
                 AlgF: Fn(&$crate::utils::ByteMask, &mut [W], Option<&$value>, &[u8]) -> W,
                 Self: Sized,
             {
                 $crate::morphisms::CatamorphismCachedWithEngine::<$value, $allocator, $engine>
-                    ::into_cata_jumping_cached(self, alg_f)
+                    ::cata_jumping_cached(self, alg_f)
             }
 
             #[inline]
-            fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
+            fn cata_jumping_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
             where
                 W: Clone,
                 AlgF: Fn(&$crate::utils::ByteMask, &mut [W], Option<&$value>, &[u8]) -> Result<W, E>,
                 Self: Sized,
             {
                 $crate::morphisms::CatamorphismCachedWithEngine::<$value, $allocator, $engine>
-                    ::into_cata_jumping_cached_fallible(self, alg_f)
+                    ::cata_jumping_cached_fallible(self, alg_f)
             }
 
             #[inline]
-            fn hash(self) -> u128
+            fn hash(&self) -> u128
             where
                 Self: Sized,
                 $value: std::hash::Hash,
@@ -557,7 +556,7 @@ macro_rules! impl_catamorphism_cached {
             }
 
             #[inline]
-            fn hash_with<F>(self, val_hash: F) -> u128
+            fn hash_with<F>(&self, val_hash: F) -> u128
             where
                 Self: Sized,
                 F: Fn(&$value) -> u128,
@@ -862,7 +861,6 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
 impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCachedWithEngine<V, A, RecursiveCata> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
-        V: Clone + Send + Sync,
         W: Clone,
         NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
@@ -880,10 +878,9 @@ impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCachedWithEng
     }
 }
 
-impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCachedWithEngine<V, A, IterativeCata> for Z where Z: Clone + Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer {
+impl<'a, Z, V: 'a, A: Allocator> CatamorphismCachedWithEngine<V, A, IterativeCata> for Z where Z: Clone + Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
-        V: Clone + Send + Sync,
         W: Clone,
         NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
@@ -901,7 +898,6 @@ impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCachedWithEng
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCachedWithEngine<V, A, RecursiveCata> for PathMap<V, A> {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
-        V: Clone + Send + Sync,
         W: Clone,
         NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
@@ -921,7 +917,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCachedWithEngine<
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCachedWithEngine<V, A, IterativeCata> for PathMap<V, A> {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
-        V: Clone + Send + Sync,
         W: Clone,
         NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
         FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
@@ -946,7 +941,6 @@ impl_catamorphism_cached!(
     RecursiveCata;
     impl<'prefix, V, A, Z> for PrefixZipper<'prefix, Z> as V, A
     where [
-        V: Clone + Send + Sync,
         A: Allocator,
         PrefixZipper<'prefix, Z>: CatamorphismCachedWithEngine<V, A, RecursiveCata>
     ];
@@ -956,7 +950,6 @@ impl_catamorphism_cached!(
     RecursiveCata;
     impl<V, A, Z> for OneFactor<Z> as V, A
     where [
-        V: Clone + Send + Sync,
         A: Allocator,
         OneFactor<Z>: CatamorphismCachedWithEngine<V, A, RecursiveCata>
     ];
@@ -966,7 +959,6 @@ impl_catamorphism_cached!(
     RecursiveCata;
     impl<V, A, Z> for Box<Z> as V, A
     where [
-        V: Clone + Send + Sync,
         A: Allocator,
         Box<Z>: CatamorphismCachedWithEngine<V, A, RecursiveCata>
     ];
@@ -976,7 +968,6 @@ impl_catamorphism_cached!(
     RecursiveCata;
     impl<'zipper, V, A, Z> for &'zipper mut Z as V, A
     where [
-        V: Clone + Send + Sync,
         A: Allocator,
         &'zipper mut Z: CatamorphismCachedWithEngine<V, A, RecursiveCata>
     ];
@@ -2099,7 +2090,7 @@ pub(crate) mod cached_catamorphism_tests {
         where
             Z: CatamorphismCached<u64, GlobalAlloc>,
         {
-            let count = zipper.into_cata_cached(|_mask, children: &mut [usize], value| {
+            let count = zipper.cata_cached(|_mask, children: &mut [usize], value| {
                 if children.is_empty() {
                     assert!(value.is_some());
                     1
@@ -2147,8 +2138,8 @@ pub(crate) mod cached_catamorphism_tests {
     where
         Z: CatamorphismCachedWithEngine<u64, GlobalAlloc, Engine>,
     {
-        let count = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::into_cata_cached(
-            zipper,
+        let count = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::cata_cached(
+            &zipper,
             |_mask, children: &mut [usize], value| {
                 if children.is_empty() {
                     assert!(value.is_some());
@@ -2165,8 +2156,8 @@ pub(crate) mod cached_catamorphism_tests {
     where
         Z: CatamorphismCachedWithEngine<u64, GlobalAlloc, Engine>,
     {
-        let count = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::into_cata_jumping_cached(
-            zipper,
+        let count = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::cata_jumping_cached(
+            &zipper,
             |_mask, children: &mut [usize], value, _prefix| {
                 if children.is_empty() {
                     assert!(value.is_some());
@@ -2225,8 +2216,8 @@ pub(crate) mod cached_catamorphism_tests {
     where
         Z: CatamorphismCachedWithEngine<u64, GlobalAlloc, Engine>,
     {
-        let longest = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::into_cata_jumping_cached(
-            zipper,
+        let longest = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::cata_jumping_cached(
+            &zipper,
             |mask, children: &mut [Vec<u8>], _value, prefix| {
                 let mut longest = mask.iter().zip(children.iter_mut())
                     .max_by_key(|(_byte, rest)| rest.len())
@@ -2277,8 +2268,8 @@ pub(crate) mod cached_catamorphism_tests {
     where
         Z: CatamorphismCachedWithEngine<u64, GlobalAlloc, Engine>,
     {
-        let values = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::into_cata_cached(
-            zipper,
+        let values = CatamorphismCachedWithEngine::<u64, GlobalAlloc, Engine>::cata_cached(
+            &zipper,
             |_mask, children: &mut [Vec<u64>], value| {
                 if children.is_empty() {
                     Vec::new()
@@ -2421,22 +2412,22 @@ mod tests {
     use super::*;
 
     trait TestRecursiveCata<V: Clone + Send + Sync>: Sized {
-        fn recursive_into_cata_cached<W, AlgF>(self, alg_f: AlgF) -> W
+        fn recursive_cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
         where
             Self: CatamorphismCachedWithEngine<V, GlobalAlloc, RecursiveCata>,
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
         {
-            CatamorphismCachedWithEngine::<V, GlobalAlloc, RecursiveCata>::into_cata_cached(self, alg_f)
+            CatamorphismCachedWithEngine::<V, GlobalAlloc, RecursiveCata>::cata_cached(self, alg_f)
         }
 
-        fn recursive_into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
+        fn recursive_cata_jumping_cached<W, AlgF>(&self, alg_f: AlgF) -> W
         where
             Self: CatamorphismCachedWithEngine<V, GlobalAlloc, RecursiveCata>,
             W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
         {
-            CatamorphismCachedWithEngine::<V, GlobalAlloc, RecursiveCata>::into_cata_jumping_cached(self, alg_f)
+            CatamorphismCachedWithEngine::<V, GlobalAlloc, RecursiveCata>::cata_jumping_cached(self, alg_f)
         }
 
         fn recursive_factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
@@ -2477,17 +2468,43 @@ mod tests {
         let alg = |_mask: &ByteMask, children: &mut [usize], value: Option<&usize>| {
             children.iter().sum::<usize>() + value.copied().unwrap_or(0)
         };
-        let recursive = CatamorphismCachedWithEngine::<usize, GlobalAlloc, RecursiveCata>::into_cata_cached(
-            map.read_zipper(),
+        let recursive_zipper = map.read_zipper();
+        let recursive = CatamorphismCachedWithEngine::<usize, GlobalAlloc, RecursiveCata>::cata_cached(
+            &recursive_zipper,
             alg,
         );
-        let iterative = CatamorphismCachedWithEngine::<usize, GlobalAlloc, IterativeCata>::into_cata_cached(
-            map.read_zipper(),
+        let iterative_zipper = map.read_zipper();
+        let iterative = CatamorphismCachedWithEngine::<usize, GlobalAlloc, IterativeCata>::cata_cached(
+            &iterative_zipper,
             alg,
         );
 
         assert_eq!(recursive, iterative);
         assert_eq!(recursive, 6);
+    }
+
+    #[test]
+    fn cached_cata_facade_borrows_its_receiver() {
+        let map: PathMap<u64> = [(b"a".as_slice(), 42)].into_iter().collect();
+        let stepping = CatamorphismCached::cata_cached(&map, |_mask, children: &mut [u64], value| {
+            children.iter().sum::<u64>() + value.copied().unwrap_or_default()
+        });
+        let jumping = CatamorphismCached::cata_jumping_cached(&map, |_mask, children: &mut [u64], value, _prefix| {
+            children.iter().sum::<u64>() + value.copied().unwrap_or_default()
+        });
+        let fallible = CatamorphismCached::cata_cached_fallible(&map, |_mask, children: &mut [u64], value| {
+            Ok::<_, Infallible>(children.iter().sum::<u64>() + value.copied().unwrap_or_default())
+        });
+        let jumping_fallible = CatamorphismCached::cata_jumping_cached_fallible(&map, |_mask, children: &mut [u64], value, _prefix| {
+            Ok::<_, Infallible>(children.iter().sum::<u64>() + value.copied().unwrap_or_default())
+        });
+
+        assert_eq!((stepping, jumping, fallible, jumping_fallible), (42, 42, Ok(42), Ok(42)));
+        assert_eq!(CatamorphismCached::hash(&map), CatamorphismCached::hash(&map));
+        assert_eq!(
+            CatamorphismCached::hash_with(&map, |value| *value as u128),
+            CatamorphismCached::hash_with(&map, |value| *value as u128),
+        );
     }
 
     fn check_side_effect_catas<'a, W, V, Z, AlgF, Assert>(
@@ -2512,12 +2529,12 @@ mod tests {
             AlgFP: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
             Assert: FnMut(W, &str),
     {
-        let output = zipper.clone().recursive_into_cata_cached(
+        let output = zipper.clone().recursive_cata_cached(
             |bm, ch, v| f_pure(bm, ch, v, &[]));
-        assert(output, "into_cata_cached");
-        let output = zipper.clone().recursive_into_cata_jumping_cached(
+        assert(output, "cata_cached");
+        let output = zipper.clone().recursive_cata_jumping_cached(
             |bm, ch, v, sub_path| f_pure(bm, ch, v, sub_path));
-        assert(output, "into_cata_jumping_cached");
+        assert(output, "cata_jumping_cached");
     }
 
     fn check_all_catas<'a, W, V: Clone + Send + Sync, Z, AlgF, Assert>(
@@ -2581,7 +2598,8 @@ mod tests {
                 }
                 (val.is_some(), sum)
             };
-            let output = CatamorphismCachedWithEngine::<(), GlobalAlloc, RecursiveCata>::into_cata_cached(map.read_zipper(), pure_alg_stepping);
+            let zipper = map.read_zipper();
+            let output = CatamorphismCachedWithEngine::<(), GlobalAlloc, RecursiveCata>::cata_cached(&zipper, pure_alg_stepping);
             assert_eq!(output.1, expected_sum);
 
             //The pure jumping cata is a variant on the above, but we also need to care about
@@ -3147,7 +3165,7 @@ mod tests {
         // println!("tree: {:#?}", visit(&mut make_map().read_zipper()));
         use core::sync::atomic::{AtomicU64, Ordering::*};
         let calls_cached = AtomicU64::new(0);
-        let tree_cached: Rc::<Node<u8>> = make_map().recursive_into_cata_cached(
+        let tree_cached: Rc::<Node<u8>> = make_map().recursive_cata_cached(
             |_bm, children, value| {
                 calls_cached.fetch_add(1, Relaxed);
                 Rc::new(Node::new(value, children))
@@ -3269,7 +3287,7 @@ mod tests {
         let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
 
-        let cached_stepping = map.read_zipper().recursive_into_cata_cached(|_mask, children: &mut [usize], val| {
+        let cached_stepping = map.read_zipper().recursive_cata_cached(|_mask, children: &mut [usize], val| {
             if children.is_empty() {
                 assert!(val.is_some());
                 1
@@ -3277,7 +3295,7 @@ mod tests {
                 children.iter().sum()
             }
         });
-        let cached_jumping = map.read_zipper().recursive_into_cata_jumping_cached(|_mask, children: &mut [usize], val, _prefix| {
+        let cached_jumping = map.read_zipper().recursive_cata_jumping_cached(|_mask, children: &mut [usize], val, _prefix| {
             if children.is_empty() {
                 assert!(val.is_some());
                 1
@@ -3324,7 +3342,7 @@ mod tests {
         let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
 
-        let cached = map.read_zipper().recursive_into_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
+        let cached = map.read_zipper().recursive_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
             let mut longest = mask.iter().zip(children.iter_mut())
                 .max_by_key(|(_byte, rest)| rest.len())
                 .map_or_else(Vec::new, |(byte, rest)| {
@@ -3375,7 +3393,7 @@ mod tests {
             },
             |_mask, _val, state| Ok(state.map_or_else(Vec::new, |(_, path)| path)),
         );
-        let adapted = map.recursive_into_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
+        let adapted = map.recursive_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
             let mut longest = mask.iter().zip(children.iter_mut())
                 .max_by_key(|(_byte, rest)| rest.len())
                 .map_or_else(Vec::new, |(byte, rest)| {
@@ -3402,7 +3420,7 @@ mod tests {
         let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
         words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
 
-        let cached_stepping = map.read_zipper().recursive_into_cata_cached(|_mask, children: &mut [Vec<usize>], val| {
+        let cached_stepping = map.read_zipper().recursive_cata_cached(|_mask, children: &mut [Vec<usize>], val| {
             if children.is_empty() {
                 Vec::new()
             } else if let Some(val) = val {
@@ -3415,7 +3433,7 @@ mod tests {
                 values
             }
         });
-        let cached_jumping = map.read_zipper().recursive_into_cata_jumping_cached(|_mask, children: &mut [Vec<usize>], val, _prefix| {
+        let cached_jumping = map.read_zipper().recursive_cata_jumping_cached(|_mask, children: &mut [Vec<usize>], val, _prefix| {
             if children.is_empty() {
                 Vec::new()
             } else if let Some(val) = val {
@@ -3487,19 +3505,19 @@ mod tests {
         }
 
         let cached_calls = AtomicU64::new(0);
-        let cached: Rc<Node<u8>> = make_map().recursive_into_cata_cached(|_mask, children, value| {
+        let cached: Rc<Node<u8>> = make_map().recursive_cata_cached(|_mask, children, value| {
             cached_calls.fetch_add(1, Relaxed);
             Rc::new(Node { value: value.cloned(), children: children.to_vec() })
         });
 
         let jumping_calls = AtomicU64::new(0);
-        let jumping: Rc<Node<u8>> = make_map().read_zipper().recursive_into_cata_jumping_cached(|_mask, children, value, _prefix| {
+        let jumping: Rc<Node<u8>> = make_map().read_zipper().recursive_cata_jumping_cached(|_mask, children, value, _prefix| {
             jumping_calls.fetch_add(1, Relaxed);
             Rc::new(Node { value: value.cloned(), children: children.to_vec() })
         });
 
         let adapted_calls = AtomicU64::new(0);
-        let adapted: Rc<Node<u8>> = make_map().recursive_into_cata_jumping_cached(|_mask, children, value, _prefix| {
+        let adapted: Rc<Node<u8>> = make_map().recursive_cata_jumping_cached(|_mask, children, value, _prefix| {
             adapted_calls.fetch_add(1, Relaxed);
             Rc::new(Node { value: value.cloned(), children: children.to_vec() })
         });

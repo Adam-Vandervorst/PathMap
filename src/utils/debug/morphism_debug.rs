@@ -11,7 +11,7 @@ use crate::morphisms::{into_cata_cached_body, DoCache};
 /// This trait provides debug-only catamorphism methods that may expose additional
 /// information useful for debugging and development.
 pub trait CatamorphismDebug<V> {
-    /// A version of [`into_cata_jumping_cached`](crate::morphisms::CatamorphismCached::into_cata_jumping_cached) where
+    /// A version of [`cata_jumping_cached`](crate::morphisms::CatamorphismCached::cata_jumping_cached) where
     /// the full path is available to the closure; **For debugging purposes only**
     ///
     /// Using data from the full path for your algorithm **will** lead to incorrect behavior.
