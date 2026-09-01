@@ -459,12 +459,29 @@ fn derive_poly_zipper_with_traits(
             quote! {}
         };
         Some(quote! {
-            impl #impl_generics pathmap::zipper::ZipperMoving for #enum_name #ty_generics
+            impl #impl_generics pathmap::zipper::ZipperPath for #enum_name #ty_generics
             #zipper_moving_where
             {
                 fn path(&self) -> &[u8] {
                     match self {
                         #(#variant_arms => inner.path(),)*
+                    }
+                }
+            }
+
+            impl #impl_generics pathmap::zipper::ZipperMoving for #enum_name #ty_generics
+            #zipper_moving_where
+            {
+                fn at_root(&self) -> bool {
+                    match self {
+                        #(#variant_arms => inner.at_root(),)*
+                    }
+                }
+
+                #[inline]
+                fn focus_byte(&self) -> Option<u8> {
+                    match self {
+                        #(#variant_arms => inner.focus_byte(),)*
                     }
                 }
 
@@ -500,19 +517,19 @@ fn derive_poly_zipper_with_traits(
                     }
                 }
 
-                fn ascend(&mut self, steps: usize) -> bool {
+                fn ascend(&mut self, steps: usize) -> usize {
                     match self {
                         #(#variant_arms => inner.ascend(steps),)*
                     }
                 }
 
-                fn ascend_until(&mut self) -> bool {
+                fn ascend_until(&mut self) -> usize {
                     match self {
                         #(#variant_arms => inner.ascend_until(),)*
                     }
                 }
 
-                fn ascend_until_branch(&mut self) -> bool {
+                fn ascend_until_branch(&mut self) -> usize {
                     match self {
                         #(#variant_arms => inner.ascend_until_branch(),)*
                     }

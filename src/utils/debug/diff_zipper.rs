@@ -52,18 +52,18 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
+    fn focus_byte(&self) -> Option<u8> {
+        let a = self.a.focus_byte();
+        let b = self.b.focus_byte();
+        assert_eq!(a, b);
+        a
+    }
     fn reset(&mut self) {
         self.a.reset();
         self.b.reset();
         if self.log_moves {
             println!("DiffZipper: reset")
         }
-    }
-    fn path(&self) -> &[u8] {
-        let a = self.a.path();
-        let b = self.b.path();
-        assert_eq!(a, b);
-        a
     }
     fn val_count(&self) -> usize {
         let a = self.a.val_count();
@@ -108,7 +108,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         }
         assert_eq!(self.a.path_exists(), self.b.path_exists());
     }
-    fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, idx: usize) -> Option<u8> {
         let a = self.a.descend_indexed_byte(idx);
         let b = self.b.descend_indexed_byte(idx);
         if self.log_moves {
@@ -117,7 +117,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         let a = self.a.descend_first_byte();
         let b = self.b.descend_first_byte();
         if self.log_moves {
@@ -126,16 +126,21 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn descend_until(&mut self) -> bool {
-        let a = self.a.descend_until();
-        let b = self.b.descend_until();
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        //`a`'s descent is forwarded to the caller as it happens, since a digest can't reconstruct
+        //the bytes afterwards.  `b`'s is only hashed, and the two digests are compared.
+        let mut hash_a = HashObserver::default();
+        let mut hash_b = HashObserver::default();
+        let a = self.a.descend_until_observed(&mut (&mut hash_a, &mut *obs));
+        let b = self.b.descend_until_observed(&mut hash_b);
         if self.log_moves {
             println!("DiffZipper: descend_until")
         }
         assert_eq!(a, b);
+        assert_eq!(hash_a, hash_b);
         a
     }
-    fn ascend(&mut self, steps: usize) -> bool {
+    fn ascend(&mut self, steps: usize) -> usize {
         let a = self.a.ascend(steps);
         let b = self.b.ascend(steps);
         if self.log_moves {
@@ -153,7 +158,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         let a = self.a.ascend_until();
         let b = self.b.ascend_until();
         if self.log_moves {
@@ -162,7 +167,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         let a = self.a.ascend_until_branch();
         let b = self.b.ascend_until_branch();
         if self.log_moves {
@@ -171,7 +176,7 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let a = self.a.to_next_sibling_byte();
         let b = self.b.to_next_sibling_byte();
         if self.log_moves {
@@ -180,12 +185,22 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
         assert_eq!(a, b);
         a
     }
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         let a = self.a.to_prev_sibling_byte();
         let b = self.b.to_prev_sibling_byte();
         if self.log_moves {
             println!("DiffZipper: to_prev_sibling_byte")
         }
+        assert_eq!(a, b);
+        a
+    }
+}
+
+impl<A: Zipper + ZipperPath, B: Zipper + ZipperPath> ZipperPath for DiffZipper<A, B>
+{
+    fn path(&self) -> &[u8] {
+        let a = self.a.path();
+        let b = self.b.path();
         assert_eq!(a, b);
         a
     }

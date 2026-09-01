@@ -465,7 +465,7 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     z.prepare_buffers();
     //Push a stack frame for the root, and start on the first branch off the root
     stack.push(StackFrame::from(&z));
-    if !z.descend_first_byte() {
+    if z.descend_first_byte().is_none() {
         //Empty trie is a special case
         return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path(), &z)
     }
@@ -520,13 +520,14 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
 
             //Position to descend the next child branch
             let descended = z.descend_indexed_byte(stack[frame_idx].child_idx as usize);
-            debug_assert!(descended);
+            debug_assert!(descended.is_some());
         } else {
             //Push a new stack frame for this branch
             Stack::push_state_raw(&mut stack, &mut frame_idx, &z);
 
             //Descend the first child branch
-            z.descend_first_byte();
+            let descended = z.descend_first_byte();
+            debug_assert!(descended.is_some());
         }
     }
 }
@@ -550,7 +551,7 @@ fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z,
             let old_path_len = z.origin_path().len();
             let old_val = z.get_val_with_witness(&z_witness);
             let ascended = z.ascend_until();
-            debug_assert!(ascended);
+            debug_assert!(ascended > 0);
 
             let origin_path = unsafe{ z.origin_path_assert_len(old_path_len) };
             let jump_len = if z.child_count() != 1 || z.is_val() {
@@ -660,7 +661,7 @@ impl Stack {
     /// This function re-uses allocations for stack frames,
     /// to avoid allocator thrashing.
     pub fn push_state<Z>(&mut self, z: &Z)
-        where Z: Zipper,
+        where Z: Zipper + ZipperPath,
     {
         Self::push_state_raw(&mut self.stack, &mut self.position, z);
     }
@@ -669,7 +670,7 @@ impl Stack {
         stack: &mut Vec<StackFrame>,
         position: &mut usize,
         zipper: &Z)
-        where Z: Zipper,
+        where Z: Zipper + ZipperPath,
     {
         *position = position.wrapping_add(1);
         assert!(*position <= stack.len(),
@@ -687,7 +688,7 @@ where
     V: 'static + Clone + Send + Sync + Unpin,
     W: Default,
     I: IntoIterator<Item=W>,
-    WZ: ZipperWriting<V, A> + zipper::ZipperMoving,
+    WZ: ZipperWriting<V, A> + zipper::ZipperMoving + zipper::ZipperPath,
     CoAlgF: Copy + FnMut(W, &[u8]) -> (&'a [u8], ByteMask, I, Option<V>),
 {
     let (prefix, bm, ws, mv) = coalg_f(w, wz.path());
@@ -781,7 +782,8 @@ pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPI
             .expect("into_cata stack is emptied before we returned to root");
         // This branch represents the body of the for loop.
         if frame_mut.child_idx < frame_mut.child_cnt {
-            zipper.descend_indexed_byte(frame_mut.child_idx as usize);
+            let descended = zipper.descend_indexed_byte(frame_mut.child_idx as usize);
+            debug_assert!(descended.is_some());
             frame_mut.child_idx += 1;
             frame_mut.child_addr = zipper.shared_node_id();
 
@@ -876,7 +878,8 @@ fn into_cata_jumping_naive<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool>
     let mut cache = HashMap::<u64, W>::new();
     let path = z.path().to_vec();
     for ii in 0..child_count {
-        z.descend_indexed_byte(ii);
+        let descended = z.descend_indexed_byte(ii);
+        debug_assert!(descended.is_some());
         let child_addr = z.shared_node_id();
         // Read and reuse value from cache, if exists
         if let Some(cached) = Cache::get(&cache, child_addr) {

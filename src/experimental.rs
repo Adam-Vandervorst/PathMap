@@ -46,8 +46,9 @@ impl ZipperPathBuffer for FullZipper {
 
 impl ZipperMoving for FullZipper {
     fn at_root(&self) -> bool { self.path.len() == 0 }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.clear() }
-    fn path(&self) -> &[u8] { &self.path[..] }
     fn val_count(&self) -> usize { usize::MAX/2 } // usize::MAX is a dangerous default for overflow
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         self.path.extend_from_slice(k.as_ref());
@@ -55,52 +56,53 @@ impl ZipperMoving for FullZipper {
     fn descend_to_byte(&mut self, k: u8) {
         self.path.push(k);
     }
-    fn descend_indexed_byte(&mut self, idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, idx: usize) -> Option<u8> {
         assert!(idx < 256);
         self.path.push(idx as u8);
-        true
+        Some(idx as u8)
     }
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.path.push(0);
-        true
+        Some(0)
     }
-    fn descend_until(&mut self) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.path.push(0); // not sure?
+        obs.descend_to_byte(0);
         true
     }
-    fn ascend(&mut self, steps: usize) -> bool {
-        if steps > self.path.len() {
-            self.path.clear();
-            false
-        } else {
-            self.path.truncate(self.path.len() - steps);
-            true
-        }
+    fn ascend(&mut self, steps: usize) -> usize {
+        let ascended = steps.min(self.path.len());
+        self.path.truncate(self.path.len() - ascended);
+        ascended
     }
     fn ascend_byte(&mut self) -> bool {
         self.path.pop().is_some()
     }
-    fn ascend_until(&mut self) -> bool {
-        self.path.pop().is_some() // not sure?
+    fn ascend_until(&mut self) -> usize {
+        if self.path.pop().is_some() { 1 } else { 0 } // not sure?
     }
-    fn ascend_until_branch(&mut self) -> bool {
-        self.path.pop().is_some() // not sure? What's the difference with the previous?
+    fn ascend_until_branch(&mut self) -> usize {
+        if self.path.pop().is_some() { 1 } else { 0 } // not sure? What's the difference with the previous?
     }
-    fn to_next_sibling_byte(&mut self) -> bool { self.to_sibling(true) }
-    fn to_prev_sibling_byte(&mut self) -> bool { self.to_sibling(false) }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { self.to_sibling(true) }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { self.to_sibling(false) }
+}
+
+impl ZipperPath for FullZipper {
+    fn path(&self) -> &[u8] { &self.path[..] }
 }
 
 impl FullZipper {
-    fn to_sibling(&mut self, next: bool) -> bool {
-        if self.path.is_empty() { return false } // right?
+    fn to_sibling(&mut self, next: bool) -> Option<u8> {
+        if self.path.is_empty() { return None } // right?
         if next {
             let last = self.path.last_mut().unwrap();
-            if *last != 255 { *last = *last + 1; true }
-            else { false }
+            if *last != 255 { *last = *last + 1; Some(*last) }
+            else { None }
         } else {
             let first = self.path.first_mut().unwrap();
-            if *first != 0 { *first = *first - 1; true }
-            else { false }
+            if *first != 0 { *first = *first - 1; Some(*first) }
+            else { None }
         }
     }
 }
@@ -117,20 +119,25 @@ impl Zipper for NullZipper {
 
 impl ZipperMoving for NullZipper {
     fn at_root(&self) -> bool { true }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> { None }
     fn reset(&mut self) {}
-    fn path(&self) -> &[u8] { &[] }
     fn val_count(&self) -> usize { 0 }
     fn descend_to<K: AsRef<[u8]>>(&mut self, _k: K) {}
     fn descend_to_byte(&mut self, _k: u8) {}
-    fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
-    fn descend_first_byte(&mut self) -> bool { false }
-    fn descend_until(&mut self) -> bool { false }
-    fn ascend(&mut self, _steps: usize) -> bool { false }
+    fn descend_indexed_byte(&mut self, _idx: usize) -> Option<u8> { None }
+    fn descend_first_byte(&mut self) -> Option<u8> { None }
+    fn descend_until_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
+    fn ascend(&mut self, _steps: usize) -> usize { 0 }
     fn ascend_byte(&mut self) -> bool { false }
-    fn ascend_until(&mut self) -> bool { false }
-    fn ascend_until_branch(&mut self) -> bool { false }
-    fn to_next_sibling_byte(&mut self) -> bool { false }
-    fn to_prev_sibling_byte(&mut self) -> bool { false }
+    fn ascend_until(&mut self) -> usize { 0 }
+    fn ascend_until_branch(&mut self) -> usize { 0 }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { None }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { None }
+}
+
+impl ZipperPath for NullZipper {
+    fn path(&self) -> &[u8] { &[] }
 }
 
 impl<V: TrieValue, A: Allocator> WriteZipperPriv<V, A> for NullZipper {

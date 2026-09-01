@@ -262,7 +262,7 @@ fn build_ascii_graph_logical<V: TrieValue + Debug, A: Allocator, Z: ZipperInfall
     while z.to_next_step() {
         if skip_node {
             z.ascend_byte();
-            while !z.to_next_sibling_byte() {
+            while z.to_next_sibling_byte().is_none() {
                 if !z.ascend_byte() {
                     return (root_id, graph);
                 }
@@ -567,7 +567,7 @@ fn viz_zipper_logical<V : TrieValue + Debug + Hash, A: Allocator, Z: ZipperInfal
         //Skip a whole branch if we've already rendered it elsewhere
         if skip_node {
             z.ascend_byte();
-            while !z.to_next_sibling_byte() {
+            while z.to_next_sibling_byte().is_none() {
                 if !z.ascend_byte() {
                     return; //We skipped all the way to the root
                 }
