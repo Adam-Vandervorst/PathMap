@@ -1121,7 +1121,10 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
 
     fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, _prune: bool) {
-        debug_assert!(key.len() == 0);
+        if key.len() > 0 {
+            //We're in a non-existent path below this node
+            return
+        }
         // in the future we can use `drain_filter`, but that's experimental
         let mut lead = 0;
         let mut differs = false;

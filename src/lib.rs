@@ -114,6 +114,9 @@ pub mod random;
 #[cfg(feature = "counters")]
 pub mod counters;
 
+/// Feature for code instrumentation and optimization
+pub mod timed_span;
+
 /// Shims to allow the use of a custom [`Allocator`](std::alloc::Allocator) type, if running with the `nightly` feature.  Does nothing otherwise
 pub mod alloc;
 

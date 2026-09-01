@@ -14,6 +14,7 @@ use crate::alloc::{Allocator, GlobalAlloc};
 use crate::utils::ByteMask;
 use crate::trie_node::*;
 use crate::PathMap;
+use crate::timed_span::{TimingEntries::*, COUNTERS, timed_span};
 
 pub use crate::write_zipper::*;
 pub use crate::trie_ref::*;
@@ -1745,7 +1746,7 @@ pub(crate) mod read_zipper_core {
             }
         }
         //GOAT, may be unneeded
-        // /// Returns a reference to the 
+        // /// Returns a reference to the
         // #[inline]
         // pub fn as_option(&self) -> Option<&T> {
         //     match self {
@@ -1873,6 +1874,7 @@ pub(crate) mod read_zipper_core {
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperCore<'_, '_, V, A> {
         type ReadZipperT<'a> = ReadZipperCore<'a, 'a, V, A> where Self: 'a;
         fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+            timed_span!(ForkReadZipper, COUNTERS);
             let new_root_val = self.val();
             let new_root_path = self.origin_path();
             let new_root_key_start = new_root_path.len() - self.node_key().len();
@@ -1965,6 +1967,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn reset(&mut self) {
+            timed_span!(Reset, COUNTERS);
             self.ancestors.truncate(1);
             match self.ancestors.pop() {
                 Some((node, _tok, _prefix_len)) => {
@@ -1977,6 +1980,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn val_count(&self) -> usize {
+            timed_span!(ValueCount, COUNTERS);
             let root_val = self.is_val() as usize;
             if self.node_key().len() == 0 {
                 val_count_below_root(*self.focus_node) + root_val
@@ -1990,6 +1994,7 @@ pub(crate) mod read_zipper_core {
             }
         }
         fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
+            timed_span!(DescendTo, COUNTERS);
             let k = k.as_ref();
             if k.len() == 0 {
                 return //Zero-length path is a no-op
@@ -2021,6 +2026,7 @@ pub(crate) mod read_zipper_core {
 
         #[inline]
         fn descend_to_byte(&mut self, k: u8) {
+            timed_span!(DescendToByte, COUNTERS);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -2056,6 +2062,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
+            timed_span!(DescendIndexedByte, COUNTERS);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -2077,6 +2084,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_first_byte(&mut self) -> Option<u8> {
+            timed_span!(DescendFirstByte, COUNTERS);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
             let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
@@ -2119,6 +2127,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+            timed_span!(DescendUntil, COUNTERS);
             debug_assert!(self.is_regularized());
             let mut moved = false;
             while self.child_count() == 1 {
@@ -2180,6 +2189,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
+            timed_span!(DescendToExisting, COUNTERS);
             let mut k = k.as_ref();
             if k.len() == 0 {
                 return 0 //Zero-length path is a no-op
@@ -2245,6 +2255,7 @@ pub(crate) mod read_zipper_core {
         // }
 
         fn to_next_sibling_byte(&mut self) -> Option<u8> {
+            timed_span!(ToNextSiblingByte, COUNTERS);
             self.prepare_buffers();
             if self.prefix_buf.len() == 0 {
                 return None
@@ -2306,10 +2317,12 @@ pub(crate) mod read_zipper_core {
         }
 
         fn to_prev_sibling_byte(&mut self) -> Option<u8> {
+            timed_span!(ToPrevSiblingByte, COUNTERS);
             self.to_sibling(false)
         }
 
         fn ascend(&mut self, steps: usize) -> usize {
+            timed_span!(Ascend, COUNTERS);
             let mut remaining = steps;
             debug_assert!(self.is_regularized());
             while remaining > 0 {
@@ -2334,6 +2347,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend_byte(&mut self) -> bool {
+            timed_span!(AscendByte, COUNTERS);
             debug_assert!(self.is_regularized());
             if self.excess_key_len() == 0 {
                 match self.ancestors.pop() {
@@ -2353,6 +2367,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend_until(&mut self) -> usize {
+            timed_span!(AscendUntil, COUNTERS);
             debug_assert!(self.is_regularized());
             if self.at_root() {
                 return 0;
@@ -2370,6 +2385,7 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend_until_branch(&mut self) -> usize {
+            timed_span!(AscendUntilBranch, COUNTERS);
             debug_assert!(self.is_regularized());
             if self.at_root() {
                 return 0;
@@ -2524,9 +2540,11 @@ pub(crate) mod read_zipper_core {
 
     impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperIteration for ReadZipperCore<'trie, '_, V, A> {
         fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+            timed_span!(ToNextVal, COUNTERS);
             unsafe{ self.to_next_get_val_observed(obs) }.is_some()
         }
         fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+            timed_span!(DescendFirstKPath, COUNTERS);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -2536,6 +2554,7 @@ pub(crate) mod read_zipper_core {
             self.k_path_internal(k, self.prefix_buf.len(), obs)
         }
         fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+            timed_span!(ToNextKPath, COUNTERS);
             let base_idx = if self.path_len() >= k {
                 self.prefix_buf.len() - k
             } else {
@@ -2784,6 +2803,7 @@ pub(crate) mod read_zipper_core {
         /// multi-byte and a descent may re-tread bytes the observer already held.  The net position is
         /// always correct; only the granularity differs from a byte-at-a-time traversal.
         pub(crate) unsafe fn to_next_get_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> Option<&'a V> {
+            timed_span!(ToNextGetValue, COUNTERS);
             self.prepare_buffers();
             loop {
                 if self.focus_iter_token == NODE_ITER_INVALID {
@@ -3386,7 +3406,7 @@ pub struct ReadZipperPathIter<'a, 'path, V: Clone + Send + Sync, A: Allocator = 
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ReadZipperPathIter<'_, '_, V, A> {
-    /// Returns a reference to the value at the last-returned path 
+    /// Returns a reference to the value at the last-returned path
     pub fn val(&self) -> Option<&V> {
         self.zipper.as_ref().and_then(|z| z.val())
     }
