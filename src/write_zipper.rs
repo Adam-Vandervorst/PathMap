@@ -2780,11 +2780,15 @@ mod mut_node_stack {
         pub fn top(&self) -> Option<TaggedNodeRef<'_, V, A>> {
             match self.stack.last() {
                 Some(top) => Some(unsafe{ top.as_tagged() }),
-                None => unsafe{ self.root.and_then(|mut ptr| {
+                None => unsafe{ self.root.map(|mut ptr| {
                     let ptr = ptr.as_mut();
                     match ptr.is_empty() {
-                        true => None,
-                        false => Some(ptr.make_mut().cast())
+                        //An empty root is still the node the focus lives under; answering
+                        // `None` here while `top_mut` answers the node made every read
+                        // through the stack unwrap after `remove_branches` (or a
+                        // `join_k_path_into` that collapsed everything) emptied the root.
+                        true => TaggedNodeRef::empty_node(),
+                        false => ptr.make_mut().cast()
                     }
                 }) }
             }
