@@ -2309,6 +2309,13 @@ where Storage: AsRef<[u8]>
     origin_depth: usize,
     origin_node_depth: usize,
     pub invalid: usize,
+    /// How far the zipper's *root* is off the trie.
+    ///
+    /// A zipper can be rooted at a path that does not exist -- `fork_read_zipper` at an off-trie
+    /// focus makes one -- and `reset` has to put it back there.  Without this, `reset` cleared
+    /// `invalid` outright and the zipper came back believing it was rooted at its deepest real
+    /// ancestor, reporting that ancestor's value as its own root value.
+    origin_invalid: usize,
     _marker: PhantomData<Value>,
 }
 
@@ -2318,7 +2325,7 @@ where Storage: AsRef<[u8]>
     fn clone(&self) -> Self {
         let Self {
             tree, cur_node, stack, path,
-            origin_depth, origin_node_depth, invalid, ..
+            origin_depth, origin_node_depth, invalid, origin_invalid, ..
         } = self;
         Self {
             tree,
@@ -2328,6 +2335,7 @@ where Storage: AsRef<[u8]>
             origin_depth: *origin_depth,
             origin_node_depth: *origin_node_depth,
             invalid: *invalid,
+            origin_invalid: *origin_invalid,
             _marker: PhantomData,
         }
     }
@@ -2381,6 +2389,7 @@ where Storage: AsRef<[u8]>
             tree, cur_node,
             path: Vec::new(),
             invalid: 0,
+            origin_invalid: 0,
             origin_depth: 0,
             origin_node_depth: 0,
             stack: Vec::from([stack_frame]),
@@ -2390,6 +2399,9 @@ where Storage: AsRef<[u8]>
 
     fn with_root_here(mut self) -> Self {
         self.origin_depth = self.path.len();
+        //The new root may itself be off the trie; `reset` has to come back to it, not to the
+        //deepest real ancestor.
+        self.origin_invalid = self.invalid;
         if self.stack.len() > 1 {
             let last = self.stack.len() - 1;
             self.stack.swap(0, last);
@@ -2912,7 +2924,12 @@ where Storage: AsRef<[u8]>
         self.stack.truncate(1);
         self.stack[0].node_depth = self.origin_node_depth;
         self.path.truncate(self.origin_depth);
-        self.invalid = 0;
+        //Back to the root the zipper was created at -- which may be off the trie, in which case
+        //it stays off it.  This used to clear `invalid` unconditionally, so a zipper forked at a
+        //non-existent path came back from `reset` believing it was rooted at its deepest real
+        //ancestor and answered `val()` with that ancestor's value.  `dump` resets before walking,
+        //so every dump from an off-trie focus reported a value that is not there.
+        self.invalid = self.origin_invalid;
     }
 
     /// Returns the total number of values contained at and below the zipper's focus, including the focus itself
@@ -4073,5 +4090,43 @@ mod tests {
 
         assert_act_matches_map(&map, &tree);
         Ok(())
+    }
+
+    /// A zipper can be rooted at a path that does not exist -- `fork_read_zipper` at an
+    /// off-trie focus makes one.  `reset` put the path back but cleared `invalid`
+    /// unconditionally, so the zipper came back believing it was rooted at its deepest
+    /// real ancestor and answered `val()` with that ancestor's value.
+    #[test]
+    fn act_zipper_reset_returns_to_an_off_trie_root() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        { let mut w = m.write_zipper(); w.set_val(38); }
+        m.insert(&[1u8, 0, 2], 22);
+        m.insert(&[1u8, 1], 72);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+
+        for root in [&[1u8, 1, 3][..], &[9u8], &[1u8, 0, 2, 5, 5]] {
+            let mut az = t.read_zipper_u64();
+            az.descend_to(root);
+            assert!(!az.path_exists(), "{root:?}");
+            let mut fork = az.fork_read_zipper();
+            assert!(!fork.path_exists(), "{root:?}");
+            assert_eq!(fork.val(), None, "{root:?}");
+            fork.reset();
+            assert!(fork.at_root(), "{root:?}");
+            assert!(!fork.path_exists(), "{root:?} after reset");
+            assert_eq!(fork.val(), None, "{root:?} after reset");
+            assert_eq!(fork.val_count(), 0, "{root:?} after reset");
+            assert_eq!(fork.child_count(), 0, "{root:?} after reset");
+            assert!(!fork.to_next_val(), "{root:?} after reset");
+        }
+
+        //The same through a zipper created at an off-trie path
+        let mut az = t.read_zipper_at_path_u64(&[1u8, 1, 3]);
+        assert_eq!(az.val(), None);
+        az.descend_to(&[0u8]);
+        az.reset();
+        assert_eq!(az.val(), None);
+        assert!(!az.path_exists());
     }
 }
