@@ -2932,11 +2932,16 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                 let key1 = unsafe{ self.key_unchecked::<1>() };
                 let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
                 if key0_byte == key1_byte {
-                    //Case 9 (Val, Child), 1-byte key, same key byte (We could eliminate this case by requiring a canonical ordering for identical one-byte keys, but currently we don't)
+                    //Case 9 (Val, Child), same key byte. The value is at the common first byte;
+                    // the child may carry a further compressed suffix below that byte.
                     debug_assert_eq!(key0.len(), 1);
-                    debug_assert_eq!(key1.len(), 1);
                     let val = unsafe { self.val_in_slot::<0>() };
-                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?;
+                    let child_w = if key1.len() == 1 {
+                        recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?
+                    } else {
+                        let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                        summarize!(Some(val), Some(child_w), &key1[1..])?
+                    };
                     summarize!(passed_in_val, Some(child_w), key0)
                 } else {
                     //Case 10 (Val, Child), different key bytes
