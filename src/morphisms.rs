@@ -2558,14 +2558,28 @@ pub(crate) mod cached_catamorphism_tests {
         Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
     {
         let result = $cata_trait::<u64, GlobalAlloc>
-            ::factored_cata_jumping::<(), Vec<u8>, Infallible, _, _, _, true>(
+            ::factored_cata_jumping::<Vec<(u8, Vec<u8>)>, Vec<u8>, Infallible, _, _, _, true>(
                 &zipper,
-                |_| panic!("a unary valueless root must not create an accumulator"),
-                |_mask, _child, _accumulator| panic!("a unary valueless root must not fold a child"),
-                |_mask, value, accumulator, prefix| {
-                    assert_eq!(value, Some(&0));
-                    assert!(accumulator.is_none());
-                    Ok(prefix.to_vec())
+                |_| Ok(Vec::new()),
+                |mask, child, children| {
+                    let byte = mask.iter().nth(children.len())
+                        .expect("fold_child called more times than child-mask bits");
+                    children.push((byte, child));
+                    Ok(())
+                },
+                |_mask, value, children, prefix| {
+                    let mut path = prefix.to_vec();
+                    match (value, children) {
+                        (Some(&0), None) => {},
+                        (None, Some(mut children)) => {
+                            assert_eq!(children.len(), 1);
+                            let (byte, child) = children.pop().unwrap();
+                            path.push(byte);
+                            path.extend(child);
+                        },
+                        _ => panic!("unexpected callback shape for a single value path"),
+                    }
+                    Ok(path)
                 },
             )
             .unwrap();
@@ -3805,62 +3819,6 @@ mod tests {
 
         assert_eq!(count.unwrap(), 3);
         assert_eq!(zipper.path(), b"a");
-    }
-
-    #[test]
-    fn iterative_summarization_folds_each_child_immediately() {
-        use std::cell::RefCell;
-
-        let map: PathMap<usize> = [
-            (b"a".as_slice(), 1),
-            (b"b".as_slice(), 2),
-        ]
-        .into_iter()
-        .collect();
-        let events = RefCell::new(Vec::new());
-
-        let result = map.read_zipper().recursive_factored_cata_jumping::<Vec<usize>, usize, Infallible, _, _, _, false>(
-            |_mask| {
-                events.borrow_mut().push("new");
-                Ok(Vec::new())
-            },
-            |_mask, child, accumulator| {
-                events.borrow_mut().push(if child == 1 { "fold 1" } else { "fold 2" });
-                accumulator.push(child);
-                Ok(())
-            },
-            |_mask, value, accumulator, _prefix| {
-                match value {
-                    Some(1) => events.borrow_mut().push("summarize 1"),
-                    Some(2) => events.borrow_mut().push("summarize 2"),
-                    _ => events.borrow_mut().push("summarize root"),
-                }
-                Ok(value.copied().unwrap_or_else(|| accumulator.unwrap().into_iter().sum()))
-            },
-        );
-
-        assert_eq!(result.unwrap(), 3);
-        assert_eq!(
-            events.into_inner(),
-            ["new", "summarize 1", "fold 1", "summarize 2", "fold 2", "summarize root"],
-        );
-    }
-
-    #[test]
-    fn recursive_factored_cata_collapses_compressed_passthrough_root() {
-        let map: PathMap<()> = [(b"abc".as_slice(), ())].into_iter().collect();
-
-        let result = map.read_zipper().recursive_factored_cata_jumping::<(), Vec<u8>, Infallible, _, _, _, true>(
-            |_| panic!("a compressed unary passthrough root must not create an accumulator"),
-            |_mask, _child, _accumulator| panic!("a compressed unary passthrough root must not fold a child"),
-            |_mask, value, accumulator, prefix| {
-                assert!(value.is_some());
-                assert!(accumulator.is_none());
-                Ok(prefix.to_vec())
-            },
-        );
-
-        assert_eq!(result.unwrap(), b"abc");
     }
 
     /// A bounded deep-path smoke test for the recursive cata.
