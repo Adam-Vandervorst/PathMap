@@ -1838,6 +1838,10 @@ pub(crate) mod cached_catamorphism_tests {
     use core::convert::Infallible;
 
     use crate::alloc::GlobalAlloc;
+    use crate::utils::{ByteMask, ByteMaskIter};
+    use crate::write_zipper::{WriteZipperOwned, ZipperWriting};
+    use crate::zipper::{ZipperMoving, ZipperPath};
+    use crate::PathMap;
 
     pub const CACHED_CATA_TEST_KEYS: &[&[u8]] = &[
         b"arrow", b"bow", b"cannon", b"roman", b"romane", b"romanus", b"romulus",
@@ -1845,6 +1849,199 @@ pub(crate) mod cached_catamorphism_tests {
     ];
     pub const CACHED_CATA_FOLD_ORDER_KEYS: &[&[u8]] = &[b"a", b"b"];
     pub const CACHED_CATA_PASSTHROUGH_KEYS: &[&[u8]] = &[b"abc"];
+
+    /// The branch bytes a node owes its `fold_child` calls.
+    ///
+    /// The contract is one fold per bit, in ascending mask-bit order.  The reconstruction
+    /// probe uses this to make an invalid callback sequence fail at the first bad fold.
+    pub(crate) struct BranchBytes(ByteMaskIter);
+
+    impl BranchBytes {
+        fn of(child_mask: &ByteMask) -> Self {
+            Self(child_mask.iter())
+        }
+
+        fn take(&mut self) -> u8 {
+            self.0.next().expect(
+                "cached-cata contract violation: more fold_child calls than child-mask bits",
+            )
+        }
+
+        fn finish(mut self) {
+            assert!(
+                self.0.next().is_none(),
+                "cached-cata contract violation: fewer fold_child calls than child-mask bits",
+            );
+        }
+    }
+
+    /// Accumulator for the cached-cata reconstruction probe.
+    ///
+    /// Every branch owns one write zipper.  Child maps are grafted one mask-selected byte below
+    /// that zipper; `recon_summarize` then places the prefix and optional value around them.
+    pub(crate) struct ReconAcc {
+        branch_bytes: BranchBytes,
+        wz: WriteZipperOwned<()>,
+    }
+
+    pub(crate) fn recon_start(child_mask: &ByteMask) -> Result<ReconAcc, Infallible> {
+        Ok(ReconAcc {
+            branch_bytes: BranchBytes::of(child_mask),
+            wz: PathMap::new().into_write_zipper(b""),
+        })
+    }
+
+    pub(crate) fn recon_fold(
+        _child_mask: &ByteMask,
+        child: PathMap<()>,
+        accumulator: &mut ReconAcc,
+    ) -> Result<(), Infallible> {
+        let branch_byte = accumulator.branch_bytes.take();
+        accumulator.wz.descend_to_byte(branch_byte);
+        accumulator.wz.graft_map(child);
+        accumulator.wz.ascend_byte();
+        Ok(())
+    }
+
+    pub(crate) fn recon_summarize(
+        _child_mask: &ByteMask,
+        value: Option<&()>,
+        children: Option<ReconAcc>,
+        prefix: &[u8],
+    ) -> Result<PathMap<()>, Infallible> {
+        match children {
+            Some(ReconAcc { branch_bytes, mut wz }) => {
+                branch_bytes.finish();
+                if !prefix.is_empty() {
+                    wz.insert_prefix(prefix);
+                }
+                if value.is_some() {
+                    wz.descend_to(prefix);
+                    wz.set_val(());
+                }
+                Ok(wz.into_map())
+            }
+            None => {
+                let mut map = PathMap::new();
+                if value.is_some() {
+                    map.set_val_at(prefix, ());
+                }
+                Ok(map)
+            }
+        }
+    }
+
+    /// Reconstructs a logical trie through a named cached-cata implementation.
+    ///
+    /// This is intentionally a macro because the two engines are traits with the same methods,
+    /// rather than values of a common engine type.
+    macro_rules! reconstruct_trie {
+        ($engine:ident, $subject:expr) => {{
+            <_ as $crate::morphisms::$engine<(), $crate::alloc::GlobalAlloc>>
+                ::factored_cata_jumping::<_, _, core::convert::Infallible, _, _, _, true>(
+                    $subject,
+                    $crate::morphisms::cached_catamorphism_tests::recon_start,
+                    $crate::morphisms::cached_catamorphism_tests::recon_fold,
+                    $crate::morphisms::cached_catamorphism_tests::recon_summarize,
+                )
+                .unwrap()
+        }};
+    }
+    #[allow(unused_imports)] // Exported for conformance tests in other modules.
+    pub(crate) use reconstruct_trie;
+
+    /// Compares value paths without materializing either map's complete path list.
+    #[track_caller]
+    pub(crate) fn assert_same_paths(got: &PathMap<()>, expected: &PathMap<()>, who: &str) {
+        let mut got = got.iter();
+        let mut expected = expected.iter();
+        loop {
+            match (got.next(), expected.next()) {
+                (None, None) => break,
+                (got, expected) => assert_eq!(
+                    got.map(|(path, _)| path),
+                    expected.map(|(path, _)| path),
+                    "{who} diverged",
+                ),
+            }
+        }
+    }
+
+    /// Runs both cached-cata engines through the reconstruction probe and checks each result
+    /// against the expected logical trie as well as against one another.
+    ///
+    /// `subject` may be a map or a zipper.  For a focused zipper, pass the map representing the
+    /// focused subtrie using the zipper's established origin-path convention as `expected`.
+    #[track_caller]
+    pub(crate) fn assert_reconstructs_like<Z>(subject: &Z, expected: &PathMap<()>)
+    where
+        Z: crate::morphisms::CatamorphismCached<(), GlobalAlloc>
+            + crate::morphisms::CatamorphismCachedIterative<(), GlobalAlloc>,
+    {
+        let iterative = reconstruct_trie!(CatamorphismCachedIterative, subject);
+        assert_same_paths(&iterative, expected, "iterative reconstruction");
+
+        let recursive = reconstruct_trie!(CatamorphismCached, subject);
+        assert_same_paths(&recursive, expected, "recursive reconstruction");
+        assert_same_paths(&recursive, &iterative, "recursive and iterative reconstruction");
+    }
+
+    fn map_from_keys(keys: &[&[u8]]) -> PathMap<()> {
+        keys.iter().copied().map(|path| (path, ())).collect()
+    }
+
+    #[test]
+    fn reconstruction_harness_sanity() {
+        let map = map_from_keys(&[b"a1", b"a2", b"b"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A value and a child with different first bytes must be folded in ascending byte order.
+    ///
+    /// The keys are deliberately chosen only through the public map API; their physical node
+    /// representation is not part of this test's setup or assertion.
+    #[test]
+    fn recursive_cata_regression_val_child_fold_order() {
+        let map = map_from_keys(&[b"a", b"b1", b"b2"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A short value sharing its first byte with a longer value must stay at its exact path.
+    #[test]
+    fn recursive_cata_regression_shared_byte_value_position() {
+        let map = map_from_keys(&[b"a", b"abc"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A value passed through a non-branching run must not cause its downstream child to be
+    /// folded through an empty mask.
+    #[test]
+    fn recursive_cata_regression_passed_value_child_mask() {
+        let map = map_from_keys(&[b"x", b"xy", b"xyz", b"xa1", b"xa2", b"q"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A focus within a compressed path must include every value below it, including any value
+    /// held at the focus.  The iterative engine preserves the zipper origin in its reconstructed
+    /// paths, so each source map contains only the focused subtrie and is also its expected map.
+    #[test]
+    fn recursive_cata_regression_mid_node_focus() {
+        let map = map_from_keys(&[b"abc1", b"abc2"]);
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"ab");
+        assert_eq!(zipper.path(), b"ab");
+        assert_reconstructs_like(&zipper, &map);
+
+        let map = map_from_keys(&[b"ab", b"abcd"]);
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"ab");
+        assert_eq!(zipper.path(), b"ab");
+        assert_reconstructs_like(&zipper, &map);
+    }
 
     macro_rules! define_cached_catamorphism_test_suite {
         ($suite_name:ident, $cata_trait:ident) => {
