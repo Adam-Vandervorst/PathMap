@@ -2894,9 +2894,13 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     debug_assert_eq!(key0.len(), 1);
                     debug_assert!(key1.len() > 1);
                     let val = unsafe { self.val_in_slot::<1>() };
-                    let w = summarize!(Some(val), None, &[])?;
+                    let child_w = summarize!(Some(val), None, &key1[2..])?;
+                    let mask = ByteMask::from(key1[1]);
+                    let mut acc = start_f(&mask)?;
+                    fold_child_f(&mask, child_w, &mut acc)?;
+
                     let val = unsafe { self.val_in_slot::<0>() };
-                    let w = summarize!(Some(val), Some(w), &key1[1..])?;
+                    let w = finalize_f(&mask, Some(val), Some(acc), &[])?;
                     summarize!(passed_in_val, Some(w), &key1[0..1])
                 } else {
                     //Case 8 (Val, Val), different first bytes
