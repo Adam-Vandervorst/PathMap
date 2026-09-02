@@ -1537,7 +1537,22 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 self.ascend_byte();
             }
             _ => {
-                match src.get_focus().try_as_tagged() {
+                //A source with none of the masked branches has nothing to graft, and the set
+                // bits it lacks must end up absent here (see the doc comment).  This used to
+                // fall through to the merge below and split the focus first, which unwraps a
+                // node that does not exist when the focus is a dangling tip or an empty root.
+                let src_focus = src.get_focus();
+                let src_has_branches = src_focus.try_as_tagged().map(|n| {
+                    //A TinyRefNode answers no structural queries; ask its full form instead
+                    let mask = match n {
+                        TaggedNodeRef::TinyRefNode(tiny) => tiny.into_full()
+                            .map(|full| full.node_branches_mask(&[]))
+                            .unwrap_or(ByteMask::EMPTY),
+                        _ => n.node_branches_mask(&[]),
+                    };
+                    (mask & child_mask).count_bits() > 0
+                }).unwrap_or(false);
+                match src_focus.try_as_tagged().filter(|_| src_has_branches) {
                     Some(src_tagged) => {
                         // Split the focus if we're in the middle of another node
                         let self_focus_node = match self.try_borrow_focus_mut() {
@@ -1592,7 +1607,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                         }
                     },
                     None => {
-                        debug_assert_eq!(src.child_count(), 0);
                         if remove_unset {
                             self.remove_branches(false);
                         } else {
