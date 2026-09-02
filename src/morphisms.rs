@@ -1840,7 +1840,7 @@ pub(crate) mod cached_catamorphism_tests {
     use crate::alloc::GlobalAlloc;
     use crate::utils::{ByteMask, ByteMaskIter};
     use crate::write_zipper::{WriteZipperOwned, ZipperWriting};
-    use crate::zipper::{ZipperMoving, ZipperPath};
+    use crate::zipper::{Zipper, ZipperIteration, ZipperMoving, ZipperPath};
     use crate::PathMap;
 
     pub const CACHED_CATA_TEST_KEYS: &[&[u8]] = &[
@@ -1952,18 +1952,26 @@ pub(crate) mod cached_catamorphism_tests {
 
     /// Compares value paths without materializing either map's complete path list.
     #[track_caller]
-    pub(crate) fn assert_same_paths(got: &PathMap<()>, expected: &PathMap<()>, who: &str) {
-        let mut got = got.iter();
-        let mut expected = expected.iter();
+    pub(crate) fn assert_same_paths(
+        got: &PathMap<()>,
+        expected: &PathMap<()>
+    ) {
+        let mut got = got.read_zipper();
+        let mut expected = expected.read_zipper();
+
+        assert_eq!(got.is_val(), expected.is_val());
+        if got.is_val() {
+            assert_eq!(got.path(), expected.path());
+        }
+
         loop {
-            match (got.next(), expected.next()) {
-                (None, None) => break,
-                (got, expected) => assert_eq!(
-                    got.map(|(path, _)| path),
-                    expected.map(|(path, _)| path),
-                    "{who} diverged",
-                ),
+            let got_has_value = got.to_next_val();
+            let expected_has_value = expected.to_next_val();
+            assert_eq!(got_has_value, expected_has_value, );
+            if !got_has_value {
+                break;
             }
+            assert_eq!(got.path(), expected.path());
         }
     }
 
@@ -1979,15 +1987,33 @@ pub(crate) mod cached_catamorphism_tests {
             + crate::morphisms::CatamorphismCachedIterative<(), GlobalAlloc>,
     {
         let iterative = reconstruct_trie!(CatamorphismCachedIterative, subject);
-        assert_same_paths(&iterative, expected, "iterative reconstruction");
+        assert_same_paths(&iterative, expected);
 
         let recursive = reconstruct_trie!(CatamorphismCached, subject);
-        assert_same_paths(&recursive, expected, "recursive reconstruction");
-        assert_same_paths(&recursive, &iterative, "recursive and iterative reconstruction");
+        assert_same_paths(&recursive, expected);
+        assert_same_paths(&recursive, &iterative);
     }
 
     fn map_from_keys(keys: &[&[u8]]) -> PathMap<()> {
         keys.iter().copied().map(|path| (path, ())).collect()
+    }
+
+    fn map_from_owned_keys(keys: &[Vec<u8>]) -> PathMap<()> {
+        keys.iter().map(|path| (path.as_slice(), ())).collect()
+    }
+
+    /// Checks a logical key set in both insertion orders.  This deliberately does not inspect
+    /// the resulting storage layout: a valid cached cata must honor the same observable contract
+    /// regardless of how the implementation stores these keys.
+    #[track_caller]
+    fn assert_logical_key_case_roundtrips(keys: &[Vec<u8>]) {
+        let map = map_from_owned_keys(keys);
+        assert_reconstructs_like(&map, &map);
+
+        let mut reversed = keys.to_vec();
+        reversed.reverse();
+        let map = map_from_owned_keys(&reversed);
+        assert_reconstructs_like(&map, &map);
     }
 
     #[test]
@@ -2041,6 +2067,53 @@ pub(crate) mod cached_catamorphism_tests {
         zipper.descend_to(b"ab");
         assert_eq!(zipper.path(), b"ab");
         assert_reconstructs_like(&zipper, &map);
+    }
+
+    /// Systematically exercises logical value/branch/prefix combinations that may be represented
+    /// compactly in different ways.  The corpus speaks only in paths and values; it neither
+    /// assumes nor inspects a particular concrete node representation.
+    #[test]
+    fn recursive_cata_logical_prefix_and_branch_corpus() {
+        let mut cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![],
+            vec![b"".to_vec()],
+            vec![b"abcd".to_vec()],
+            vec![b"a".to_vec(), b"ab".to_vec(), b"abc".to_vec()],
+            vec![b"a".to_vec(), b"b".to_vec()],
+            vec![b"a1".to_vec(), b"a2".to_vec(), b"b1".to_vec(), b"b2".to_vec()],
+            vec![b"a".to_vec(), b"ab1".to_vec(), b"ab2".to_vec()],
+            vec![b"".to_vec(), b"q1".to_vec(), b"q2".to_vec()],
+        ];
+
+        for tail_len in 1..=4 {
+            let tail = &b"cdef"[..tail_len];
+
+            let mut shared_value_tail = b"a".to_vec();
+            shared_value_tail.extend_from_slice(tail);
+            cases.push(vec![b"a".to_vec(), shared_value_tail]);
+
+            let mut high_child_1 = b"b1".to_vec();
+            high_child_1.extend_from_slice(tail);
+            let mut high_child_2 = b"b2".to_vec();
+            high_child_2.extend_from_slice(tail);
+            cases.push(vec![b"a".to_vec(), high_child_1, high_child_2]);
+
+            let mut low_child_1 = b"a1".to_vec();
+            low_child_1.extend_from_slice(tail);
+            let mut low_child_2 = b"a2".to_vec();
+            low_child_2.extend_from_slice(tail);
+            cases.push(vec![low_child_1, low_child_2, b"b".to_vec()]);
+
+            let mut same_byte_child_1 = b"ab1".to_vec();
+            same_byte_child_1.extend_from_slice(tail);
+            let mut same_byte_child_2 = b"ab2".to_vec();
+            same_byte_child_2.extend_from_slice(tail);
+            cases.push(vec![b"a".to_vec(), same_byte_child_1, same_byte_child_2]);
+        }
+
+        for keys in cases {
+            assert_logical_key_case_roundtrips(&keys);
+        }
     }
 
     macro_rules! define_cached_catamorphism_test_suite {
