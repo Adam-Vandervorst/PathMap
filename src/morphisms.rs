@@ -52,7 +52,7 @@
 //!
 //! | side_effect                                     | cached                                      |
 //! |-------------------------------------------------|---------------------------------------------|
-//! | Visits the entire trie                          | Short-circuits shared subtries              |
+//! | Visits every path in the trie                   | Short-circuits shared subtries              |
 //! | Always re-computes subtrie info (e.g. `W`)      | Reuses shared subtrie info                  |
 //! | Guaranteed and deterministic `alg` exec order   | Unpredictable callback `alg` exec order     |
 //! | `alg` may capture and modify environment ([`FnMut`](https://doc.rust-lang.org/std/ops/trait.FnMut.html))      | `alg` must be a pure [`Fn`](https://doc.rust-lang.org/std/ops/trait.Fn.html)           |
@@ -82,7 +82,7 @@ use crate::gxhash::{self, HashMap, HashMapExt};
 
 /// Provides methods to perform side-effecting catamorphisms appropriate for serialization and full-path operations
 pub trait CatamorphismSideEffecting<V> {
-    /// Applies a "stepping" catamorphism to the trie descending from the zipper's root, running the `alg_f` at every
+    /// Applies a "stepping" catamorphism to the subtrie descending from the zipper's focus, running the `alg_f` at every
     /// step (at every byte)
     ///
     /// ## Arguments to `alg_f`:
@@ -97,12 +97,9 @@ pub trait CatamorphismSideEffecting<V> {
     /// - `value`: A value associated with a given path in the trie, or `None` if the trie has no value at
     /// that path.
     ///
-    /// - `path`: The [`origin_path`](ZipperAbsolutePath::origin_path) for the invocation.  The `alg_f` will
-    /// be run exactly once for each unique path in the trie.
+    /// - `path`: The absolute [`origin_path`](ZipperAbsolutePath::origin_path) for the invocation.  The `alg_f` will
+    /// be run exactly once for each path in the subtrie rooted at the initial focus.
     ///
-    /// ## Behavior
-    ///
-    /// The focus position of the zipper will be ignored and it will be immediately reset to the root.
     fn into_cata_side_effect<W, AlgF>(self, mut alg_f: AlgF) -> W
         where
         AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
@@ -119,7 +116,7 @@ pub trait CatamorphismSideEffecting<V> {
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>;
 
-    /// Applies a "jumping" catamorphism to the trie
+    /// Applies a "jumping" catamorphism to the subtrie descending from the zipper's focus.
     ///
     /// A "jumping" catamorphism is a form of catamorphism where the `alg_f` "jumps over" (isn't called for)
     /// path bytes in the trie where there isn't either a `value` or a branch where `children.len() > 1`.
@@ -790,16 +787,16 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
 {
     //`stack` holds a "frame" at each forking point above the zipper position.  No frames exist for values
-    let mut stack = Vec::<StackFrame>::with_capacity(12);
+    let mut stack = Vec::<SideEffectStackFrame>::with_capacity(12);
     let mut children = Vec::<W>::new();
     let mut frame_idx = 0;
 
-    z.reset();
+    let focus_depth = z.depth();
     z.prepare_buffers();
-    //Push a stack frame for the root, and start on the first branch off the root
-    stack.push(StackFrame::from(&z));
+    // Push a stack frame for the initial focus, and start on its first branch.
+    stack.push(SideEffectStackFrame::new(&z));
     if z.descend_first_byte().is_none() {
-        //Empty trie is a special case
+        // A leaf focus is a special case.
         return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path(), &z)
     }
 
@@ -815,7 +812,15 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
 
         if is_leaf {
             //Ascend back to the last fork point from this leaf
-            let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, &mut [])?;
+            let cur_w = match ascend_to_focus_or_fork::<Z, V, W, Err, AlgF, JUMPING>(
+                &mut z,
+                focus_depth,
+                &mut alg_f,
+                &mut [],
+            )? {
+                AscendResult::Parent(w) => w,
+                AscendResult::Focus(w) => return Ok(w),
+            };
             children.push(cur_w);
             stack[frame_idx].child_idx += 1;
 
@@ -841,7 +846,15 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
                     debug_assert_eq!(stack[frame_idx].child_idx, stack[frame_idx].child_cnt);
                     let child_start = children.len() - stack[frame_idx].child_cnt as usize;
                     let children2 = &mut children[child_start..];
-                    let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, children2)?;
+                    let cur_w = match ascend_to_focus_or_fork::<Z, V, W, Err, AlgF, JUMPING>(
+                        &mut z,
+                        focus_depth,
+                        &mut alg_f,
+                        children2,
+                    )? {
+                        AscendResult::Parent(w) => w,
+                        AscendResult::Focus(w) => return Ok(w),
+                    };
                     children.truncate(child_start);
                     frame_idx -= 1;
 
@@ -855,8 +868,16 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
             let descended = z.descend_indexed_byte(stack[frame_idx].child_idx as usize);
             debug_assert!(descended.is_some());
         } else {
-            //Push a new stack frame for this branch
-            Stack::push_state_raw(&mut stack, &mut frame_idx, &z);
+            // Push a new stack frame for this branch, reusing a frame left by a completed
+            // sibling branch when possible.
+            frame_idx += 1;
+            assert!(frame_idx <= stack.len(), "stack invariant: frame index <= length");
+            let frame = SideEffectStackFrame::new(&z);
+            if frame_idx == stack.len() {
+                stack.push(frame);
+            } else {
+                stack[frame_idx] = frame;
+            }
 
             //Descend the first child branch
             let descended = z.descend_first_byte();
@@ -865,153 +886,126 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     }
 }
 
+/// Ascends from a completed child to either its parent fork or the initial cata focus.
+///
+/// A jumping ascent may otherwise pass a valueless unary focus in one movement, so the focus
+/// boundary is checked explicitly rather than relying on `at_root()`.
 #[inline(always)]
-fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z, 
-        alg_f: &mut AlgF, children: &mut [W]
-) -> Result<W, Err>
-    where
+fn ascend_to_focus_or_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(
+    z: &mut Z,
+    focus_depth: usize,
+    alg_f: &mut AlgF,
+    children: &mut [W],
+) -> Result<AscendResult<W>, Err>
+where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
+    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>,
 {
-    let z_witness = z.witness();
-    let mut w;
+    let witness = z.witness();
     let mut child_mask = ByteMask::from(z.child_mask());
     let mut children = &mut children[..];
+
     if JUMPING {
-        //This loop runs until we got to a fork or the root.  We will take a spin through the loop
-        // for each value we encounter along the way while ascending
+        let mut w;
         loop {
+            let old_depth = z.depth();
             let old_path_len = z.origin_path().len();
-            let old_val = z.get_val_with_witness(&z_witness);
+            let old_value = z.get_val_with_witness(&witness);
             let ascended = z.ascend_until();
             debug_assert!(ascended > 0);
 
-            let origin_path = unsafe{ z.origin_path_assert_len(old_path_len) };
-            let jump_len = if z.child_count() != 1 || z.is_val() {
-                old_path_len - (z.origin_path().len()+1)
-            } else {
-                old_path_len - z.origin_path().len()
-            };
+            // SAFETY: `ascend_until` only shortens the path, so the former path remains initialized
+            // in the prepared buffer until the next movement.
+            let origin_path = unsafe { z.origin_path_assert_len(old_path_len) };
 
-            w = alg_f(&child_mask, children, jump_len, old_val, origin_path, &z)?;
+            if z.depth() < focus_depth {
+                // A valueless unary focus is not an `ascend_until` stopping point.  Its jumping
+                // cata is just its child's result, but the preceding callback must report the
+                // jump relative to this focus rather than to the zipper's root.
+                debug_assert!(old_depth > focus_depth);
+                w = alg_f(
+                    &child_mask,
+                    children,
+                    old_depth - focus_depth,
+                    old_value,
+                    origin_path,
+                    z,
+                )?;
+                return Ok(AscendResult::Focus(w))
+            }
+
+            let jump_len = if z.child_count() != 1 || z.is_val() {
+                ascended - 1
+            } else {
+                ascended
+            };
+            w = alg_f(&child_mask, children, jump_len, old_value, origin_path, z)?;
+
+            if z.depth() == focus_depth && z.child_count() == 1 {
+                // A valued unary focus stops `ascend_until`; complete that focus here rather
+                // than continuing to its parent. A valueless focus is a jumping passthrough.
+                return if z.is_val() {
+                    let byte = origin_path[old_path_len - jump_len - 1];
+                    let child_mask = ByteMask::from(byte);
+                    let mut child = [w];
+                    alg_f(&child_mask, &mut child, 0, z.val(), z.origin_path(), z)
+                        .map(AscendResult::Focus)
+                } else {
+                    Ok(AscendResult::Focus(w))
+                }
+            }
 
             if z.child_count() != 1 || z.at_root() {
-                return Ok(w)
+                return Ok(AscendResult::Parent(w))
             }
 
             children = core::array::from_mut(&mut w);
-
-            // SAFETY: We will never over-read the path buffer because we only get here after we ascended
-            let byte = *unsafe{ z.origin_path_assert_len(old_path_len-jump_len) }.last().unwrap();
-            child_mask = ByteMask::EMPTY;
-            child_mask.set_bit(byte);
+            let byte = origin_path[old_path_len - jump_len - 1];
+            child_mask = ByteMask::from(byte);
         }
     } else {
-        //This loop runs at each byte step as we ascend
+        let mut w;
         loop {
             let origin_path = z.origin_path();
             let byte = origin_path.last().copied().unwrap_or(0);
-            let val = z.val();
-            w = alg_f(&child_mask, children, 0, val, origin_path, &z)?;
+            let value = z.val();
+            w = alg_f(&child_mask, children, 0, value, origin_path, z)?;
 
             let ascended = z.ascend_byte();
             debug_assert!(ascended);
 
+            if z.depth() == focus_depth && z.child_count() == 1 {
+                let child_mask = ByteMask::from(byte);
+                let mut child = [w];
+                return alg_f(&child_mask, &mut child, 0, z.val(), z.origin_path(), z)
+                    .map(AscendResult::Focus)
+            }
+
             if z.child_count() != 1 || z.at_root() {
-                return Ok(w)
+                return Ok(AscendResult::Parent(w))
             }
 
             children = core::array::from_mut(&mut w);
-            child_mask = ByteMask::EMPTY;
-            child_mask.set_bit(byte);
+            child_mask = ByteMask::from(byte);
         }
     }
 }
 
-/// Internal structure to hold temporary info used inside morphism apply methods
-struct StackFrame {
+/// A frame for the side-effecting cata's explicit traversal stack.
+struct SideEffectStackFrame {
     child_idx: u16,
     child_cnt: u16,
-    child_addr: Option<u64>,
 }
 
-impl StackFrame {
-    /// Allocates a new StackFrame
-    fn from<Z>(zipper: &Z) -> Self
-        where Z: Zipper,
+impl SideEffectStackFrame {
+    #[inline]
+    fn new<Z>(zipper: &Z) -> Self
+    where
+        Z: Zipper,
     {
-        let mut stack_frame = StackFrame {
-            child_cnt: 0,
-            child_idx: 0,
-            child_addr: None,
-        };
-        stack_frame.reset(zipper);
-        stack_frame
-    }
-
-    /// Resets a StackFrame to the state needed to iterate a new forking point
-    fn reset<Z>(&mut self, zipper: &Z)
-        where Z: Zipper,
-    {
-        self.child_cnt = zipper.child_count() as u16;
-        self.child_idx = 0;
-    }
-}
-
-struct Stack {
-    stack: Vec<StackFrame>,
-    position: usize,
-}
-
-impl Stack {
-    pub fn new() -> Self {
         Self {
-            stack: Vec::with_capacity(12),
-            position: !0,
-        }
-    }
-    /// Return the reference to the top stack frame
-    #[inline]
-    pub fn last_mut(&mut self) -> Option<&mut StackFrame> {
-        let idx = self.position;
-        self.stack.get_mut(idx)
-    }
-
-    /// Return the reference to the top stack frame
-    /// and decrease stack pointer. Doesn't free the stack frame.
-    #[inline]
-    pub fn pop_mut(&mut self) -> Option<&mut StackFrame> {
-        if self.position == !0 {
-            return None;
-        }
-        let idx = self.position;
-        self.position = self.position.wrapping_sub(1);
-        self.stack.get_mut(idx)
-    }
-
-    /// Push stack state for current zipper position
-    ///
-    /// This function re-uses allocations for stack frames,
-    /// to avoid allocator thrashing.
-    pub fn push_state<Z>(&mut self, z: &Z)
-        where Z: Zipper + ZipperPath,
-    {
-        Self::push_state_raw(&mut self.stack, &mut self.position, z);
-    }
-
-    pub fn push_state_raw<'a, Z>(
-        stack: &mut Vec<StackFrame>,
-        position: &mut usize,
-        zipper: &Z)
-        where Z: Zipper + ZipperPath,
-    {
-        *position = position.wrapping_add(1);
-        assert!(*position <= stack.len(),
-            "stack invariant: position <= len");
-        if *position == stack.len() {
-            stack.push(StackFrame::from(zipper));
-        } else {
-            stack[*position].reset(zipper);
+            child_idx: 0,
+            child_cnt: zipper.child_count() as u16,
         }
     }
 }
@@ -1112,28 +1106,35 @@ impl<Acc> SummarizeStackFrame<Acc> {
     }
 }
 
-/// Internal helper type returned by summarize_ascend_to_fork
-enum SummarizeAscend<W> {
+/// Result of ascending from a completed child.
+enum AscendResult<W> {
     Parent(W),
     Focus(W),
 }
 
-/// Ascend from a leaf or completed fork, summarizing each value and non-branching path run on the
-/// way to the parent fork.  This is the three-closure counterpart to [`ascend_to_fork`].
 #[inline(always)]
-fn summarize_ascend_to_fork<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+fn no_debug_path<Z>(_zipper: &Z, _depth: usize) -> &[u8] {
+    &[]
+}
+
+/// Ascend from a leaf or completed fork, summarizing each value and non-branching path run on the
+/// way to the parent fork.
+#[inline(always)]
+fn summarize_ascend_to_fork<'a, Z, V: 'a, Acc, W, E, DebugPathF, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const DEBUG_PATH: bool>(
     zipper: &mut Z,
     focus_depth: usize,
     mut accumulator: Option<Acc>,
+    debug_path_f: DebugPathF,
     new_acc_f: NewAccF,
     fold_child_f: FoldChildF,
     summarize_f: SummarizeF,
-) -> Result<SummarizeAscend<W>, E>
+) -> Result<AscendResult<W>, E>
 where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperPathBuffer,
+    DebugPathF: Copy + for<'z> Fn(&'z Z, usize) -> &'z [u8],
     NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
-    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8], &[u8]) -> Result<W, E>,
 {
     let witness = zipper.witness();
     let mut child_mask = ByteMask::from(zipper.child_mask());
@@ -1142,8 +1143,9 @@ where
         let old_depth = zipper.depth();
         let old_value = zipper.get_val_with_witness(&witness);
         if old_depth == focus_depth {
-            return summarize_f(&child_mask, old_value, accumulator, &[])
-                .map(SummarizeAscend::Focus);
+            let debug_path = if DEBUG_PATH { debug_path_f(zipper, old_depth) } else { &[] };
+            return summarize_f(&child_mask, old_value, accumulator, &[], debug_path)
+                .map(AscendResult::Focus);
         }
 
         let ascended = zipper.ascend_until();
@@ -1154,6 +1156,7 @@ where
         // SAFETY: `ascend_until` only shortens the logical path; the bytes it removed remain
         // initialized in the zipper's prepared path buffer until the next zipper movement.
         let path = unsafe { zipper.path_assert_len(old_depth) };
+        let debug_path = if DEBUG_PATH { debug_path_f(zipper, old_depth) } else { &[] };
 
         // `ascend_until` can pass the initial focus when that focus is a valueless unary
         // position in a compressed run. That position is the traversal root, so preserve the
@@ -1165,7 +1168,8 @@ where
                 old_value,
                 accumulator,
                 if COMPUTE_PATH { &path[focus_depth..old_depth] } else { &[] },
-            ).map(SummarizeAscend::Focus);
+                debug_path,
+            ).map(AscendResult::Focus);
         }
 
         let jump_len = if zipper.child_count() != 1 || zipper.is_val() {
@@ -1179,10 +1183,10 @@ where
             &[]
         };
 
-        let w = summarize_f(&child_mask, old_value, accumulator, prefix)?;
+        let w = summarize_f(&child_mask, old_value, accumulator, prefix, debug_path)?;
 
         if zipper.child_count() != 1 || zipper.at_root() {
-            return Ok(SummarizeAscend::Parent(w))
+            return Ok(AscendResult::Parent(w))
         }
 
         debug_assert!(old_depth > jump_len);
@@ -1195,11 +1199,8 @@ where
 }
 
 /// Iterative cached traversal behind [`CatamorphismCached::factored_cata_jumping`].
-///
-/// This follows [`into_cata_cached_body`] closely, but completes a logical node with the three
-/// summarization closures instead of collecting a mutable child slice for one algebra closure.
 fn summarize_cached_body<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
-    mut zipper: Z,
+    zipper: Z,
     new_acc_f: NewAccF,
     fold_child_f: FoldChildF,
     summarize_f: SummarizeF,
@@ -1211,12 +1212,40 @@ where
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
     SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,
 {
+    summarize_cached_body_with_debug::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, false>(
+        zipper,
+        no_debug_path::<Z>,
+        new_acc_f,
+        fold_child_f,
+        move |mask, value, accumulator, prefix, _debug_path| {
+            summarize_f(mask, value, accumulator, prefix)
+        },
+    )
+}
+
+/// Shared iterative cached traversal used by the ordinary and debug cata adapters.
+fn summarize_cached_body_with_debug<'a, Z, V: 'a, Acc, W, E, DebugPathF, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const DEBUG_PATH: bool>(
+    mut zipper: Z,
+    debug_path_f: DebugPathF,
+    new_acc_f: NewAccF,
+    fold_child_f: FoldChildF,
+    summarize_f: SummarizeF,
+) -> Result<W, E>
+where
+    W: Clone,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer,
+    DebugPathF: Copy + for<'z> Fn(&'z Z, usize) -> &'z [u8],
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8], &[u8]) -> Result<W, E>,
+{
     let focus_depth = zipper.depth();
     zipper.prepare_buffers();
 
     let root_child_cnt = zipper.child_count();
     if root_child_cnt == 0 {
-        return summarize_f(&ByteMask::EMPTY, zipper.val(), None, &[])
+        let debug_path = if DEBUG_PATH { debug_path_f(&zipper, focus_depth) } else { &[] };
+        return summarize_f(&ByteMask::EMPTY, zipper.val(), None, &[], debug_path)
     }
 
     let passthrough_root = root_child_cnt == 1 && !zipper.is_val();
@@ -1226,15 +1255,16 @@ where
         zipper.descend_indexed_byte(0);
         while zipper.child_count() < 2 {
             if !zipper.descend_until() {
-                return summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+                return summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
                     &mut zipper,
                     focus_depth,
                     None,
+                    debug_path_f,
                     new_acc_f,
                     fold_child_f,
                     summarize_f,
                 ).map(|result| match result {
-                    SummarizeAscend::Parent(w) | SummarizeAscend::Focus(w) => w,
+                    AscendResult::Parent(w) | AscendResult::Focus(w) => w,
                 })
             }
         }
@@ -1271,16 +1301,17 @@ where
             }
 
             if is_leaf {
-                let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+                let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
                     &mut zipper,
                     focus_depth,
                     None,
+                    debug_path_f,
                     new_acc_f,
                     fold_child_f,
                     summarize_f,
                 )? {
-                    SummarizeAscend::Parent(w) => w,
-                    SummarizeAscend::Focus(w) => return Ok(w),
+                    AscendResult::Parent(w) => w,
+                    AscendResult::Focus(w) => return Ok(w),
                 };
                 DoCache::insert(&mut cache, frame_mut.child_addr, &cur_w);
                 let child_mask = ByteMask::from(zipper.child_mask());
@@ -1298,33 +1329,36 @@ where
 
         if stack.is_empty() {
             return if passthrough_root {
-                summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+                summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
                     &mut zipper,
                     focus_depth,
                     Some(frame.accumulator),
+                    debug_path_f,
                     new_acc_f,
                     fold_child_f,
                     summarize_f,
                 ).map(|result| match result {
-                    SummarizeAscend::Parent(w) | SummarizeAscend::Focus(w) => w,
+                    AscendResult::Parent(w) | AscendResult::Focus(w) => w,
                 })
             } else {
                 debug_assert_eq!(zipper.depth(), focus_depth, "must be at the initial focus when summarization is done");
                 let child_mask = ByteMask::from(zipper.child_mask());
-                summarize_f(&child_mask, zipper.val(), Some(frame.accumulator), &[])
+                let debug_path = if DEBUG_PATH { debug_path_f(&zipper, focus_depth) } else { &[] };
+                summarize_f(&child_mask, zipper.val(), Some(frame.accumulator), &[], debug_path)
             };
         }
 
-        let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+        let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
             &mut zipper,
             focus_depth,
             Some(frame.accumulator),
+            debug_path_f,
             new_acc_f,
             fold_child_f,
             summarize_f,
         )? {
-            SummarizeAscend::Parent(w) => w,
-            SummarizeAscend::Focus(w) => return Ok(w),
+            AscendResult::Parent(w) => w,
+            AscendResult::Focus(w) => return Ok(w),
         };
 
         let frame_mut = stack.last_mut()
@@ -1335,106 +1369,54 @@ where
     }
 }
 
-/// Internal implementation behind all cached catas
-///
-/// AlgF args: (child_mask, children, value, prefix, debug_path, zipper)
-pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool, const DEBUG_PATH: bool>(
-    mut zipper: Z, mut alg_f: AlgF
-) -> Result<W, E>
-    where
-    Cache: CacheStrategy<W>,
-    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8], &Z) -> Result<W, E>
+#[inline(always)]
+fn debug_origin_path<'a, Z>(zipper: &'a Z, depth: usize) -> &'a [u8]
+where
+    Z: Zipper + ZipperAbsolutePath + ZipperPathBuffer,
 {
-    zipper.reset();
-    zipper.prepare_buffers();
+    let root_prefix_len = zipper.origin_path().len() - zipper.depth();
+    // SAFETY: the caller supplies a depth that the zipper occupied earlier in this traversal;
+    // `prepare_buffers` keeps that path initialized until the next movement.
+    unsafe { zipper.origin_path_assert_len(root_prefix_len + depth) }
+}
 
-    let mut stack = Stack::new();
-    let mut children = Vec::<W>::new();
-    let mut cache = HashMap::<u64, W>::new();
-    stack.push_state(&zipper);
-    'outer: loop {
-        let frame_mut = stack.last_mut()
-            .expect("into_cata stack is emptied before we returned to root");
-        // This branch represents the body of the for loop.
-        if frame_mut.child_idx < frame_mut.child_cnt {
-            let descended = zipper.descend_indexed_byte(frame_mut.child_idx as usize);
-            debug_assert!(descended.is_some());
-            frame_mut.child_idx += 1;
-            frame_mut.child_addr = zipper.shared_node_id();
+/// Debug-only adapter over the iterative cached cata. The extra path is an absolute path borrowed
+/// directly from the zipper buffer and must not influence the cached algebra's result.
+pub(crate) fn cata_jumping_cached_debug_body<'a, Z, V: 'a, W, E, AlgF>(
+    zipper: Z,
+    alg_f: AlgF,
+) -> Result<W, E>
+where
+    W: Clone,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
+    AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> Result<W, E>,
+{
+    let children = std::cell::RefCell::new(CataChildren::<W>::new());
+    let children = &children;
+    let alg_f = &alg_f;
 
-            // Read and reuse value from cache, if exists
-            if let Some(cache) = Cache::get(&cache, frame_mut.child_addr) {
-                // DO NOT modify the W from cache
-                children.push(cache);
-                zipper.ascend_byte();
-                continue 'outer;
-            }
-
-            // Descend until leaf or branch
-            let mut is_leaf = false;
-            'descend: while zipper.child_count() < 2 {
-                if !zipper.descend_until() {
-                    is_leaf = true;
-                    break 'descend;
-                }
-            }
-
-            if is_leaf {
-                // If we encounter a leaf, ascend immediately.
-                // This branch will preserve the current stack frame.
-                let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-                    &mut zipper, &mut |mask, children, jump, val, path, z| {
-                        alg_f(mask, children, val, &path[path.len()-jump..], path, z)
-                    }, &mut [])?;
-                // Put value to cache (1)
-                Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
-                children.push(cur_w);
-                continue 'outer;
-            }
-
-            // Enter one recursion step
-            stack.push_state(&zipper);
-            continue 'outer;
-        }
-
-        // This branch represents the rest of the function after the loop
-        let frame_idx = stack.position;
-        let StackFrame { child_cnt, .. } = stack.pop_mut()
-            .expect("we just checked that stack is not empty, pop must return Some");
-        let child_start = children.len() - *child_cnt as usize;
-        let children2 = &mut children[child_start..];
-
-        if frame_idx == 0 {
-            // Final branch
-            debug_assert!(zipper.at_root(), "must be at root when cata is done");
-            let value = zipper.val();
-            let child_mask = ByteMask::from(zipper.child_mask());
-            return if JUMPING && *child_cnt == 1 && value.is_none() {
-                Ok(children.pop().unwrap())
-            } else {
-                let debug_path = if DEBUG_PATH {
-                    zipper.origin_path()
-                } else {
-                    &[]
-                };
-                alg_f(&child_mask, children2, value, &[], debug_path, &zipper)
-            };
-        }
-
-        let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-            &mut zipper, &mut |mask, children, jump, val, path, z| {
-                alg_f(mask, children, val, &path[path.len()-jump..], path, z)
-            }, children2)?;
-        children.truncate(child_start);
-
-        // Exit one recursion step
-        let frame_mut = stack.last_mut()
-            .expect("when we're not at root, expect parent stack");
-        // Put value to cache (2) after recursion
-        Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
-        children.push(cur_w);
-    }
+    summarize_cached_body_with_debug::<Z, V, CataChildrenAcc, W, E, _, _, _, _, true, true>(
+        zipper,
+        debug_origin_path::<Z>,
+        move |mask| {
+            debug_assert!(children.try_borrow_mut().is_ok());
+            Ok(unsafe { &mut *children.as_ptr() }.new_acc(mask.count_bits()))
+        },
+        move |_mask, child, accumulator| {
+            debug_assert!(children.try_borrow_mut().is_ok());
+            unsafe { &mut *children.as_ptr() }.push(accumulator, child);
+            Ok(())
+        },
+        move |mask, value, accumulator, prefix, debug_path| match accumulator {
+            Some(accumulator) => {
+                debug_assert!(children.try_borrow_mut().is_ok());
+                unsafe { &mut *children.as_ptr() }.summarize(accumulator, mask.count_bits(), |children| {
+                    alg_f(mask, children, value, prefix, debug_path)
+                })
+            },
+            None => alg_f(mask, &mut [], value, prefix, debug_path),
+        },
+    )
 }
 
 // This is a naive implementation of caching/jumping cata
@@ -3819,6 +3801,51 @@ mod tests {
 
         assert_eq!(count.unwrap(), 3);
         assert_eq!(zipper.path(), b"a");
+    }
+
+    #[test]
+    fn side_effecting_cata_uses_its_focus_as_root() {
+        let map: PathMap<()> = [
+            (b"a".as_slice(), ()),
+            (b"ab".as_slice(), ()),
+            (b"ac".as_slice(), ()),
+            (b"z".as_slice(), ()),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut stepping_zipper = map.read_zipper();
+        stepping_zipper.descend_to(b"a");
+        let mut stepping_paths = Vec::new();
+        let stepping = stepping_zipper.into_cata_side_effect(|_mask, children: &mut [usize], value, path| {
+            stepping_paths.push(path.to_vec());
+            value.is_some() as usize + children.iter().sum::<usize>()
+        });
+
+        assert_eq!(stepping, 3);
+        assert!(stepping_paths.iter().all(|path| path.starts_with(b"a")));
+        assert!(stepping_paths.contains(&b"a".to_vec()));
+
+        let mut jumping_zipper = map.read_zipper();
+        jumping_zipper.descend_to(b"a");
+        let jumping = jumping_zipper.into_cata_jumping_side_effect(|_mask, children: &mut [usize], _jump, value, _path| {
+            value.is_some() as usize + children.iter().sum::<usize>()
+        });
+
+        assert_eq!(jumping, 3);
+
+        // A valueless unary focus may lie in a compressed path, so the jumping traversal must
+        // not ascend past it while looking for the next logical callback point.
+        let unary_map: PathMap<()> = [(b"abc".as_slice(), ()), (b"z".as_slice(), ())]
+            .into_iter()
+            .collect();
+        let mut unary_zipper = unary_map.read_zipper();
+        unary_zipper.descend_to(b"a");
+        let unary = unary_zipper.into_cata_jumping_side_effect(|_mask, children: &mut [usize], _jump, value, _path| {
+            value.is_some() as usize + children.iter().sum::<usize>()
+        });
+
+        assert_eq!(unary, 1);
     }
 
     /// A bounded deep-path smoke test for the recursive cata.

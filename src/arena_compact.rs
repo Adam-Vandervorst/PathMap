@@ -1354,8 +1354,7 @@ struct CachedFrame {
 /// contiguous — and the copy keeps pointing at the original children.  So a
 /// repeated subtrie costs one node, not a subtrie.
 ///
-/// The traversal itself is the jumping catamorphism, unrolled (see
-/// `morphisms::into_cata_cached_body`, which this follows closely).  It is
+/// The traversal itself is an unrolled jumping catamorphism. It is
 /// spelled out here rather than delegating to
 /// [`CatamorphismCached::cata_jumping_cached`] for two reasons:
 /// - the cached cata only consults its cache one byte below a fork, whereas we
