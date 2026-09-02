@@ -8,9 +8,9 @@ Two things live here:
 
 1. **The model** (`PathMapModel/`) — a total, executable definition of what each
    API function *means*, with the laws relating them.
-2. **The harness** (`Main.lean` and the `../differential` crate) — the two
-   front ends that run the same generated program against the model and
-   against `pathmap`, printing a trace that can be diffed.
+2. **The harness** (`Main.lean`, `differential.py`, `shrink.py`, and the
+   `../differential` crate) — the machinery that runs the same generated
+   program against the model and against `pathmap`, and diffs the results.
 
 ## Build and run
 
@@ -30,6 +30,11 @@ cd lean && lake build
 # the crate side of the differential harness
 cargo build --release -p differential
 
+# generate random programs and compare model against crate
+./lean/differential.py --random 500 --seed 1
+
+# minimise an input that diverges (or that panics)
+./lean/shrink.py path/to/input.bin
 ```
 
 `lake build` also checks every `#guard` in `PathMapModel/Check.lean`, so a build
@@ -164,6 +169,8 @@ Honest accounting, because it matters for how much the model is worth:
   transcribed from `pathmap`'s own unit tests (`write_zipper_prune_path_test2`,
   `write_zipper_drop_head_test1/3/6`) and the `restrict` oracle from
   `tests/pathmap_algebra_differential.rs`.
+* **Checked against the crate** (`differential.py`): everything else, on every
+  generated program.
 
 The definitions themselves are the specification.  They are total and executable,
 so "the spec" and "the oracle" cannot drift apart.
@@ -205,6 +212,81 @@ The op table lives in `Fuzz.lean` (`PathMapModel.Fuzz.step`) and
 | `lean/.lake/build/bin/pathmap-oracle` | the Lean model | `cd lean && lake build` |
 | `target/release/pathmap_trace` | the real crate | `cargo build --release -p differential` |
 | `target/release/act_trace` | the crate, ACT read source | `cargo build --release -p differential` |
+
+`differential.py` diffs the Lean oracle against one of the others:
+
+```bash
+./lean/differential.py --random 500            # Lean model vs. the crate
+./lean/differential.py --act   --random 500    # Lean model vs. an ACT read source
+```
+
+### Resident children
+
+Each front end is spawned once with `--server` and stays up, taking inputs as
+hex on stdin — `run-input <timeout-ms> <hex>`, replying with the trace and one
+`!DONE` / `!TIMEOUT` / `!PANIC <msg>` terminator.  The protocol lives in
+`differential/src/server.rs`, shared by both crate front ends (it is plumbing;
+it knows nothing about tries).
+
+This replaced a temp file plus two fresh processes per input.  Process creation
+dominated: 2000 inputs took 10.3s wall with 6.4s of that in `sys`, and now take
+1.8s with 0.7s in `sys` — 5.6x faster overall, 10x less kernel time.  The old
+scheme also never deleted its temp directories; 98M of `/tmp/pathmap-diff-*` had
+accumulated.  Only failing inputs are written out now, and the path is printed
+so `shrink.py` can still take them.
+
+Both children are handed an input before either is read, so they work at the
+same time; driving them one after the other cost about a fifth of the
+throughput.  `-j N` shards across N worker processes, each owning its own pair
+of children — processes rather than threads because comparing two lists of trace
+lines is enough Python work to make the GIL the ceiling past a few workers.
+
+Where an input *comes from* is behind `InputSource`, and each worker asks for
+its own through `get_next_input(idx)`.  `get` must be deterministic in `idx` and
+carry no state between calls, which is what makes a `-j32` run test exactly what
+a `-j1` run does and lets the parent re-derive a failing input from its index
+without workers shipping bytes back.  `RandomInputs` seeds per index rather than
+once per run, so generation parallelises; a queue-backed source (a corpus being
+minimised, a coverage-guided generator) drops in without touching the driver.
+
+That mattered more than it sounds.  The parent used to build every random input
+up front, single-threaded, a byte at a time — `bytes(rng.randrange(256) for _ in
+range(n))` — which was 0.63s per 20000 inputs, half the wall clock of a `-j32`
+pass, and it capped scaling at `-j32`.  `randbytes` alone is ~39x faster than
+that loop, and moving it into the workers removes it from the critical path:
+
+    inputs/s, 100000 random programs
+
+              -j1      -j8     -j32     -j64
+    model    1746    12376    37037    44444
+    crate       -        -    36232    45249
+
+Crate mode is the slow one — 897/s at `-j32`, because two hangs per 2000
+inputs each stall for the whole timeout and no amount of parallelism goes below
+that floor.  The hangs are the read zipper's missing at-root guard (finding 3);
+until that is fixed, the timeout is the floor.
+
+Note that changing the generator changed *which* programs a seed produces, so
+runs recorded against an older seed do not reproduce byte for byte.
+
+`--timeout` bounds one input, and defaults to 2s.  It used to be 30s, which was
+about 25000x too generous: measured over 2000 random programs against the real
+crate, the inputs that do *not* hang run in p50 0.19ms and p100 1.21ms.  Since
+two of those 2000 do hang, that one constant was most of the wall clock — crate
+mode went from 32 to 364 inputs/s at `-j1` on the strength of it, and 897/s at
+`-j8`, where the remaining floor is just the timeout itself.
+
+The Rust front ends run each input on a thread they can abandon, so a hang costs
+one input rather than the process.  The driver then respawns that child anyway:
+an abandoned thread cannot be killed and goes on spinning at 100% of a core for
+the rest of the run, which showed up as `user` time exceeding `wall` on an
+otherwise sequential workload.  A respawn costs ~3ms and gets the core back.
+The oracle cannot cut its own work off at all: `IO.asTask` with `IO.waitAny`
+blocks on the work task and never sees the timer, and polling `IO.hasFinished`
+blocks on the first call (measured: a 50ms budget returned "finished" after
+99.5s).  So the driver enforces that deadline from outside, killing and
+respawning a child that stops answering — which it must handle anyway, since no
+in-process timeout saves a child that has died outright.
 
 ### Deliberately skipped operations
 
@@ -318,7 +400,7 @@ This costs efficiency -- several definitions are quadratic where the crate is
 constant-time -- and that is the intended trade.  The model is a specification
 that happens to run, not an implementation.
 
-Two further defences, in increasing order of how much they actually prove:
+Three further defences, in increasing order of how much they actually prove:
 
 **1. Metamorphic laws** (`Spec.lean` §2) relate *different* API functions to each
 other — `take_map` then `graft_map` is the identity, `drop_head` undoes
@@ -334,6 +416,11 @@ transcription is excluded as a source of error.  This is the same technique the
 crate's own `tests/pathmap_algebra_differential.rs` uses for `restrict`, where it
 caught a real `prestrict` bug.
 
+**3. A third implementation.**  `ArenaCompactTree` implements the same read
+specification independently, so `differential.py --act` triangulates: the model
+agreeing with `PathMap` while disagreeing with ACT is evidence the model is not
+merely echoing either one.  It found three ACT defects.
+
 What none of this can do is prove the specification *right*.  It can only show
 that the specification is not vacuous in a given region, and narrow the set of
 places where "the model and the crate agree" might mean "they are wrong
@@ -347,6 +434,7 @@ so the model can hold it to the same standard without any new modelling:
 
 ```bash
 cargo build --release -p differential
+./lean/differential.py --act --random 500 --seed 99 --max-fails 0
 ```
 
 `differential/src/bin/act_trace.rs` builds an ACT from map1 with `from_zipper` and runs the
@@ -397,6 +485,9 @@ invariants in-process after every operation — no oracle needed:
 * a value implies the path exists; children imply the path exists
 * `child_count() == |child_mask()|`
 * `val_count()` counts the focus value, and equals it exactly at a leaf
+
+`differential.py` runs without `--check`, because a crate that violates an
+invariant should show up as a trace diff rather than as an abort.
 
 ## Out of scope
 
