@@ -2016,6 +2016,61 @@ pub(crate) mod cached_catamorphism_tests {
         assert_reconstructs_like(&map, &map);
     }
 
+    /// Finds prefixes where the logical input keys have at least two different following bytes.
+    /// These are derived from the test data alone, not from the trie's concrete representation.
+    fn logical_branch_prefixes(keys: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut prefixes = Vec::new();
+        for key in keys {
+            for len in 0..key.len() {
+                let prefix = &key[..len];
+                let first_child = keys.iter()
+                    .filter(|candidate| candidate.starts_with(prefix))
+                    .filter_map(|candidate| candidate.get(len))
+                    .next();
+                let is_branch = first_child.is_some_and(|first| {
+                    keys.iter()
+                        .filter(|candidate| candidate.starts_with(prefix))
+                        .filter_map(|candidate| candidate.get(len))
+                        .any(|child| child != first)
+                });
+                if is_branch && !prefixes.iter().any(|existing| existing == prefix) {
+                    prefixes.push(prefix.to_vec());
+                }
+            }
+        }
+        prefixes
+    }
+
+    /// Runs the focused-zipper portion of the differential harness.  Both the requested focus
+    /// and the expected subtrie come from the logical source keys, keeping this test independent
+    /// of the storage representation.
+    fn assert_logical_focus_roundtrips(keys: &[Vec<u8>], focus: &[u8]) {
+        let map = map_from_owned_keys(keys);
+        let expected_keys: Vec<Vec<u8>> = keys.iter()
+            .filter(|key| key.starts_with(focus))
+            .cloned()
+            .collect();
+        let expected = map_from_owned_keys(&expected_keys);
+
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(focus);
+        assert_eq!(zipper.path(), focus);
+        assert_reconstructs_like(&zipper, &expected);
+    }
+
+    fn assert_random_case(
+        seed: &[u8; 32],
+        round: usize,
+        focus: Option<&[u8]>,
+        test: impl FnOnce(),
+    ) {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(test)).is_err() {
+            panic!(
+                "random cached-cata regression: seed={seed:?}, round={round}, focus={focus:?}",
+            );
+        }
+    }
+
     #[test]
     fn reconstruction_harness_sanity() {
         let map = map_from_keys(&[b"a1", b"a2", b"b"]);
@@ -2113,6 +2168,73 @@ pub(crate) mod cached_catamorphism_tests {
 
         for keys in cases {
             assert_logical_key_case_roundtrips(&keys);
+        }
+    }
+
+    /// A 256-way logical branch exercises storage configurations that use wide byte-indexed
+    /// nodes without making the test depend on any particular node representation.
+    #[test]
+    fn recursive_cata_wide_logical_branch() {
+        let keys: Vec<Vec<u8>> = (0u8..=u8::MAX)
+            .map(|byte| vec![byte, b'a', byte])
+            .collect();
+
+        assert_logical_key_case_roundtrips(&keys);
+        for byte in [0, 63, 64, 127, 128, 191, 192, 255] {
+            assert_logical_focus_roundtrips(&keys, &[byte]);
+        }
+    }
+
+    /// Differential coverage over seeded logical maps and root/value/branch/proper-prefix
+    /// focuses.  The seed is fixed so any failure is reproducible without observing concrete
+    /// node layout.
+    #[test]
+    fn recursive_cata_randomized_maps_and_foci() {
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        const ROUNDS: usize = 64;
+        const KEYS_PER_ROUND: usize = 48;
+        const FOCI_PER_ROUND: usize = 8;
+
+        const SEED: [u8; 32] = [31; 32];
+
+        let mut rng = StdRng::from_seed(SEED);
+        for round in 0..ROUNDS {
+            let keys: Vec<Vec<u8>> = (0..KEYS_PER_ROUND)
+                .map(|_| {
+                    let len = rng.random_range(0..=6);
+                    (0..len)
+                        .map(|_| b'a' + rng.random_range(0..3))
+                        .collect()
+                })
+                .collect();
+            let branch_prefixes = logical_branch_prefixes(&keys);
+
+            assert_random_case(&SEED, round, None, || {
+                assert_logical_key_case_roundtrips(&keys);
+            });
+            assert_random_case(&SEED, round, Some(b""), || {
+                assert_logical_focus_roundtrips(&keys, b"");
+            });
+
+            for focus_idx in 0..FOCI_PER_ROUND {
+                let key = &keys[rng.random_range(0..keys.len())];
+                let focus = match focus_idx % 3 {
+                    // An exact value path.
+                    0 => key.clone(),
+                    // A proper prefix, which may fall inside a compressed run.
+                    1 if !key.is_empty() => {
+                        key[..rng.random_range(0..key.len())].to_vec()
+                    }
+                    // A logical branch prefix, or root if the generated map has none.
+                    _ if branch_prefixes.is_empty() => Vec::new(),
+                    _ => branch_prefixes[rng.random_range(0..branch_prefixes.len())].clone(),
+                };
+                assert_random_case(&SEED, round, Some(&focus), || {
+                    assert_logical_focus_roundtrips(&keys, &focus);
+                });
+            }
         }
     }
 
@@ -3649,12 +3771,17 @@ mod tests {
         assert_eq!(result.unwrap(), b"abc");
     }
 
-    /// Finds the path_depth at which the recursive cata hits a stack overflow
+    /// A bounded deep-path smoke test for the recursive cata.
     ///
-    /// Empirically seems to be somewhere between 8 and 10 KBytes.  But more branching, and thus fewer
-    /// bytes-per-node, will mean it will fail on shorter paths.
+    /// The implementation uses the Rust call stack once per physical node.  `all_dense_nodes`
+    /// creates more physical nodes for a path, so it needs a smaller safe bound; intentionally
+    /// testing beyond that bound can abort the whole test process instead of reporting a normal
+    /// assertion failure.
     #[test]
     fn recursive_cata_deep_path_smoke() {
+        #[cfg(feature = "all_dense_nodes")]
+        const PATH_LEN: usize = 256;
+        #[cfg(not(feature = "all_dense_nodes"))]
         const PATH_LEN: usize = 8_000;
 
         let mut map = PathMap::<()>::new();
