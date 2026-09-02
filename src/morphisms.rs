@@ -147,9 +147,9 @@ pub trait CatamorphismSideEffecting<V> {
 }
 
 macro_rules! define_cached_cata_trait {
-    ($(#[$meta:meta])* $trait_name:ident) => {
+    ($(#[$meta:meta])* $trait_name:ident [$($generics:tt)*]) => {
         $(#[$meta])*
-        pub trait $trait_name<V, A: Allocator = GlobalAlloc> {
+        pub trait $trait_name<$($generics)*> {
             /// Applies a **cached**, **stepping**, catamorphism to the subtrie descending from the
             /// zipper's current focus, running `alg_f` at every step (every byte).
             ///
@@ -406,7 +406,7 @@ define_cached_cata_trait! {
     /// [`CatamorphismCachedIterative`] deliberately has the same method names and signatures so it
     /// is perfectly interchangeable.  Import one trait for ordinary method syntax.  When both
     /// strategies are needed in one scope, call the desired trait with fully qualified syntax.
-    CatamorphismCached
+    CatamorphismCached [V, A = GlobalAlloc]
 }
 
 define_cached_cata_trait! {
@@ -421,7 +421,7 @@ define_cached_cata_trait! {
     /// Import one trait for ordinary method syntax.  When both strategies are needed in one scope,
     /// call the desired trait with fully qualified syntax. such as
     /// `CatamorphismCachedIterative::cata_cached(&zipper, algebra)`.
-    CatamorphismCachedIterative
+    CatamorphismCachedIterative [V]
 }
 
 /// Shared child-result storage used to adapt the factored cached-cata API to a single-function algebra.
@@ -488,34 +488,6 @@ impl<W> CataChildren<W> {
         result
     }
 }
-
-// //GOAT Implementation of adapted single-function-algebra cata
-// fn into_cata_jumping_cached_from_summarization<V, A, S, W, E, AlgF>(source: &S, alg_f: AlgF) -> Result<W, E>
-// where
-//     V: Clone + Send + Sync,
-//     A: Allocator,
-//     S: Summarization<V, A>,
-//     W: Clone,
-//     AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
-// {
-//     let children = std::cell::RefCell::new(CataChildren::<W>::new());
-//     let children = &children;
-//     let alg_f = &alg_f;
-
-//     source.recursive_cata::<CataChildrenAcc, W, E, _, _, _, true>(
-//         move |mask| Ok(children.borrow_mut().new_acc(mask.count_bits())),
-//         move |_mask, child, acc| {
-//             children.borrow_mut().push(acc, child);
-//             Ok(())
-//         },
-//         move |mask, value, acc, prefix| match acc {
-//             Some(acc) => children.borrow_mut().summarize(acc, mask.count_bits(), |children| {
-//                 alg_f(mask, children, value, prefix)
-//             }),
-//             None => alg_f(mask, &mut [], value, prefix),
-//         },
-//     )
-// }
 
 //TODO GOAT!!: It would be nice to get rid of this Default bound on all morphism Ws.  In this case, the plan
 // for doing that would be to create a new type called a TakableSlice.  It would be able to deref
@@ -694,7 +666,7 @@ impl<Z, V: Clone + Send + Sync, A: Allocator> CatamorphismCached<V, A> for Z whe
     }
 }
 
-impl<'a, Z, V: 'a, A: Allocator> CatamorphismCachedIterative<V, A> for Z where Z: Clone + Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer {
+impl<'a, Z, V: 'a> CatamorphismCachedIterative<V> for Z where Z: Clone + Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         W: Clone,
@@ -730,7 +702,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCached<V, A> for 
     }
 }
 
-impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCachedIterative<V, A> for PathMap<V, A> {
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCachedIterative<V> for PathMap<V, A> {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         W: Clone,
@@ -1972,8 +1944,18 @@ pub(crate) mod cached_catamorphism_tests {
     /// This is intentionally a macro because the two engines are traits with the same methods,
     /// rather than values of a common engine type.
     macro_rules! reconstruct_trie {
-        ($engine:ident, $subject:expr) => {{
-            <_ as $crate::morphisms::$engine<(), $crate::alloc::GlobalAlloc>>
+        (CatamorphismCached, $subject:expr) => {{
+            <_ as $crate::morphisms::CatamorphismCached<(), $crate::alloc::GlobalAlloc>>
+                ::factored_cata_jumping::<_, _, core::convert::Infallible, _, _, _, true>(
+                    $subject,
+                    $crate::morphisms::cached_catamorphism_tests::recon_start,
+                    $crate::morphisms::cached_catamorphism_tests::recon_fold,
+                    $crate::morphisms::cached_catamorphism_tests::recon_summarize,
+                )
+                .unwrap()
+        }};
+        (CatamorphismCachedIterative, $subject:expr) => {{
+            <_ as $crate::morphisms::CatamorphismCachedIterative<()>>
                 ::factored_cata_jumping::<_, _, core::convert::Infallible, _, _, _, true>(
                     $subject,
                     $crate::morphisms::cached_catamorphism_tests::recon_start,
@@ -2017,7 +1999,7 @@ pub(crate) mod cached_catamorphism_tests {
     pub(crate) fn assert_reconstructs_like<Z>(subject: &Z, expected: &PathMap<()>)
     where
         Z: crate::morphisms::CatamorphismCached<(), GlobalAlloc>
-            + crate::morphisms::CatamorphismCachedIterative<(), GlobalAlloc>,
+            + crate::morphisms::CatamorphismCachedIterative<()>,
     {
         let iterative = reconstruct_trie!(CatamorphismCachedIterative, subject);
         assert_same_paths(&iterative, expected);
@@ -2300,17 +2282,17 @@ pub(crate) mod cached_catamorphism_tests {
     }
 
     macro_rules! define_cached_catamorphism_test_suite {
-        ($suite_name:ident, $cata_trait:ident) => {
+        ($suite_name:ident, $cata_trait:ident, [$($cata_args:ty),+]) => {
             pub(crate) mod $suite_name {
-                use super::{GlobalAlloc, Infallible, ZipperMoving, ZipperPath};
+                use super::{Infallible, ZipperMoving, ZipperPath};
                 use crate::morphisms::$cata_trait;
                 use crate::utils::BitMask;
 
     pub fn factored_cata_propagates_callback_errors<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let error = $cata_trait::<u64, GlobalAlloc>
+        let error = $cata_trait::<$($cata_args),*>
             ::factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
                 &zipper,
                 |_| Err("new"),
@@ -2319,7 +2301,7 @@ pub(crate) mod cached_catamorphism_tests {
             );
         assert_eq!(error, Err("new"));
 
-        let error = $cata_trait::<u64, GlobalAlloc>
+        let error = $cata_trait::<$($cata_args),*>
             ::factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
                 &zipper,
                 |_| Ok(()),
@@ -2328,7 +2310,7 @@ pub(crate) mod cached_catamorphism_tests {
             );
         assert_eq!(error, Err("fold"));
 
-        let error = $cata_trait::<u64, GlobalAlloc>
+        let error = $cata_trait::<$($cata_args),*>
             ::factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
                 &zipper,
                 |_| Ok(()),
@@ -2340,9 +2322,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn leaf_count_stepping<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let count = $cata_trait::<u64, GlobalAlloc>::cata_cached(
+        let count = $cata_trait::<$($cata_args),*>::cata_cached(
             &zipper,
             |_mask, children: &mut [usize], value| {
                 if children.is_empty() {
@@ -2358,9 +2340,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn leaf_count_jumping<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let count = $cata_trait::<u64, GlobalAlloc>::cata_jumping_cached(
+        let count = $cata_trait::<$($cata_args),*>::cata_jumping_cached(
             &zipper,
             |_mask, children: &mut [usize], value, _prefix| {
                 if children.is_empty() {
@@ -2376,9 +2358,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn leaf_count_factored_jumping<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let count = $cata_trait::<u64, GlobalAlloc>
+        let count = $cata_trait::<$($cata_args),*>
             ::factored_cata_jumping::<usize, usize, Infallible, _, _, _, false>(
                 &zipper,
                 |_| Ok(0),
@@ -2397,9 +2379,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn leaf_count_factored_stepping<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let count = $cata_trait::<u64, GlobalAlloc>
+        let count = $cata_trait::<$($cata_args),*>
             ::factored_cata::<usize, usize, Infallible, _, _, _>(
                 &zipper,
                 |_| Ok(0),
@@ -2420,10 +2402,10 @@ pub(crate) mod cached_catamorphism_tests {
     /// descendants, but not values elsewhere in the trie.
     pub fn cata_from_value_focus<Z>(mut zipper: Z)
     where
-        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<$($cata_args),*>,
     {
         zipper.descend_to(b"roman");
-        let count = $cata_trait::<u64, GlobalAlloc>::cata_cached(
+        let count = $cata_trait::<$($cata_args),*>::cata_cached(
             &zipper,
             |_mask, children: &mut [usize], value| {
                 value.is_some() as usize + children.iter().sum::<usize>()
@@ -2438,10 +2420,10 @@ pub(crate) mod cached_catamorphism_tests {
     /// Traversal still covers precisely the subtrie below that point.
     pub fn cata_from_mid_run_focus<Z>(mut zipper: Z)
     where
-        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<$($cata_args),*>,
     {
         zipper.descend_to(b"roma");
-        let count = $cata_trait::<u64, GlobalAlloc>::cata_jumping_cached(
+        let count = $cata_trait::<$($cata_args),*>::cata_jumping_cached(
             &zipper,
             |_mask, children: &mut [usize], value, _prefix| {
                 value.is_some() as usize + children.iter().sum::<usize>()
@@ -2454,9 +2436,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn longest_path_jumping<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let longest = $cata_trait::<u64, GlobalAlloc>::cata_jumping_cached(
+        let longest = $cata_trait::<$($cata_args),*>::cata_jumping_cached(
             &zipper,
             |mask, children: &mut [Vec<u8>], _value, prefix| {
                 let mut longest = mask.iter().zip(children.iter_mut())
@@ -2476,9 +2458,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn longest_path_factored_jumping<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let longest = $cata_trait::<u64, GlobalAlloc>
+        let longest = $cata_trait::<$($cata_args),*>
             ::factored_cata_jumping::<Vec<Vec<u8>>, Vec<u8>, Infallible, _, _, _, true>(
                 &zipper,
                 |_| Ok(Vec::new()),
@@ -2506,9 +2488,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn branch_values_stepping<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let values = $cata_trait::<u64, GlobalAlloc>::cata_cached(
+        let values = $cata_trait::<$($cata_args),*>::cata_cached(
             &zipper,
             |_mask, children: &mut [Vec<u64>], value| {
                 if children.is_empty() {
@@ -2529,12 +2511,12 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn factored_cata_folds_each_child_immediately<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
         use std::cell::RefCell;
 
         let events = RefCell::new(Vec::new());
-        let result = $cata_trait::<u64, GlobalAlloc>
+        let result = $cata_trait::<$($cata_args),*>
             ::factored_cata_jumping::<Vec<u64>, u64, Infallible, _, _, _, false>(
                 &zipper,
                 |_mask| {
@@ -2562,9 +2544,9 @@ pub(crate) mod cached_catamorphism_tests {
 
     pub fn factored_cata_passthrough_root<Z>(zipper: Z)
     where
-        Z: crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
     {
-        let result = $cata_trait::<u64, GlobalAlloc>
+        let result = $cata_trait::<$($cata_args),*>
             ::factored_cata_jumping::<Vec<(u8, Vec<u8>)>, Vec<u8>, Infallible, _, _, _, true>(
                 &zipper,
                 |_| Ok(Vec::new()),
@@ -2600,7 +2582,7 @@ pub(crate) mod cached_catamorphism_tests {
         test: impl Fn(Z),
     )
     where
-        Z: 'a + crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+        Z: 'a + crate::morphisms::$cata_trait<$($cata_args),*>,
     {
         test(make_z(store));
     }
@@ -2609,8 +2591,8 @@ pub(crate) mod cached_catamorphism_tests {
         };
     }
 
-    define_cached_catamorphism_test_suite!(recursive, CatamorphismCached);
-    define_cached_catamorphism_test_suite!(iterative, CatamorphismCachedIterative);
+    define_cached_catamorphism_test_suite!(recursive, CatamorphismCached, [u64, crate::alloc::GlobalAlloc]);
+    define_cached_catamorphism_test_suite!(iterative, CatamorphismCachedIterative, [u64]);
 
     macro_rules! cached_catamorphism_case {
         ($z_name:ident, $implementation:ident, $suite:ident, $read_keys:expr, $make_z:expr, $keys:ident, $test:ident) => {
@@ -2724,7 +2706,7 @@ mod tests {
             alg,
         );
         let iterative_zipper = map.read_zipper();
-        let iterative = CatamorphismCachedIterative::<usize, GlobalAlloc>::cata_cached(
+        let iterative = CatamorphismCachedIterative::<usize>::cata_cached(
             &iterative_zipper,
             alg,
         );

@@ -328,10 +328,7 @@ fn superdense_val_count_bench(bencher: Bencher, n: u64) {
 #[cfg(feature="arena_compact")]
 #[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
 fn superdense_val_count_bench_act(bencher: Bencher, n: u64) {
-    use pathmap::{
-        arena_compact::ArenaCompactTree,
-        zipper::ZipperMoving,
-    };
+    use pathmap::{morphisms::CatamorphismCachedIterative, arena_compact::ArenaCompactTree};
     let mut map: PathMap<u64> = PathMap::new();
     for i in 0..n { map.set_val_at(prefix_key(&i), i); }
     let act = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
