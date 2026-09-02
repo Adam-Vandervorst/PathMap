@@ -57,7 +57,7 @@
 //! | Guaranteed and deterministic `alg` exec order   | Unpredictable callback `alg` exec order     |
 //! | `alg` may capture and modify environment ([`FnMut`](https://doc.rust-lang.org/std/ops/trait.FnMut.html))      | `alg` must be a pure [`Fn`](https://doc.rust-lang.org/std/ops/trait.Fn.html)           |
 //! | Owned `W` type passed between `alg` invocations | `W` type must implement [`Clone`](https://doc.rust-lang.org/std/clone/trait.Clone.html) |
-//! | `alg` is aware of the entire `path`             | `alg` only sees path byte, or sub-path slice |
+//! | `alg` is aware of the entire `path`             | `alg` only sees path byte, or prefix slice |
 //!
 //! All else being equal, `cached` methods are likely to be more efficient because structural sharing
 //! occurs frequently in pathmap tries.  At the extreme, `side_effect` methods may produce a combinitoric
@@ -188,9 +188,9 @@ macro_rules! define_cached_cata_trait {
                 AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>,
                 Self: Sized,
             {
-                self.cata_jumping_cached_fallible(|mask, children, val, sub_path| {
+                self.cata_jumping_cached_fallible(|mask, children, val, prefix| {
                     let mut w = alg_f(mask, children, val)?;
-                    for &byte in sub_path.iter().rev() {
+                    for &byte in prefix.iter().rev() {
                         let child_mask = ByteMask::from(byte);
                         w = alg_f(&child_mask, core::slice::from_mut(&mut w), None)?;
                     }
@@ -201,19 +201,20 @@ macro_rules! define_cached_cata_trait {
             /// Applies a **cached**, **jumping** catamorphism to the subtrie descending from the
             /// zipper's current focus.
             ///
-            /// A jumping catamorphism does not call `alg_f` for path bytes that have neither a
-            /// value nor a branch with more than one child. Those omitted bytes are passed as
-            /// `sub_path` instead.
+            /// A jumping catamorphism may omit calls to `alg_f` for path bytes that have neither
+            /// a value nor a branch with more than one child, passing those bytes as `prefix`
+            /// instead. Implementations may also fall back to stepping through some or all such
+            /// bytes, in which case `prefix` is shorter or empty.
             ///
             /// This method may reuse previously calculated `W` values when a shared subtrie has
             /// already been computed.
             ///
             /// ## Arguments to `alg_f`
             ///
-            /// `(child_mask: &`[`ByteMask`]`, children: &mut [W], value: Option<&V>, sub_path: &[u8])`
+            /// `(child_mask: &`[`ByteMask`]`, children: &mut [W], value: Option<&V>, prefix: &[u8])`
             ///
-            /// `sub_path` is the sequence of bytes for which `alg_f` was not called. For example,
-            /// in this trie:
+            /// `prefix` is the sequence of bytes collapsed into this `alg_f` call. For example,
+            /// an implementation that collapses every non-branching run in this trie:
             ///
             /// ```text
             /// ─── c ─── o ─── m ─┬─ b ─── o               → "combo"
@@ -221,7 +222,7 @@ macro_rules! define_cached_cata_trait {
             ///                    └─ f ─── o ─── r ─── t   → "comfort"
             /// ```
             ///
-            /// `alg_f` is called four times:
+            /// This implementation calls `alg_f` four times:
             ///
             /// 1. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"o")`
             /// 2. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"t")`
@@ -235,8 +236,8 @@ macro_rules! define_cached_cata_trait {
                 AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
                 Self: Sized,
             {
-                self.cata_jumping_cached_fallible(|mask, children, val, sub_path| -> Result<W, Infallible> {
-                    Ok(alg_f(mask, children, val, sub_path))
+                self.cata_jumping_cached_fallible(|mask, children, val, prefix| -> Result<W, Infallible> {
+                    Ok(alg_f(mask, children, val, prefix))
                 }).unwrap()
             }
 
@@ -308,13 +309,13 @@ macro_rules! define_cached_cata_trait {
             ///
             /// ## Closures
             ///
-            /// `NewAccF` creates an accumulator for a logical trie node with more than one child
-            /// branch: `fn(child_mask: &ByteMask) -> Result<Acc, Err>`.
+            /// `NewAccF` creates an accumulator for a logical trie node with one or more downstream
+            /// child branches: `fn(child_mask: &ByteMask) -> Result<Acc, Err>`.
             ///
             /// `FoldChildF` folds one downstream child's `W` into that accumulator. It is called
             /// once per downstream branch, in the same order as the bits in `child_mask`. Every
-            /// call for a logical node receives its complete child mask, so use call order to
-            /// associate a child result with its byte:
+            /// call for a logical trie node receives its complete child mask, so use call
+            /// order to associate a child result with its byte:
             /// `fn(child_mask: &ByteMask, downstream: W, accumulator: &mut Acc) -> Result<(), Err>`.
             ///
             /// `SummarizeF` produces the `W` for a logical trie node and a non-branching path
@@ -322,15 +323,23 @@ macro_rules! define_cached_cata_trait {
             /// including `value` and downstream children.
             ///
             /// - `child_mask` describes the node's immediate child bytes.
-            /// - `accumulator` contains results folded from child branches, or is `None` when the
-            ///   node has no downstream branches.
-            /// - `prefix` is a non-branching path above the logical node. It never includes a path
-            ///   position that is part of a `child_mask` for this or another `summarize_f` call.
+            /// - `accumulator` contains results folded from child branches, or is `None` when no
+            ///   accumulator was needed.
+            /// - `prefix` is a collapsed non-branching path above the traversal node. It never
+            ///   includes a path position that is part of a `child_mask` for this or another
+            ///   `summarize_f` call. It may be empty when an implementation falls back to stepping.
             ///
-            /// Its signature is
+            /// The `SummarizeF` signature is
             /// `fn(child_mask: &ByteMask, value: Option<&V>, accumulator: Option<Acc>, prefix: &[u8]) -> Result<W, Err>`.
             ///
-            /// Errors from any callback stop traversal immediately and are returned to the caller.
+            /// ## Behavior
+            ///
+            /// * Errors from any callback stop traversal immediately and are returned to the caller.
+            /// * Every call to `new_acc_f` will lead to a matching call to `summarize_f` where ownership
+            /// of the `Acc` object is given to the `SummarizeF` callback, unless an error halts the catamorphism.
+            /// * `prefix` is **only an optimization** for path bytes with a single child.  Your
+            /// algebra must not rely on a given path byte being represented as a prefix, instead of as
+            /// a sequence of `new_acc_f`, then `fold_child_f`.
             ///
             /// With `COMPUTE_PATH = false`, path runs are not materialized and `prefix` is always
             /// empty. Use that only when the algebra does not depend on path bytes, only on values
@@ -570,8 +579,8 @@ impl SplitCata {
 
 /// A compatibility shim to provide a 4-function "jumping" catamorphism API
 ///
-/// - `jump_f`: `FnMut(sub_path: &[u8], w: W, path: &[u8]) -> W`
-/// Elevates a result `w` descending from the relative path, `sub_path` to the current position at `path`
+/// - `jump_f`: `FnMut(prefix: &[u8], w: W, path: &[u8]) -> W`
+/// Elevates a result `w` descending from the relative path, `prefix` to the current position at `path`
 ///
 /// See [`SplitCata`] for a description of additional args
 #[deprecated]
@@ -1328,7 +1337,7 @@ where
 
 /// Internal implementation behind all cached catas
 ///
-/// AlgF args: (child_mask, children, value, sub_path, debug_path, zipper)
+/// AlgF args: (child_mask, children, value, prefix, debug_path, zipper)
 pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool, const DEBUG_PATH: bool>(
     mut zipper: Z, mut alg_f: AlgF
 ) -> Result<W, E>
@@ -2753,7 +2762,7 @@ mod tests {
             |bm, ch, v| f_pure(bm, ch, v, &[]));
         assert(output, "cata_cached");
         let output = zipper.clone().recursive_cata_jumping_cached(
-            |bm, ch, v, sub_path| f_pure(bm, ch, v, sub_path));
+            |bm, ch, v, prefix| f_pure(bm, ch, v, prefix));
         assert(output, "cata_jumping_cached");
     }
 
@@ -2767,7 +2776,7 @@ mod tests {
         check_side_effect_catas(zipper.clone(), |mask, children, _jmp, val, _path| {
             alg_f(mask, children, val)
         }, &mut assert);
-        check_pure_catas(zipper.clone(), |mask, children, val, _sub_path| {
+        check_pure_catas(zipper.clone(), |mask, children, val, _prefix| {
             alg_f(mask, children, val)
         }, &mut assert);
     }
@@ -2823,15 +2832,15 @@ mod tests {
             assert_eq!(output.1, expected_sum);
 
             //The pure jumping cata is a variant on the above, but we also need to care about
-            // the sub_path we jump over.  So we either count the value associated with the last
-            // byte of the sub-path, or with the next parent path byte.
+            // the prefix we jump over.  So we either count the value associated with the last
+            // byte of the prefix, or with the next parent path byte.
             //
             //This code works fine for both stepping and jumping, but is a little more complicated
             // than the stepping-only version
-            let pure_alg = |child_mask: &ByteMask, children: &mut [(bool, u32)], val: Option<&()>, sub_path: &[u8]| {
+            let pure_alg = |child_mask: &ByteMask, children: &mut [(bool, u32)], val: Option<&()>, prefix: &[u8]| {
                 let mut sum = 0;
                 if val.is_some() {
-                    if let Some(path_byte) = sub_path.last() {
+                    if let Some(path_byte) = prefix.last() {
                         sum += (*path_byte as char).to_digit(10).unwrap();
                     }
                 }
@@ -2841,7 +2850,7 @@ mod tests {
                     }
                     sum += *downstream_sum;
                 }
-                (val.is_some() && sub_path.len()==0, sum)
+                (val.is_some() && prefix.len()==0, sum)
             };
 
             //Test both stepping and jumping cached catas
@@ -2888,11 +2897,11 @@ mod tests {
             assert_eq!(std::str::from_utf8(longest.as_slice()).unwrap(), "rubicundus"));
 
         //=================================================================================
-        // PureLongestPath - Finds the longest path in the trie by concatenating sub-paths;
+        // PureLongestPath - Finds the longest path in the trie by concatenating prefix paths;
         //  This is necessary for pure catas because the same subtrie may share multiple base paths
-        fn longest_partial_path(child_mask: &ByteMask, children: &mut[Vec<u8>], sub_path: &[u8]) -> Vec<u8> {
+        fn longest_partial_path(child_mask: &ByteMask, children: &mut[Vec<u8>], prefix: &[u8]) -> Vec<u8> {
             if children.len() == 0 {
-                sub_path.to_vec()
+                prefix.to_vec()
             } else {
                 let mut longest_downstream_path = child_mask.iter()
                     .zip(children.iter_mut()).max_by_key(|(_byte, path_rest)| path_rest.len())
@@ -2901,7 +2910,7 @@ mod tests {
                         path_rest.insert(0, byte);
                         path_rest
                     });
-                let mut path = sub_path.to_vec();
+                let mut path = prefix.to_vec();
                 path.append(&mut longest_downstream_path);
                 path
             }
@@ -3180,8 +3189,8 @@ mod tests {
                 // println!("alg: \"{}\"", String::from_utf8_lossy(_path));
                 alg_cnt += 1;
             },
-            |_sub_path, _, _path| {
-                // println!("jump: over \"{}\" to \"{}\"", String::from_utf8_lossy(_sub_path), String::from_utf8_lossy(_path));
+            |_prefix, _, _path| {
+                // println!("jump: over \"{}\" to \"{}\"", String::from_utf8_lossy(_prefix), String::from_utf8_lossy(_path));
                 jump_cnt += 1;
             }
         ));
@@ -3221,8 +3230,8 @@ mod tests {
                 // println!("alg: {_path:?}, mask: {_mask:?}");
                 alg_cnt += 1;
             },
-            |_sub_path, _, _path| {
-                // println!("jump: over {_sub_path:?} to {_path:?}");
+            |_prefix, _, _path| {
+                // println!("jump: over {_prefix:?} to {_path:?}");
                 jump_cnt += 1;
             }
         ));
@@ -3261,9 +3270,9 @@ mod tests {
                 // println!("alg: {path:?}");
                 assert_eq!(path, &[]);
             },
-            |sub_path, _, path| {
-                // println!("jump: over {sub_path:?} to {path:?}");
-                assert_eq!(sub_path, &[98]);
+            |prefix, _, path| {
+                // println!("jump: over {prefix:?} to {path:?}");
+                assert_eq!(prefix, &[98]);
                 assert_eq!(path, &[97]);
             }
         ))
@@ -3838,12 +3847,12 @@ mod tests {
     }
 
     #[test]
-    fn iterative_summarization_does_not_accumulate_at_passthrough_root() {
+    fn recursive_factored_cata_collapses_compressed_passthrough_root() {
         let map: PathMap<()> = [(b"abc".as_slice(), ())].into_iter().collect();
 
         let result = map.read_zipper().recursive_factored_cata_jumping::<(), Vec<u8>, Infallible, _, _, _, true>(
-            |_| panic!("a unary valueless root must not create an accumulator"),
-            |_mask, _child, _accumulator| panic!("a unary valueless root must not fold a child"),
+            |_| panic!("a compressed unary passthrough root must not create an accumulator"),
+            |_mask, _child, _accumulator| panic!("a compressed unary passthrough root must not fold a child"),
             |_mask, value, accumulator, prefix| {
                 assert!(value.is_some());
                 assert!(accumulator.is_none());
