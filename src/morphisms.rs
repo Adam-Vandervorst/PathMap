@@ -153,8 +153,8 @@ macro_rules! define_cached_cata_trait {
     ($(#[$meta:meta])* $trait_name:ident) => {
         $(#[$meta])*
         pub trait $trait_name<V, A: Allocator = GlobalAlloc> {
-            /// Applies a **cached**, **stepping**, catamorphism to the trie descending from the
-            /// zipper's root, running `alg_f` at every step (every byte).
+            /// Applies a **cached**, **stepping**, catamorphism to the subtrie descending from the
+            /// zipper's current focus, running `alg_f` at every step (every byte).
             ///
             /// This method may reuse previously calculated `W` values when a shared subtrie has
             /// already been computed.
@@ -168,9 +168,6 @@ macro_rules! define_cached_cata_trait {
             /// - `children` contains the `W` values produced for downstream branches.
             /// - `value` is the value associated with this path, or `None` when there is none.
             ///
-            /// ## Behavior
-            ///
-            /// The zipper's focus is ignored; traversal starts again at the root.
             fn cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
             where
                 W: Clone,
@@ -201,7 +198,8 @@ macro_rules! define_cached_cata_trait {
                 })
             }
 
-            /// Applies a **cached**, **jumping** catamorphism to the trie.
+            /// Applies a **cached**, **jumping** catamorphism to the subtrie descending from the
+            /// zipper's current focus.
             ///
             /// A jumping catamorphism does not call `alg_f` for path bytes that have neither a
             /// value nor a branch with more than one child. Those omitted bytes are passed as
@@ -680,7 +678,7 @@ impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> 
         } else {
             match focus.into_option() {
                 Some(node) => recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(&node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)?,
-                None => return summarize_f(&ByteMask::EMPTY, None, None, &[]),
+                None => return summarize_f(&ByteMask::EMPTY, self.val(), None, &[]),
             }
         };
         Ok(w)
@@ -1105,16 +1103,23 @@ impl<Acc> SummarizeStackFrame<Acc> {
     }
 }
 
+/// Internal helper type returned by summarize_ascend_to_fork
+enum SummarizeAscend<W> {
+    Parent(W),
+    Focus(W),
+}
+
 /// Ascend from a leaf or completed fork, summarizing each value and non-branching path run on the
 /// way to the parent fork.  This is the three-closure counterpart to [`ascend_to_fork`].
 #[inline(always)]
 fn summarize_ascend_to_fork<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
     zipper: &mut Z,
+    focus_depth: usize,
     mut accumulator: Option<Acc>,
     new_acc_f: NewAccF,
     fold_child_f: FoldChildF,
     summarize_f: SummarizeF,
-) -> Result<W, E>
+) -> Result<SummarizeAscend<W>, E>
 where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperPathBuffer,
     NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
@@ -1127,6 +1132,11 @@ where
     loop {
         let old_depth = zipper.depth();
         let old_value = zipper.get_val_with_witness(&witness);
+        if old_depth == focus_depth {
+            return summarize_f(&child_mask, old_value, accumulator, &[])
+                .map(SummarizeAscend::Focus);
+        }
+
         let ascended = zipper.ascend_until();
         debug_assert!(ascended > 0);
         let depth = zipper.depth();
@@ -1135,6 +1145,20 @@ where
         // SAFETY: `ascend_until` only shortens the logical path; the bytes it removed remain
         // initialized in the zipper's prepared path buffer until the next zipper movement.
         let path = unsafe { zipper.path_assert_len(old_depth) };
+
+        // `ascend_until` can pass the initial focus when that focus is a valueless unary
+        // position in a compressed run. That position is the traversal root, so preserve the
+        // entire suffix below it and finish there rather than continuing toward the zipper root.
+        if depth < focus_depth {
+            debug_assert!(focus_depth < old_depth);
+            return summarize_f(
+                &child_mask,
+                old_value,
+                accumulator,
+                if COMPUTE_PATH { &path[focus_depth..old_depth] } else { &[] },
+            ).map(SummarizeAscend::Focus);
+        }
+
         let jump_len = if zipper.child_count() != 1 || zipper.is_val() {
             ascended - 1
         } else {
@@ -1149,7 +1173,7 @@ where
         let w = summarize_f(&child_mask, old_value, accumulator, prefix)?;
 
         if zipper.child_count() != 1 || zipper.at_root() {
-            return Ok(w)
+            return Ok(SummarizeAscend::Parent(w))
         }
 
         debug_assert!(old_depth > jump_len);
@@ -1178,7 +1202,7 @@ where
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
     SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,
 {
-    zipper.reset();
+    let focus_depth = zipper.depth();
     zipper.prepare_buffers();
 
     let root_child_cnt = zipper.child_count();
@@ -1195,11 +1219,14 @@ where
             if !zipper.descend_until() {
                 return summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
                     &mut zipper,
+                    focus_depth,
                     None,
                     new_acc_f,
                     fold_child_f,
                     summarize_f,
-                )
+                ).map(|result| match result {
+                    SummarizeAscend::Parent(w) | SummarizeAscend::Focus(w) => w,
+                })
             }
         }
         let accumulator = new_acc_f(&ByteMask::from(zipper.child_mask()))?;
@@ -1235,13 +1262,17 @@ where
             }
 
             if is_leaf {
-                let cur_w = summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+                let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
                     &mut zipper,
+                    focus_depth,
                     None,
                     new_acc_f,
                     fold_child_f,
                     summarize_f,
-                )?;
+                )? {
+                    SummarizeAscend::Parent(w) => w,
+                    SummarizeAscend::Focus(w) => return Ok(w),
+                };
                 DoCache::insert(&mut cache, frame_mut.child_addr, &cur_w);
                 let child_mask = ByteMask::from(zipper.child_mask());
                 fold_child_f(&child_mask, cur_w, &mut frame_mut.accumulator)?;
@@ -1260,25 +1291,32 @@ where
             return if passthrough_root {
                 summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
                     &mut zipper,
+                    focus_depth,
                     Some(frame.accumulator),
                     new_acc_f,
                     fold_child_f,
                     summarize_f,
-                )
+                ).map(|result| match result {
+                    SummarizeAscend::Parent(w) | SummarizeAscend::Focus(w) => w,
+                })
             } else {
-                debug_assert!(zipper.at_root(), "must be at root when summarization is done");
+                debug_assert_eq!(zipper.depth(), focus_depth, "must be at the initial focus when summarization is done");
                 let child_mask = ByteMask::from(zipper.child_mask());
                 summarize_f(&child_mask, zipper.val(), Some(frame.accumulator), &[])
             };
         }
 
-        let cur_w = summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
+        let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, COMPUTE_PATH>(
             &mut zipper,
+            focus_depth,
             Some(frame.accumulator),
             new_acc_f,
             fold_child_f,
             summarize_f,
-        )?;
+        )? {
+            SummarizeAscend::Parent(w) => w,
+            SummarizeAscend::Focus(w) => return Ok(w),
+        };
 
         let frame_mut = stack.last_mut()
             .expect("when we're not at root, expect a parent summarization stack frame");
@@ -1981,9 +2019,6 @@ pub(crate) mod cached_catamorphism_tests {
 
     /// Runs both cached-cata engines through the reconstruction probe and checks each result
     /// against the expected logical trie as well as against one another.
-    ///
-    /// `subject` may be a map or a zipper.  For a focused zipper, pass the map representing the
-    /// focused subtrie using the zipper's established origin-path convention as `expected`.
     #[track_caller]
     pub(crate) fn assert_reconstructs_like<Z>(subject: &Z, expected: &PathMap<()>)
     where
@@ -2051,8 +2086,7 @@ pub(crate) mod cached_catamorphism_tests {
     fn assert_logical_focus_roundtrips(keys: &[Vec<u8>], focus: &[u8]) {
         let map = map_from_owned_keys(keys);
         let expected_keys: Vec<Vec<u8>> = keys.iter()
-            .filter(|key| key.starts_with(focus))
-            .cloned()
+            .filter_map(|key| key.strip_prefix(focus).map(ToOwned::to_owned))
             .collect();
         let expected = map_from_owned_keys(&expected_keys);
 
@@ -2111,21 +2145,26 @@ pub(crate) mod cached_catamorphism_tests {
     }
 
     /// A focus within a compressed path must include every value below it, including any value
-    /// held at the focus.  The iterative engine preserves the zipper origin in its reconstructed
-    /// paths, so each source map contains only the focused subtrie and is also its expected map.
+    /// held at the focus. Reconstructed paths are relative to that focus.
     #[test]
     fn recursive_cata_regression_mid_node_focus() {
         let map = map_from_keys(&[b"abc1", b"abc2"]);
         let mut zipper = map.read_zipper();
         zipper.descend_to(b"ab");
         assert_eq!(zipper.path(), b"ab");
-        assert_reconstructs_like(&zipper, &map);
+        assert_reconstructs_like(&zipper, &map_from_keys(&[b"c1", b"c2"]));
 
         let map = map_from_keys(&[b"ab", b"abcd"]);
         let mut zipper = map.read_zipper();
         zipper.descend_to(b"ab");
         assert_eq!(zipper.path(), b"ab");
-        assert_reconstructs_like(&zipper, &map);
+        assert_reconstructs_like(&zipper, &map_from_keys(&[b"", b"cd"]));
+
+        let map = map_from_keys(&[b"abc"]);
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"abc");
+        assert_eq!(zipper.path(), b"abc");
+        assert_reconstructs_like(&zipper, &map_from_keys(&[b""]));
     }
 
     /// Systematically exercises logical value/branch/prefix combinations that may be represented
@@ -2245,7 +2284,7 @@ pub(crate) mod cached_catamorphism_tests {
     macro_rules! define_cached_catamorphism_test_suite {
         ($suite_name:ident, $cata_trait:ident) => {
             pub(crate) mod $suite_name {
-                use super::{GlobalAlloc, Infallible};
+                use super::{GlobalAlloc, Infallible, ZipperMoving, ZipperPath};
                 use crate::morphisms::$cata_trait;
                 use crate::utils::BitMask;
 
@@ -2357,6 +2396,42 @@ pub(crate) mod cached_catamorphism_tests {
             )
             .unwrap();
         assert_eq!(count, 11);
+    }
+
+    /// A cached cata starts at the zipper's focus: it includes a value held there and all of its
+    /// descendants, but not values elsewhere in the trie.
+    pub fn cata_from_value_focus<Z>(mut zipper: Z)
+    where
+        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+    {
+        zipper.descend_to(b"roman");
+        let count = $cata_trait::<u64, GlobalAlloc>::cata_cached(
+            &zipper,
+            |_mask, children: &mut [usize], value| {
+                value.is_some() as usize + children.iter().sum::<usize>()
+            },
+        );
+
+        assert_eq!(count, 3);
+        assert_eq!(zipper.path(), b"roman");
+    }
+
+    /// The focus may be within a compressed run rather than at an explicit logical branch.
+    /// Traversal still covers precisely the subtrie below that point.
+    pub fn cata_from_mid_run_focus<Z>(mut zipper: Z)
+    where
+        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<u64, GlobalAlloc>,
+    {
+        zipper.descend_to(b"roma");
+        let count = $cata_trait::<u64, GlobalAlloc>::cata_jumping_cached(
+            &zipper,
+            |_mask, children: &mut [usize], value, _prefix| {
+                value.is_some() as usize + children.iter().sum::<usize>()
+            },
+        );
+
+        assert_eq!(count, 3);
+        assert_eq!(zipper.path(), b"roma");
     }
 
     pub fn longest_path_jumping<Z>(zipper: Z)
@@ -2534,6 +2609,8 @@ pub(crate) mod cached_catamorphism_tests {
             $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, leaf_count_jumping);
             $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, leaf_count_factored_jumping);
             $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, leaf_count_factored_stepping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, cata_from_value_focus);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, cata_from_mid_run_focus);
             $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, longest_path_jumping);
             $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, longest_path_factored_jumping);
             $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, branch_values_stepping);
