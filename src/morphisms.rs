@@ -2208,32 +2208,54 @@ pub(crate) mod cached_catamorphism_tests {
     }
 
     /// A 256-way logical branch exercises storage configurations that use wide byte-indexed
-    /// nodes without making the test depend on any particular node representation.
+    /// nodes without making the test depend on any particular node representation. Miri uses
+    /// representative mask-word-boundary bytes instead of the full branch fanout.
     #[test]
     fn recursive_cata_wide_logical_branch() {
+        #[cfg(miri)]
+        let keys: Vec<Vec<u8>> = [0, 1, 63, 64, 127, 128, 191, 192, 254, 255]
+            .into_iter()
+            .map(|byte| vec![byte, b'a', byte])
+            .collect();
+        #[cfg(not(miri))]
         let keys: Vec<Vec<u8>> = (0u8..=u8::MAX)
             .map(|byte| vec![byte, b'a', byte])
             .collect();
 
         assert_logical_key_case_roundtrips(&keys);
-        for byte in [0, 63, 64, 127, 128, 191, 192, 255] {
+        #[cfg(miri)]
+        let focus_bytes = [0, 64, 128, 255];
+        #[cfg(not(miri))]
+        let focus_bytes = [0, 63, 64, 127, 128, 191, 192, 255];
+        for byte in focus_bytes {
             assert_logical_focus_roundtrips(&keys, &[byte]);
         }
     }
 
     /// Differential coverage over seeded logical maps and root/value/branch/proper-prefix
-    /// focuses.  The seed is fixed so any failure is reproducible without observing concrete
+    /// focuses. The seed is fixed so any failure is reproducible without observing concrete
     /// node layout.
     #[test]
     fn recursive_cata_randomized_maps_and_foci() {
-        use rand::{Rng, SeedableRng};
-        use rand::rngs::StdRng;
+        const SEED: [u8; 32] = [31; 32];
 
+        #[cfg(miri)]
+        const ROUNDS: usize = 1;
+        #[cfg(not(miri))]
         const ROUNDS: usize = 64;
+
+        #[cfg(miri)]
+        const KEYS_PER_ROUND: usize = 12;
+        #[cfg(not(miri))]
         const KEYS_PER_ROUND: usize = 48;
+
+        #[cfg(miri)]
+        const FOCI_PER_ROUND: usize = 3;
+        #[cfg(not(miri))]
         const FOCI_PER_ROUND: usize = 8;
 
-        const SEED: [u8; 32] = [31; 32];
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
 
         let mut rng = StdRng::from_seed(SEED);
         for round in 0..ROUNDS {
