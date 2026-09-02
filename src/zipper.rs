@@ -1687,6 +1687,21 @@ pub(crate) mod read_zipper_core {
     /// A [Zipper] that is unable to modify the trie
     ///
     /// (Internal type, but in private module so it can be part of sealed interface)
+    /// Which iteration `focus_iter_token` currently belongs to.
+    ///
+    /// Two different walks resume from that one field: `to_next_get_val` and the `k_path`
+    /// pair.  A token left by one must not be resumed by the other, and nothing about the
+    /// token itself says which it is -- so this says.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) enum IterOwner {
+        /// Not part of any in-progress iteration.
+        None,
+        /// `to_next_get_val` / `to_next_val`.
+        Vals,
+        /// `descend_first_k_path` / `to_next_k_path`.
+        KPath,
+    }
+
     pub struct ReadZipperCore<'a, 'path, V: Clone + Send + Sync, A: Allocator> {
         /// A reference to the entire origin path, of which `root_key` is the final subset
         origin_path: SliceOrLen<'path>,
@@ -1709,6 +1724,8 @@ pub(crate) mod read_zipper_core {
         /// An iter token corresponding to the location of the `node_key` within the `focus_node`, or NODE_ITER_INVALID
         /// if iteration is not in-process
         focus_iter_token: IterToken,
+        /// Which walk `focus_iter_token` belongs to; see [IterOwner].
+        iter_owner: IterOwner,
         /// Stores the entire path from the root node, including the bytes from `root_key`
         prefix_buf: Vec<u8>,
         /// Stores a stack of parent node references.  Does not include the focus_node
@@ -1836,6 +1853,7 @@ pub(crate) mod read_zipper_core {
                 root_node: self.root_node.clone(),
                 focus_node: self.focus_node.clone(),
                 focus_iter_token: NODE_ITER_INVALID,
+                iter_owner: IterOwner::None,
                 prefix_buf: self.prefix_buf.clone(),
                 ancestors: self.ancestors.clone(),
                 alloc: self.alloc.clone(),
@@ -1972,10 +1990,21 @@ pub(crate) mod read_zipper_core {
             match self.ancestors.pop() {
                 Some((node, _tok, _prefix_len)) => {
                     *self.focus_node = node;
-                    self.focus_iter_token = NODE_ITER_INVALID;
                 },
                 None => {}
             }
+            //The focus has moved back to the root, so no token can still describe it.  This was
+            //done only on the branch that popped an ancestor, so a zipper that had never
+            //descended across a node boundary -- everything below its root living in one node --
+            //kept a spent token through the reset, and the next `to_next_val` resumed from it and
+            //reported that there was nothing left:
+            //
+            //  m.set_val_at(&[1,1,1], 72);
+            //  z.to_next_val();  // -> true, at [1,1,1]
+            //  z.reset();
+            //  z.to_next_val();  // -> was false, with [1,1,1] right there
+            self.focus_iter_token = NODE_ITER_INVALID;
+            self.iter_owner = IterOwner::None;
             self.prefix_buf.truncate(self.origin_path.len());
         }
 
@@ -2103,6 +2132,8 @@ pub(crate) mod read_zipper_core {
                     debug_assert!(self.is_regularized());
                     return None; //We can't go any deeper down this path
                 }
+                //Set before the descent below, which may replace it with a token for the
+                //child node; setting it afterwards would clobber that.
                 self.focus_iter_token = new_tok;
                 let descended_byte = key_bytes[byte_idx];
                 self.prefix_buf.push(descended_byte);
@@ -2117,10 +2148,23 @@ pub(crate) mod read_zipper_core {
                         },
                     }
                 }
+                //Keep the token, but disown it.  `to_next_sibling_byte` resumes from this field
+                // too, and `to_next_step` alternates the two, so throwing the token away costs a
+                // fresh `iter_token_for_path` on every step -- measured at +10.4% on a full
+                // `to_next_step` walk (n=30, p=4e-86).  What must not happen is
+                // `to_next_get_val` resuming it: the token `next_items` handed back is positioned
+                // *past* the item just descended into, so value iteration would carry on from
+                // beyond the subtree and report nothing left.  Marking the owner leaves the
+                // sibling path its fast resume and makes value iteration restart.
+                self.iter_owner = IterOwner::None;
                 debug_assert!(self.is_regularized());
                 Some(descended_byte)
             } else {
+                //The branch that did not move: keep `NODE_ITER_FINISHED` for the sibling path,
+                //but disown it so a later `to_next_val` does not read it as "an iteration you
+                //never started is already over".
                 self.focus_iter_token = new_tok;
+                self.iter_owner = IterOwner::None;
                 debug_assert!(self.is_regularized());
                 None
             }
@@ -2322,6 +2366,14 @@ pub(crate) mod read_zipper_core {
         }
 
         fn ascend(&mut self, steps: usize) -> usize {
+            //Any ascent moves the focus, so the token no longer describes it for *value*
+            //iteration.  It is kept rather than cleared because `to_next_sibling_byte` resumes
+            //from it and `to_next_step` alternates the two -- discarding it here costs the same
+            //~10% that discarding it in `descend_first_byte` did.  Disowning leaves the sibling
+            //path its fast resume and makes `to_next_val` restart, which is what
+            //`to_next_val` -> `ascend` -> `to_next_val` needs: that used to report nothing left
+            //with values still ahead.
+            self.iter_owner = IterOwner::None;
             timed_span!(Ascend, COUNTERS);
             debug_assert!(self.is_regularized());
             let mut remaining = steps;
@@ -2348,6 +2400,14 @@ pub(crate) mod read_zipper_core {
 
         fn ascend_byte(&mut self) -> bool {
             timed_span!(AscendByte, COUNTERS);
+            //Any ascent moves the focus, so the token no longer describes it for *value*
+            //iteration.  It is kept rather than cleared because `to_next_sibling_byte` resumes
+            //from it and `to_next_step` alternates the two -- discarding it here costs the same
+            //~10% that discarding it in `descend_first_byte` did.  Disowning leaves the sibling
+            //path its fast resume and makes `to_next_val` restart, which is what
+            //`to_next_val` -> `ascend` -> `to_next_val` needs: that used to report nothing left
+            //with values still ahead.
+            self.iter_owner = IterOwner::None;
             debug_assert!(self.is_regularized());
             if self.excess_key_len() == 0 {
                 match self.ancestors.pop() {
@@ -2368,6 +2428,14 @@ pub(crate) mod read_zipper_core {
 
         fn ascend_until(&mut self) -> usize {
             timed_span!(AscendUntil, COUNTERS);
+            //Any ascent moves the focus, so the token no longer describes it for *value*
+            //iteration.  It is kept rather than cleared because `to_next_sibling_byte` resumes
+            //from it and `to_next_step` alternates the two -- discarding it here costs the same
+            //~10% that discarding it in `descend_first_byte` did.  Disowning leaves the sibling
+            //path its fast resume and makes `to_next_val` restart, which is what
+            //`to_next_val` -> `ascend` -> `to_next_val` needs: that used to report nothing left
+            //with values still ahead.
+            self.iter_owner = IterOwner::None;
             debug_assert!(self.is_regularized());
             if self.at_root() {
                 return 0;
@@ -2386,6 +2454,14 @@ pub(crate) mod read_zipper_core {
 
         fn ascend_until_branch(&mut self) -> usize {
             timed_span!(AscendUntilBranch, COUNTERS);
+            //Any ascent moves the focus, so the token no longer describes it for *value*
+            //iteration.  It is kept rather than cleared because `to_next_sibling_byte` resumes
+            //from it and `to_next_step` alternates the two -- discarding it here costs the same
+            //~10% that discarding it in `descend_first_byte` did.  Disowning leaves the sibling
+            //path its fast resume and makes `to_next_val` restart, which is what
+            //`to_next_val` -> `ascend` -> `to_next_val` needs: that used to report nothing left
+            //with values still ahead.
+            self.iter_owner = IterOwner::None;
             debug_assert!(self.is_regularized());
             if self.at_root() {
                 return 0;
@@ -2550,6 +2626,7 @@ pub(crate) mod read_zipper_core {
 
             let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
             self.focus_iter_token = cur_tok;
+            self.iter_owner = IterOwner::KPath;
 
             self.k_path_internal(k, self.prefix_buf.len(), obs)
         }
@@ -2563,6 +2640,7 @@ pub(crate) mod read_zipper_core {
             //De-regularize the zipper
             debug_assert!(self.is_regularized());
             self.deregularize();
+            self.iter_owner = IterOwner::KPath;
             self.k_path_internal(k, base_idx, obs)
         }
     }
@@ -2654,6 +2732,7 @@ pub(crate) mod read_zipper_core {
                 focus_node: MiriWrapper::new(focus),
                 root_node,
                 focus_iter_token: NODE_ITER_INVALID,
+                iter_owner: IterOwner::None,
                 prefix_buf: vec![],
                 ancestors: vec![],
                 alloc,
@@ -2691,6 +2770,7 @@ pub(crate) mod read_zipper_core {
                 root_node: self.root_node,
                 focus_node: self.focus_node,
                 focus_iter_token: NODE_ITER_INVALID,
+                iter_owner: IterOwner::None,
                 prefix_buf: self.prefix_buf,
                 ancestors: self.ancestors,
                 alloc: self.alloc
@@ -2806,9 +2886,16 @@ pub(crate) mod read_zipper_core {
             timed_span!(ToNextGetValue, COUNTERS);
             self.prepare_buffers();
             loop {
-                if self.focus_iter_token == NODE_ITER_INVALID {
+                //Resume only this walk's own token.  A `k_path` walk leaves one positioned for
+                //*its* iteration, and resuming from that made `to_next_val` carry on from
+                //wherever the k-path had got to and report that there was nothing left -- the
+                //third route of FINDINGS `to_next_val_after_step`, after `descend_first_byte`
+                //and `to_next_step`.  Those two could simply invalidate the token; this one
+                //cannot, because `to_next_k_path` legitimately resumes from it.
+                if self.focus_iter_token == NODE_ITER_INVALID || self.iter_owner != IterOwner::Vals {
                     let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
                     self.focus_iter_token = cur_tok;
+                    self.iter_owner = IterOwner::Vals;
                 }
 
                 let (new_tok, key_bytes, child_node, value) = if self.focus_iter_token != NODE_ITER_FINISHED {
@@ -5587,5 +5674,86 @@ mod tests {
         assert!(rz.descend_last_path_observed(&mut observed));
         assert_eq!(rz.path(), b"rubicundus");
         assert_eq!(&observed[..], rz.path());
+    }
+
+    /// `to_next_get_val` *resumes* from `focus_iter_token` rather than starting at the
+    /// focus, so the token is a promise that an iteration is in progress and positioned
+    /// where the reader expects.  Several movement operations broke that promise:
+    /// `descend_first_byte` (and so `to_next_step`) left the token `next_items` had
+    /// advanced past the descended item, `descend_first_k_path` left a token that
+    /// belongs to the k-path walk, and `reset` and the `ascend*` family left a spent
+    /// one.  In each case a following `to_next_val` carried on from the wrong place
+    /// and reported that nothing was left.  `iter_owner` now records which walk a
+    /// token belongs to, and `to_next_get_val` restarts unless it is its own.
+    #[test]
+    fn read_zipper_to_next_val_after_every_movement() {
+        let mut map = PathMap::<u64>::new();
+        { let mut w = map.write_zipper(); w.set_val(0); }
+        map.insert(&[0u8, 0], 7);
+        map.insert(&[1u8], 9);
+
+        type Rz<'a> = ReadZipperUntracked<'a, 'static, u64>;
+        let ways: Vec<(&str, Box<dyn Fn(&mut Rz)>)> = vec![
+            ("descend_to([0])", Box::new(|z: &mut Rz| { z.descend_to(&[0u8]); })),
+            ("descend_to_byte(0)", Box::new(|z: &mut Rz| { z.descend_to_byte(0); })),
+            ("descend_indexed_byte(0)", Box::new(|z: &mut Rz| { z.descend_indexed_byte(0); })),
+            ("descend_to_existing_byte(0)", Box::new(|z: &mut Rz| { z.descend_to_existing_byte(0); })),
+            ("move_to_path([0])", Box::new(|z: &mut Rz| { z.move_to_path(&[0u8]); })),
+            ("descend_first_byte()", Box::new(|z: &mut Rz| { z.descend_first_byte(); })),
+            ("to_next_step()", Box::new(|z: &mut Rz| { z.to_next_step(); })),
+            ("descend_first_k_path(1)", Box::new(|z: &mut Rz| { z.descend_first_k_path(1); })),
+            ("descend_last_byte(), to_prev_sibling_byte()", Box::new(|z: &mut Rz| { z.descend_last_byte(); z.to_prev_sibling_byte(); })),
+        ];
+        for (label, f) in &ways {
+            let mut z = map.read_zipper();
+            f(&mut z);
+            assert_eq!(z.path(), &[0u8], "{label} did not land on [0]");
+            assert!(z.to_next_val(), "to_next_val after {label}");
+            assert_eq!(z.path(), &[0u8, 0], "after {label}");
+            assert_eq!(z.val(), Some(&7), "after {label}");
+            assert!(z.to_next_val(), "second to_next_val after {label}");
+            assert_eq!(z.path(), &[1u8], "after {label}");
+            assert!(!z.to_next_val(), "third to_next_val after {label}");
+        }
+
+        //A finished iteration, then `reset`, must start over
+        let mut one = PathMap::<u64>::new();
+        one.insert(&[1u8, 1, 1], 72);
+        let mut z = one.read_zipper();
+        assert!(z.to_next_val());
+        assert!(!z.to_next_val());
+        z.reset();
+        assert!(z.to_next_val(), "to_next_val after reset");
+        assert_eq!(z.val(), Some(&72));
+
+        //A finished iteration, then an ascent, must start over
+        let mut two = PathMap::<u64>::new();
+        two.insert(&[3u8], 24);
+        two.insert(&[3u8, 3], 25);
+        let ups: Vec<(&str, fn(&mut Rz))> = vec![
+            ("ascend", |z| { z.ascend(7); }),
+            ("ascend_byte", |z| { z.ascend_byte(); z.ascend_byte(); }),
+            ("ascend_until", |z| { z.ascend_until(); z.ascend_until(); }),
+            ("ascend_until_branch", |z| { z.ascend_until_branch(); }),
+        ];
+        for (label, up) in ups {
+            let mut z = two.read_zipper();
+            assert!(z.to_next_val());
+            assert!(z.to_next_val());
+            assert_eq!(z.path(), &[3u8, 3]);
+            up(&mut z);
+            assert!(z.at_root(), "{label}");
+            assert!(z.to_next_val(), "to_next_val after {label}");
+            assert_eq!(z.val(), Some(&24), "after {label}");
+        }
+
+        //And the k-path walk still resumes its own token across `to_next_k_path`
+        let mut three = PathMap::<u64>::new();
+        for k in [&[0u8, 0][..], &[0u8, 1], &[1u8, 0], &[1u8, 1]] { three.insert(k, 1); }
+        let mut z = three.read_zipper();
+        assert!(z.descend_first_k_path(2));
+        let mut seen = vec![z.path().to_vec()];
+        while z.to_next_k_path(2) { seen.push(z.path().to_vec()); }
+        assert_eq!(seen, vec![vec![0u8, 0], vec![0, 1], vec![1, 0], vec![1, 1]]);
     }
 }
