@@ -2023,14 +2023,31 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 AlgebraicStatus::None
             },
             AlgebraicResult::Identity(mask) => {
-                if mask & SELF_IDENT > 0 {
-                    //GOAT, document that meet_2 will not return identify because it doesn't actually check what's in the destination
-                    self.graft_internal(Some(a_focus.into_option().unwrap()));
+                //`meet_2` never reports `Identity` itself, because it does not look at what is
+                // already at the destination; the mask here says which *operand* the intersection
+                // equals.
+                let src = if mask & SELF_IDENT > 0 {
+                    a_focus.into_option()
                 } else {
                     debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be a or b
-                    self.graft_internal(Some(b_focus.into_option().unwrap()));
+                    b_focus.into_option()
+                };
+                match src {
+                    Some(node) => {
+                        self.graft_internal(Some(node));
+                        AlgebraicStatus::Element
+                    }
+                    //The operand the intersection is equal to holds an empty node, so the
+                    // intersection is empty.  This used to `unwrap`, and it is reachable:
+                    // `try_as_tagged` above answers `Some` for a `BorrowedRc` whose node is
+                    // empty, while `into_option` answers `None` for exactly that case, so the
+                    // two guards disagree.  An empty node is materialised by `create_path` or
+                    // by `remove_val` (FINDINGS #8), which is how a fuzzer reaches it.
+                    None => {
+                        self.graft_internal(None);
+                        AlgebraicStatus::None
+                    }
                 }
-                AlgebraicStatus::Element
             },
         }
     }
@@ -5833,4 +5850,42 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    /// `meet_2` guarded both sources with `try_as_tagged`, which answers `Some` for a
+    /// `BorrowedRc` whatever it holds, and then unwrapped `into_option`, which answers
+    /// `None` when that node is empty.  A source rooted at a dangling path -- an empty
+    /// node, which `create_path` leaves behind -- passed the guard and panicked on the
+    /// unwrap.  The intersection with an empty node is empty, so the answer is `None`
+    /// and nothing is grafted.
+    #[test]
+    fn write_zipper_meet_2_with_an_empty_source_node() {
+        for (label, b_keys, b_dangling) in [
+            ("b holds a value below", &[&[0u8, 1][..]][..], &[][..]),
+            ("b dangling too", &[][..], &[&[0u8][..]][..]),
+            ("b empty", &[][..], &[][..]),
+        ] {
+            let mut a = PathMap::<u64>::new();
+            a.create_path(&[0u8]);
+            let mut b = PathMap::<u64>::new();
+            for k in b_keys { b.insert(k, 2); }
+            for k in b_dangling { b.create_path(k); }
+
+            let mut dst = PathMap::<u64>::new();
+            dst.insert(&[5u8], 9);
+            let ra = a.read_zipper_at_path(&[0u8]);
+            let rb = b.read_zipper_at_path(&[0u8]);
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None, "{label}");
+            assert_eq!(wz.child_count(), 0, "{label}");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}");
+
+            //With the operands swapped
+            let mut dst = PathMap::<u64>::new();
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&rb, &ra), AlgebraicStatus::None, "{label}, swapped");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}, swapped");
+        }
+    }
 }
