@@ -99,7 +99,9 @@ fn recursive_cata_jumping_total_len(bencher: Bencher) {
             |_| Ok((0usize, 0usize)),
             |_mask: &ByteMask, w: (usize, usize), acc: &mut (usize, usize)| {
                 acc.0 += w.0;
-                acc.1 += w.1;
+                // Every folded child hangs below exactly one branch byte. `prefix` accounts
+                // for compressed runs separately in `summarize_f` below.
+                acc.1 += w.1 + w.0;
                 Ok(())
             },
             |_mask: &ByteMask, val, acc, prefix| {
@@ -109,7 +111,7 @@ fn recursive_cata_jumping_total_len(bencher: Bencher) {
             },
         ).unwrap();
     });
-    assert_eq!(sink.0, MAP_COUNT as usize);
+    assert_eq!(sink, (MAP_COUNT as usize, MAP_COUNT as usize * 8));
 }
 
 #[divan::bench()]
@@ -128,10 +130,11 @@ fn cached_jumping_cata_total_len(bencher: Bencher) {
             }
             for (_byte, child) in mask.iter().zip(children.iter_mut()) {
                 count += child.0;
-                total_len += child.1 + child.0 * prefix_len;
+                // The child is below one mask byte as well as this callback's prefix.
+                total_len += child.1 + child.0 * (prefix_len + 1);
             }
             (count, total_len)
         });
     });
-    assert_eq!(sink.0, MAP_COUNT as usize);
+    assert_eq!(sink, (MAP_COUNT as usize, MAP_COUNT as usize * 8));
 }

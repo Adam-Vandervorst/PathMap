@@ -30,7 +30,7 @@ pub struct ByteNode<Cf, A: Allocator> {
     #[cfg(feature = "nightly")]
     values: Vec<Cf, A>,
     #[cfg(not(feature = "nightly"))]
-    pub(crate) values: Vec<Cf>,
+    values: Vec<Cf>,
     alloc: A,
 }
 
@@ -396,7 +396,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
     {
         let mask = &self.mask;
-        let mut ws = Some(start_f(mask)?);
+        let mut ws = start_f(mask)?;
         for cf in self.values.iter() {
             let path = &[];
 
@@ -410,21 +410,21 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             match (cf.rec(), cf.val()) {
                 (Some(rec), Some(val)) => {
                     let w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(rec, Some(val), start_f, fold_child_f, finalize_f, cache)?;
-                    fold_child_f(mask, w, unsafe { ws.as_mut().unwrap_unchecked() })?;
+                    fold_child_f(mask, w, &mut ws)?;
                 },
                 (Some(rec), None) => {
                     let w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(rec, None, start_f, fold_child_f, finalize_f, cache)?;
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(None, Some(w), path, start_f, fold_child_f, finalize_f)?, unsafe { ws.as_mut().unwrap_unchecked() })?;
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(None, Some(w), path, start_f, fold_child_f, finalize_f)?, &mut ws)?;
                 },
                 (None, Some(val)) => {
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(Some(val), None, path, start_f, fold_child_f, finalize_f)?, unsafe { ws.as_mut().unwrap_unchecked() })?;
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(Some(val), None, path, start_f, fold_child_f, finalize_f)?, &mut ws)?;
                 },
                 (None, None) => {
-                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(None, None, path, start_f, fold_child_f, finalize_f)?, unsafe { ws.as_mut().unwrap_unchecked() })?;
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(None, None, path, start_f, fold_child_f, finalize_f)?, &mut ws)?;
                 },
             }
         }
-        finalize_f(mask, passed_in_val, Some(unsafe { std::mem::take(&mut ws).unwrap_unchecked() }), &[])
+        finalize_f(mask, passed_in_val, Some(ws), &[])
     }
 }
 
