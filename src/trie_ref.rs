@@ -165,12 +165,28 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
                 core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
             };
 
-            if let Some((consumed_byte_cnt, next_node)) = node.as_tagged().node_get_child(next_node_path) {
-                debug_assert!(consumed_byte_cnt >= node_key_len);
-                node = next_node;
-                path = &path[consumed_byte_cnt-node_key_len..];
-            } else {
-                path = next_node_path;
+            match node.as_tagged().node_get_child(next_node_path) {
+                //The child was reached at or beyond the end of `node_key`, so what is left to walk
+                //is a suffix of `path` and the step can be taken here.
+                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len => {
+                    node = next_node;
+                    path = &path[consumed_byte_cnt-node_key_len..];
+                }
+                //The child was reached *inside* `node_key`: the key spans a node boundary, which
+                //happens when a node was materialised part-way along it -- `create_path` leaves an
+                //empty one (FINDINGS #8), and a `TrieRef` taken below such a path lands here.  What
+                //remains to walk is `node_key[consumed..] ++ path`, which is a slice of neither, so
+                //the step is left to `node_along_path` below: it walks a whole key from a node and
+                //crosses boundaries itself.
+                //
+                //This used to be a `debug_assert!(consumed_byte_cnt >= node_key_len)` and a
+                //subtraction, so a release build computed `2 - 6` and indexed a slice at
+                //18446744073709551612.  Reached from the public API by
+                //`create_path(&[2,2]); write_zipper_at_path(&[2,2]); descend_to(&[2,1,3,1]);
+                //val_at(&[1,1])`.
+                _ => {
+                    path = next_node_path;
+                }
             }
         } else {
             if path_len == 0 {
@@ -537,12 +553,28 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieRefOwned<V, A> {
                 core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
             };
 
-            if let Some((consumed_byte_cnt, next_node)) = node.as_tagged().node_get_child(next_node_path) {
-                debug_assert!(consumed_byte_cnt >= node_key_len);
-                node = next_node;
-                path = &path[consumed_byte_cnt-node_key_len..];
-            } else {
-                path = next_node_path;
+            match node.as_tagged().node_get_child(next_node_path) {
+                //The child was reached at or beyond the end of `node_key`, so what is left to walk
+                //is a suffix of `path` and the step can be taken here.
+                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len => {
+                    node = next_node;
+                    path = &path[consumed_byte_cnt-node_key_len..];
+                }
+                //The child was reached *inside* `node_key`: the key spans a node boundary, which
+                //happens when a node was materialised part-way along it -- `create_path` leaves an
+                //empty one (FINDINGS #8), and a `TrieRef` taken below such a path lands here.  What
+                //remains to walk is `node_key[consumed..] ++ path`, which is a slice of neither, so
+                //the step is left to `node_along_path` below: it walks a whole key from a node and
+                //crosses boundaries itself.
+                //
+                //This used to be a `debug_assert!(consumed_byte_cnt >= node_key_len)` and a
+                //subtraction, so a release build computed `2 - 6` and indexed a slice at
+                //18446744073709551612.  Reached from the public API by
+                //`create_path(&[2,2]); write_zipper_at_path(&[2,2]); descend_to(&[2,1,3,1]);
+                //val_at(&[1,1])`.
+                _ => {
+                    path = next_node_path;
+                }
             }
         } else {
             if path_len == 0 {
@@ -1215,5 +1247,42 @@ mod tests {
             TrieRef::Borrowed(_) => unreachable!(),
         };
         assert_graft_src_at(owned.trie_ref_at_path(b"root:"));
+    }
+
+    /// `TrieRef::new_with_key_and_path_in` descends one step before handing the rest of
+    /// the walk to `node_along_path`, and assumed the child it found was reached at or
+    /// beyond the end of `node_key`.  `create_path` materialises an empty node part-way
+    /// along a key, so the child can be reached *inside* `node_key`; the release build
+    /// then computed `consumed - node_key_len` on a `usize` and indexed a slice at
+    /// 18446744073709551612, and the debug build tripped the assertion.
+    #[test]
+    fn trie_ref_key_crossing_a_node_boundary() {
+        //Nothing below: the answer is None
+        let mut map = PathMap::<u64>::new();
+        map.create_path(&[2u8, 2]);
+        let mut wz = map.write_zipper_at_path(&[2u8, 2]);
+        wz.descend_to(&[2u8, 1, 3, 1]);
+        assert!(!wz.path_exists());
+        assert_eq!(wz.val_at(&[1u8, 1]), None);
+        assert_eq!(wz.val_at(&[]), None);
+        drop(wz);
+
+        //Something below: the answer is what is stored there
+        map.insert(&[2u8, 2, 2, 1, 3, 1, 1, 1], 5);
+        map.insert(&[2u8, 2, 2, 1, 3, 1, 4], 6);
+        let mut wz = map.write_zipper_at_path(&[2u8, 2]);
+        wz.descend_to(&[2u8, 1, 3, 1]);
+        assert_eq!(wz.val_at(&[1u8, 1]), Some(&5));
+        assert_eq!(wz.val_at(&[4u8]), Some(&6));
+        assert_eq!(wz.val_at(&[1u8]), None);
+        drop(wz);
+
+        //And directly through a TrieRef taken below the empty node
+        let tr = map.trie_ref_at_path(&[2u8, 2, 2, 1, 3, 1]);
+        assert_eq!(tr.val_at(&[1u8, 1]), Some(&5));
+        let tr = map.trie_ref_at_path(&[2u8, 2, 2, 1, 3, 1, 1]);
+        assert_eq!(tr.val_at(&[1u8]), Some(&5));
+        let tr = map.trie_ref_at_path(&[2u8, 2, 2, 1]);
+        assert_eq!(tr.val_at(&[3u8, 1, 4]), Some(&6));
     }
 }
