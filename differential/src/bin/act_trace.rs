@@ -20,7 +20,8 @@
 //!
 //! What it cannot exercise: ACT is read-only and, more restrictively, is not a
 //! `ZipperInfallibleSubtries`, so it cannot be the *source* of a graft or an
-//! algebraic merge.  Those operations report `skip`.
+//! algebraic merge.  Those operations report `skip`.  ACT's own merge path is
+//! `ArenaCompactTree::merge_zipper_into_file`, which `act_merge_check` covers.
 
 use differential::*;
 

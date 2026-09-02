@@ -12,6 +12,9 @@ Two things live here:
    `../differential` crate) — the machinery that runs the same generated
    program against the model and against `pathmap`, and diffs the results.
 
+Everything the fuzzing found is written up in [FINDINGS.md](FINDINGS.md), with
+standalone reproducers in `cargo run -p differential --bin zipper_bug_repros`.
+
 ## Build and run
 
 Lean is installed through `elan`, which reads `lean-toolchain` and fetches the
@@ -46,7 +49,7 @@ A property test asserts things you already suspect.  A model asserts *everything
 at once: for each generated program the harness compares every return value and
 the entire resulting trie against what the specification says should happen.  The
 interesting consequence is that writing the model is where most of the value was
-— several defects were found by trying to state
+— several defects in [FINDINGS.md](FINDINGS.md) were found by trying to state
 the semantics precisely and discovering there was no consistent statement to
 make, before a single fuzz input had been generated.
 
@@ -59,7 +62,7 @@ one, and does not try to be.
 The model specifies the *meaning* a trie carries, not the trie.  Shaped like the
 implementation, it would inherit the implementation's structure — and a bug in
 how that structure is handled could then be present in both and cancel out.
-Three of the crate defects the fuzzing found are of exactly that kind (an invalid node built
+Findings 14, 15 and 16 are all bugs of exactly that kind (an invalid node built
 by `graft`, a dense-node path in `graft_child_maps`, empty nodes in the sharing
 machinery), and the model catches them precisely because it has no nodes to get
 wrong.  The type is named `PathMap`, after the crate's own name for the thing a
@@ -104,8 +107,8 @@ def pathExists t p := (t.entryAt p).present   -- derived
 ```
 
 The middle case is where this API keeps going wrong — `create_path` produces it,
-`remove_val(false)` leaves it behind, and several crate operations
-mishandle it.  A definition written against `Entry` cannot
+`remove_val(false)` leaves it behind, and findings 7, 8 and 15 are all
+operations that mishandle it.  A definition written against `Entry` cannot
 quietly forget it: the `match` will not compile until it says what happens.  And
 `valued` entails existence by construction, so "a value at a path that is not
 there" is unrepresentable rather than merely false
@@ -315,7 +318,8 @@ not, the maps it ends with match the trace's `MAP0`/`MAP1`.
 
 A handful of argument combinations are skipped by both sides, each because the
 crate's behaviour there is a confirmed bug that would otherwise mask everything
-downstream.  Each skip is commented at its site:
+downstream.  Each is recorded in [FINDINGS.md](FINDINGS.md) and each skip is
+commented at its site:
 
 * `meet_k_path_into` when the focus has no children, or `k = 0` — it does not
   terminate.
@@ -450,6 +454,28 @@ places where "the model and the crate agree" might mean "they are wrong
 together".  Every survivor is a place to go and re-derive the definition from the
 documentation rather than from the code.
 
+## Current agreement
+
+500 random programs (`./lean/differential.py --random 500 --seed 99 --max-fails 0`),
+model versus crate, comparing every return value plus both maps in full:
+
+```
+404/500 inputs agree exactly
+ 87/500 hit one of the classified defects in FINDINGS.md
+  9/500 diverge for reasons not yet classified
+```
+
+The 87 break down as: `to_next_val` after `to_next_step` (19), `ascend_until`
+corrupting a write zipper (17), zippers escaping their root (16), a `set_val`
+unwrap on `None` (14), the `TrieRef` slice underflow (12), `make_unique` on an
+empty sentinel (7), `join_into` dropping the source (2).
+
+Every defect listed in FINDINGS.md reproduces here exactly as it does on
+`master`; the blind-zipper migration neither fixed nor introduced any of them.
+
+`differential.py` prints that breakdown itself, so new divergences stay visible
+as the known ones are fixed.
+
 ## ArenaCompactTree as the read source
 
 `ArenaCompactTree` is a second implementation of the same *read* specification,
@@ -471,6 +497,20 @@ it cannot be the *source* of a graft or an algebraic merge; those operations and
 `make_map` report `skip` on both sides.  Everything else is compared in full,
 including the final trie -- which is dumped *from the ACT*, so `from_zipper` is
 under test on every program.
+
+```
+248/500 inputs agree exactly
+250/500 hit a classified defect (three of them ACT-specific)
+  2/500 diverge for reasons not yet classified
+```
+
+Three ACT defects, all silent wrong answers, are written up in FINDINGS.md:
+`val_count()` counts from the zipper root rather than the focus (117 of 500
+programs), `descend_first_k_path()` only walks the leftmost chain, and
+`descend_last_path()` can run one byte past the end of the trie.  `from_zipper`
+round-trips faithfully, and `merge_zipper_into_file` -- ACT's one write-shaped
+operation -- matches its specification on all 300 cases of
+`differential/src/bin/act_merge_check.rs`.
 
 ## Sharing
 
@@ -495,7 +535,23 @@ restriction.
 
 Not modelling sharing is what makes sharing bugs *detectable* rather than what
 hides them: the model says two grafted copies are independent, so a mutation
-leaking from one to the other is a divergence.
+leaking from one to the other is a divergence.  Where representation does leak
+into observable results, that is a finding — 8, 14, 15 and 16 all are.
+
+Two properties the differential harness cannot reach are checked directly:
+
+```bash
+cargo run -p differential --bin sharing_check
+```
+
+* **Copy-on-write** — graft one source into three places, write under one, and
+  the others must be untouched.
+* **`merkleize`** — the one operation whose purpose is to *change* sharing, so
+  the one place the model's blind spot is deliberately exercised.  The
+  observable trie must survive unchanged.
+
+Both hold wherever they run (266/266 and 214/214, 1464 node references reused)
+and both abort on tries containing a *shared dangling path* — see finding 16.
 
 ## Structural invariants
 
@@ -518,3 +574,8 @@ invariant should show up as a trace diff rather than as an abort.
 `OverlayZipper` / the ACT format, serialisation, `merkleize`, catamorphisms, and
 allocator behaviour.  The model covers `PathMap`, `ReadZipper` and `WriteZipper`
 over an in-memory trie.
+
+That said, the containment invariant `--check` asserts
+(`root_prefix_path()` never changes) is exactly the property `ZipperHead` relies
+on to hand out non-overlapping zippers safely, and it is violated — see
+[FINDINGS.md](FINDINGS.md).

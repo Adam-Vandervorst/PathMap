@@ -183,13 +183,95 @@ class Child:
         return self.recv()
 
 
+# Divergences already traced to confirmed `pathmap` bugs.  Keyed by the name of
+# the first operation whose trace line differs (or by the panic location), so a
+# run can separate "known" from "new" without hiding either.  See
+# lean/README.md for the full write-up of each.
 # Divergences already traced to confirmed `pathmap` defects.  Each entry is a
 # list of substrings that must all appear in the report, so the table survives
 # the line-number shifts between branches.  Semantic entries key on the name of
 # the first operation whose trace line differs; panic entries key on the file
-# and message.  A run reports these as "known" rather than "new", so the two
-# stay visible separately.
-KNOWN = []
+# and message.  See lean/FINDINGS.md for the write-up of each, and
+# `cargo run -p differential --bin zipper_bug_repros -- <case>` for a reproducer.
+KNOWN = [
+    (["ESCAPED-ROOT"],
+     "a zipper left its own root: root_prefix_path() changed [root_escape]"),
+    (["to_next_val"],
+     "to_next_val() misses downstream values after a token-maintaining move "
+     "[to_next_val_after_step]"),
+    (["sibling_byte"],
+     "sibling movement fails after a token-maintaining move "
+     "[sibling_after_iteration]"),
+    (["to_next_get_val"],
+     "to_next_get_val() inherits the to_next_val() iteration defect "
+     "[to_next_val_after_step]"),
+    (["join_into"],
+     "join_into() drops the source subtrie when the destination map is empty "
+     "[join_into_empty_dst]"),
+    (["ascend_until"],
+     "ascend_until()/ascend_until_branch() corrupt a write zipper rooted at a "
+     "node boundary [ascend_until_wz]"),
+    (["remove_branches"],
+     "remove_branches() returns true at a dangling tip where nothing was "
+     "removed [empty_node_leak]"),
+    (["take_map_restore"],
+     "take_map() returns Some(empty map) at a dangling tip [empty_node_leak]"),
+    # Panics.  These only abort in a debug build; differential.py prefers the
+    # release binary, so they normally surface as wrong values instead.
+    (["src/zipper.rs", "subtract with overflow"],
+     "path_len()/excess_key_len() underflow on a zipper whose path buffer is "
+     "not yet prepared [to_next_k_path_borrowed]"),
+    (["src/zipper.rs", "assertion failed: self.path_exists()"],
+     "to_prev_sibling_byte() asserts path_exists() at a non-existent focus "
+     "[prev_sibling_missing]"),
+    (["src/write_zipper.rs", "assertion `left == right`"],
+     "ascend_until() leaves the write zipper's node stack inconsistent "
+     "[ascend_until_wz]"),
+    (["src/write_zipper.rs", "Option::unwrap()"],
+     "set_val unwraps a None root value"),
+    (["src/line_list_node.rs", "is_child_ptr"],
+     "remove_unmasked_branches() asserts inside a dangling line node "
+     "[remove_unmasked_dangling]"),
+    (["src/trie_ref.rs", "out of range"],
+     "TrieRef slice range underflows to a huge usize"),
+    (["src/dense_byte_node.rs", "index out of bounds"],
+     "graft_child_maps() reaches node_get_child_mut with an empty key whenever "
+     "the destination focus is a dense node [graft_child_maps_dense]"),
+    # graft_child_maps is quarantined by op name: it is broken in two documented
+    # ways (finding 15), and its surviving non-panicking behaviour on line-list
+    # nodes diverges constantly.  Anything new in this op hides behind this
+    # entry, so re-check it once the method is fixed.
+    (["graft_child_maps"],
+     "graft_child_maps() misbehaves (finding 15) [graft_child_maps_dense]"),
+    (["join_map_into"],
+     "AlgebraicStatus::Identity is not returned reliably when nothing changed "
+     "(finding 8); reproducer in lean/corpus/"),
+    (["restrict"],
+     "AlgebraicStatus::Identity is not returned reliably when nothing changed "
+     "(finding 8); reproducer in lean/corpus/"),
+    (["graft_masked_branches"],
+     "graft_masked_branches() creates the focus when grafting absent branches "
+     "(finding 15) [graft_child_maps_dense]"),
+    (["ambiguous path violation"],
+     "graft() builds a node with both a child and a value on the same key when "
+     "the destination node holds a single line [graft_ambiguous_node]"),
+    (["src/trie_node.rs", "make_unique"],
+     "copy-on-write cannot make a shared dangling path unique (finding 16) "
+     "[shared_dangling_cow]"),
+    # ArenaCompactTree read source (differential.py --act).
+    (["ACT-VALCOUNT-ONLY"],
+     "ACTZipper::val_count() counts from the zipper root, not the focus "
+     "[act: val_count_ignores_focus]"),
+    (["k_path_walk"],
+     "ACTZipper::descend_first_k_path() only walks the leftmost chain "
+     "[act: first_k_path_no_backtrack]"),
+    (["descend_first_k_path"],
+     "ACTZipper::descend_first_k_path() only walks the leftmost chain "
+     "[act: first_k_path_no_backtrack]"),
+    (["descend_last_path"],
+     "ACTZipper::descend_last_path() runs one byte past the end of the trie "
+     "[act: last_path_overshoots]"),
+]
 
 
 def act_valcount_only(a, b):
