@@ -227,12 +227,8 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
     fn new_iter_token(&self) -> IterToken { unreachable!() }
     fn iter_token_for_path(&self, _key: &[u8]) -> IterToken { unreachable!() }
     fn next_items(&self, _token: IterToken) -> (IterToken, &'a[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) { unreachable!() }
-    fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
-        let temp_node = self.into_full().unwrap();
-        temp_node.node_val_count(cache)
-    }
-    fn node_goat_val_count(&self) -> usize {
-        self.into_full().unwrap().node_goat_val_count()
+    fn node_val_count(&self) -> usize {
+        self.into_full().unwrap().node_val_count()
     }
     fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
         if self.is_used_child() {

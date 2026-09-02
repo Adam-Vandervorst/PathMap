@@ -26,7 +26,7 @@ use divan::{Bencher, Divan, counter::ItemsCount};
 use pathmap::PathMap;
 use pathmap::arena_compact::{ACTOutputStream, ArenaCompactTree};
 use pathmap::paths_serialization::{for_each_deserialized_path, serialize_paths};
-use pathmap::zipper::ZipperMoving;
+use pathmap::morphisms::CatamorphismCached;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::path::Path;
 

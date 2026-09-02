@@ -389,10 +389,6 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         self.set_valid(0);
     }
 
-    fn val_count(&self) -> usize {
-        self.source.val_count()
-    }
-
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, patho: K) -> usize {
         if self.position.is_invalid() {
             return 0;

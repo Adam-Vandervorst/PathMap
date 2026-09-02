@@ -1057,37 +1057,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         let k = k as usize;
         (next_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
     }
-    fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
-        //Discussion: These two implementations do the same thing but with a slightly different ordering of
-        // the operations.  In `all_dense_nodes`, the "Branchy" impl wins.  But in a mixed-node setting, the
-        // IMPL B is the winner.  My suspicion is that the ListNode's heavily branching structure leads to
-        // underutilization elsewhere in the CPU so we get better instruction parallelism with IMPL B.
-
-        //IMPL A "Branchy"
-        // let mut result = 0;
-        // for cf in self.values.iter() {
-        //     if cf.value.is_some() {
-        //         result += 1;
-        //     }
-        //     match &cf.rec {
-        //         Some(rec) => result += rec.borrow().node_subtree_len(),
-        //         None => {}
-        //     }
-        // }
-        // result
-
-        //IMPL B "Arithmetic"
-        return self.values.iter().rfold(0, |t, cf| {
-            t + cf.has_val() as usize + cf.rec().map(|r| val_count_below_node(r, cache)).unwrap_or(0)
-        });
-    }
-/*    fn node_goat_val_count(&self) -> usize {
-        return self.values.iter().rfold(0, |t, cf| {
-            t + cf.has_val() as usize + cf.rec().map(|r| r.as_tagged().node_goat_val_count()).unwrap_or(0)
-        });
-    }*/
     #[inline]
-    fn node_goat_val_count(&self) -> usize {
+    fn node_val_count(&self) -> usize {
         let mut result = 0;
         for cf in self.values.iter() {
             result += cf.has_val() as usize

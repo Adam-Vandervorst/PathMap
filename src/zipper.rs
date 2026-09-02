@@ -28,6 +28,7 @@ pub use crate::poly_zipper::{PolyZipper, PolyZipperExplicit};
 pub use crate::dependent_zipper::DependentProductZipperG;
 use crate::zipper_tracking::*;
 
+pub use crate::morphisms::CatamorphismCached; //re-exported so `use pathmap::zipper::*` gives the caller access to `val_count`, etc
 
 /// The most fundamantal interface for a zipper, compatible with all zipper types
 pub trait Zipper {
@@ -166,12 +167,6 @@ pub trait ZipperMoving: Zipper {
             self.ascend_byte();
         }
     }
-
-    /// Returns the total number of values contained at and below the zipper's focus, including the focus itself
-    ///
-    /// WARNING: This is not a cheap method. It may have an order-N cost
-    //GOAT! This doesn't belong here.  Should be a function that uses a non-side-effect catamorphism
-    fn val_count(&self) -> usize;
 
     /// Moves the zipper deeper into the trie, to the `key` specified relative to the current zipper focus
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K);
@@ -1235,7 +1230,6 @@ macro_rules! zipper_impl_lens {
         fn at_root(&$s) -> bool { $e.at_root() }
         #[inline] fn focus_byte(&$s) -> Option<u8> { $e.focus_byte() }
         fn reset(&mut $s) { $e.reset() }
-        fn val_count(&$s) -> usize { $e.val_count() }
         fn descend_to<K: AsRef<[u8]>>(&mut $s, k: K) { $e.descend_to(k) }
         fn descend_to_check<K: AsRef<[u8]>>(&mut $s, k: K) -> bool { $e.descend_to_check(k) }
         fn descend_to_existing<K: AsRef<[u8]>>(&mut $s, k: K) -> usize { $e.descend_to_existing(k) }
@@ -1986,20 +1980,6 @@ pub(crate) mod read_zipper_core {
             self.prefix_buf.truncate(self.origin_path.len());
         }
 
-        fn val_count(&self) -> usize {
-            timed_span!(ValueCount, COUNTERS);
-            let root_val = self.is_val() as usize;
-            if self.node_key().len() == 0 {
-                val_count_below_root(*self.focus_node) + root_val
-            } else {
-                let focus = self.get_focus();
-                if focus.0.is_none() {
-                    root_val
-                } else {
-                    val_count_below_root(focus.0.as_tagged()) + root_val
-                }
-            }
-        }
         fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
             timed_span!(DescendTo, COUNTERS);
             let k = k.as_ref();

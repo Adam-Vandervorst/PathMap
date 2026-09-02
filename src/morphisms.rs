@@ -168,8 +168,7 @@ macro_rules! define_cached_cata_trait {
             fn cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
             where
                 W: Clone,
-                AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
-                Self: Sized,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W
             {
                 self.cata_cached_fallible(|mask, children, val| -> Result<W, Infallible> {
                     Ok(alg_f(mask, children, val))
@@ -182,8 +181,7 @@ macro_rules! define_cached_cata_trait {
             fn cata_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
             where
                 W: Clone,
-                AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>,
-                Self: Sized,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
             {
                 self.cata_jumping_cached_fallible(|mask, children, val, prefix| {
                     let mut w = alg_f(mask, children, val)?;
@@ -230,8 +228,7 @@ macro_rules! define_cached_cata_trait {
             fn cata_jumping_cached<W, AlgF>(&self, alg_f: AlgF) -> W
             where
                 W: Clone,
-                AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
-                Self: Sized,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W
             {
                 self.cata_jumping_cached_fallible(|mask, children, val, prefix| -> Result<W, Infallible> {
                     Ok(alg_f(mask, children, val, prefix))
@@ -244,8 +241,7 @@ macro_rules! define_cached_cata_trait {
             fn cata_jumping_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
             where
                 W: Clone,
-                AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>,
-                Self: Sized,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>
             {
                 let children = std::cell::RefCell::new(CataChildren::<W>::new());
                 let children = &children;
@@ -276,7 +272,6 @@ macro_rules! define_cached_cata_trait {
             /// Hashes the logical trie and all of its values.
             fn hash(&self) -> u128
             where
-                Self: Sized,
                 V: std::hash::Hash,
             {
                 self.hash_with(|v| {
@@ -289,7 +284,6 @@ macro_rules! define_cached_cata_trait {
             /// Hashes the logical trie using the provided function to hash values.
             fn hash_with<F>(&self, val_hash: F) -> u128
             where
-                Self: Sized,
                 F: Fn(&V) -> u128,
             {
                 self.cata_cached(|bm, hs, mv| {
@@ -299,6 +293,16 @@ macro_rules! define_cached_cata_trait {
                     if let Some(v) = mv { hasher.write_u128(val_hash(v)) };
                     hasher.finish_u128()
                 })
+            }
+
+            /// Returns the total number of values contained at and below the zipper's focus, including the
+            /// focus itself
+            fn val_count(&self) -> usize {
+                self.factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
+                    |_| Ok(0usize),
+                    |_mask, w: usize, total| { *total += w; Ok(()) },
+                    |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+                ).unwrap_or(0)
             }
 
             /// A low-level cached catamorphism API that decomposes the algebra into multiple
@@ -351,8 +355,7 @@ macro_rules! define_cached_cata_trait {
                 W: Clone,
                 NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
                 FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
-                SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
-                Self: Sized;
+                SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>;
 
             /// A **stepping** catamorphism based on a similar factored algebra to [`Self::factored_cata_jumping`]
             ///
@@ -636,7 +639,7 @@ impl SplitCataJumping {
     }
 }
 
-impl<'a, Z, V: 'a> CatamorphismSideEffecting<V> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer {
+impl<'a, Z, V: 'a> CatamorphismSideEffecting<V> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer {
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, mut alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>,
     {
@@ -669,7 +672,7 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
     }
 }
 
-impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperInfallibleSubtries<V, A> {
+impl<Z, V: Clone + Send + Sync, A: Allocator> CatamorphismCached<V, A> for Z where Z: Zipper + ZipperConcrete + ZipperInfallibleSubtries<V, A> {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         W: Clone,

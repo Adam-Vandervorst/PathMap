@@ -2918,23 +2918,6 @@ where Storage: AsRef<[u8]>
         self.invalid = 0;
     }
 
-    /// Returns the total number of values contained at and below the zipper's focus, including the focus itself
-    ///
-    /// WARNING: This is not a cheap method. It may have an order-N cost
-    fn val_count(&self) -> usize {
-        timed_span!(ValueCount, COUNTERS);
-        let mut zipper = self.clone();
-        zipper.reset();
-        let mut count = 0;
-        if zipper.is_val() {
-            count += 1;
-        }
-        while zipper.to_next_val() {
-            count += 1;
-        }
-        count
-    }
-
     /// Moves the zipper deeper into the trie, to the `key` specified relative to the current zipper focus
     ///
     /// Returns `true` if the zipper points to an existing path within the tree, otherwise `false`.  The

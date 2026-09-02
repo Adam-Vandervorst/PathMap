@@ -74,7 +74,6 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
             None
         }
     }
-    fn val_count(&self) -> usize { self.zipper.val_count() }
     fn descend_to<K: AsRef<[u8]>>(&mut self, path: K) {
         let path = path.as_ref();
         self.path.extend_from_slice(path);

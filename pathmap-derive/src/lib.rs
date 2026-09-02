@@ -490,12 +490,6 @@ fn derive_poly_zipper_with_traits(
                     }
                 }
 
-                fn val_count(&self) -> usize {
-                    match self {
-                        #(#variant_arms => inner.val_count(),)*
-                    }
-                }
-
                 fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
                     match self {
                         #(#variant_arms => inner.descend_to(k),)*

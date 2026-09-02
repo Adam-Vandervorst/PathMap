@@ -499,15 +499,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     ///
     /// WARNING: This is not a cheap method. It may have an order-N cost
     pub fn val_count(&self) -> usize {
-        let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
-        match self.root() {
-            Some(root) => val_count_below_root(root.as_tagged()) + root_val,
-            None => root_val
-        }
-    }
-
-    /// GOAT, temporary method to do side-by-side comparison between abstracted val_count and bespoke version
-    pub fn goat_val_count(&self) -> usize {
         match self.root() {
             Some(_root) => {
                 match self.factored_cata_jumping::<_, _, Infallible, _, _, _, false>(

@@ -174,10 +174,6 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.factor_paths.clear();
         self.z.reset()
     }
-    fn val_count(&self) -> usize {
-        debug_assert!(self.focus_factor() == self.factor_count() - 1);
-        self.z.val_count()
-    }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
         let k = k.as_ref();
         let mut descended = 0;
@@ -683,10 +679,6 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
             secondary.reset();
         }
         self.primary.reset();
-    }
-    #[inline]
-    fn val_count(&self) -> usize {
-        unimplemented!("method will probably get removed")
     }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, path: K) -> usize {
         let mut path = path.as_ref();

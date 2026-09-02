@@ -1999,45 +1999,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
     }
     #[inline]
-    fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
-        let mut result = 0;
-        if self.is_used_value_0() {
-            result += 1;
-        }
-        if self.is_used_value_1() {
-            result += 1;
-        }
-        if self.is_used_child_0() {
-            let child_node = unsafe{ self.child_in_slot::<0>() };
-            result += val_count_below_node(child_node, cache);
-        }
-        if self.is_used_child_1() {
-            let child_node = unsafe{ self.child_in_slot::<1>() };
-            result += val_count_below_node(child_node, cache);
-        }
-        result
-    }
-/*    #[inline]
-    fn node_goat_val_count(&self) -> usize {
-        let mut result = 0;
-        if self.is_used_value_0() {
-            result += 1;
-        }
-        if self.is_used_value_1() {
-            result += 1;
-        }
-        if self.is_used_child_0() {
-            let child_node = unsafe{ self.child_in_slot::<0>() };
-            result += child_node.as_tagged().node_goat_val_count();
-        }
-        if self.is_used_child_1() {
-            let child_node = unsafe{ self.child_in_slot::<1>() };
-            result += child_node.as_tagged().node_goat_val_count();
-        }
-        result
-    }*/
-    #[inline]
-    fn node_goat_val_count(&self) -> usize {
+    fn node_val_count(&self) -> usize {
         //Here are 3 alternative implementations.  They're basically the same in perf, with a slight edge to the
         // inline bitwise arithmetic version.
 

@@ -53,7 +53,6 @@ impl ZipperMoving for FullZipper {
     #[inline]
     fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.clear() }
-    fn val_count(&self) -> usize { usize::MAX/2 } // usize::MAX is a dangerous default for overflow
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         self.path.extend_from_slice(k.as_ref());
     }
@@ -126,7 +125,6 @@ impl ZipperMoving for NullZipper {
     #[inline]
     fn focus_byte(&self) -> Option<u8> { None }
     fn reset(&mut self) {}
-    fn val_count(&self) -> usize { 0 }
     fn descend_to<K: AsRef<[u8]>>(&mut self, _k: K) {}
     fn descend_to_byte(&mut self, _k: u8) {}
     fn descend_indexed_byte(&mut self, _idx: usize) -> Option<u8> { None }

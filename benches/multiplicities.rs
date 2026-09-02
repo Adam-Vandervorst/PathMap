@@ -1,5 +1,5 @@
 use pathmap::*;
-use pathmap::zipper::{ZipperMoving, ZipperWriting};
+use pathmap::zipper::{CatamorphismCached, ZipperWriting};
 
 fn main() {
     const SILLY_LARGE_COUNTS: bool = false;

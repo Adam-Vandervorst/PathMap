@@ -38,7 +38,7 @@ fn build_binary_tree_map() -> PathMap<()> {
 }
 
 #[divan::bench()]
-fn recursive_cata_jumping_val_count(bencher: Bencher) {
+fn factored_cata_jumping_val_count(bencher: Bencher) {
     let map = build_map(MAP_COUNT);
     let mut sink = 0usize;
     bencher.bench_local(|| {
@@ -53,7 +53,7 @@ fn recursive_cata_jumping_val_count(bencher: Bencher) {
 }
 
 #[divan::bench()]
-fn recursive_cata_binary_tree_leaf_count(bencher: Bencher) {
+fn factored_cata_binary_tree_leaf_count(bencher: Bencher) {
     let map = build_binary_tree_map();
     let mut sink = 0usize;
     bencher.bench_local(|| {
@@ -90,7 +90,7 @@ fn cached_jumping_cata_val_count(bencher: Bencher) {
 }
 
 #[divan::bench()]
-fn recursive_cata_jumping_total_len(bencher: Bencher) {
+fn factored_cata_jumping_total_len(bencher: Bencher) {
     let map = build_map(MAP_COUNT);
     let mut sink = (0usize, 0usize);
     bencher.bench_local(|| {

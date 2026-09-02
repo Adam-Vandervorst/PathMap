@@ -215,15 +215,9 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// - `value` that exists at the path, or `None`
     fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
 
-    /// Returns the total number of leaves contained within the whole subtree defined by the node
-    /// GOAT, this should be deprecated
-    fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize;
-
     /// Returns the number of values contained within the node itself, irrespective of the positions within
     /// the node; does not include onward links
-    ///
-    /// GOAT, this should replace node_val_count
-    fn node_goat_val_count(&self) -> usize;
+    fn node_val_count(&self) -> usize;
 
     /// Returns the first downstream child of a node, and a token that can be used to access subsequent children
     ///
@@ -1243,23 +1237,12 @@ mod tagged_node_ref {
         }
 
         #[inline]
-        pub fn node_val_count(&self, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
+        pub fn node_val_count(&self) -> usize {
             match self {
-                Self::DenseByteNode(node) => node.node_val_count(cache),
-                Self::LineListNode(node) => node.node_val_count(cache),
-                Self::CellByteNode(node) => node.node_val_count(cache),
-                Self::TinyRefNode(node) => node.node_val_count(cache),
-                Self::EmptyNode => 0,
-            }
-        }
-
-        #[inline]
-        pub fn node_goat_val_count(&self) -> usize {
-            match self {
-                Self::DenseByteNode(node) => node.node_goat_val_count(),
-                Self::LineListNode(node) => node.node_goat_val_count(),
-                Self::CellByteNode(node) => node.node_goat_val_count(),
-                Self::TinyRefNode(node) => node.node_goat_val_count(),
+                Self::DenseByteNode(node) => node.node_val_count(),
+                Self::LineListNode(node) => node.node_val_count(),
+                Self::CellByteNode(node) => node.node_val_count(),
+                Self::TinyRefNode(node) => node.node_val_count(),
                 Self::EmptyNode => 0,
             }
         }
@@ -2383,31 +2366,6 @@ mod tagged_node_ref {
                 _ => unsafe{ unreachable_unchecked() }
             }
         }
-    }
-}
-
-/// Returns the count of values in the subtrie descending from the node, caching shared subtries
-pub(crate) fn val_count_below_root<V: Clone + Send + Sync, A: Allocator>(node: TaggedNodeRef<V, A>) -> usize {
-    let mut cache = std::collections::HashMap::new();
-    node.node_val_count(&mut cache)
-}
-
-pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &TrieNodeODRc<V, A>, cache: &mut std::collections::HashMap<u64, usize>) -> usize {
-    if node.is_empty() {
-        return 0
-    }
-    if node.refcount() > 1 {
-        let hash = node.shared_node_id();
-        match cache.get(&hash) {
-            Some(cached) => *cached,
-            None => {
-                let val = node.as_tagged().node_val_count(cache);
-                cache.insert(hash, val);
-                val
-            },
-        }
-    } else {
-        node.as_tagged().node_val_count(cache)
     }
 }
 
