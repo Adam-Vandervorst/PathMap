@@ -1715,7 +1715,15 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 return AlgebraicStatus::Identity
             }
         }
-        match self_focus.try_as_tagged() {
+        //`try_as_tagged` answers `Some` for a `BorrowedRc` whatever it holds, so an *empty*
+        // destination node used to take the `pjoin` path below and come back
+        // `Identity(SELF_IDENT)` -- "the result is what you already have" -- which for an empty
+        // destination is nothing, so the source was silently dropped.  Joining into an empty
+        // destination map lost the data outright while joining into a non-empty one worked.
+        // The union of nothing with the source *is* the source, so an empty node takes the same
+        // path as a missing one.  The branch above already draws this distinction with
+        // `node_is_empty` for the source; this draws it for the destination.
+        match self_focus.try_as_tagged().filter(|n| !n.node_is_empty()) {
             Some(self_node) => {
                 match self_node.pjoin_dyn(src.as_tagged()) {
                     AlgebraicResult::Element(joined) => {
@@ -1737,6 +1745,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     }
                 }
             },
+            //No node at the destination, or an empty one: the result is the source.
             None => { self.graft_internal(src.into_option()); AlgebraicStatus::Element }
         }
     }
@@ -5833,4 +5842,48 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    /// `join_into` into an *empty* destination map reported `Identity` and wrote
+    /// nothing: `try_as_tagged` answers `Some` for an empty node, so the destination
+    /// took the `pjoin` path and came back "the result is what you already have",
+    /// which for an empty destination is nothing.  The same join into a destination
+    /// holding one unrelated key worked.  The union of nothing with the source is the
+    /// source, so an empty node must take the same path as a missing one.
+    #[test]
+    fn write_zipper_join_into_empty_destination() {
+        let mut src = PathMap::<u64>::new();
+        src.insert(&[0u8, 0, 0, 0], 7);
+        src.insert(&[0u8, 0, 1], 8);
+        let mut rz = src.read_zipper();
+        rz.descend_to(&[0u8]);
+
+        let mut expected = PathMap::<u64>::new();
+        { let mut w = expected.write_zipper(); w.graft(&rz); }
+        assert_eq!(expected.val_count(), 2);
+
+        //Into an empty map
+        let mut empty = PathMap::<u64>::new();
+        let st = { let mut w = empty.write_zipper(); w.join_into(&rz) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(empty.val_count(), 2);
+        assert_eq!(empty.get_val_at(&[0u8, 0, 0]), Some(&7));
+        assert_eq!(empty.get_val_at(&[0u8, 1]), Some(&8));
+        assert!(empty.read_zipper().to_next_val());
+
+        //Into a focus whose node exists but is empty
+        let mut dangling = PathMap::<u64>::new();
+        dangling.create_path(&[3u8]);
+        let st = { let mut w = dangling.write_zipper_at_path(&[3u8]); w.join_into(&rz) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(dangling.val_count(), 2);
+        assert_eq!(dangling.get_val_at(&[3u8, 0, 0, 0]), Some(&7));
+        assert_eq!(dangling.get_val_at(&[3u8, 0, 1]), Some(&8));
+
+        //Into a non-empty map, which already worked
+        let mut nonempty = PathMap::<u64>::new();
+        nonempty.insert(&[9u8], 5);
+        let st = { let mut w = nonempty.write_zipper(); w.join_into(&rz) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(nonempty.val_count(), 3);
+    }
 }
