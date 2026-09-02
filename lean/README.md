@@ -288,6 +288,29 @@ blocks on the first call (measured: a 50ms budget returned "finished" after
 respawning a child that stops answering — which it must handle anyway, since no
 in-process timeout saves a child that has died outright.
 
+### From a failing input to a reproducer
+
+A divergence arrives as a `.bin` and a trace diff, which still leaves the repro
+to be written by hand -- and the interesting ones are forty operations into a
+trie built by forty earlier ones.  `--repro` turns the input back into a
+standalone Rust program that uses only the public `pathmap` API:
+
+```bash
+cargo run --release -p differential --bin pathmap_trace -- --repro FILE            # whole program
+cargo run --release -p differential --bin pathmap_trace -- --repro --upto 15 FILE  # through step 14
+```
+
+`--upto N` stops after N operations, so a trace line `14 to_next_val ...` is
+reproduced by `--upto 15`.  Shrink first (`shrink.py`) and the result is usually
+a handful of calls, ready to paste into `differential/src/bin/zipper_bug_repros.rs`.
+
+The generator decodes the same bytes in the same order as the op table,
+including the operands consumed only to keep the stream aligned, so it is worth
+compiling and running rather than trusting: a generated repro that has drifted
+from the op table will not reproduce.  Both checks are done -- the repro for an
+input that panics the crate reproduces the same panic, and for inputs that do
+not, the maps it ends with match the trace's `MAP0`/`MAP1`.
+
 ### Deliberately skipped operations
 
 A handful of argument combinations are skipped by both sides, each because the

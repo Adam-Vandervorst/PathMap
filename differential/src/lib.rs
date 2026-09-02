@@ -6,12 +6,15 @@
 //!   zippers, runs it, and renders the trace.  Its wire format and operation
 //!   table are a contract shared with `lean/PathMapModel/Fuzz.lean`.
 //! * [`server`] is the resident-process protocol the driver speaks.
+//! * [`repro`] turns an input back into standalone `pathmap` calls.
 //! * [`act`] is the `ArenaCompactTree` read source behind `act_trace`.
 
 pub mod act;
 pub mod harness;
+pub mod repro;
 pub mod server;
 
 pub use act::*;
 pub use harness::*;
+pub use repro::*;
 pub use server::*;

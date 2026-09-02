@@ -16,7 +16,21 @@ fn main() {
         serve(check, run);
         return;
     }
-    let file = args.iter().find(|a| !a.starts_with("--")).cloned();
+    // `--repro [--upto N] FILE` prints a standalone Rust program for the input
+    // instead of a trace.  `N` is the step to stop after; the divergent step from
+    // a trace line `N <op> ...` is reproduced by `--upto N+1`.
+    let repro = args.iter().any(|a| a == "--repro");
+    let upto = args
+        .iter()
+        .position(|a| a == "--upto")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(MAX_STEPS);
+    let file = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .find(|a| a.parse::<usize>().is_err())
+        .cloned();
     let bytes: Vec<u8> = match file {
         Some(p) => std::fs::read(p).expect("cannot read input"),
         None => {
@@ -26,6 +40,10 @@ fn main() {
             v
         }
     };
-    print!("{}", run(&bytes, check));
+    if repro {
+        print!("{}", emit_repro(&bytes, upto));
+    } else {
+        print!("{}", run(&bytes, check));
+    }
 }
 
