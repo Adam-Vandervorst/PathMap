@@ -2798,7 +2798,9 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         // - Case 1 (Empty, Empty)
         //   Run only `finalize_f` on default `Acc`
         // - Case 2 (Child, Empty)
-        //   Recursively call on child, then run only `collapse_f` on the result, specifying the path
+        //   Recursively call on child, then run only `collapse_f` on the result, specifying the path.
+        //   When a value was passed in at the first byte of that path, split out that byte as a
+        //   value-bearing branch before collapsing the remaining run.
         // - Case 3 (Child, Val), 1-byte key, same key byte
         //   Recursively call on child, then run only `collapse_f` on the result, specifying the value and the 1-byte path
         // - Case 4 (Child, Val), different key bytes
@@ -2829,7 +2831,15 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                 let child_node = unsafe{ self.child_in_slot::<0>() };
                 let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
                 let path = unsafe{ self.key_unchecked::<0>() };
-                summarize!(passed_in_val, Some(child_w), path)
+                if passed_in_val.is_none() {
+                    summarize!(None, Some(child_w), path)
+                } else {
+                    let child_w = summarize!(None, Some(child_w), &path[1..])?;
+                    let mask = ByteMask::from(path[0]);
+                    let mut acc = start_f(&mask)?;
+                    fold_child_f(&mask, child_w, &mut acc)?;
+                    finalize_f(&mask, passed_in_val, Some(acc), &[])
+                }
             },
             //(Child, Val) = (1 << 3) + (1 << 2) + (1 << 1)
             14 => {

@@ -2181,6 +2181,8 @@ pub(crate) mod cached_catamorphism_tests {
             vec![b"a1".to_vec(), b"a2".to_vec(), b"b1".to_vec(), b"b2".to_vec()],
             vec![b"a".to_vec(), b"ab1".to_vec(), b"ab2".to_vec()],
             vec![b"".to_vec(), b"q1".to_vec(), b"q2".to_vec()],
+            // A value mid-run with both a deeper child and a sibling branch.
+            vec![b"accab".to_vec(), b"ac".to_vec(), b"accac".to_vec(), b"abacc".to_vec()],
         ];
 
         for tail_len in 1..=4 {
