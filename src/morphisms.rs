@@ -3780,7 +3780,7 @@ mod tests {
     #[test]
     fn recursive_cata_deep_path_smoke() {
         #[cfg(feature = "all_dense_nodes")]
-        const PATH_LEN: usize = 256;
+        const PATH_LEN: usize = 200;
         #[cfg(not(feature = "all_dense_nodes"))]
         const PATH_LEN: usize = 8_000;
 

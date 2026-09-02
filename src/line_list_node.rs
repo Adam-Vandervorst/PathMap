@@ -2882,7 +2882,15 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             8 | 9 => {
                 let val = unsafe { self.val_in_slot::<0>() };
                 let path = unsafe{ self.key_unchecked::<0>() };
-                summarize!(passed_in_val, Some(summarize!(Some(val), None, path)?), &[])
+                if passed_in_val.is_none() {
+                    summarize!(None, Some(summarize!(Some(val), None, path)?), &[])
+                } else {
+                    let child_w = summarize!(Some(val), None, &path[1..])?;
+                    let mask = ByteMask::from(path[0]);
+                    let mut acc = start_f(&mask)?;
+                    fold_child_f(&mask, child_w, &mut acc)?;
+                    finalize_f(&mask, passed_in_val, Some(acc), &[])
+                }
             },
             //(Val, Val) = (1 << 3) + (1 << 2)
             12 => {
