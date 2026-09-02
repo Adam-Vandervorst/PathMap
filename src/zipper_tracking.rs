@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use crate::PathMap;
-use crate::zipper::{ReadZipperUntracked, Zipper, ZipperAbsolutePath, ZipperForking, ZipperMoving, ZipperReadOnlyValues, ZipperWriting, ZipperIteration, ZipperReadOnlyIteration, };
+use crate::zipper::{ReadZipperUntracked, Zipper, ZipperAbsolutePath, ZipperForking, ZipperMoving, ZipperPath, ZipperReadOnlyValues, ZipperWriting, ZipperIteration, ZipperReadOnlyIteration, };
 
 /// Marker to track an outstanding read zipper
 pub struct TrackingRead;
@@ -135,7 +135,7 @@ impl Conflict {
             /* at this point zipper is either focued on the given path (when it exists)
             , or the procedure broke out early, because it was determined that the path does not exist */
             {
-                if zipper.path().len() == path.len() {
+                if zipper.depth() == path.len() {
                     let mut subtree = zipper.fork_read_zipper();
                     match subtree.to_next_val() {
                         false => Ok(()),
@@ -157,7 +157,7 @@ impl Conflict {
         let mut zipper = all_paths.read_zipper();
         match Conflict::check_for_lock_along_path(path, &mut zipper) {
             None => {
-                if zipper.path().len() == path.len() {
+                if zipper.depth() == path.len() {
                     let mut subtree = zipper.fork_read_zipper();
                     match subtree.to_next_get_val() {
                         None => Ok(()),

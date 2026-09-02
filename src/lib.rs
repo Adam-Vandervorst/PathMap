@@ -114,6 +114,9 @@ pub mod random;
 #[cfg(feature = "counters")]
 pub mod counters;
 
+/// Feature for code instrumentation and optimization
+pub mod timed_span;
+
 /// Shims to allow the use of a custom [`Allocator`](std::alloc::Allocator) type, if running with the `nightly` feature.  Does nothing otherwise
 pub mod alloc;
 
@@ -131,6 +134,7 @@ mod empty_zipper;
 mod prefix_zipper;
 mod overlay_zipper;
 mod dependent_zipper;
+mod path_tracker;
 mod trie_ref;
 mod dense_byte_node;
 pub(crate) mod line_list_node;

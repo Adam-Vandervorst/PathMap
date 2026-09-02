@@ -13,6 +13,7 @@ use crate::zipper::{
   ZipperReadOnlyConditionalIteration,
   ZipperWriting,
   ZipperIteration,
+  ZipperPath,
   ZipperValues,
 };
 
@@ -48,7 +49,7 @@ pub struct DeserializationStats {
 pub fn serialize_paths<'a, V, W, RZ>(rz: RZ, target: &mut W) -> std::io::Result<SerializationStats>
   where
     V: TrieValue,
-    RZ: ZipperReadOnlyConditionalIteration<'a, V>,
+    RZ: ZipperReadOnlyConditionalIteration<'a, V> + ZipperPath,
     W: std::io::Write
 {
   serialize_paths_with_auxdata(rz, target, |_, _, _| {})
@@ -58,7 +59,7 @@ pub fn serialize_paths<'a, V, W, RZ>(rz: RZ, target: &mut W) -> std::io::Result<
 ///
 /// The `fv` closure is called for each path, permitting values to be serialized separately
 /// and associated with path indices
-pub fn serialize_paths_with_auxdata<'a, V : TrieValue, RZ : ZipperValues<V> + ZipperIteration, W: std::io::Write, F: FnMut(usize, &[u8], &V) -> ()>(mut rz: RZ, target: &mut W, mut fv: F) -> std::io::Result<SerializationStats> {
+pub fn serialize_paths_with_auxdata<'a, V : TrieValue, RZ : ZipperValues<V> + ZipperIteration + ZipperPath, W: std::io::Write, F: FnMut(usize, &[u8], &V) -> ()>(mut rz: RZ, target: &mut W, mut fv: F) -> std::io::Result<SerializationStats> {
   let mut k = 0;
   //GOAT, old implementation.  Delete.
   // serialize_paths_from_func(target, &mut rz, |rz| {
@@ -278,7 +279,7 @@ pub fn for_each_deserialized_path<R: std::io::Read, F: FnMut(usize, &[u8]) -> st
 
 #[cfg(test)]
 mod test {
-  use crate::zipper::{ZipperIteration, ZipperValues, ZipperMoving};
+  use crate::zipper::{ZipperIteration, ZipperValues};
   use super::*;
 
   #[cfg(not(miri))] // miri really hates the zlib-ng-sys C API

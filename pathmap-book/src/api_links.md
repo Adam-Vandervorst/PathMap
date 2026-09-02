@@ -17,6 +17,7 @@
 [`WriteZipperOwned`]: https://docs.rs/pathmap/latest/pathmap/zipper/struct.WriteZipperOwned.html
 [`WriteZipperUntracked`]: https://docs.rs/pathmap/latest/pathmap/zipper/struct.WriteZipperUntracked.html
 [`Zipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.Zipper.html
+[`ZipperPath`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPath.html
 [`ZipperAbsolutePath`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperAbsolutePath.html
 [`ZipperConcrete`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperConcrete.html
 [`ZipperForking`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperForking.html
@@ -46,6 +47,7 @@
 [`TrieRef`]: https://docs.rs/pathmap/latest/pathmap/zipper/enum.TrieRef.html
 [`WriteZipperOwned`]: https://docs.rs/pathmap/latest/pathmap/zipper/struct.WriteZipperOwned.html
 [`WriteZipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/struct.WriteZipperUntracked.html
+[`ZipperPath`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPath.html
 [`ZipperAbsolutePath`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperAbsolutePath.html
 [`ZipperConcrete`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperConcrete.html
 [`ZipperForking`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperForking.html
@@ -97,12 +99,12 @@
 [`make_map`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperSubtries.html#tymethod.make_map
 [`meet_2`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.meet_2
 [`meet_into`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.meet_into
-[`move_to_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.move_to_path
+[`move_to_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPath.html#tymethod.move_to_path
 [`origin_path_assert_len`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPathBuffer.html#tymethod.origin_path_assert_len
 [`origin_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperAbsolutePath.html#tymethod.origin_path
 [`path_exists_at`]: https://docs.rs/pathmap/latest/pathmap/struct.PathMap.html#method.path_exists_at
 [`path_exists`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.Zipper.html#tymethod.path_exists
-[`path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.path
+[`path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPath.html#tymethod.path
 [`prepare_buffers`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPathBuffer.html#tymethod.prepare_buffers
 [`prune_ascend`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.prune_ascend
 [`prune_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.prune_path

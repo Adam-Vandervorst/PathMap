@@ -34,7 +34,7 @@ pub fn serialize_fork<V : TrieValue, RZ : CatamorphismSideEffecting<V>, F: FnMut
 }
 
 /// WIP
-pub fn deserialize_fork<V: TrieValue + 'static, A: Allocator, WZ : ZipperWriting<V, A> + zipper::ZipperMoving, F: Fn(usize, &[u8]) -> V>(node: usize, wz: &mut WZ, source: &[u8], fv: F) -> std::io::Result<usize> {
+pub fn deserialize_fork<V: TrieValue + 'static, A: Allocator, WZ : ZipperWriting<V, A> + zipper::ZipperMoving + zipper::ZipperPath, F: Fn(usize, &[u8]) -> V>(node: usize, wz: &mut WZ, source: &[u8], fv: F) -> std::io::Result<usize> {
     unsafe {
     // let mut recovered = 0;
     new_map_from_ana_jumping(wz, node, |n: usize, path: &[u8]| {

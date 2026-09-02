@@ -32,9 +32,10 @@ impl Zipper for EmptyZipper {
 }
 
 impl ZipperMoving for EmptyZipper {
-    fn at_root(&self) -> bool { self.path.len() == self.path_start_idx }
+    #[inline] fn depth(&self) -> usize { self.path.len() - self.path_start_idx }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.truncate(self.path_start_idx) }
-    fn path(&self) -> &[u8] { &self.path[self.path_start_idx..] }
     fn val_count(&self) -> usize { 0 }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         self.path.extend_from_slice(k.as_ref());
@@ -42,17 +43,14 @@ impl ZipperMoving for EmptyZipper {
     fn descend_to_byte(&mut self, k: u8) {
         self.path.push(k);
     }
-    fn descend_indexed_byte(&mut self, _idx: usize) -> bool { false }
-    fn descend_first_byte(&mut self) -> bool { false }
-    fn descend_until(&mut self) -> bool { false }
-    fn ascend(&mut self, steps: usize) -> bool {
-        if steps > self.path.len() - self.path_start_idx {
-            self.reset();
-            false
-        } else {
-            self.path.truncate(self.path.len() - self.path_start_idx - steps);
-            true
-        }
+    fn descend_indexed_byte(&mut self, _idx: usize) -> Option<u8> { None }
+    fn descend_first_byte(&mut self) -> Option<u8> { None }
+    fn descend_until_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
+    fn ascend(&mut self, steps: usize) -> usize {
+        let available = self.path.len() - self.path_start_idx;
+        let ascended = steps.min(available);
+        self.path.truncate(self.path.len() - ascended);
+        ascended
     }
     fn ascend_byte(&mut self) -> bool {
         if self.path.len() > self.path_start_idx {
@@ -62,19 +60,20 @@ impl ZipperMoving for EmptyZipper {
             false
         }
     }
-    fn ascend_until(&mut self) -> bool {
-        if self.at_root() {
-            false
-        } else {
-            self.reset();
-            true
-        }
+    fn ascend_until(&mut self) -> usize {
+        let ascended = self.path.len() - self.path_start_idx;
+        self.reset();
+        ascended
     }
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         self.ascend_until()
     }
-    fn to_next_sibling_byte(&mut self) -> bool { false }
-    fn to_prev_sibling_byte(&mut self) -> bool { false }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { None }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { None }
+}
+
+impl ZipperPath for EmptyZipper {
+    fn path(&self) -> &[u8] { &self.path[self.path_start_idx..] }
 }
 
 impl ZipperAbsolutePath for EmptyZipper {
@@ -83,9 +82,10 @@ impl ZipperAbsolutePath for EmptyZipper {
 }
 
 impl ZipperIteration for EmptyZipper {
-    fn to_next_val(&mut self) -> bool { false }
-    fn descend_first_k_path(&mut self, _k: usize) -> bool { false }
-    fn to_next_k_path(&mut self, _k: usize) -> bool { false }
+    fn to_next_val_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
+    fn descend_last_path_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
+    fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, _k: usize, _obs: &mut Obs) -> bool { false }
+    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, _k: usize, _obs: &mut Obs) -> bool { false }
 }
 
 impl<V> ZipperValues<V> for EmptyZipper {
@@ -110,11 +110,11 @@ impl<'a, V: Clone + Send + Sync> ZipperReadOnlyConditionalValues<'a, V> for Empt
 }
 
 impl<'a, V: Clone + Send + Sync> ZipperReadOnlyIteration<'a, V> for EmptyZipper {
-    fn to_next_get_val(&mut self) -> Option<&'a V> { None }
+    fn to_next_get_val_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> Option<&'a V> { None }
 }
 
 impl<'a, V: Clone + Send + Sync> ZipperReadOnlyConditionalIteration<'a, V> for EmptyZipper {
-    fn to_next_get_val_with_witness<'w>(&mut self, _witness: &'w Self::WitnessT) -> Option<&'w V> where 'a: 'w { None }
+    fn to_next_get_val_with_witness_observed<'w, Obs: PathObserver>(&mut self, _witness: &'w Self::WitnessT, _obs: &mut Obs) -> Option<&'w V> where 'a: 'w { None }
 }
 
 impl ZipperPathBuffer for EmptyZipper {

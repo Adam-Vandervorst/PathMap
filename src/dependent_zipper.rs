@@ -32,7 +32,7 @@ pub struct DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
 impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving,
+        PrimaryZ: ZipperMoving + ZipperPath,
         SecondaryZ: ZipperMoving,
 {
     /// Creates a new `DependentProductZipperG` from the provided enroll function
@@ -63,7 +63,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     fn factor_idx(&self, truncate_up: bool) -> Option<usize> {
         debug_assert_eq!(self.factor_paths.len(), self.secondary.len(),
             "factor_paths and secondary must stay in step");
-        let len = self.path().len();
+        let len = self.depth();
         let mut factor = self.factor_paths.len().checked_sub(1)?;
         while truncate_up && self.factor_paths[factor] == len {
             factor = factor.checked_sub(1)?;
@@ -77,7 +77,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     /// The returned slice will have a length of [`focus_factor`](Self::focus_factor), so the factor
     /// containing the current focus has will not be included.
     ///
-    /// Indices will be offsets into the buffer returned by [path](ZipperMoving::path).  To get an offset into
+    /// Indices will be offsets into the buffer returned by [path](ZipperPath::path).  To get an offset into
     /// [origin_path](ZipperAbsolutePath::origin_path), add the length of the prefix path from
     /// [root_prefix_path](ZipperAbsolutePath::root_prefix_path).
     pub fn path_indices(&self) -> &[usize] {
@@ -96,7 +96,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// Remove top factors if they are at root
     fn exit_factors(&mut self) -> bool {
-        let len = self.path().len();
+        let len = self.depth();
         let mut exited = false;
         while self.factor_paths.last() == Some(&len) {
             self.factor_paths.pop();
@@ -108,7 +108,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// Enter factors at current location if we're on the end of the factor's path
     fn enter_factors(&mut self) -> bool {
-        let len = self.path().len();
+        let len = self.depth();
         // enter the next factor if we can
         let mut entered = false;
         if self.is_path_end() {
@@ -126,8 +126,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// A combination between `ascend_until` and `ascend_until_branch`.
     /// if `allow_stop_on_val` is `true`, behaves as `ascend_until`
-    fn ascend_cond(&mut self, allow_stop_on_val: bool) -> bool {
-        let mut plen = self.path().len();
+    fn ascend_cond(&mut self, allow_stop_on_val: bool) -> usize {
+        let mut plen = self.depth();
+        let mut ascended = 0;
         loop {
             while self.factor_paths.last() == Some(&plen) {
                 self.factor_paths.pop();
@@ -135,20 +136,21 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             }
             if let Some(idx) = self.factor_idx(false) {
                 let zipper = &mut self.secondary[idx];
-                let before = zipper.path().len();
-                let rv = if allow_stop_on_val {
+                //The inner zipper reports how far it moved, so the primary can be brought along
+                //without measuring its path before and after
+                let delta = if allow_stop_on_val {
                     zipper.ascend_until()
                 } else {
                     zipper.ascend_until_branch()
                 };
-                let delta = before - zipper.path().len();
                 plen -= delta;
                 self.primary.ascend(delta);
-                if rv && (self.child_count() != 1 || (allow_stop_on_val && self.is_val())) {
-                    return true;
+                ascended += delta;
+                if delta > 0 && (self.child_count() != 1 || (allow_stop_on_val && self.is_val())) {
+                    return ascended;
                 }
             } else {
-                return if allow_stop_on_val {
+                return ascended + if allow_stop_on_val {
                     self.primary.ascend_until()
                 } else {
                     self.primary.ascend_until_branch()
@@ -158,11 +160,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     }
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
-    fn to_sibling_byte(&mut self, next: bool) -> bool {
-        let Some(&byte) = self.path().last() else {
-            return false;
-        };
-        assert!(self.ascend(1), "must ascend");
+    fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        let byte = self.focus_byte()?;
+        let ascended = self.ascend(1);
+        debug_assert_eq!(ascended, 1, "must ascend");
         let child_mask = self.child_mask();
         let Some(sibling_byte) = (if next {
             child_mask.next_bit(byte)
@@ -170,10 +171,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             child_mask.prev_bit(byte)
         }) else {
             self.descend_to_byte(byte);
-            return false;
+            return None;
         };
         self.descend_to_byte(sibling_byte);
-        true
+        Some(sibling_byte)
     }
 }
 
@@ -192,7 +193,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperConcrete,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperConcrete,
         SecondaryZ: ZipperMoving + ZipperConcrete,
 {
     fn shared_node_id(&self) -> Option<u64> {
@@ -215,7 +216,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperPathBuffer,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
         SecondaryZ: ZipperMoving + ZipperPathBuffer,
 {
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.origin_path_assert_len(len) } }
@@ -227,7 +228,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperValues<V>,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperValues<V>,
         SecondaryZ: ZipperMoving + ZipperValues<V>,
 {
     fn val(&self) -> Option<&V> {
@@ -250,7 +251,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperReadOnlyValues<'trie, V>,
         SecondaryZ: ZipperMoving + ZipperReadOnlyValues<'trie, V>,
 {
     fn get_val(&self) -> Option<&'trie V> {
@@ -273,7 +274,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperReadOnlyConditionalValues<'trie, V>,
         SecondaryZ: ZipperMoving + ZipperReadOnlyConditionalValues<'trie, V>,
 {
     type WitnessT = (PrimaryZ::WitnessT, Vec<SecondaryZ::WitnessT>);
@@ -294,7 +295,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> Zipper for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + Zipper,
+        PrimaryZ: ZipperMoving + ZipperPath + Zipper,
         SecondaryZ: ZipperMoving + Zipper,
 {
     fn path_exists(&self) -> bool {
@@ -330,20 +331,21 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperMoving for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving,
+        PrimaryZ: ZipperMoving + ZipperPath,
         SecondaryZ: ZipperMoving,
 {
-    fn at_root(&self) -> bool {
-        self.path().is_empty()
+    #[inline]
+    fn depth(&self) -> usize {
+        self.primary.depth()
+    }
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> {
+        self.primary.focus_byte()
     }
     fn reset(&mut self) {
         self.factor_paths.clear();
         self.secondary.clear();
         self.primary.reset();
-    }
-    #[inline]
-    fn path(&self) -> &[u8] {
-        self.primary.path()
     }
     fn val_count(&self) -> usize {
         unimplemented!("method will probably get removed")
@@ -386,33 +388,28 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     fn descend_to_byte(&mut self, k: u8) {
         self.descend_to([k])
     }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool {
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> {
         let mask = self.child_mask();
-        let Some(byte) = mask.indexed_bit::<true>(child_idx) else {
-            return false;
-        };
+        let byte = mask.indexed_bit::<true>(child_idx)?;
         self.descend_to_byte(byte);
-        true
+        Some(byte)
     }
     #[inline]
-    fn descend_first_byte(&mut self) -> bool {
+    fn descend_first_byte(&mut self) -> Option<u8> {
         self.descend_indexed_byte(0)
     }
-    fn descend_until(&mut self) -> bool {
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         let mut moved = false;
         self.enter_factors();
         while self.child_count() == 1 {
             moved |= if let Some(idx) = self.factor_idx(false) {
+                //The primary carries the whole product path, so it has to follow whatever the
+                //secondary descends.  Mirroring the movement keeps it in step without buffering
+                //the bytes.
                 let zipper = &mut self.secondary[idx];
-                let before = zipper.path().len();
-                let rv = zipper.descend_until();
-                let path = zipper.path();
-                if path.len() > before {
-                    self.primary.descend_to(&path[before..]);
-                }
-                rv
+                zipper.descend_until_observed(&mut (MirrorPathObserver(&mut self.primary), &mut *obs))
             } else {
-                self.primary.descend_until()
+                self.primary.descend_until_observed(&mut *obs)
             };
             self.enter_factors();
             if self.is_val() {
@@ -422,39 +419,52 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         moved
     }
     #[inline]
-    fn to_next_sibling_byte(&mut self) -> bool {
+    fn to_next_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(true)
     }
     #[inline]
-    fn to_prev_sibling_byte(&mut self) -> bool {
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         self.to_sibling_byte(false)
     }
-    fn ascend(&mut self, mut steps: usize) -> bool {
-        while steps > 0 {
+    fn ascend(&mut self, steps: usize) -> usize {
+        let mut remaining = steps;
+        while remaining > 0 {
             self.exit_factors();
             if let Some(idx) = self.factor_idx(false) {
-                let len = self.path().len() - self.factor_paths[idx];
-                let delta = len.min(steps);
+                let len = self.depth() - self.factor_paths[idx];
+                let delta = len.min(remaining);
                 self.secondary[idx].ascend(delta);
                 self.primary.ascend(delta);
-                steps -= delta;
+                remaining -= delta;
             } else {
-                return self.primary.ascend(steps);
+                return (steps - remaining) + self.primary.ascend(remaining);
             }
         }
-        true
+        steps
     }
     #[inline]
     fn ascend_byte(&mut self) -> bool {
-        self.ascend(1)
+        self.ascend(1) == 1
     }
     #[inline]
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         self.ascend_cond(true)
     }
     #[inline]
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         self.ascend_cond(false)
+    }
+}
+
+impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperPath for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
+    where
+        V: Clone + Send + Sync,
+        PrimaryZ: ZipperMoving + ZipperPath,
+        SecondaryZ: ZipperMoving,
+{
+    #[inline]
+    fn path(&self) -> &[u8] {
+        self.primary.path()
     }
 }
 
@@ -462,14 +472,15 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperIteration,
+        //The `enroll` closure receives the path traversed so far, which comes from the primary
+        PrimaryZ: ZipperIteration + ZipperPath,
         SecondaryZ: ZipperIteration,
 { } //Use the default impl for all methods
 
 impl<'trie, PrimaryZ, SecondaryZ, V: Clone + Send + Sync + Unpin, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperSubtries<V, GlobalAlloc> for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
         V: Clone + Send + Sync,
-        PrimaryZ: ZipperMoving + ZipperValues<V>,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperValues<V>,
         SecondaryZ: ZipperMoving + ZipperValues<V>,
 {
     fn native_subtries(&self) -> bool { false }
@@ -494,7 +505,9 @@ mod tests {
         });
 
         let mut full = String::new();
-        while dpz.to_next_val() {
+        let mut observed = Vec::<u8>::new();
+        while dpz.to_next_val_observed(&mut observed) {
+            assert_eq!(&observed[..], dpz.path());
             if dpz.child_count() == 0 {
                 full.push_str(std::str::from_utf8(dpz.path()).unwrap());
                 full.push('\n');
@@ -525,7 +538,9 @@ rubicundus.postfix
         });
 
         let mut full = String::new();
-        while dpz.to_next_val() {
+        let mut observed = Vec::<u8>::new();
+        while dpz.to_next_val_observed(&mut observed) {
+            assert_eq!(&observed[..], dpz.path());
             if dpz.child_count() == 0 {
                 full.push_str(std::str::from_utf8(dpz.path()).unwrap());
                 full.push('\n');

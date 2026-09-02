@@ -1,13 +1,13 @@
 use std::io::Read;
 use std::usize;
 use pathmap::PathMap;
-use pathmap::zipper::{Zipper, ZipperValues, ZipperMoving, ZipperWriting, ZipperCreation};
+use pathmap::zipper::{Zipper, ZipperValues, ZipperMoving, ZipperPath, ZipperWriting, ZipperCreation};
 use num::BigInt;
 use divan::{Divan, Bencher, black_box};
 
 const MAX_OFFSET: u8 = 10;
 
-fn drop_symbol_head_byte<Z: ZipperWriting<usize> + Zipper + ZipperMoving>(loc: &mut Z) {
+fn drop_symbol_head_byte<Z: ZipperWriting<usize> + Zipper + ZipperMoving + ZipperPath>(loc: &mut Z) {
   let mut it = loc.child_mask().iter();
 
   let p = loc.path().to_vec();
@@ -15,7 +15,7 @@ fn drop_symbol_head_byte<Z: ZipperWriting<usize> + Zipper + ZipperMoving>(loc: &
     if b == 0 { continue }
     loc.descend_to_existing_byte(b);
     loc.join_k_path_into(b as usize, true);
-    assert!(loc.ascend(1));
+    assert_eq!(loc.ascend(1), 1);
   }
   loc.reset();
   loc.descend_to(&p[..]);
