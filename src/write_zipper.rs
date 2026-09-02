@@ -1505,61 +1505,61 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
-        match child_mask.count_bits() {
-            0 => {
-                if remove_unset {
-                    self.remove_branches(false);
-                }
-            }
+        //Only the branches the source actually has are grafted.  The masked bits it lacks "will
+        // be non-existent in `self`" (doc comment above), so they are removed here first, for
+        // every arm alike.  The one- and two-bit arms used to descend to each masked byte and
+        // graft whatever the source had there, which for an absent branch meant removing the
+        // branches at a location that need not exist -- and left a dangling child behind --
+        // while the arm below removed the same branch outright.
+        let src_mask = src.child_mask() & child_mask;
+        let absent = child_mask & src_mask.not();
+        if remove_unset {
+            self.remove_branches(false);
+        } else if absent.count_bits() > 0 {
+            self.remove_unmasked_branches(absent.not(), false);
+        }
+        match src_mask.count_bits() {
+            0 => {}
             1 => {
-                if remove_unset {
-                    self.remove_branches(false);
-                }
-
-                let byte = child_mask.indexed_bit::<true>(0).expect("one bit set");
+                let byte = src_mask.indexed_bit::<true>(0).expect("one bit set");
                 self.descend_to_byte(byte);
                 self.graft_src_at(src, &[byte]);
                 self.ascend_byte();
             }
             2 => {
-                if remove_unset {
-                    self.remove_branches(false);
-                }
-
-                let first_byte = child_mask.indexed_bit::<true>(0).expect("some bit set");
+                let first_byte = src_mask.indexed_bit::<true>(0).expect("some bit set");
                 self.descend_to_byte(first_byte);
                 self.graft_src_at(src, &[first_byte]);
                 self.ascend_byte();
 
-                let second_byte = child_mask.next_bit(first_byte).expect("two bits set");
+                let second_byte = src_mask.next_bit(first_byte).expect("two bits set");
                 self.descend_to_byte(second_byte);
                 self.graft_src_at(src, &[second_byte]);
                 self.ascend_byte();
             }
             _ => {
-                //A source with none of the masked branches has nothing to graft, and the set
-                // bits it lacks must end up absent here (see the doc comment).  This used to
-                // fall through to the merge below and split the focus first, which unwraps a
-                // node that does not exist when the focus is a dangling tip or an empty root.
+                let child_mask = src_mask;
                 let src_focus = src.get_focus();
-                let src_has_branches = src_focus.try_as_tagged().map(|n| {
-                    //A TinyRefNode answers no structural queries; ask its full form instead
-                    let mask = match n {
-                        TaggedNodeRef::TinyRefNode(tiny) => tiny.into_full()
-                            .map(|full| full.node_branches_mask(&[]))
-                            .unwrap_or(ByteMask::EMPTY),
-                        _ => n.node_branches_mask(&[]),
-                    };
-                    (mask & child_mask).count_bits() > 0
-                }).unwrap_or(false);
-                match src_focus.try_as_tagged().filter(|_| src_has_branches) {
+                match src_focus.try_as_tagged() {
                     Some(src_tagged) => {
-                        // Split the focus if we're in the middle of another node
+                        // Split the focus if we're in the middle of another node.  A focus that
+                        // is a dangling stub (an empty child node, which `get_child_mut` declines
+                        // to hand out) has no node to merge into even after the split, so the
+                        // branches are merged into a fresh node that is grafted in afterwards.
+                        // This used to unwrap the missing node.
+                        let mut fresh_node: Option<TrieNodeODRc<V, A>> = None;
                         let self_focus_node = match self.try_borrow_focus_mut() {
                             Some(node) => node,
                             None => {
                                 self.split_at_focus();
-                                self.try_borrow_focus_mut().unwrap()
+                                match self.try_borrow_focus_mut() {
+                                    Some(node) => node,
+                                    None => {
+                                        let alloc = self.alloc.clone();
+                                        fresh_node.insert(TrieNodeODRc::new_in(
+                                            crate::dense_byte_node::DenseByteNode::<V, A>::new_in(alloc.clone()), alloc))
+                                    }
+                                }
                             }
                         };
                         match src_tagged {
@@ -1604,6 +1604,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                                     self.remove_unmasked_branches(child_mask.not(), false);
                                 }
                             },
+                        }
+                        if let Some(node) = fresh_node {
+                            if !node.as_tagged().node_is_empty() {
+                                self.graft_internal(Some(node));
+                            }
                         }
                     },
                     None => {
