@@ -674,14 +674,16 @@ impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> 
         SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
     {
         let focus = self.get_focus();
-        let w = match focus.0.borrow() {
-            Some(node) => {
-                let mut cache = HashMap::new();
-                recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
-            },
-            None => summarize_f(&ByteMask::EMPTY, None, None, &[]),
+        let mut cache = HashMap::new();
+        let w = if let Some(node) = focus.0.borrow() {
+            recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)?
+        } else {
+            match focus.into_option() {
+                Some(node) => recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(&node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)?,
+                None => return summarize_f(&ByteMask::EMPTY, None, None, &[]),
+            }
         };
-        w
+        Ok(w)
     }
 }
 
