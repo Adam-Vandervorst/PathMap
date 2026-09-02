@@ -444,6 +444,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPath fo
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperTracked<'a, 'path, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
@@ -609,6 +610,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPath fo
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperUntracked<'a, 'path, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
@@ -1132,6 +1134,16 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperAbsolut
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperCore<'a, 'path, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        let start = self.key.origin_path.len();
+        if self.key.prefix_buf.capacity() > 0 {
+            assert!(len <= self.key.prefix_buf.capacity() - start);
+            unsafe{ core::slice::from_raw_parts(self.key.prefix_buf.as_ptr().add(start), len) }
+        } else {
+            assert_eq!(len, 0);
+            &[]
+        }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         if self.key.prefix_buf.capacity() > 0 {
             assert!(len <= self.key.prefix_buf.capacity());

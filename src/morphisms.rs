@@ -665,7 +665,7 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
     }
 }
 
-impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer + ZipperInfallibleSubtries<V, A> {
+impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperInfallibleSubtries<V, A> {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         W: Clone,
@@ -687,7 +687,7 @@ impl<'a, Z, V: Clone + Send + Sync + 'a, A: Allocator> CatamorphismCached<V, A> 
     }
 }
 
-impl<'a, Z, V: 'a, A: Allocator> CatamorphismCachedIterative<V, A> for Z where Z: Clone + Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer {
+impl<'a, Z, V: 'a, A: Allocator> CatamorphismCachedIterative<V, A> for Z where Z: Clone + Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer {
     fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
     where
         W: Clone,
@@ -1116,7 +1116,7 @@ fn summarize_ascend_to_fork<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, Summar
     summarize_f: SummarizeF,
 ) -> Result<W, E>
 where
-    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperPathBuffer,
     NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
     SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,
@@ -1125,19 +1125,23 @@ where
     let mut child_mask = ByteMask::from(zipper.child_mask());
 
     loop {
-        let old_path_len = zipper.origin_path().len();
+        let old_depth = zipper.depth();
         let old_value = zipper.get_val_with_witness(&witness);
         let ascended = zipper.ascend_until();
         debug_assert!(ascended > 0);
+        let depth = zipper.depth();
+        debug_assert_eq!(old_depth - depth, ascended);
 
-        let origin_path = unsafe { zipper.origin_path_assert_len(old_path_len) };
+        // SAFETY: `ascend_until` only shortens the logical path; the bytes it removed remain
+        // initialized in the zipper's prepared path buffer until the next zipper movement.
+        let path = unsafe { zipper.path_assert_len(old_depth) };
         let jump_len = if zipper.child_count() != 1 || zipper.is_val() {
-            old_path_len - (zipper.origin_path().len() + 1)
+            ascended - 1
         } else {
-            old_path_len - zipper.origin_path().len()
+            ascended
         };
         let prefix = if COMPUTE_PATH {
-            &origin_path[origin_path.len() - jump_len..]
+            &path[old_depth - jump_len..]
         } else {
             &[]
         };
@@ -1148,10 +1152,8 @@ where
             return Ok(w)
         }
 
-        // SAFETY: The path buffer still contains the path we just ascended through.
-        let byte = *unsafe { zipper.origin_path_assert_len(old_path_len - jump_len) }
-            .last()
-            .unwrap();
+        debug_assert!(old_depth > jump_len);
+        let byte = path[old_depth - jump_len - 1];
         child_mask = ByteMask::from(byte);
         let mut next_accumulator = new_acc_f(&child_mask)?;
         fold_child_f(&child_mask, w, &mut next_accumulator)?;
@@ -1171,7 +1173,7 @@ fn summarize_cached_body<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, Summarize
 ) -> Result<W, E>
 where
     W: Clone,
-    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer,
     NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
     SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,

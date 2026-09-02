@@ -1147,6 +1147,12 @@ pub trait ZipperConcrete {
 
 /// Provides more direct control over a [ZipperMoving] zipper's path buffer
 pub trait ZipperPathBuffer: ZipperMoving {
+    /// Internal method to get the relative path buffer, beyond its current logical length.
+    ///
+    /// Panics if `len` exceeds that buffer's capacity.  The returned bytes beyond [`ZipperPath::path`]
+    /// are only valid when the caller knows they were initialized by earlier zipper movement.
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8];
+
     /// Internal method to get the path, beyond its length.  Panics if `len` > the path's capacity, or
     /// if the zipper is relative and doesn't have an `origin_path`
     ///
@@ -1278,6 +1284,7 @@ macro_rules! zipper_impl_lens {
         #[inline] fn is_shared(&$s) -> bool { $e.is_shared() }
     };
     (ZipperPathBuffer $s: ident => $e:expr) => {
+        unsafe fn path_assert_len(&$s, len: usize) -> &[u8] { unsafe{ $e.path_assert_len(len) } }
         unsafe fn origin_path_assert_len(&$s, len: usize) -> &[u8] { unsafe{ $e.origin_path_assert_len(len) } }
         fn prepare_buffers(&mut $s) { $e.prepare_buffers() }
         fn reserve_buffers(&mut $s, path_len: usize, stack_depth: usize) { $e.reserve_buffers(path_len, stack_depth) }
@@ -2415,6 +2422,16 @@ pub(crate) mod read_zipper_core {
     }
 
     impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ReadZipperCore<'trie, '_, V, A> {
+        unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+            let start = self.origin_path.len();
+            if self.prefix_buf.capacity() > 0 {
+                assert!(len <= self.prefix_buf.capacity() - start);
+                unsafe{ core::slice::from_raw_parts(self.prefix_buf.as_ptr().add(start), len) }
+            } else {
+                assert_eq!(len, 0);
+                &[]
+            }
+        }
         unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
             if self.prefix_buf.capacity() > 0 {
                 assert!(len <= self.prefix_buf.capacity());

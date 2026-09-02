@@ -364,6 +364,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZip
 }
 
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ProductZipper<'_, 'trie, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
@@ -552,6 +553,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperPathBuffer
         PrimaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
         SecondaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
 {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.primary.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.primary.reserve_buffers(path_len, stack_depth) }

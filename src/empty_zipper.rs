@@ -118,6 +118,10 @@ impl<'a, V: Clone + Send + Sync> ZipperReadOnlyConditionalIteration<'a, V> for E
 }
 
 impl ZipperPathBuffer for EmptyZipper {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        assert!(len <= self.path.capacity() - self.path_start_idx);
+        unsafe{ core::slice::from_raw_parts(self.path.as_ptr().add(self.path_start_idx), len) }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         assert!(len <= self.path.capacity());
         unsafe{ core::slice::from_raw_parts(self.path.as_ptr(), len) }

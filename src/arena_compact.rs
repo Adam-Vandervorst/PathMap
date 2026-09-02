@@ -2518,6 +2518,10 @@ where Storage: AsRef<[u8]>
 impl<'tree, Storage, Value> ZipperPathBuffer for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        assert!(len <= self.path.capacity() - self.origin_depth);
+        unsafe{ core::slice::from_raw_parts(self.path.as_ptr().add(self.origin_depth), len) }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         // Safety: we're not creating a slice larger than capacity
         assert!(self.path.capacity() >= len);

@@ -296,6 +296,10 @@ impl<'prefix, 'source, Z, V> ZipperReadOnlyConditionalValues<'source, V>
 impl<'prefix, Z> ZipperPathBuffer for PrefixZipper<'prefix, Z>
     where Z: ZipperMoving
 {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        assert!(len <= self.path.capacity() - self.origin_depth);
+        unsafe{ core::slice::from_raw_parts(self.path.as_ptr().add(self.origin_depth), len) }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         assert!(self.path.capacity() >= len);
         unsafe{ core::slice::from_raw_parts(self.path.as_ptr(), len) }

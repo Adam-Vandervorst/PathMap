@@ -31,6 +31,10 @@ impl Zipper for FullZipper {
 }
 
 impl ZipperPathBuffer for FullZipper {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        assert!(len <= self.path.capacity());
+        unsafe{ core::slice::from_raw_parts(self.path.as_ptr(), len) }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         assert!(len <= self.path.capacity());
         unsafe{ core::slice::from_raw_parts(self.path.as_ptr(), len) }
