@@ -2928,15 +2928,16 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     summarize!(passed_in_val, Some(child_w), key0)
                 } else {
                     //Case 10 (Val, Child), different key bytes
-                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
-                    let path = &key1[1..];
                     let mask = ByteMask::from((key0_byte, key1_byte));
                     let mut acc = start_f(&mask)?;
-                    fold_child_f(&mask, summarize!(None, Some(child_w), path)?, &mut acc)?;
 
                     let val = unsafe { self.val_in_slot::<0>() };
                     let path = &key0[1..];
                     fold_child_f(&mask, summarize!(Some(val), None, path)?, &mut acc)?;
+
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                    let path = &key1[1..];
+                    fold_child_f(&mask, summarize!(None, Some(child_w), path)?, &mut acc)?;
 
                     finalize_f(&mask, passed_in_val, Some(acc), &[])
                 }
