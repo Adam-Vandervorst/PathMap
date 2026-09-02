@@ -3173,51 +3173,59 @@ where Storage: AsRef<[u8]>
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
     fn descend_first_k_path(&mut self, k: usize) -> bool {
         timed_span!(DescendFirstKPath, COUNTERS);
-        for ii in 0..k {
-            if !self.descend_first_byte() {
-                self.ascend(ii);
-                return false;
+        if k == 0 {
+            return true;
+        }
+        //This used to follow the first byte `k` times and give up if it ran out, which finds a
+        //path of length `k` only when the leftmost chain happens to be that long -- so a trie
+        //whose first branch is short reported "no such path" with plenty of them to the right.
+        //The doc above promises depth-first exploration, and that is what the caller needs: the
+        //depth-first-*first* location exactly `k` bytes below the focus.  So on a dead end, back
+        //up to the nearest ancestor with an unvisited sibling and carry on from there.
+        let mut depth = 0usize;
+        loop {
+            while depth < k {
+                if self.descend_first_byte() { depth += 1; } else { break; }
+            }
+            if depth == k {
+                return true;
+            }
+            //Dead end above depth `k`.  Ascend to the nearest branch that has another way
+            //down; running out of those means there is no such path, and the focus is back
+            //where it started, which is what the doc promises on `false`.
+            loop {
+                if depth == 0 {
+                    return false;
+                }
+                if self.to_next_sibling_byte() {
+                    break;
+                }
+                self.ascend_byte();
+                depth -= 1;
             }
         }
-        return true;
     }
 
-    /// Moves the zipper's focus to the next location with the same path length as the current focus,
-    /// following a depth-first exploration from a common root `k` steps above the current focus
-    ///
-    /// Returns `true` if the zipper has sucessfully moved to a new location at the same level, or `false`
-    /// if no further locations exist.  If this method returns `false` then the zipper will be ascended `k`
-    /// steps to the common root.  (The focus position when [descend_first_k_path](ZipperIteration::descend_first_k_path) was called)
-    ///
-    /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to the paths
-    /// below the zipper's focus.  Although a typical cost is `order log n` or better.
-    ///
-    /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
+    /// Moves the zipper's focus to the next location with the same path length as the current focus.
     fn to_next_k_path(&mut self, k: usize) -> bool {
         timed_span!(ToNextKPath, COUNTERS);
         let mut depth = k;
         'outer: loop {
             while depth > 0 && self.child_count() <= 1 {
-                if !self.ascend(1) {
-                    break 'outer;
-                }
+                if !self.ascend(1) { break 'outer; }
                 depth -= 1;
             }
             let stack = self.stack.last_mut().unwrap();
             let idx = stack.child_index + 1;
             if idx >= stack.child_count {
-                if depth == 0 || !self.ascend(1) {
-                    break 'outer;
-                }
+                if depth == 0 || !self.ascend(1) { break 'outer; }
                 depth -= 1;
                 continue 'outer;
             }
             assert!(self.descend_indexed_byte(idx));
             depth += 1;
             for _ii in 0..k - depth {
-                if !self.descend_first_byte() {
-                    continue 'outer;
-                }
+                if !self.descend_first_byte() { continue 'outer; }
                 depth += 1;
             }
             return true;
@@ -4020,5 +4028,43 @@ mod tests {
 
         assert_act_matches_map(&map, &tree);
         Ok(())
+    }
+
+    /// `ACTZipper::descend_first_k_path` followed the first byte `k` times and gave up
+    /// when that chain ran out, so it found a path of length `k` only when the leftmost
+    /// chain happened to be that long.  The trait promises a depth-first search for the
+    /// first location exactly `k` bytes below the focus, with the focus unmoved on
+    /// `false`.
+    #[test]
+    fn act_zipper_descend_first_k_path_backtracks() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(b"a", 1);       //the leftmost branch is one byte deep
+        m.insert(b"bxy", 2);     //this one reaches depth 3
+        m.insert(b"bxz", 3);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+        for k in 1..=4 {
+            let mut az = t.read_zipper_u64();
+            let mut pz = m.read_zipper();
+            let a = az.descend_first_k_path(k);
+            let p = pz.descend_first_k_path(k);
+            assert_eq!(a, p, "k={k}");
+            assert_eq!(az.path(), pz.path(), "k={k}");
+            if a {
+                //The walk continues from what descend_first_k_path found
+                let mut az_paths = vec![az.path().to_vec()];
+                while az.to_next_k_path(k) { az_paths.push(az.path().to_vec()); }
+                let mut pz_paths = vec![pz.path().to_vec()];
+                while pz.to_next_k_path(k) { pz_paths.push(pz.path().to_vec()); }
+                assert_eq!(az_paths, pz_paths, "k={k}");
+            }
+        }
+        //From a focus below the root, and with no path of that length at all
+        let mut az = t.read_zipper_u64();
+        az.descend_to(b"b");
+        assert!(!az.descend_first_k_path(3));
+        assert_eq!(az.path(), b"b");
+        assert!(az.descend_first_k_path(2));
+        assert_eq!(az.path(), b"bxy");
     }
 }
