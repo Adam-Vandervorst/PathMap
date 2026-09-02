@@ -427,7 +427,7 @@ This costs efficiency -- several definitions are quadratic where the crate is
 constant-time -- and that is the intended trade.  The model is a specification
 that happens to run, not an implementation.
 
-Three further defences, in increasing order of how much they actually prove:
+Four further defences, in increasing order of how much they actually prove:
 
 **1. Metamorphic laws** (`Spec.lean` §2) relate *different* API functions to each
 other — `take_map` then `graft_map` is the identity, `drop_head` undoes
@@ -447,6 +447,31 @@ caught a real `prestrict` bug.
 specification independently, so `differential.py --act` triangulates: the model
 agreeing with `PathMap` while disagreeing with ACT is evidence the model is not
 merely echoing either one.  It found three ACT defects.
+
+**4. Mutation testing** (`lean/mutate.py`) measures sensitivity directly rather
+than arguing for it.  It injects a deliberate defect
+into `pathmap`, rebuilds, and re-runs the differential over a fixed corpus:
+
+```bash
+./lean/mutate.py                 # the whole set in lean/mutants.toml
+./lean/mutate.py --only ascend   # one group
+```
+
+A mutant is **killed** if the differential's verdict changes, and **SURVIVED**
+if the crate demonstrably behaves differently yet the verdict does not move —
+which is precisely what a transcribed bug looks like from the outside.  Mutants
+whose traces are byte-identical to baseline are reported as **equivalent**: the
+corpus never reaches them, which is a coverage fact, not a spec failure.
+Comparing whole verdicts rather than pass counts means the defects already in
+FINDINGS.md cannot mask a mutant.
+
+A first run over `lean/mutants.toml` killed 6 of 6 behaviour-changing mutants
+with no survivors -- but 9 of the 15 came back `equivalent`, meaning the corpus
+never reaches them, and most of those sit in `ring.rs`, which is exactly where
+the transcription risk is concentrated.  So that run is *inconclusive* about the
+suspect definitions rather than reassuring about them, and it says more about the
+31% line coverage of `ring.rs` than about the spec.  Raising algebraic coverage
+would make the technique bite where it is most needed.
 
 What none of this can do is prove the specification *right*.  It can only show
 that the specification is not vacuous in a given region, and narrow the set of
