@@ -143,5 +143,5 @@ harness = false
 required-features = ["arena_compact", "serialization"]
 
 [workspace]
-members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests"]
+members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "differential"]
 resolver = "2"

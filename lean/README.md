@@ -1,11 +1,16 @@
 # A Lean model of the `pathmap` zipper
 
 An executable formal specification of `pathmap`'s trie and zipper API, written
-in Lean 4, meant to serve as an oracle for differential fuzzing of the real
-crate.
+in Lean 4, plus the harness that uses it as an oracle for differential fuzzing
+of the real crate.
 
-**The model** (`PathMapModel/`) is a total, executable definition of what each
-API function *means*, with the laws relating them.
+Two things live here:
+
+1. **The model** (`PathMapModel/`) — a total, executable definition of what each
+   API function *means*, with the laws relating them.
+2. **The harness** (`Main.lean` and the `../differential` crate) — the two
+   front ends that run the same generated program against the model and
+   against `pathmap`, printing a trace that can be diffed.
 
 ## Build and run
 
@@ -21,6 +26,9 @@ source ~/.elan/env
 ```bash
 # the model, its build-time law checks, and the oracle binary
 cd lean && lake build
+
+# the crate side of the differential harness
+cargo build --release -p differential
 
 ```
 
@@ -137,6 +145,8 @@ focus, such that ..." — instead of as a node walk.
 | `PathMapModel/Map.lean` | the `PathMap` surface, which is the zipper API applied at the root — plus `PathMap::restrict`, the one genuinely map-level operation |
 | `PathMapModel/Spec.lean` | §1 proved laws (the cursor algebra); §2 checkable laws (metamorphic properties) |
 | `PathMapModel/Check.lean` | `#guard`s: regression fixtures transcribed from `src/write_zipper.rs`'s own tests, and the §2 laws over a battery of tries |
+| `PathMapModel/Fuzz.lean` | the wire format, the operation table, and the trace producer (including `--act` mode) |
+| `Main.lean` | the `pathmap-oracle` binary |
 
 ## What is proved versus what is checked
 
@@ -158,6 +168,73 @@ Honest accounting, because it matters for how much the model is worth:
 The definitions themselves are the specification.  They are total and executable,
 so "the spec" and "the oracle" cannot drift apart.
 
+## The differential harness
+
+A fuzzer input is a byte string.  Lean and Rust decode it with identical rules
+into a program over two maps and two zippers — `wz` writing into map 0, `rz`
+reading map 1, kept in separate maps so the real crate can hold both at once.
+
+```
+header:
+  n  := u8 % 8                              -- entries seeded into map0
+  n × ( len := u8 % 6 ; len × pathbyte ; val := u8 )
+  n  := u8 % 8                              -- entries seeded into map1
+  n × ( len := u8 % 6 ; len × pathbyte ; val := u8 )
+  r0 := u8 % 4 ; r0 × pathbyte              -- write zipper root
+  r1 := u8 % 4 ; r1 × pathbyte              -- read  zipper root
+body:
+  repeated: op := u8 % 56 ; operands per op
+```
+
+Every path byte is masked to `b % 4`, so generated tries share prefixes heavily
+and actually branch — that is where the interesting shapes are (branch points,
+single-child runs, dangling chains).  Decoding stops when the input runs out.
+
+Each operation appends one line carrying its return value and a fingerprint of
+both zippers (relative path, origin path, existence, value, child count, value
+count); the run ends with a full dump of both maps.  Any behavioural difference
+is a textual diff.
+
+The op table lives in `Fuzz.lean` (`PathMapModel.Fuzz.step`) and
+`differential/src/harness.rs`; **the two must be changed together.**
+
+### Front ends
+
+| binary | drives | built with |
+|---|---|---|
+| `lean/.lake/build/bin/pathmap-oracle` | the Lean model | `cd lean && lake build` |
+| `target/release/pathmap_trace` | the real crate | `cargo build --release -p differential` |
+| `target/release/act_trace` | the crate, ACT read source | `cargo build --release -p differential` |
+
+### Deliberately skipped operations
+
+A handful of argument combinations are skipped by both sides, each because the
+crate's behaviour there is a confirmed bug that would otherwise mask everything
+downstream.  Each skip is commented at its site:
+
+* `meet_k_path_into` when the focus has no children, or `k = 0` — it does not
+  terminate.
+* `insert_prefix("")` and `join_k_path_into(0)` — both should be the identity and
+  both destroy the subtrie.
+* `descend_first_k_path(0)` / `to_next_k_path(0)` — degenerate; report success
+  without moving, forever.
+* `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native
+  read zipper leaves its own root there.
+* `prune_path` / `prune_ascend`, and the `prune` flag on every other operation,
+  for a write zipper not rooted at the map root — the depth pruned is a function
+  of internal node layout, so there is nothing to specify.
+
+`to_next_k_path` is also only exercised as the continuation of a
+`descend_first_k_path` iteration (the `k_path_walk` op), because
+`k_path_internal` carries iteration state and `pathmap`'s own debug assertions
+flag calling it cold.
+
+Five return values are compared as `?` when the focus has no descendants
+(`remove_branches`, `join_map_into`, `restrict`, `restricting`, `take_map`):
+they report on whether an empty node happens to be materialised at the focus,
+which is representation state rather than trie state.  The *effects* are still
+compared in full.
+
 ## The blind-zipper contract
 
 The model follows master's blind-zipper contract, where `ZipperMoving` no longer
@@ -168,7 +245,8 @@ trait, which the concrete `ReadZipper`/`WriteZipper` types still implement.
 What that cost the model, in full:
 
 * **`Zipper.lean` gained `focusByte`** — the only positional information a blind
-  zipper can read.  Its value at the root is *unspecified* by the trait.
+  zipper can read.  Its value at the root is *unspecified* by the trait, so the
+  harness masks it there (`f?` in the trace) and compares it everywhere else.
 * **The movement operations report distance or destination, not a flag.**
   `ascend`, `ascend_until` and `ascend_until_branch` return the number of bytes
   ascended; `descend_indexed_byte`, `descend_first_byte`, `descend_last_byte`,
@@ -177,7 +255,8 @@ What that cost the model, in full:
 * **`descend_until_observed` is new**, and is the interesting addition: a blind
   zipper learns where it went only from what the operation reports to a
   `PathObserver`.  The model specifies the reported sequence as the path delta,
-  and `Laws.descendUntilObservedExact` states the property.
+  the harness runs it as op 47 with a `Vec<u8>` observer and compares it byte for
+  byte, and `Laws.descendUntilObservedExact` states the property.
 
 `ZipperWriting`, `Zipper` and `ZipperValues` are unchanged, so `PathMap.lean`,
 `Write.lean` and `Map.lean` needed nothing.  Two proved laws were restated
@@ -261,6 +340,27 @@ places where "the model and the crate agree" might mean "they are wrong
 together".  Every survivor is a place to go and re-derive the definition from the
 documentation rather than from the code.
 
+## ArenaCompactTree as the read source
+
+`ArenaCompactTree` is a second implementation of the same *read* specification,
+so the model can hold it to the same standard without any new modelling:
+
+```bash
+cargo build --release -p differential
+```
+
+`differential/src/bin/act_trace.rs` builds an ACT from map1 with `from_zipper` and runs the
+identical operation table against an `ACTZipper`.  There is still exactly one
+op table: the merge operations sit behind a `ReadSource` trait, whose ACT
+implementation declines them, so the two front ends cannot drift apart.  The
+model's matching mode is `pathmap-oracle --act`.
+
+ACT is read-only, and more restrictively is not a `ZipperInfallibleSubtries`, so
+it cannot be the *source* of a graft or an algebraic merge; those operations and
+`make_map` report `skip` on both sides.  Everything else is compared in full,
+including the final trie -- which is dumped *from the ACT*, so `from_zipper` is
+under test on every program.
+
 ## Sharing
 
 `pathmap` is a DAG: subtries are shared between paths, `graft` clones a
@@ -285,6 +385,18 @@ restriction.
 Not modelling sharing is what makes sharing bugs *detectable* rather than what
 hides them: the model says two grafted copies are independent, so a mutation
 leaking from one to the other is a divergence.
+
+## Structural invariants
+
+`pathmap_trace --check <file>` (and `act_trace --check`) asserts structural
+invariants in-process after every operation — no oracle needed:
+
+* `at_root()` agrees with `path().is_empty()`
+* `origin_path() == root_prefix_path() ++ path()`
+* `root_prefix_path()` never changes — **a zipper may not escape its own root**
+* a value implies the path exists; children imply the path exists
+* `child_count() == |child_mask()|`
+* `val_count()` counts the focus value, and equals it exactly at a leaf
 
 ## Out of scope
 

@@ -1,5 +1,9 @@
 name = "pathmap-model"
-defaultTargets = ["PathMapModel"]
+defaultTargets = ["PathMapModel", "pathmap-oracle"]
 
 [[lean_lib]]
 name = "PathMapModel"
+
+[[lean_exe]]
+name = "pathmap-oracle"
+root = "Main"
