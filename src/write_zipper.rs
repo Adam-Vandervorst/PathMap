@@ -1718,7 +1718,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 return AlgebraicStatus::Identity
             }
         }
-        match self_focus.try_as_tagged() {
+        // An allocated empty destination is equivalent to a missing destination for a join.
+        // Otherwise `pjoin_dyn` reports `SELF_IDENT` and the nonempty source is discarded.
+        match self_focus.try_as_tagged().filter(|n| !n.node_is_empty()) {
             Some(self_node) => {
                 match self_node.pjoin_dyn(src.as_tagged()) {
                     AlgebraicResult::Element(joined) => {
@@ -1740,6 +1742,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     }
                 }
             },
+            // No destination node, or an empty one: the result is the source.
             None => { self.graft_internal(src.into_option()); AlgebraicStatus::Element }
         }
     }
@@ -6031,6 +6034,32 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    /// Joining into an empty destination must graft the nonempty source rather than report that
+    /// the destination is already the result.
+    #[test]
+    fn write_zipper_join_into_empty_destination() {
+        let mut src = PathMap::<u64>::new();
+        src.insert(&[0u8, 0, 0, 0], 7);
+        src.insert(&[0u8, 0, 1], 8);
+        let mut rz = src.read_zipper();
+        rz.descend_to(&[0u8]);
+
+        let mut empty = PathMap::<u64>::new();
+        let status = { let mut wz = empty.write_zipper(); wz.join_into(&rz) };
+        assert_eq!(status, AlgebraicStatus::Element);
+        assert_eq!(empty.val_count(), 2);
+        assert_eq!(empty.get_val_at(&[0u8, 0, 0]), Some(&7));
+        assert_eq!(empty.get_val_at(&[0u8, 1]), Some(&8));
+
+        let mut dangling = PathMap::<u64>::new();
+        dangling.create_path(&[3u8]);
+        let status = { let mut wz = dangling.write_zipper_at_path(&[3u8]); wz.join_into(&rz) };
+        assert_eq!(status, AlgebraicStatus::Element);
+        assert_eq!(dangling.val_count(), 2);
+        assert_eq!(dangling.get_val_at(&[3u8, 0, 0, 0]), Some(&7));
+        assert_eq!(dangling.get_val_at(&[3u8, 0, 1]), Some(&8));
+    }
 
     /// A map holding `extra` plus `{ca, cb}`, after `remove_branches(prune = false)` at "c": the node
     /// holding "c" now has a dangling child there, i.e. the empty sentinel.  With one extra key the
