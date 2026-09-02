@@ -1,0 +1,5 @@
+name = "pathmap-model"
+defaultTargets = ["PathMapModel"]
+
+[[lean_lib]]
+name = "PathMapModel"
