@@ -974,8 +974,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_0 = unsafe{ self.key_unchecked::<0>() };
         let mut overlap = find_prefix_overlap(key, node_key_0);
         if overlap > 0 {
-            //See if we should totally replace the existing downstream branch
-            if IS_CHILD && self.is_child_ptr::<0>() && overlap == key.len() {
+            // Replacing a downstream branch also needs to replace any payload strictly below `key`
+            // Hopefully the caller accounted for this
+            if IS_CHILD && overlap == key.len() &&
+                (self.is_child_ptr::<0>() || node_key_0.len() > key.len()) {
                 let _ = self.take_payload::<0>();
                 return self.set_payload_abstract::<IS_CHILD>(key, payload)
             }
@@ -1004,8 +1006,9 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_1 = unsafe{ self.key_unchecked::<1>() };
         let mut overlap = find_prefix_overlap(key, node_key_1);
         if overlap > 0 {
-            //See if we should totally replace the existing downstream branch
-            if IS_CHILD && self.is_child_ptr::<1>() && overlap == key.len() {
+            // See the corresponding slot_0 case above.  Replacing a downstream branch also needs to replace any payload strictly below `key`
+            if IS_CHILD && overlap == key.len() &&
+                (self.is_child_ptr::<1>() || node_key_1.len() > key.len()) {
                 let _ = self.take_payload::<1>();
                 return self.set_payload_abstract::<IS_CHILD>(key, payload)
             }
@@ -1885,8 +1888,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         0
     }
     fn node_set_branch(&mut self, key: &[u8], new_node: TrieNodeODRc<V, A>) -> Result<bool, TrieNodeODRc<V, A>> {
-        self.set_payload_abstract::<true>(key, new_node.into())
-            .map(|(_, created_subnode)| created_subnode)
+        let result = self.set_payload_abstract::<true>(key, new_node.into());
+        debug_assert!(result.is_err() || validate_node(self));
+        result.map(|(_, created_subnode)| created_subnode)
     }
 
     fn node_remove_all_branches(&mut self, key: &[u8], prune: bool) -> bool {
@@ -2876,6 +2880,16 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
+    // If two unequal keys share a prefix but neither is an ancestor of the
+    // other, that prefix must be factored into an onward child.  Otherwise a
+    // virtual focus at the shared prefix spans both slots, while node-at-key
+    // operations can only return one of them.
+    if node.is_used::<1>() && find_prefix_overlap(key0, key1) > 0 &&
+        !starts_with(key0, key1) && !starts_with(key1, key0) {
+        println!("Invalid node - unfactored divergent prefix. {node:?}");
+        panic!()
+    }
+
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
         println!("Invalid node - duplicated prefix too long. {node:?}");
@@ -2983,6 +2997,26 @@ mod tests {
         let child_node = child_node.as_tagged();
         assert_eq!(bytes_used, 1);
         assert_eq!(child_node.node_get_val("hello".as_bytes()), Some(&24));
+    }
+
+    /// `node_set_branch` replaces the downstream branch at its key. A value
+    /// stored under a longer compressed key is downstream, not a value at that
+    /// key, and must not survive beside the replacement child.
+    #[test]
+    fn test_line_list_set_branch_replaces_compressed_value_descendant() {
+        let mut node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(node.node_set_val(b"aaa", 1).map_err(|_| ()), Ok((None, false)));
+
+        let mut replacement = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(replacement.node_set_val(b"b", 2).map_err(|_| ()), Ok((None, false)));
+        let replacement = TrieNodeODRc::new_in(replacement, global_alloc());
+
+        assert_eq!(node.node_set_branch(b"a", replacement).map_err(|_| ()), Ok(false));
+        assert_eq!(node.node_get_val(b"aaa"), None, "the replaced subtree must not leak its old value");
+        let (used_bytes, child) = node.node_get_child(b"a").unwrap();
+        assert_eq!(used_bytes, 1);
+        assert_eq!(child.as_tagged().node_get_val(b"b"), Some(&2));
+        assert!(validate_node(&node));
     }
 
     /// This tests that a common prefix will be found and the if the node only has an entry in slot_0
@@ -3465,6 +3499,21 @@ mod tests {
         assert_eq!(inner_node.as_tagged().node_get_val(b"ple"), Some(&0));
         let inner_node = node.get_node_at_key(b"b");
         assert_eq!(inner_node.as_tagged().node_get_val(b"anana"), Some(&1));
+    }
+
+    /// Test that `drop_head_dyn` can do the right thing when a single node now needs to be
+    /// represented as two
+    #[test]
+    fn test_line_list_get_node_at_shared_prefix_after_drop_head() {
+        let mut source_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        source_node.node_set_val(b"1ab", 1).unwrap_or_else(|_| panic!());
+        source_node.node_set_val(b"2ac", 2).unwrap_or_else(|_| panic!());
+        source_node.drop_head_dyn(1).unwrap();
+
+        let dropped_ref = source_node.as_tagged();
+        let focus = dropped_ref.get_node_at_key(b"a");
+        assert_eq!(focus.as_tagged().node_get_val(b"b"), Some(&1));
+        assert_eq!(focus.as_tagged().node_get_val(b"c"), Some(&2));
     }
 
     /// Regression test: a value and the onward child at the same path are kept
