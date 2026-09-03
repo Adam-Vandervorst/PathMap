@@ -1824,16 +1824,20 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 }
             },
             Some(src) => {
+                //A dangling source focus is taken as the empty sentinel: nothing to join, and not
+                // a node graft_internal may be handed
+                if src.as_tagged().node_is_empty() {
+                    return if self.get_focus().is_none() { AlgebraicStatus::None } else { AlgebraicStatus::Identity }
+                }
                 match self.take_focus(false) {
-                    Some(mut self_node) => {
-                        let (status, result) = self_node.make_mut().join_into_dyn(src);
-                        match result {
-                            Ok(()) => self.graft_internal(Some(self_node)),
-                            Err(replacement_node) => self.graft_internal(Some(replacement_node)),
-                        }
+                    //A dangling destination focus is taken as the sentinel too, which cannot be
+                    // made mutable; the join into nothing is the source itself
+                    Some(mut self_node) if !self_node.as_tagged().node_is_empty() => {
+                        let status = self_node.join_into(src);
+                        self.graft_internal(Some(self_node));
                         status
                     },
-                    None => {
+                    _ => {
                         self.graft_internal(Some(src));
                         AlgebraicStatus::Element
                     }
@@ -6103,5 +6107,53 @@ mod tests {
         let n = map.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
         assert_eq!(n, 3);
         assert_valid_nodes(&map);
+    }
+
+    /// Issue #85: `join_into_take` at a dangling destination focus panicked in make_unique
+    /// (take_focus hands back the empty sentinel), and a dangling *source* focus handed the
+    /// sentinel to graft_internal.
+    #[test]
+    fn write_zipper_join_into_take_at_dangling_focus() {
+        fn mk(keys: &[&[u8]]) -> PathMap<()> { let mut m = PathMap::new(); for k in keys { m.set_val_at(k, ()); } m }
+        fn keys(m: &PathMap<()>) -> Vec<String> { m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect() }
+        fn dangling_c() -> PathMap<()> {
+            let mut m = mk(&[b"ca", b"cb", b"d"]);
+            { let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); }
+            assert_eq!(keys(&m), ["d"]);
+            m
+        }
+        //Dangling destination
+        let mut m = dangling_c();
+        let mut o = mk(&[b"x"]);
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            let mut src = o.write_zipper();
+            assert_eq!(wz.join_into_take(&mut src, false), AlgebraicStatus::Element);
+        }
+        assert_eq!(keys(&m), ["cx", "d"]);
+        assert_eq!(keys(&o), Vec::<String>::new());
+
+        //Dangling source
+        let mut m = mk(&[b"x"]);
+        let mut o = dangling_c();
+        {
+            let mut wz = m.write_zipper();
+            let mut src = o.write_zipper();
+            src.descend_to(b"c");
+            assert_eq!(wz.join_into_take(&mut src, false), AlgebraicStatus::Identity);
+        }
+        assert_eq!(keys(&m), ["x"]);
+
+        //Both real, which already worked
+        let mut m = mk(&[b"cy", b"d"]);
+        let mut o = mk(&[b"x"]);
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            let mut src = o.write_zipper();
+            assert_eq!(wz.join_into_take(&mut src, false), AlgebraicStatus::Element);
+        }
+        assert_eq!(keys(&m), ["cx", "cy", "d"]);
     }
 }
