@@ -974,8 +974,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_0 = unsafe{ self.key_unchecked::<0>() };
         let mut overlap = find_prefix_overlap(key, node_key_0);
         if overlap > 0 {
-            // Replacing a downstream branch also needs to replace any payload strictly below `key`
-            // Hopefully the caller accounted for this
+            // Can we replace the downstream branch ptr?  Or do we need to split the node?
             if IS_CHILD && overlap == key.len() &&
                 (self.is_child_ptr::<0>() || node_key_0.len() > key.len()) {
                 let _ = self.take_payload::<0>();
@@ -1006,7 +1005,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_1 = unsafe{ self.key_unchecked::<1>() };
         let mut overlap = find_prefix_overlap(key, node_key_1);
         if overlap > 0 {
-            // See the corresponding slot_0 case above.  Replacing a downstream branch also needs to replace any payload strictly below `key`
+            //See if we should totally replace the existing downstream branch ptr, or split the node
             if IS_CHILD && overlap == key.len() &&
                 (self.is_child_ptr::<1>() || node_key_1.len() > key.len()) {
                 let _ = self.take_payload::<1>();
@@ -1930,6 +1929,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
 
     fn node_is_empty(&self) -> bool {
         !self.is_used::<0>()
+    }
+
+    fn debug_validate(&self) -> bool {
+        validate_node(self)
     }
 
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
