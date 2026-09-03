@@ -4311,28 +4311,6 @@ mod tests {
         assert_eq!(map.iter().map(|(k, _v)| k).collect::<Vec<Vec<u8>>>(), ref_keys);
     }
 
-    /// Walk every physical node and check `LineListNode`'s structural invariants.
-    fn assert_valid_nodes<V: Clone + Send + Sync + Unpin>(map: &PathMap<V>) {
-        fn walk<V: Clone + Send + Sync + Unpin>(node: &TrieNodeODRc<V, GlobalAlloc>) {
-            if node.is_empty() {
-                return;
-            }
-            let tagged = node.as_tagged();
-            if let TaggedNodeRef::LineListNode(line_list) = tagged {
-                assert!(crate::line_list_node::validate_node(line_list));
-            }
-            let (mut token, mut child) = tagged.node_child_iter_start();
-            while let Some(child_node) = child {
-                walk(child_node);
-                (token, child) = tagged.node_child_iter_next(token);
-            }
-        }
-
-        if let Some(root) = map.root() {
-            walk(root);
-        }
-    }
-
     /// A focus in the middle of a compressed key run must replace the old run,
     /// rather than retain it alongside the prefixed copy.
     #[test]
@@ -4351,7 +4329,7 @@ mod tests {
         let mut rz = map.read_zipper();
         rz.descend_to(b"aa");
         assert!(!rz.path_exists(), "stale key run must be gone");
-        assert_valid_nodes(&map);
+        assert_valid_trie(map.root());
 
         // The compressed run can continue into a branch as well.
         let mut map = PathMap::<()>::new();
@@ -4365,7 +4343,7 @@ mod tests {
             map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
             vec![b"abXcd".to_vec(), b"abXce".to_vec()]
         );
-        assert_valid_nodes(&map);
+        assert_valid_trie(map.root());
     }
 
     #[test]
@@ -4382,7 +4360,7 @@ mod tests {
             map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
             vec![b"a".to_vec(), b"aZb".to_vec(), b"aZc".to_vec()]
         );
-        assert_valid_nodes(&map);
+        assert_valid_trie(map.root());
     }
 
     #[test]
@@ -4401,7 +4379,7 @@ mod tests {
         drop(wz);
         assert_eq!(map.get(b"ab"), Some(&1));
         assert_eq!(map.get(b"ac"), Some(&2));
-        assert_valid_nodes(&map);
+        assert_valid_trie(map.root());
     }
 
     #[test]
@@ -4421,7 +4399,7 @@ mod tests {
                 vec![vec![0, src_key[1]]]
             );
             assert_eq!(dst.get([0, src_key[1]]), Some(&8));
-            assert_valid_nodes(&dst);
+            assert_valid_trie(dst.root());
         }
     }
 
@@ -4456,7 +4434,7 @@ mod tests {
             expected,
             "keys {keys:?}, focus {focus:?}, prefix {prefix:?}"
         );
-        assert_valid_nodes(&map);
+        assert_valid_trie(map.root());
     }
 
     #[test]
@@ -6067,23 +6045,6 @@ mod tests {
             btm.clone().into_write_zipper(path)
     });
 
-    /// Walks every physical node and checks LineListNode's structural invariants
-    fn assert_valid_nodes<V: Clone + Send + Sync + Unpin>(map: &PathMap<V>) {
-        fn walk<V: Clone + Send + Sync + Unpin>(node: &TrieNodeODRc<V, GlobalAlloc>) {
-            if node.is_empty() { return }
-            let tagged = node.as_tagged();
-            if let TaggedNodeRef::LineListNode(ln) = tagged {
-                assert!(crate::line_list_node::validate_node(ln));
-            }
-            let (mut tok, mut child) = tagged.node_child_iter_start();
-            while let Some(child_node) = child {
-                walk(child_node);
-                (tok, child) = tagged.node_child_iter_next(tok);
-            }
-        }
-        if let Some(root) = map.root() { walk(root); }
-    }
-
     /// A map holding `extra` plus `{ca, cb}`, after `remove_branches(prune = false)` at "c": the node
     /// holding "c" now has a dangling child there, i.e. the empty sentinel.  With one extra key the
     /// parent is a LineListNode; with three or more it is a DenseByteNode carrying the sentinel in a CoFree.
@@ -6105,12 +6066,12 @@ mod tests {
         let mut other = PathMap::<()>::new(); other.set_val_at(b"ca", ());
         let joined = dense_with_dangling_child().join(&other);
         assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"ca".to_vec(), b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
-        assert_valid_nodes(&joined);
+        assert_valid_trie(joined.root());
 
         let mut m = dense_with_dangling_child();
         m.write_zipper().join_into(&other.read_zipper());
         assert_eq!(m.iter().count(), 4);
-        assert_valid_nodes(&m);
+        assert_valid_trie(m.root());
 
         //Symmetric: the dangling child arrives from the *other* operand
         let mut dense = PathMap::<()>::new();
@@ -6119,7 +6080,7 @@ mod tests {
         assert_eq!(joined.iter().count(), 4);
         dense.write_zipper().join_into(&lln_with_dangling_child().read_zipper());
         assert_eq!(dense.iter().count(), 4);
-        assert_valid_nodes(&dense);
+        assert_valid_trie(dense.root());
     }
 
     /// Dropping head bytes over a dangling sentinel child, in both node types.  (Values that sit within
@@ -6132,7 +6093,7 @@ mod tests {
         let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]); // dense parent
         assert!(m.write_zipper().join_k_path_into(1, false));
         assert_eq!(keys(&m), vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]);
-        assert_valid_nodes(&m);
+        assert_valid_trie(m.root());
 
         let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]);
         assert!(m.write_zipper().drop_head(1));
@@ -6141,7 +6102,7 @@ mod tests {
         let mut m = with_dangling_c(&[b"dx"]); // LineListNode parent
         assert!(m.write_zipper().join_k_path_into(1, false));
         assert_eq!(keys(&m), vec![b"x".to_vec()]);
-        assert_valid_nodes(&m);
+        assert_valid_trie(m.root());
 
         //Only a dangling path below the focus: the branch is cleared, nothing is grafted
         let mut m = with_dangling_c(&[]);
@@ -6176,12 +6137,13 @@ mod tests {
             let a = gen_map(&mut rng);
             let b = gen_map(&mut rng);
             let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
-            assert_valid_nodes(&a); assert_valid_nodes(&b);
+            assert_valid_trie(a.root());
+            assert_valid_trie(b.root());
 
             let mut expected = keys(&a); expected.extend(keys(&b)); expected.sort(); expected.dedup();
             let joined = a.join(&b);
             assert_eq!(keys(&joined), expected, "join");
-            assert_valid_nodes(&joined);
+            assert_valid_trie(joined.root());
             let mut a2 = a.clone();
             a2.write_zipper().join_into(&b.read_zipper());
             assert_eq!(keys(&a2), expected, "join_into");
@@ -6194,7 +6156,7 @@ mod tests {
             a3.write_zipper().join_k_path_into(k, false);
             assert_eq!(keys(&a3), expected, "join_k_path_into({k})");
             assert_eq!(a3.val_count(), expected.len(), "join_k_path_into({k}) val_count");
-            assert_valid_nodes(&a3);
+            assert_valid_trie(a3.root());
         }
     }
 
@@ -6227,11 +6189,11 @@ mod tests {
         };
         let joined = dangling_c().join(&dangling_c());
         assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
-        assert_valid_nodes(&joined);
+        assert_valid_trie(joined.root());
         let mut a = dangling_c();
         a.write_zipper().join_into(&dangling_c().read_zipper());
         assert_eq!(a.iter().count(), 3);
-        assert_valid_nodes(&a);
+        assert_valid_trie(a.root());
     }
 
     /// `join_k_path_into` where the two slots of a LineListNode shorten onto the *same* key: the payloads
@@ -6246,7 +6208,7 @@ mod tests {
         assert!(m.write_zipper().join_k_path_into(3, false));
         assert_eq!(keys(&m), vec![b"a".to_vec()]);
         assert_eq!(m.val_count(), 1);
-        assert_valid_nodes(&m);
+        assert_valid_trie(m.root());
 
         //two children collapsing onto one key
         let mut m = PathMap::<()>::new();
@@ -6254,7 +6216,7 @@ mod tests {
         let mut wz = m.write_zipper(); wz.descend_to(b"a"); assert!(wz.join_k_path_into(1, false)); drop(wz);
         assert_eq!(keys(&m), vec![b"ax1".to_vec(), b"ax2".to_vec(), b"ax3".to_vec()]);
         assert_eq!(m.val_count(), 3);
-        assert_valid_nodes(&m);
+        assert_valid_trie(m.root());
 
         //a value and a child on the same key is the legal representation and is left alone
         let mut m = PathMap::<()>::new();
@@ -6299,7 +6261,7 @@ mod tests {
         //the (zipper-driven) cached cata must agree with iteration
         let n = m.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
         assert_eq!(n, 2);
-        assert_valid_nodes(&m);
+        assert_valid_trie(m.root());
 
         //the same through a shared (grafted) subtrie, as the randomized program found it
         let mut map = PathMap::<()>::new(); map.set_val_at(b"", ());
@@ -6309,7 +6271,7 @@ mod tests {
         assert!(map.write_zipper().join_k_path_into(1, false));
         let n = map.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
         assert_eq!(n, 3);
-        assert_valid_nodes(&map);
+        assert_valid_trie(map.root());
     }
 
     /// Issue #85: `join_into_take` at a dangling destination focus panicked in make_unique
