@@ -295,7 +295,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 
     #[inline]
     fn get_child_mut(&mut self, k: u8) -> Option<&mut TrieNodeODRc<V, A>> {
-        self.get_mut(k).and_then(|cf| cf.rec_mut())
+        //An empty rec is a dangling byte: the byte is in the mask but there is nothing to descend
+        // into, and the empty sentinel it holds cannot be made mutable.  It is reported as "no
+        // child", as LineListNode::get_child_mut does, so a descent stops at this node and the
+        // mutator that follows (node_set_val, node_set_branch, a graft) replaces the rec through
+        // set_child instead of calling make_mut on it.
+        self.get_mut(k).and_then(|cf| cf.rec_mut()).filter(|child| !child.is_empty())
     }
 
     #[inline]
@@ -2475,4 +2480,43 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
         }
     }
     assert_eq!(visited_after_missing_65, [127, 128, 191, 192, 255]);
+
+}
+
+/// Issue #85: mutating below a dangling byte of a dense node panicked in make_unique.
+/// The dangling slot is copied over when a pair node is upgraded to a dense node, and
+/// node_get_child_mut handed its empty sentinel to the descent.
+#[test]
+fn dense_node_mutate_below_dangling_byte() {
+    use crate::PathMap;
+    use crate::zipper::*;
+    fn keys(m: &PathMap<()>) -> Vec<String> { m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect() }
+    fn dangling_c() -> PathMap<()> {
+        let mut m = PathMap::new();
+        for k in [b"ca".as_slice(), b"cb", b"d"] { m.set_val_at(k, ()); }
+        { let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); }
+        assert_eq!(keys(&m), ["d"]);
+        m
+    }
+    let mut m = dangling_c();
+    m.set_val_at(b"e", ());
+    m.set_val_at(b"f", ());
+    m.set_val_at(b"cx", ());
+    assert_eq!(keys(&m), ["cx", "d", "e", "f"]);
+
+    let mut m = dangling_c();
+    m.set_val_at(b"e", ());
+    m.set_val_at(b"f", ());
+    { let mut wz = m.write_zipper(); wz.descend_to(b"cxy"); let mut o = PathMap::new(); o.set_val_at(b"z", ()); wz.graft_map(o); }
+    assert_eq!(keys(&m), ["cxyz", "d", "e", "f"]);
+
+    //At the dangling byte itself, and in a pair-node parent, which already worked
+    let mut m = dangling_c();
+    m.set_val_at(b"e", ());
+    m.set_val_at(b"f", ());
+    m.set_val_at(b"c", ());
+    assert_eq!(keys(&m), ["c", "d", "e", "f"]);
+    let mut m = dangling_c();
+    m.set_val_at(b"cx", ());
+    assert_eq!(keys(&m), ["cx", "d"]);
 }
