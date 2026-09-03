@@ -18,7 +18,7 @@
 
 use fast_slice_utils::find_prefix_overlap;
 use crate::utils::{BitMask, ByteMask};
-use crate::zipper::{Zipper, ZipperMoving, ZipperIteration, ZipperValues};
+use crate::zipper::{Zipper, ZipperMoving, ZipperIteration, ZipperValues, ZipperValuesAt};
 
 /// Zipper that traverses a virtual trie formed by fusing the tries of two other zippers
 pub struct OverlayZipper<AV, BV, OutV, AZipper, BZipper, Mapping>
@@ -104,6 +104,15 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperValues<OutV>
     fn val(&self) -> Option<&OutV> {
         (self.mapping)(self.a.val(), self.b.val())
     }
+}
+
+impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperValuesAt<OutV>
+    for OverlayZipper<AV, BV, OutV, AZipper, BZipper, Mapping>
+    where
+        AZipper: ZipperValuesAt<AV>,
+        BZipper: ZipperValuesAt<BV>,
+        Mapping: for<'a> Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>,
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&OutV> {
         (self.mapping)(self.a.val_at(&path), self.b.val_at(&path))
     }

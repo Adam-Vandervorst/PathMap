@@ -242,6 +242,12 @@ impl<'prefix, Z, V> ZipperValues<V> for PrefixZipper<'prefix, Z>
         }
         self.source.val()
     }
+}
+
+impl<'prefix, Z, V> ZipperValuesAt<V> for PrefixZipper<'prefix, Z>
+    where
+        Z: ZipperValuesAt<V>
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         let path = self.adjust_lookup_path(path.as_ref())?;
         self.source.val_at(path)

@@ -390,6 +390,9 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> Zipper for WriteZipp
 
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValues<V> for WriteZipperTracked<'a, '_, V, A>{
     fn val(&self) -> Option<&V> { self.z.val() }
+}
+
+impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValuesAt<V> for WriteZipperTracked<'a, '_, V, A>{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> { self.z.val_at(path) }
 }
 
@@ -550,6 +553,9 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> Zipper for WriteZipp
 
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValues<V> for WriteZipperUntracked<'a, '_, V, A> {
     fn val(&self) -> Option<&V> { self.z.val() }
+}
+
+impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValuesAt<V> for WriteZipperUntracked<'a, '_, V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> { self.z.val_at(path) }
 }
 
@@ -717,6 +723,7 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator> Clone for WriteZipp
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for WriteZipperOwned<V, A> { zipper_impl_lens!(Zipper self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperValues self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperValuesAt self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperMoving for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperMoving self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPathBuffer for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperPathBuffer self => self.z); }

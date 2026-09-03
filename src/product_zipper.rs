@@ -308,6 +308,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
     fn val(&self) -> Option<&V> {
         unsafe{ self.z.get_val() }
     }
+}
+
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperValuesAt<V> for ProductZipper<'_, 'trie, V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         unsafe{ self.z.get_val_at(path) }
     }
@@ -562,6 +565,15 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValues<V>
             self.primary.val()
         }
     }
+}
+
+impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValuesAt<V>
+    for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
+    where
+        V: Clone + Send + Sync,
+        PrimaryZ: ZipperMoving + ZipperValuesAt<V>,
+        SecondaryZ: ZipperMoving + ZipperValuesAt<V>,
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         if let Some(idx) = self.factor_idx(true) {
             self.secondary[idx].val_at(path)
@@ -887,6 +899,7 @@ impl <Z : ZipperAbsolutePath> ZipperAbsolutePath for OneFactor<Z> { zipper_impl_
 impl <Z : ZipperMoving> ZipperMoving for OneFactor<Z> { zipper_impl_lens!(ZipperMoving self => self.z); }
 impl <Z : ZipperIteration> ZipperIteration for OneFactor<Z> { zipper_impl_lens!(ZipperIteration self => self.z); }
 impl <V, Z : ZipperValues<V>> ZipperValues<V> for OneFactor<Z> { zipper_impl_lens!(ZipperValues self => self.z); }
+impl <V, Z : ZipperValuesAt<V>> ZipperValuesAt<V> for OneFactor<Z> { zipper_impl_lens!(ZipperValuesAt self => self.z); }
 impl <V, Z : ZipperForking<V>> ZipperForking<V> for OneFactor<Z> { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Z: 'a; zipper_impl_lens!(ZipperForking self => self.z); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperSubtries<V, A>> ZipperSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperSubtries self => self.z); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperInfallibleSubtries<V, A>> ZipperInfallibleSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }

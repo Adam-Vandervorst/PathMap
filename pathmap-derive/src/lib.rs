@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 enum PolyZipperTrait {
     Zipper,
     ZipperValues,
+    ZipperValuesAt,
     ZipperReadOnlyValues,
     ZipperReadOnlyConditionalValues,
     ZipperReadOnlyConditionalIteration,
@@ -26,6 +27,7 @@ impl PolyZipperTrait {
         match ident.to_string().as_str() {
             "Zipper" => Some(Self::Zipper),
             "ZipperValues" => Some(Self::ZipperValues),
+            "ZipperValuesAt" => Some(Self::ZipperValuesAt),
             "ZipperReadOnlyValues" => Some(Self::ZipperReadOnlyValues),
             "ZipperReadOnlyConditionalValues" => Some(Self::ZipperReadOnlyConditionalValues),
             "ZipperReadOnlyConditionalIteration" => Some(Self::ZipperReadOnlyConditionalIteration),
@@ -47,6 +49,7 @@ fn all_poly_zipper_traits() -> BTreeSet<PolyZipperTrait> {
     BTreeSet::from([
         Zipper,
         ZipperValues,
+        ZipperValuesAt,
         ZipperReadOnlyValues,
         ZipperReadOnlyConditionalValues,
         ZipperReadOnlyConditionalIteration,
@@ -118,6 +121,11 @@ fn add_trait_dependencies(traits: &mut BTreeSet<PolyZipperTrait>) {
             }
         }
         if traits.contains(&ZipperInfallibleSubtries) {
+            if traits.insert(ZipperValuesAt) {
+                changed = true;
+            }
+        }
+        if traits.contains(&ZipperValuesAt) {
             if traits.insert(ZipperValues) {
                 changed = true;
             }
@@ -312,7 +320,28 @@ fn derive_poly_zipper_with_traits(
                         #(#variant_arms => inner.val(),)*
                     }
                 }
+            }
+        })
+    } else {
+        None
+    };
 
+    // Generate ZipperValuesAt trait implementation
+    let zipper_values_at_impl = if traits.contains(&PolyZipperTrait::ZipperValuesAt) {
+        let variant_arms = &variant_arms;
+        let zipper_values_where = if include_where_clause {
+            quote! {
+                where
+                    #(#inner_types: pathmap::zipper::ZipperValuesAt<V>,)*
+                    #where_clause
+            }
+        } else {
+            quote! {}
+        };
+        Some(quote! {
+            impl #impl_generics pathmap::zipper::ZipperValuesAt<V> for #enum_name #ty_generics
+            #zipper_values_where
+            {
                 fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
                     match self {
                         #(#variant_arms => inner.val_at(path),)*
@@ -825,6 +854,7 @@ fn derive_poly_zipper_with_traits(
         #(#from_impls)*
         #zipper_impl
         #zipper_values_impl
+        #zipper_values_at_impl
         #zipper_read_only_values_impl
         #zipper_read_only_conditional_values_impl
         // #zipper_forking_impl

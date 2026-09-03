@@ -2856,7 +2856,7 @@ mod zipper_algebra_poly {
     use pathmap_derive::PolyZipperExplicit;
 
     #[derive(PolyZipperExplicit)]
-    #[poly_zipper_explicit(traits(ZipperMoving, ZipperValues, ZipperConcrete))]
+    #[poly_zipper_explicit(traits(ZipperMoving, ZipperValues, ZipperValuesAt, ZipperConcrete))]
     pub(super) enum SomeMutRefZ<'a, 'trie, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> {
         RZ(&'a mut ReadZipperUntracked<'trie, 'path, V, A>),
         RZT(&'a mut ReadZipperTracked<'trie, 'path, V, A>),

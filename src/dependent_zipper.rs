@@ -237,6 +237,15 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             self.primary.val()
         }
     }
+}
+
+impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperValuesAt<V>
+    for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
+    where
+        V: Clone + Send + Sync,
+        PrimaryZ: ZipperMoving + ZipperValuesAt<V>,
+        SecondaryZ: ZipperMoving + ZipperValuesAt<V>,
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         if let Some(idx) = self.factor_idx(true) {
             self.secondary[idx].val_at(path)
