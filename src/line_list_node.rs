@@ -2815,6 +2815,16 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
+    // If two unequal keys share a prefix but neither is an ancestor of the
+    // other, that prefix must be factored into an onward child.  Otherwise a
+    // virtual focus at the shared prefix spans both slots, while node-at-key
+    // operations can only return one of them.
+    if node.is_used::<1>() && find_prefix_overlap(key0, key1) > 0 &&
+        !starts_with(key0, key1) && !starts_with(key1, key0) {
+        println!("Invalid node - unfactored divergent prefix. {node:?}");
+        panic!()
+    }
+
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
         println!("Invalid node - duplicated prefix too long. {node:?}");
@@ -3424,6 +3434,21 @@ mod tests {
         assert_eq!(inner_node.as_tagged().node_get_val(b"ple"), Some(&0));
         let inner_node = node.get_node_at_key(b"b");
         assert_eq!(inner_node.as_tagged().node_get_val(b"anana"), Some(&1));
+    }
+
+    /// Test that `drop_head_dyn` can do the right thing when a single node now needs to be
+    /// represented as two
+    #[test]
+    fn test_line_list_get_node_at_shared_prefix_after_drop_head() {
+        let mut source_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        source_node.node_set_val(b"1ab", 1).unwrap_or_else(|_| panic!());
+        source_node.node_set_val(b"2ac", 2).unwrap_or_else(|_| panic!());
+        source_node.drop_head_dyn(1).unwrap();
+
+        let dropped_ref = source_node.as_tagged();
+        let focus = dropped_ref.get_node_at_key(b"a");
+        assert_eq!(focus.as_tagged().node_get_val(b"b"), Some(&1));
+        assert_eq!(focus.as_tagged().node_get_val(b"c"), Some(&2));
     }
 
     /// Regression test: a value and the onward child at the same path are kept
