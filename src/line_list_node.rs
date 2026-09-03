@@ -1057,10 +1057,13 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let (key0, key1) = self.get_both_keys();
         let overlap = find_prefix_overlap(key0, key1);
         //Overlap of 1 is legal if and only if ONE OF the following two conditions are true:
-        // A: slot0 contains a value
+        // A: slot0 contains a value AND has a 1-byte key (a value at the shared byte, slot1 continuing below it)
         // B: both slots have a length of 1, and one is a value
+        //NOTE: without the length requirement in A, `drop_head` could leave (Val@"aa", Val@"ab"): a shape
+        // insertion never creates, that indexed descent (`descend_indexed_byte`) and the catamorphisms
+        // cannot traverse.  Factoring it yields the canonical Child@"a" -> {a, b}.
         let legal_overlap = overlap == 1 && (
-            !self.is_child_ptr::<0>() ||
+            (!self.is_child_ptr::<0>() && key0.len() == 1) ||
             (!self.is_child_ptr::<1>() && key0.len()==1 && key1.len()==1 ));
 
         //If the overlap is illegal, split the prefix
@@ -1534,6 +1537,14 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
         }
     }
 
+    //Two empty nodes (e.g. roots emptied by `remove_branches`) produce no entries at all.  This must be
+    // decided before touching `entries[0]`: reading it would be `assume_init` on uninitialized memory,
+    // and dropping the garbage payload it yields corrupts an arbitrary refcount.
+    if entry_cnt == 0 {
+        debug_assert!(a.node_is_empty() && b.node_is_empty());
+        return Ok(AlgebraicResult::None)
+    }
+
     //Do we have two or fewer paths, that can fit into a new ListNode?
     if entry_cnt <= 2 {
         let mut joined_node = LineListNode::new_in(a.alloc.clone());
@@ -1569,10 +1580,6 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
                     debug_assert!(validate_node(&joined_node));
                     return Ok(AlgebraicResult::Element(joined_node))
                 }
-            },
-            0 => {
-                debug_assert!(a.node_is_empty() && b.node_is_empty());
-                return Ok(AlgebraicResult::None)
             },
             _ => unreachable!()
         }
@@ -2485,7 +2492,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self) {
-                    AlgebraicStatus::None => unreachable!(), //Joining a non-empty node with another non-empty node should never produce an empty node
+                    //Both nodes were empty (e.g. a root emptied by `remove_branches` — always a LineListNode — joined
+                    // with an empty map whose root was materialized as a dense node); the join is empty too
+                    AlgebraicStatus::None => {
+                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        AlgebraicResult::None
+                    },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
                     AlgebraicStatus::Element => AlgebraicResult::Element(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
                 }
@@ -2498,7 +2510,11 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self) {
-                    AlgebraicStatus::None => unreachable!(), //Joining a non-empty node with another non-empty node should never produce an empty node
+                    //See the DENSE_BYTE_NODE_TAG arm: two empty nodes join to an empty result
+                    AlgebraicStatus::None => {
+                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        AlgebraicResult::None
+                    },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
                     AlgebraicStatus::Element => AlgebraicResult::Element(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
                 }
@@ -2589,6 +2605,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                     ValOrChild::Child(child) => child,
                     ValOrChild::Val(_) => unreachable!(),
                 };
+                //A dangling child (the empty sentinel) has nothing below the dropped bytes and can't be made mutable
+                if child.is_empty() {
+                    return None
+                }
                 if remaining_bytes > 0 {
                     return child.make_mut().drop_head_dyn(remaining_bytes)
                 } else {
@@ -2605,6 +2625,41 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         let (key0, key1) = temp_node.get_both_keys();
         let key0_len = key0.len();
         let key1_len = key1.len();
+
+        //If byte_cnt < both key lengths but the shortened keys coincide, both slots now describe the same
+        // path and must be merged: two values join into one value, two children join into one child.  (A
+        // value and a child at the same key is the legal representation and needs no merge.)  Leaving two
+        // value slots on one key makes a path with two values: iteration sees it once, `val_count` twice.
+        if byte_cnt < key0_len && byte_cnt < key1_len && key0[byte_cnt..] == key1[byte_cnt..]
+            && temp_node.is_child_ptr::<0>() == temp_node.is_child_ptr::<1>() {
+            let new_key_len = key0_len - byte_cnt;
+            let mut new_key = [0u8; KEY_BYTES_CNT];
+            new_key[..new_key_len].copy_from_slice(&key0[byte_cnt..]);
+            //NOTE: take slot 1 first; taking slot 0 first may shift slot 1's contents down
+            let payload1 = temp_node.take_payload::<1>().unwrap();
+            let payload0 = temp_node.take_payload::<0>().unwrap();
+            let merged = match (payload0, payload1) {
+                (ValOrChild::Val(v0), ValOrChild::Val(v1)) => match v0.pjoin(&v1) {
+                    AlgebraicResult::Element(v) => Some(ValOrChild::Val(v)),
+                    AlgebraicResult::Identity(mask) => Some(ValOrChild::Val(if mask & SELF_IDENT > 0 { v0 } else { v1 })),
+                    AlgebraicResult::None => None,
+                },
+                (ValOrChild::Child(c0), ValOrChild::Child(c1)) => match c0.pjoin(&c1) {
+                    AlgebraicResult::Element(c) => Some(ValOrChild::Child(c)),
+                    AlgebraicResult::Identity(mask) => Some(ValOrChild::Child(if mask & SELF_IDENT > 0 { c0 } else { c1 })),
+                    AlgebraicResult::None => None,
+                },
+                _ => unreachable!(), //Both slots are the same kind; checked above
+            };
+            return match merged {
+                Some(payload) => {
+                    unsafe{ temp_node.set_payload_owned::<0>(&new_key[..new_key_len], payload); }
+                    debug_assert!(validate_node(&temp_node));
+                    Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
+                },
+                None => None,
+            }
+        }
 
         //If byte_cnt < both key lengths, reuse this node but shorten the keys
         if byte_cnt < key0_len && byte_cnt < key1_len {
@@ -2676,6 +2731,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         };
 
         if let ValOrChild::Child(mut child_node) = merged_payload {
+            //A dangling child (the empty sentinel) has nothing below the dropped bytes and can't be made mutable
+            if child_node.is_empty() {
+                return None
+            }
             if chop_bytes == byte_cnt {
                 return Some(child_node)
             } else {

@@ -3115,6 +3115,16 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
     }
     #[inline]
     pub fn join_into(&mut self, node: TrieNodeODRc<V, A>) -> AlgebraicStatus {
+        //The empty sentinel (how a dangling path is represented) has no refcount word and cannot be
+        // made mutable.  Joining into it is a replacement, exactly as `EmptyNode::join_into_dyn` says,
+        // and joining an empty node into anything is the identity.
+        if node.as_tagged().node_is_empty() {
+            return if self.is_empty() { AlgebraicStatus::None } else { AlgebraicStatus::Identity }
+        }
+        if self.is_empty() {
+            *self = node;
+            return AlgebraicStatus::Element
+        }
         let (status, result) = self.make_mut().join_into_dyn(node);
         match result {
             Ok(()) => {},

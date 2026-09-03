@@ -1826,7 +1826,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice {
         let result = match self.get_focus().into_option() {
             Some(mut self_node) => {
-                let new_node = self_node.make_mut().drop_head_dyn(byte_cnt);
+                //An empty result means nothing remains below the focus: clear the branch rather than
+                // grafting an empty node (`graft_internal` requires a non-empty source)
+                let new_node = self_node.make_mut().drop_head_dyn(byte_cnt)
+                    .filter(|node| !node.as_tagged().node_is_empty());
                 let result = new_node.is_some();
                 self.graft_internal(new_node);
                 result
@@ -5833,4 +5836,249 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    /// Walks every physical node and checks LineListNode's structural invariants
+    fn assert_valid_nodes<V: Clone + Send + Sync + Unpin>(map: &PathMap<V>) {
+        fn walk<V: Clone + Send + Sync + Unpin>(node: &TrieNodeODRc<V, GlobalAlloc>) {
+            if node.is_empty() { return }
+            let tagged = node.as_tagged();
+            if let TaggedNodeRef::LineListNode(ln) = tagged {
+                assert!(crate::line_list_node::validate_node(ln));
+            }
+            let (mut tok, mut child) = tagged.node_child_iter_start();
+            while let Some(child_node) = child {
+                walk(child_node);
+                (tok, child) = tagged.node_child_iter_next(tok);
+            }
+        }
+        if let Some(root) = map.root() { walk(root); }
+    }
+
+    /// A map holding `extra` plus `{ca, cb}`, after `remove_branches(prune = false)` at "c": the node
+    /// holding "c" now has a dangling child there, i.e. the empty sentinel.  With one extra key the
+    /// parent is a LineListNode; with three or more it is a DenseByteNode carrying the sentinel in a CoFree.
+    fn with_dangling_c(extra: &[&[u8]]) -> PathMap<()> {
+        let mut m = PathMap::<()>::new();
+        for k in [b"ca".as_slice(), b"cb"] { m.set_val_at(k, ()); }
+        for k in extra { m.set_val_at(k, ()); }
+        let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); drop(wz);
+        let mut rz = m.read_zipper(); rz.descend_to(b"c");
+        assert!(rz.path_exists());
+        m
+    }
+    fn lln_with_dangling_child() -> PathMap<()> { with_dangling_c(&[b"d"]) }
+    fn dense_with_dangling_child() -> PathMap<()> { with_dangling_c(&[b"d", b"e", b"f"]) }
+
+    /// Joining into a dense node whose child at that byte is a dangling sentinel
+    #[test]
+    fn write_zipper_join_into_dangling_dense_child() {
+        let mut other = PathMap::<()>::new(); other.set_val_at(b"ca", ());
+        let joined = dense_with_dangling_child().join(&other);
+        assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"ca".to_vec(), b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
+        assert_valid_nodes(&joined);
+
+        let mut m = dense_with_dangling_child();
+        m.write_zipper().join_into(&other.read_zipper());
+        assert_eq!(m.iter().count(), 4);
+        assert_valid_nodes(&m);
+
+        //Symmetric: the dangling child arrives from the *other* operand
+        let mut dense = PathMap::<()>::new();
+        for k in [b"ca".as_slice(), b"d", b"e", b"f"] { dense.set_val_at(k, ()); }
+        let joined = dense.join(&lln_with_dangling_child());
+        assert_eq!(joined.iter().count(), 4);
+        dense.write_zipper().join_into(&lln_with_dangling_child().read_zipper());
+        assert_eq!(dense.iter().count(), 4);
+        assert_valid_nodes(&dense);
+    }
+
+    /// Dropping head bytes over a dangling sentinel child, in both node types.  (Values that sit within
+    /// the dropped bytes are discarded by `join_k_path_into`; only the downstream subtries are joined.)
+    #[test]
+    #[allow(deprecated)]
+    fn write_zipper_drop_head_over_dangling_child() {
+        let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
+
+        let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]); // dense parent
+        assert!(m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(keys(&m), vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]);
+        assert_valid_nodes(&m);
+
+        let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]);
+        assert!(m.write_zipper().drop_head(1));
+        assert_eq!(keys(&m), vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]);
+
+        let mut m = with_dangling_c(&[b"dx"]); // LineListNode parent
+        assert!(m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(keys(&m), vec![b"x".to_vec()]);
+        assert_valid_nodes(&m);
+
+        //Only a dangling path below the focus: the branch is cleared, nothing is grafted
+        let mut m = with_dangling_c(&[]);
+        assert!(!m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(m.iter().count(), 0);
+    }
+
+    /// Randomized: no-prune removals sprinkle dangling sentinels through random tries; join must be
+    /// the union of the value sets and join_k_path_into must be the head-dropped key set, with no panics
+    /// and valid nodes throughout
+    #[test]
+    fn write_zipper_dangling_children_algebra_randomized() {
+        use rand::prelude::*;
+        let mut rng = StdRng::from_seed([11; 32]);
+        for _ in 0..600 {
+            let alphabet = rng.random_range(2..6u8);
+            let gen_map = |rng: &mut StdRng| {
+                let mut keys: Vec<Vec<u8>> = (0..rng.random_range(1..12)).map(|_| {
+                    let len = rng.random_range(1..=5usize);
+                    (0..len).map(|_| b'a' + rng.random_range(0..alphabet)).collect()
+                }).collect();
+                let mut m = PathMap::<()>::new();
+                for k in &keys { m.set_val_at(k, ()); }
+                keys.shuffle(rng);
+                for k in keys.iter().take(keys.len() / 2) {
+                    let cut = rng.random_range(0..k.len());
+                    let mut wz = m.write_zipper(); wz.descend_to(&k[..cut]);
+                    if rng.random_bool(0.5) { wz.remove_branches(false); } else { wz.remove_val(false); }
+                }
+                m
+            };
+            let a = gen_map(&mut rng);
+            let b = gen_map(&mut rng);
+            let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
+            assert_valid_nodes(&a); assert_valid_nodes(&b);
+
+            let mut expected = keys(&a); expected.extend(keys(&b)); expected.sort(); expected.dedup();
+            let joined = a.join(&b);
+            assert_eq!(keys(&joined), expected, "join");
+            assert_valid_nodes(&joined);
+            let mut a2 = a.clone();
+            a2.write_zipper().join_into(&b.read_zipper());
+            assert_eq!(keys(&a2), expected, "join_into");
+
+            let k = rng.random_range(1..=2usize);
+            // values within the dropped bytes are discarded; only keys longer than k survive
+            let mut expected: Vec<Vec<u8>> = keys(&a).into_iter().filter(|key| key.len() > k).map(|key| key[k..].to_vec()).collect();
+            expected.sort(); expected.dedup();
+            let mut a3 = a.clone();
+            a3.write_zipper().join_k_path_into(k, false);
+            assert_eq!(keys(&a3), expected, "join_k_path_into({k})");
+            assert_eq!(a3.val_count(), expected.len(), "join_k_path_into({k}) val_count");
+            assert_valid_nodes(&a3);
+        }
+    }
+
+    /// Joining two maps whose roots are allocated-but-empty nodes (here: emptied by `remove_branches`
+    /// at the root).  `merge_list_nodes` used to `assume_init` an entry that was never written and then
+    /// drop the garbage payload; the fault is only sometimes visible natively, always under miri.
+    #[test]
+    fn write_zipper_join_emptied_roots() {
+        let emptied = || { let mut m = PathMap::<()>::new(); m.set_val_at(b"x", ()); assert!(m.write_zipper().remove_branches(false)); assert_eq!(m.iter().count(), 0); m };
+        let joined = emptied().join(&emptied());
+        assert_eq!(joined.iter().count(), 0);
+        let mut a = emptied();
+        a.write_zipper().join_into(&emptied().read_zipper());
+        assert_eq!(a.iter().count(), 0);
+        let mut plain = PathMap::<()>::new(); plain.set_val_at(b"yz", ());
+        assert_eq!(emptied().join(&plain).iter().count(), 1);
+        assert_eq!(plain.join(&emptied()).iter().count(), 1);
+    }
+
+    /// The same byte is a dangling path (no value, no onward node) in two DenseByteNodes being joined
+    #[test]
+    fn write_zipper_join_dangling_in_both_dense_nodes() {
+        let dangling_c = || {
+            let mut m = PathMap::<()>::new();
+            for k in [b"ca".as_slice(), b"cb", b"d", b"e", b"f"] { m.set_val_at(k, ()); }
+            let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); drop(wz);
+            let mut rz = m.read_zipper(); rz.descend_to(b"c");
+            assert!(rz.path_exists());
+            m
+        };
+        let joined = dangling_c().join(&dangling_c());
+        assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
+        assert_valid_nodes(&joined);
+        let mut a = dangling_c();
+        a.write_zipper().join_into(&dangling_c().read_zipper());
+        assert_eq!(a.iter().count(), 3);
+        assert_valid_nodes(&a);
+    }
+
+    /// `join_k_path_into` where the two slots of a LineListNode shorten onto the *same* key: the payloads
+    /// must be merged.  Previously two value slots were left on one key (a path with two values:
+    /// iteration reported it once, `val_count` twice).
+    #[test]
+    fn write_zipper_join_k_path_collapsing_keys() {
+        let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
+
+        let mut m = PathMap::<()>::new();
+        for k in [b"aaaa".as_slice(), b"acaa"] { m.set_val_at(k, ()); }
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(keys(&m), vec![b"a".to_vec()]);
+        assert_eq!(m.val_count(), 1);
+        assert_valid_nodes(&m);
+
+        //two children collapsing onto one key
+        let mut m = PathMap::<()>::new();
+        for k in [b"abx1".as_slice(), b"abx2", b"acx1", b"acx3"] { m.set_val_at(k, ()); }
+        let mut wz = m.write_zipper(); wz.descend_to(b"a"); assert!(wz.join_k_path_into(1, false)); drop(wz);
+        assert_eq!(keys(&m), vec![b"ax1".to_vec(), b"ax2".to_vec(), b"ax3".to_vec()]);
+        assert_eq!(m.val_count(), 3);
+        assert_valid_nodes(&m);
+
+        //a value and a child on the same key is the legal representation and is left alone
+        let mut m = PathMap::<()>::new();
+        for k in [b"aaa".as_slice(), b"acab", b"acac"] { m.set_val_at(k, ()); }
+        assert!(m.write_zipper().join_k_path_into(2, false));
+        assert_eq!(keys(&m), vec![b"a".to_vec(), b"ab".to_vec(), b"ac".to_vec()]);
+        assert_eq!(m.val_count(), 3);
+    }
+
+    /// An emptied root (`remove_branches` at the root always leaves a LineListNode) joined with an empty
+    /// map whose root was materialized by a read (a dense node under `all_dense_nodes`): both orders,
+    /// with and without a root value.  Exercises the empty∪empty paths of every node-type pairing.
+    #[test]
+    fn write_zipper_join_mixed_empty_roots() {
+        let emptied = || { let mut m = PathMap::<()>::new(); m.set_val_at(b"x", ()); assert!(m.write_zipper().remove_branches(true)); m };
+        let empty_with_root = || { let m = PathMap::<()>::new(); assert_eq!(m.iter().count(), 0); m };
+        assert_eq!(emptied().join(&empty_with_root()).iter().count(), 0);
+        assert_eq!(empty_with_root().join(&emptied()).iter().count(), 0);
+        let mut a = emptied(); a.write_zipper().join_into(&empty_with_root().read_zipper()); assert_eq!(a.iter().count(), 0);
+        let mut a = empty_with_root(); a.write_zipper().join_into(&emptied().read_zipper()); assert_eq!(a.iter().count(), 0);
+        let mut a = emptied(); a.set_val_at(b"", ());
+        assert_eq!(a.join(&empty_with_root()).iter().count(), 1);
+        assert_eq!(empty_with_root().join(&a).iter().count(), 1);
+    }
+
+    /// `join_k_path_into` shortening two value keys onto a shared first byte must yield the canonical
+    /// layout (Child@"a" -> {a, b}), not (Val@"aa", Val@"ab"): the latter defeats indexed descent and
+    /// every catamorphism engine (the PR #31 iterative engine loops on it).
+    #[test]
+    fn write_zipper_drop_head_shared_first_byte_is_canonical() {
+        use crate::morphisms::Catamorphism;
+        let mut m = PathMap::<()>::new();
+        for k in [b"aaa".as_slice(), b"bab"] { m.set_val_at(k, ()); }
+        assert!(m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"aa".to_vec(), b"ab".to_vec()]);
+        //indexed descent must reach both children below "a"
+        let mut rz = m.read_zipper();
+        rz.descend_to_byte(b'a');
+        assert!(rz.path_exists());
+        assert_eq!(rz.child_count(), 2);
+        assert!(rz.descend_indexed_byte(1).is_some());
+        //the (zipper-driven) cached cata must agree with iteration
+        let n = m.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
+        assert_eq!(n, 2);
+        assert_valid_nodes(&m);
+
+        //the same through a shared (grafted) subtrie, as the randomized program found it
+        let mut map = PathMap::<()>::new(); map.set_val_at(b"", ());
+        let mut other = PathMap::<()>::new();
+        for k in [b"".as_slice(), b"a", b"aaaa", b"abab", b"b", b"ba", b"baa", b"bbaa", b"bbb"] { other.set_val_at(k, ()); }
+        { let mut rz = other.read_zipper(); rz.descend_to(b"a"); let mut wz = map.write_zipper(); wz.graft(&rz); }
+        assert!(map.write_zipper().join_k_path_into(1, false));
+        let n = map.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
+        assert_eq!(n, 3);
+        assert_valid_nodes(&map);
+    }
 }
