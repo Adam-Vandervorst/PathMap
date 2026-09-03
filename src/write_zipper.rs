@@ -1505,17 +1505,14 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
-        //Only the branches the source actually has are grafted.  The masked bits it lacks "will
-        // be non-existent in `self`" (doc comment above), so they are removed here first, for
-        // every arm alike.  The one- and two-bit arms used to descend to each masked byte and
-        // graft whatever the source had there, which for an absent branch meant removing the
-        // branches at a location that need not exist -- and left a dangling child behind --
-        // while the arm below removed the same branch outright.
+
         let src_mask = src.child_mask() & child_mask;
-        let absent = child_mask & src_mask.not();
         if remove_unset {
             self.remove_branches(false);
-        } else if absent.count_bits() > 0 {
+        } else {
+            //Remove branches that will be absent from the final node because they are set in child_mask and absent from src
+            // It will be faster to overwrite a branch than re-add it after removing it, so we are focussed on the difference
+            let absent = child_mask & src_mask.not();
             self.remove_unmasked_branches(absent.not(), false);
         }
         match src_mask.count_bits() {
@@ -2784,15 +2781,11 @@ mod mut_node_stack {
         pub fn top(&self) -> Option<TaggedNodeRef<'_, V, A>> {
             match self.stack.last() {
                 Some(top) => Some(unsafe{ top.as_tagged() }),
-                None => unsafe{ self.root.map(|mut ptr| {
+                None => unsafe{ self.root.and_then(|mut ptr| {
                     let ptr = ptr.as_mut();
                     match ptr.is_empty() {
-                        //An empty root is still the node the focus lives under; answering
-                        // `None` here while `top_mut` answers the node made every read
-                        // through the stack unwrap after `remove_branches` (or a
-                        // `join_k_path_into` that collapsed everything) emptied the root.
-                        true => TaggedNodeRef::empty_node(),
-                        false => ptr.make_mut().cast()
+                        true => None,
+                        false => Some(ptr.make_mut().cast())
                     }
                 }) }
             }

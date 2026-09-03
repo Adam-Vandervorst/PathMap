@@ -662,6 +662,22 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         self.val_or_child0 = payload;
         self.header = Self::header0(is_child_ptr, key.len());
     }
+    /// Installs a payload in slot 0 after its key has already been written to `key_bytes`.
+    #[inline]
+    fn set_payload_0_for_existing_key(&mut self, key_len: usize, payload: ValOrChild<V, A>) {
+        debug_assert!(!self.is_used::<0>());
+        debug_assert!(key_len > 0 && key_len <= KEY_BYTES_CNT);
+        match payload {
+            ValOrChild::Child(child) => {
+                self.val_or_child0.child = ManuallyDrop::new(child);
+                self.header = Self::header0(true, key_len);
+            },
+            ValOrChild::Val(val) => {
+                self.val_or_child0.val = ManuallyDrop::new(LocalOrHeap::new(val));
+                self.header = Self::header0(false, key_len);
+            },
+        }
+    }
     #[inline]
     unsafe fn set_payload_1(&mut self, key: &[u8], is_child_ptr: bool, payload: ValOrChildUnion<V, A>) {
         let key_0_used_cnt = self.key_len_0();
@@ -1061,9 +1077,6 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         //Overlap of 1 is legal if and only if ONE OF the following two conditions are true:
         // A: slot0 contains a value AND has a 1-byte key (a value at the shared byte, slot1 continuing below it)
         // B: both slots have a length of 1, and one is a value
-        //NOTE: without the length requirement in A, `drop_head` could leave (Val@"aa", Val@"ab"): a shape
-        // insertion never creates, that indexed descent (`descend_indexed_byte`) and the catamorphisms
-        // cannot traverse.  Factoring it yields the canonical Child@"a" -> {a, b}.
         let legal_overlap = overlap == 1 && (
             (!self.is_child_ptr::<0>() && key0.len() == 1) ||
             (!self.is_child_ptr::<1>() && key0.len()==1 && key1.len()==1 ));
@@ -1190,10 +1203,6 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     let restricted_node_result = if onward_key.len() == 0 {
                         self_onward_link.as_tagged().prestrict_dyn(onward_node)
                     } else {
-                        //`onward_key` may name a dangling byte of `other`: in its child mask, but
-                        // with no node behind it.  Nothing under it can validate a path, so the
-                        // slot is dropped, as `subtract_from_slot_contents` beside this already
-                        // does.  Calling `as_tagged` on the missing node was an explicit panic.
                         match onward_node.get_node_at_key(onward_key).into_option() {
                             Some(other_onward_node) => self_onward_link.as_tagged().prestrict_dyn(other_onward_node.as_tagged()),
                             None => AlgebraicResult::None,
@@ -2505,8 +2514,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self) {
-                    //Both nodes were empty (e.g. a root emptied by `remove_branches` — always a LineListNode — joined
-                    // with an empty map whose root was materialized as a dense node); the join is empty too
+                    //Both nodes were empty so the join is empty too
                     AlgebraicStatus::None => {
                         debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
                         AlgebraicResult::None
@@ -2639,43 +2647,48 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         let key0_len = key0.len();
         let key1_len = key1.len();
 
-        //If byte_cnt < both key lengths but the shortened keys coincide, both slots now describe the same
-        // path and must be merged: two values join into one value, two children join into one child.  (A
-        // value and a child at the same key is the legal representation and needs no merge.)  Leaving two
-        // value slots on one key makes a path with two values: iteration sees it once, `val_count` twice.
-        if byte_cnt < key0_len && byte_cnt < key1_len && key0[byte_cnt..] == key1[byte_cnt..]
-            && temp_node.is_child_ptr::<0>() == temp_node.is_child_ptr::<1>() {
-            let new_key_len = key0_len - byte_cnt;
-            let mut new_key = [0u8; KEY_BYTES_CNT];
-            new_key[..new_key_len].copy_from_slice(&key0[byte_cnt..]);
-            //NOTE: take slot 1 first; taking slot 0 first may shift slot 1's contents down
-            let payload1 = temp_node.take_payload::<1>().unwrap();
-            let payload0 = temp_node.take_payload::<0>().unwrap();
-            let merged = match (payload0, payload1) {
-                (ValOrChild::Val(v0), ValOrChild::Val(v1)) => match v0.pjoin(&v1) {
-                    AlgebraicResult::Element(v) => Some(ValOrChild::Val(v)),
-                    AlgebraicResult::Identity(mask) => Some(ValOrChild::Val(if mask & SELF_IDENT > 0 { v0 } else { v1 })),
-                    AlgebraicResult::None => None,
-                },
-                (ValOrChild::Child(c0), ValOrChild::Child(c1)) => match c0.pjoin(&c1) {
-                    AlgebraicResult::Element(c) => Some(ValOrChild::Child(c)),
-                    AlgebraicResult::Identity(mask) => Some(ValOrChild::Child(if mask & SELF_IDENT > 0 { c0 } else { c1 })),
-                    AlgebraicResult::None => None,
-                },
-                _ => unreachable!(), //Both slots are the same kind; checked above
-            };
-            return match merged {
-                Some(payload) => {
-                    unsafe{ temp_node.set_payload_owned::<0>(&new_key[..new_key_len], payload); }
-                    debug_assert!(validate_node(&temp_node));
-                    Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
-                },
-                None => None,
-            }
-        }
+        //Both keys survive.  Shorten them in-place; if they collide, the two payloads must first
+        //be joined into one.  This is deliberately destructive: unlike `factor_prefix`, it avoids
+        //cloning values or child references just to replace this temporary node.
+        if byte_cnt < key0_len.min(key1_len) {
+            let shortened_key0 = &key0[byte_cnt..];
+            let shortened_key1 = &key1[byte_cnt..];
+            if shortened_key0 == shortened_key1
+                && temp_node.is_child_ptr::<0>() == temp_node.is_child_ptr::<1>() {
+                let new_key_len = shortened_key0.len();
+                unsafe {
+                    let key_bytes = temp_node.key_bytes.as_mut_ptr().cast::<u8>();
+                    core::ptr::copy(key_bytes.add(byte_cnt), key_bytes, new_key_len);
+                }
 
-        //If byte_cnt < both key lengths, reuse this node but shorten the keys
-        if byte_cnt < key0_len && byte_cnt < key1_len {
+                //Take slot 1 first: taking slot 0 would shift slot 1 into its place.
+                let payload1 = temp_node.take_payload::<1>().unwrap();
+                let payload0 = temp_node.take_payload::<0>().unwrap();
+                let merged = match (payload0, payload1) {
+                    (ValOrChild::Val(v0), ValOrChild::Val(v1)) => match v0.pjoin(&v1) {
+                        AlgebraicResult::Element(v) => Some(ValOrChild::Val(v)),
+                        AlgebraicResult::Identity(mask) => Some(ValOrChild::Val(if mask & SELF_IDENT > 0 { v0 } else { v1 })),
+                        AlgebraicResult::None => None,
+                    },
+                    (ValOrChild::Child(c0), ValOrChild::Child(c1)) => match c0.pjoin(&c1) {
+                        AlgebraicResult::Element(c) => Some(ValOrChild::Child(c)),
+                        AlgebraicResult::Identity(mask) => Some(ValOrChild::Child(if mask & SELF_IDENT > 0 { c0 } else { c1 })),
+                        AlgebraicResult::None => None,
+                    },
+                    _ => unreachable!(), //Both slots have the same kind; checked above.
+                };
+                return match merged {
+                    Some(payload) => {
+                        temp_node.set_payload_0_for_existing_key(new_key_len, payload);
+                        debug_assert!(validate_node(&temp_node));
+                        Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
+                    },
+                    None => None,
+                }
+            }
+
+            //The shortened keys are distinct, or form the legal value-and-child case.  Preserve
+            //slot order before factoring any now-illegal shared prefix.
             let mut slot0_child = temp_node.is_child_ptr::<0>();
             let mut slot1_child = temp_node.is_child_ptr::<1>();
             let mut new_key0_len = key0_len-byte_cnt;
@@ -3511,9 +3524,16 @@ mod tests {
         let mut source_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
         source_node.node_set_val(b"1ab", 1).unwrap_or_else(|_| panic!());
         source_node.node_set_val(b"2ac", 2).unwrap_or_else(|_| panic!());
-        source_node.drop_head_dyn(1).unwrap();
+        let dropped = source_node.drop_head_dyn(1).unwrap();
 
-        let dropped_ref = source_node.as_tagged();
+        // Dropping the distinct leading bytes factors the shared "a" into an onward child.
+        let dropped_ref = dropped.as_tagged();
+        let (consumed, child) = dropped_ref.node_get_child(b"a").unwrap();
+        assert_eq!(consumed, 1);
+        assert_eq!(child.as_tagged().node_get_val(b"b"), Some(&1));
+        assert_eq!(child.as_tagged().node_get_val(b"c"), Some(&2));
+
+        // `get_node_at_key` must expose that same factored child as the focused node.
         let focus = dropped_ref.get_node_at_key(b"a");
         assert_eq!(focus.as_tagged().node_get_val(b"b"), Some(&1));
         assert_eq!(focus.as_tagged().node_get_val(b"c"), Some(&2));
