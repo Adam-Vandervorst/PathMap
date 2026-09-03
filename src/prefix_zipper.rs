@@ -693,6 +693,7 @@ mod tests {
     use crate::zipper::ZipperAbsolutePath;
     use crate::zipper::ZipperReadOnlyValues;
     use crate::zipper::ZipperValues;
+    use crate::zipper::ZipperValuesAt;
     const PATHS1: &[(&[u8], u64)] = &[
         (b"0000", 0),
         (b"00000", 1),

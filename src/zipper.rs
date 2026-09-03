@@ -3923,7 +3923,7 @@ pub(crate) mod zipper_moving_tests {
         b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i",
     ];
 
-    pub fn zipper_val_at_test<Z: ZipperMoving + ZipperValues<()>>(mut zipper: Z) {
+    pub fn zipper_val_at_test<Z: ZipperMoving + ZipperValuesAt<()>>(mut zipper: Z) {
         assert_eq!(zipper.val_at(b""), None);
         assert_eq!(zipper.val_at(b"roman"), Some(&()));
         assert_eq!(zipper.val_at(b"romane"), Some(&()));
@@ -3966,7 +3966,7 @@ pub(crate) mod zipper_moving_tests {
         key
     }
 
-    pub fn zipper_val_at_long_path_test<Z: ZipperMoving + ZipperValues<()>>(mut zipper: Z) {
+    pub fn zipper_val_at_long_path_test<Z: ZipperMoving + ZipperValuesAt<()>>(mut zipper: Z) {
         let long_key = zipper_val_at_long_path_test_key();
         let relative_long_suffix = &long_key[3..];
         let almost_full_suffix = &relative_long_suffix[..relative_long_suffix.len()-1];

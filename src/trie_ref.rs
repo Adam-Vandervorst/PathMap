@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn trie_ref_val_at_test() {
-        fn assert_val_at<T: ZipperValues<i32>>(trie_ref: T) {
+        fn assert_val_at<T: ZipperValuesAt<i32>>(trie_ref: T) {
             assert_eq!(trie_ref.val(), None);
             assert_eq!(trie_ref.val_at(b"root:a:new_a"), Some(&10));
             assert_eq!(trie_ref.val_at(b"root:a:nested:deep"), Some(&11));
