@@ -1188,8 +1188,14 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     let restricted_node_result = if onward_key.len() == 0 {
                         self_onward_link.as_tagged().prestrict_dyn(onward_node)
                     } else {
-                        let other_onward_node = onward_node.get_node_at_key(onward_key);
-                        self_onward_link.as_tagged().prestrict_dyn(other_onward_node.as_tagged())
+                        //`onward_key` may name a dangling byte of `other`: in its child mask, but
+                        // with no node behind it.  Nothing under it can validate a path, so the
+                        // slot is dropped, as `subtract_from_slot_contents` beside this already
+                        // does.  Calling `as_tagged` on the missing node was an explicit panic.
+                        match onward_node.get_node_at_key(onward_key).into_option() {
+                            Some(other_onward_node) => self_onward_link.as_tagged().prestrict_dyn(other_onward_node.as_tagged()),
+                            None => AlgebraicResult::None,
+                        }
                     };
                     restricted_node_result.map(|node| ValOrChildUnion::from(node))
                 } else {
@@ -3494,48 +3500,37 @@ mod tests {
         assert_eq!(by_index.child_count(), by_path.child_count());
         assert_eq!(by_index.child_mask(), by_path.child_mask());
     }
+
+    /// Issue #85: `restrict` panicked when a child-link slot was followed into `other` and
+    /// landed on a dangling byte there (in the child mask, no node behind it).
+    #[test]
+    fn restrict_against_dangling_branch() {
+        use crate::PathMap;
+        use crate::zipper::*;
+        fn mk(keys: &[&[u8]]) -> PathMap<()> { let mut m = PathMap::new(); for k in keys { m.set_val_at(k, ()); } m }
+        fn keys(m: &PathMap<()>) -> Vec<String> { m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect() }
+        fn other_dangling_a() -> PathMap<()> {
+            let mut o = mk(&[b"a", b"b", b"c", b"e"]);
+            o.remove_val_at(b"a", false);
+            assert_eq!(keys(&o), ["b", "c", "e"]);
+            o
+        }
+        let m = mk(&[b"ab", b"ac"]);
+        let r = m.restrict(&other_dangling_a());
+        assert_eq!(keys(&r), Vec::<String>::new());
+
+        let mut m = mk(&[b"ab", b"ac"]);
+        let o = other_dangling_a();
+        m.write_zipper().restrict(&o.read_zipper());
+        assert_eq!(keys(&m), Vec::<String>::new());
+
+        let mut m = mk(&[b"dab", b"dac"]);
+        { let mut wz = m.write_zipper(); wz.descend_to(b"d"); wz.restrict(&o.read_zipper()); }
+        assert_eq!(keys(&m), Vec::<String>::new());
+
+        //A path that `other` does validate survives beside one it does not
+        let mut m = mk(&[b"ab", b"ac", b"bx"]);
+        m.write_zipper().restrict(&o.read_zipper());
+        assert_eq!(keys(&m), ["bx"]);
+    }
 }
-
-//GOAT, merge wrappers for lattice impls on primitives
-//
-//GOAT, remove garbage lattice impls
-//
-//GOAT Catamorphism names:  https://github.com/Adam-Vandervorst/PathMap/pull/8#discussion_r2004745719
-//
-//GOAT, document how path existence can't be used to confirm the existence of a value, only the non-existence
-//  and document the meaning of path existence more generally.
-//GOAT, consider exposing an explicit prune method.  Possibly also consider exposing a "create_path" method.
-//  SEE "PATH EXISTS DISCUSSION" below
-//
-//GOAT, consider adding a "prune" flag to methods that might remove values
-//
-
-
-// PATH EXISTS DISCUSSION
-// Ok... Fork 1 is about paths, and specifically what information about values you can get from whether or not a path exists.  In the current code, the *nonexistence* of a path guarantees no value is below that point (how could there be one?) but the *existence* of a path does **not** guarantee a value is.
-// Earlier drafts of PathMap (about 3 months ago) we were upholding that property that all paths led to values.  But I realized this property is impossible to uphold with the a multi write-zipper implementation.
-// Bottom line, with the current set of guarantees, you can't use `path_exists` to conclude that there are zippers above you.  You will have to call `to_next_value` to search downwards.
-// Looking forwards, I think I may add explicit methods like `ascend_prune` that ascends the zipper upwards from an empty leaf, pruning as it goes, and `descend_create` to do the opposite.  (although I'm a little on the fence about how descend_create would actually be useful.)  Maybe it might make sense to implement versions of these methods that don't move the zipper focus.
-// But if we tweak the zipper contract so that paths are explicitly managed, just like values, and document the behavior of every operation with respect to paths, then the existence of a path might become a reliable signal.
-// However, that brings up another question: Do you *want* to be pruning the path each time?  Consider a loop where a zipper is acquired, dropped, acquired, dropped, etc.  If each acquisition means creating the path, and each drop means pruning it, that is a lot of wasted work.  On the other hand, just setting and clearing a value is a lot cheaper.
-// Anyway, let me know your thoughts.
-
-
-//GOAT, steps to moving `val_count` method onto a new "TrieSummary" trait, and removing it from the ZipperMoving trait
-// (and remove the node_val_count method from the TrieNode trait)
-//
-//GOAT - Wait until TrieNode trait is re-jigged to put root values on the node and not the
-// parent, because there is bound to be a lot of edge-case logic to account for root values
-// under the current TrieNode trait contract.  I'd prefer to only write this code once.
-//
-// 1. implement a caching_cata inner loop that uses the TrieNode API instead of the zipper API
-//       a. This means it has no access to the origin_path, and the cata implementation needs
-//          to maintain its own path_buffer
-//       b. It means paths are relative to the node where it is called
-//       c. It borrows the zipper, rather than taking ownership.
-//       d. It works from the focus, rather than from a the root.
-//       e. It can then be implemented on more zipper types that don't support ReadOnlyValues
-//          and ZipperMoving
-// 2. implement a val_count convenience on top of 1.
-
-//GOAT, Paths in caching Cata:  https://github.com/Adam-Vandervorst/PathMap/pull/8#discussion_r2004828957
