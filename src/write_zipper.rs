@@ -1505,37 +1505,43 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
-
-        let src_mask = src.child_mask() & child_mask;
-        if remove_unset {
-            self.remove_branches(false);
-        } else {
-            //Remove branches that will be absent from the final node because they are set in child_mask and absent from src
-            // It will be faster to overwrite a branch than re-add it after removing it, so we are focussed on the difference
-            let absent = child_mask & src_mask.not();
-            self.remove_unmasked_branches(absent.not(), false);
-        }
-        match src_mask.count_bits() {
-            0 => {}
+        // The dense-node merge handles both pieces of the contract directly: it removes
+        // masked branches absent from `src`, and (when requested) every unmasked branch.
+        // Do not pre-clear or pre-filter `self`: that throws away the destination node the
+        // merge is meant to copy selectively, turning the bulk path into a rebuild.
+        match child_mask.count_bits() {
+            0 => {
+                if remove_unset {
+                    self.remove_branches(false);
+                }
+            }
             1 => {
-                let byte = src_mask.indexed_bit::<true>(0).expect("one bit set");
+                if remove_unset {
+                    self.remove_branches(false);
+                }
+                // SAFETY: this arm is selected only when `child_mask` has one bit.
+                let byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
                 self.descend_to_byte(byte);
                 self.graft_src_at(src, &[byte]);
                 self.ascend_byte();
             }
             2 => {
-                let first_byte = src_mask.indexed_bit::<true>(0).expect("some bit set");
+                if remove_unset {
+                    self.remove_branches(false);
+                }
+                // SAFETY: this arm is selected only when `child_mask` has two bits.
+                let first_byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
                 self.descend_to_byte(first_byte);
                 self.graft_src_at(src, &[first_byte]);
                 self.ascend_byte();
 
-                let second_byte = src_mask.next_bit(first_byte).expect("two bits set");
+                // SAFETY: `first_byte` is one of the two set bits, so it has a successor.
+                let second_byte = unsafe { child_mask.next_bit(first_byte).unwrap_unchecked() };
                 self.descend_to_byte(second_byte);
                 self.graft_src_at(src, &[second_byte]);
                 self.ascend_byte();
             }
             _ => {
-                let child_mask = src_mask;
                 let src_focus = src.get_focus();
                 match src_focus.try_as_tagged() {
                     Some(src_tagged) => {
