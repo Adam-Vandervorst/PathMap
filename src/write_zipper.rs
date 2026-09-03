@@ -4168,6 +4168,18 @@ mod tests {
         drop(wz);
     }
 
+    /// Tests a code path where a single PairNode could represent the trie before the drop_head, but now can't
+    #[test]
+    fn write_zipper_drop_head_test7() {
+        let mut map: PathMap<u64> = [
+            (b"1ab".as_slice(), 1),
+            (b"2ac".as_slice(), 2),
+        ].into_iter().collect();
+        assert!(map.write_zipper().join_k_path_into(1, true));
+        assert_eq!(map.get_val_at(b"ab"), Some(&1));
+        assert_eq!(map.get_val_at(b"ac"), Some(&2));
+    }
+
     #[test]
     fn write_zipper_meet_k_path_into_test1() {
         let keys = [
