@@ -82,6 +82,7 @@ use std::marker::PhantomData;
 use fast_slice_utils::starts_with;
 
 use crate::alloc::{GlobalAlloc, global_alloc};
+use crate::zipper::ZipperValuesAt;
 use crate::{
     PathMap,
     morphisms::Catamorphism,
@@ -2785,6 +2786,11 @@ where Storage: AsRef<[u8]>
     fn val(&self) -> Option<&()> {
         self.get_value().map(|_x| &())
     }
+}
+
+impl<'tree, Storage> ZipperValuesAt<()> for ACTZipper<'tree, Storage, ()>
+where Storage: AsRef<[u8]>
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&()> {
         self.get_value_at(path.as_ref()).map(|_x| &())
     }
@@ -2797,6 +2803,11 @@ where Storage: AsRef<[u8]>
         //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
         self.get_val()
     }
+}
+
+impl<'tree, Storage> ZipperValuesAt<u64> for ACTZipper<'tree, Storage, u64>
+where Storage: AsRef<[u8]>
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&u64> {
         //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
         self.get_val_at(path)
