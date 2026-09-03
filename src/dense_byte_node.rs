@@ -295,11 +295,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 
     #[inline]
     fn get_child_mut(&mut self, k: u8) -> Option<&mut TrieNodeODRc<V, A>> {
-        //An empty rec is a dangling byte: the byte is in the mask but there is nothing to descend
-        // into, and the empty sentinel it holds cannot be made mutable.  It is reported as "no
-        // child", as LineListNode::get_child_mut does, so a descent stops at this node and the
-        // mutator that follows (node_set_val, node_set_branch, a graft) replaces the rec through
-        // set_child instead of calling make_mut on it.
         self.get_mut(k).and_then(|cf| cf.rec_mut()).filter(|child| !child.is_empty())
     }
 
@@ -1312,8 +1307,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
 
     fn join_into_dyn(&mut self, mut other: TrieNodeODRc<V, A>) -> (AlgebraicStatus, Result<(), TrieNodeODRc<V, A>>) where V: Lattice {
-        //An empty `other` (e.g. the sentinel behind a dangling path) contributes nothing, and it
-        // cannot be made mutable; this mirrors the `EMPTY_NODE_TAG` arm in LineListNode::join_into_dyn
         if other.as_tagged().node_is_empty() {
             return (AlgebraicStatus::Identity, Ok(()))
         }
@@ -1353,7 +1346,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 //WARNING: Don't be tempted to swap the node itself with its first child.  This feels like it
                 // might be an optimization, but it would be a memory leak because the other node will now
                 // hold an Rc to itself.
-                //A dangling child (the empty sentinel) has nothing below the dropped byte and can't be made mutable
                 match self.values.pop().unwrap().into_rec().filter(|child| !child.is_empty()) {
                     Some(mut child) => {
                         if byte_cnt > 1 {
@@ -1368,7 +1360,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             _ => {
                 let mut new_node = Self::new_in(self.alloc.clone());
                 while let Some(cf) = self.values.pop() {
-                    //A dangling child (the empty sentinel) has nothing below the dropped byte and can't be made mutable
                     let child = cf.into_rec().filter(|child| !child.is_empty());
                     let child = if byte_cnt > 1 {
                         child.and_then(|mut child| child.make_mut().drop_head_dyn(byte_cnt-1))
@@ -1844,8 +1835,7 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         let (other_rec, other_val) = other.into_both();
         let rec_status = match self.rec_mut() {
             Some(self_rec) => match other_rec {
-                //Route through `TrieNodeODRc::join_into` so an empty-sentinel `self_rec` (a dangling path) is
-                // replaced rather than made mutable
+                //Route through `TrieNodeODRc::join_into`
                 Some(other_rec) => self_rec.join_into(other_rec),
                 None => AlgebraicStatus::Identity,
             },
@@ -2051,6 +2041,8 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
                         AlgebraicResult::None => {
                             //Both nodes hold a dangling path (no value, no onward node) at this byte, e.g. after
                             // `remove_branches(prune = false)`; it stays dangling in the join and is an identity for both
+                            debug_assert!(!lv.has_rec() && !lv.has_val());
+                            debug_assert!(!rv.has_rec() && !rv.has_val());
                             unsafe { new_v.get_unchecked_mut(c).write(Cf::new(None, None)) };
                         },
                         AlgebraicResult::Identity(mask) => {
@@ -2141,7 +2133,6 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
                     match lv.join_into(rv) {
                         AlgebraicStatus::Identity => { },
                         AlgebraicStatus::Element => { is_identity = false; },
-                        //Both nodes hold a dangling path at this byte; `lv` is the (still empty) CoFree written back below
                         AlgebraicStatus::None => { },
                     }
                     unsafe { new_v.get_unchecked_mut(c).write(lv) };
