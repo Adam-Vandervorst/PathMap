@@ -1880,6 +1880,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let prefix = prefix.as_ref();
         match self.get_focus().into_option() {
             Some(focus_node) => {
+                // Inserting zero bytes is a no-op
+                if prefix.is_empty() {
+                    return true;
+                }
                 let prefixed = make_parents_in(prefix, focus_node, self.alloc.clone());
                 self.graft_internal(Some(prefixed));
                 true
@@ -2289,6 +2293,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     //The focus_stack.top() is the parent node of the focus, so we'll replace its child
                     let sub_branch_added = self.in_zipper_mut_static_result(
                         |node, key| {
+                            // A graft replaces everything below the focus
+                            node.node_remove_all_branches(key, false);
                             node.node_set_branch(key, src)
                         },
                         |_, _| true);
@@ -2596,6 +2602,7 @@ pub(crate) fn swap_top_node<'cursor, V: Clone + Send + Sync, A: Allocator + 'cur
 /// Internal function to create a parent path leading up to the supplied `child_node`
 #[inline]
 fn make_parents_in<V: Clone + Send + Sync, A: Allocator>(path: &[u8], child_node: TrieNodeODRc<V, A>, alloc: A) -> TrieNodeODRc<V, A> {
+    debug_assert!(!path.is_empty(), "make_parents_in needs at least one path byte; an empty path would drop child_node");
 
     #[cfg(not(feature = "all_dense_nodes"))]
     {
@@ -4232,6 +4239,190 @@ mod tests {
         drop(wz);
 
         assert_eq!(map.iter().map(|(k, _v)| k).collect::<Vec<Vec<u8>>>(), ref_keys);
+    }
+
+    /// Walk every physical node and check `LineListNode`'s structural invariants.
+    fn assert_valid_nodes<V: Clone + Send + Sync + Unpin>(map: &PathMap<V>) {
+        fn walk<V: Clone + Send + Sync + Unpin>(node: &TrieNodeODRc<V, GlobalAlloc>) {
+            if node.is_empty() {
+                return;
+            }
+            let tagged = node.as_tagged();
+            if let TaggedNodeRef::LineListNode(line_list) = tagged {
+                assert!(crate::line_list_node::validate_node(line_list));
+            }
+            let (mut token, mut child) = tagged.node_child_iter_start();
+            while let Some(child_node) = child {
+                walk(child_node);
+                (token, child) = tagged.node_child_iter_next(token);
+            }
+        }
+
+        if let Some(root) = map.root() {
+            walk(root);
+        }
+    }
+
+    /// A focus in the middle of a compressed key run must replace the old run,
+    /// rather than retain it alongside the prefixed copy.
+    #[test]
+    fn write_zipper_insert_prefix_mid_key_replaces_old_downstream_path() {
+        let mut map = PathMap::<()>::new();
+        map.set_val_at(b"aaa", ());
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"a");
+        assert!(wz.insert_prefix(b"b"));
+        drop(wz);
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"abaa".to_vec()]
+        );
+        assert!(map.get(b"aaa").is_none());
+        let mut rz = map.read_zipper();
+        rz.descend_to(b"aa");
+        assert!(!rz.path_exists(), "stale key run must be gone");
+        assert_valid_nodes(&map);
+
+        // The compressed run can continue into a branch as well.
+        let mut map = PathMap::<()>::new();
+        map.set_val_at(b"abcd", ());
+        map.set_val_at(b"abce", ());
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"ab");
+        assert!(wz.insert_prefix(b"X"));
+        drop(wz);
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"abXcd".to_vec(), b"abXce".to_vec()]
+        );
+        assert_valid_nodes(&map);
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_keeps_focus_value() {
+        let mut map = PathMap::<()>::new();
+        for key in [b"a".as_slice(), b"ab", b"ac"] {
+            map.set_val_at(key, ());
+        }
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"a");
+        assert!(wz.insert_prefix(b"Z"));
+        drop(wz);
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"a".to_vec(), b"aZb".to_vec(), b"aZc".to_vec()]
+        );
+        assert_valid_nodes(&map);
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_empty_is_identity() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(b"ab", 1);
+        map.set_val_at(b"ac", 2);
+        assert!(map.write_zipper().insert_prefix(b""));
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"ab".to_vec(), b"ac".to_vec()]
+        );
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"a");
+        assert!(wz.insert_prefix(b""));
+        drop(wz);
+        assert_eq!(map.get(b"ab"), Some(&1));
+        assert_eq!(map.get(b"ac"), Some(&2));
+        assert_valid_nodes(&map);
+    }
+
+    #[test]
+    fn write_zipper_graft_over_single_line() {
+        for src_key in [[0u8, 3u8], [0u8, 0u8]] {
+            let mut dst = PathMap::<u64>::new();
+            dst.set_val_at([0, 0], 1);
+            let mut src = PathMap::<u64>::new();
+            src.set_val_at(src_key, 8);
+            let mut wz = dst.write_zipper_at_path(&[0]);
+            let mut rz = src.read_zipper();
+            rz.descend_to(&[0]);
+            wz.graft(&rz);
+            drop(wz);
+            assert_eq!(
+                dst.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+                vec![vec![0, src_key[1]]]
+            );
+            assert_eq!(dst.get([0, src_key[1]]), Some(&8));
+            assert_valid_nodes(&dst);
+        }
+    }
+
+    fn assert_insert_prefix_rewrite(mut keys: Vec<Vec<u8>>, focus: Vec<u8>, prefix: Vec<u8>) {
+        keys.sort();
+        keys.dedup();
+
+        let mut map = PathMap::<()>::new();
+        for key in &keys {
+            map.set_val_at(key, ());
+        }
+
+        let mut expected: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|key| {
+                if key.starts_with(&focus) && key.len() > focus.len() {
+                    [&focus[..], &prefix[..], &key[focus.len()..]].concat()
+                } else {
+                    key.clone()
+                }
+            })
+            .collect();
+        expected.sort();
+
+        let mut wz = map.write_zipper();
+        wz.descend_to(&focus);
+        wz.insert_prefix(&prefix);
+        drop(wz);
+
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            expected,
+            "keys {keys:?}, focus {focus:?}, prefix {prefix:?}"
+        );
+        assert_valid_nodes(&map);
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_randomized() {
+        // Miri runs this same corpus generator with a small budget. This keeps
+        // the test's behavior identical while completing comfortably quickly.
+        #[cfg(miri)]
+        const CASE_COUNT: usize = 20;
+        #[cfg(not(miri))]
+        const CASE_COUNT: usize = 2_000;
+
+        use rand::prelude::*;
+
+        let mut rng = StdRng::from_seed([42; 32]);
+        for _ in 0..CASE_COUNT {
+            let alphabet = rng.random_range(2..4u8);
+            let mut keys: Vec<Vec<u8>> = (0..rng.random_range(1..7))
+                .map(|_| {
+                    let len = rng.random_range(0..=5usize);
+                    (0..len)
+                        .map(|_| b'a' + rng.random_range(0..alphabet))
+                        .collect()
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+
+            let focus = {
+                let key = &keys[rng.random_range(0..keys.len())];
+                key[..rng.random_range(0..=key.len())].to_vec()
+            };
+            let prefix: Vec<u8> = (0..rng.random_range(1..=3usize))
+                .map(|_| b'a' + rng.random_range(0..alphabet))
+                .collect();
+            assert_insert_prefix_rewrite(keys, focus, prefix);
+        }
     }
 
     #[test]
