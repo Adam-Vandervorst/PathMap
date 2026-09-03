@@ -295,7 +295,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 
     #[inline]
     fn get_child_mut(&mut self, k: u8) -> Option<&mut TrieNodeODRc<V, A>> {
-        self.get_mut(k).and_then(|cf| cf.rec_mut())
+        self.get_mut(k).and_then(|cf| cf.rec_mut()).filter(|child| !child.is_empty())
     }
 
     #[inline]
@@ -1307,6 +1307,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
 
     fn join_into_dyn(&mut self, mut other: TrieNodeODRc<V, A>) -> (AlgebraicStatus, Result<(), TrieNodeODRc<V, A>>) where V: Lattice {
+        if other.as_tagged().node_is_empty() {
+            return (AlgebraicStatus::Identity, Ok(()))
+        }
         let other_node = other.make_mut();
         let status = match other_node.tag() {
             DENSE_BYTE_NODE_TAG => {
@@ -1343,7 +1346,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 //WARNING: Don't be tempted to swap the node itself with its first child.  This feels like it
                 // might be an optimization, but it would be a memory leak because the other node will now
                 // hold an Rc to itself.
-                match self.values.pop().unwrap().into_rec() {
+                match self.values.pop().unwrap().into_rec().filter(|child| !child.is_empty()) {
                     Some(mut child) => {
                         if byte_cnt > 1 {
                             child.make_mut().drop_head_dyn(byte_cnt-1)
@@ -1357,10 +1360,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             _ => {
                 let mut new_node = Self::new_in(self.alloc.clone());
                 while let Some(cf) = self.values.pop() {
+                    let child = cf.into_rec().filter(|child| !child.is_empty());
                     let child = if byte_cnt > 1 {
-                        cf.into_rec().and_then(|mut child| child.make_mut().drop_head_dyn(byte_cnt-1))
+                        child.and_then(|mut child| child.make_mut().drop_head_dyn(byte_cnt-1))
                     } else {
-                        cf.into_rec()
+                        child
                     };
                     match child {
                         Some(child) => {
@@ -1831,14 +1835,8 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         let (other_rec, other_val) = other.into_both();
         let rec_status = match self.rec_mut() {
             Some(self_rec) => match other_rec {
-                Some(other_rec) => {
-                    let (status, result) = self_rec.make_mut().join_into_dyn(other_rec);
-                    match result {
-                        Ok(()) => {},
-                        Err(replacement_node) => {*self_rec = replacement_node},
-                    }
-                    status
-                },
+                //Route through `TrieNodeODRc::join_into`
+                Some(other_rec) => self_rec.join_into(other_rec),
                 None => AlgebraicStatus::Identity,
             },
             None => match other_rec {
@@ -2040,7 +2038,13 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
                     let lv = unsafe { self.values.get_unchecked(l) };
                     let rv = unsafe { other.values.get_unchecked(r) };
                     match lv.pjoin(rv) {
-                        AlgebraicResult::None => unreachable!(), //Some joined to Some should never be None
+                        AlgebraicResult::None => {
+                            //Both nodes hold a dangling path (no value, no onward node) at this byte, e.g. after
+                            // `remove_branches(prune = false)`; it stays dangling in the join and is an identity for both
+                            debug_assert!(!lv.has_rec() && !lv.has_val());
+                            debug_assert!(!rv.has_rec() && !rv.has_val());
+                            unsafe { new_v.get_unchecked_mut(c).write(Cf::new(None, None)) };
+                        },
                         AlgebraicResult::Identity(mask) => {
                             debug_assert!((mask & SELF_IDENT > 0) || (mask & COUNTER_IDENT > 0));
                             if mask & SELF_IDENT == 0 {
@@ -2129,7 +2133,7 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
                     match lv.join_into(rv) {
                         AlgebraicStatus::Identity => { },
                         AlgebraicStatus::Element => { is_identity = false; },
-                        AlgebraicStatus::None => unreachable!(), //Some.join(Some) shouldn't create None
+                        AlgebraicStatus::None => { },
                     }
                     unsafe { new_v.get_unchecked_mut(c).write(lv) };
                     l += 1;
@@ -2467,4 +2471,43 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
         }
     }
     assert_eq!(visited_after_missing_65, [127, 128, 191, 192, 255]);
+
+}
+
+/// Issue #85: mutating below a dangling byte of a dense node panicked in make_unique.
+/// The dangling slot is copied over when a pair node is upgraded to a dense node, and
+/// node_get_child_mut handed its empty sentinel to the descent.
+#[test]
+fn dense_node_mutate_below_dangling_byte() {
+    use crate::PathMap;
+    use crate::zipper::*;
+    fn keys(m: &PathMap<()>) -> Vec<String> { m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect() }
+    fn dangling_c() -> PathMap<()> {
+        let mut m = PathMap::new();
+        for k in [b"ca".as_slice(), b"cb", b"d"] { m.set_val_at(k, ()); }
+        { let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); }
+        assert_eq!(keys(&m), ["d"]);
+        m
+    }
+    let mut m = dangling_c();
+    m.set_val_at(b"e", ());
+    m.set_val_at(b"f", ());
+    m.set_val_at(b"cx", ());
+    assert_eq!(keys(&m), ["cx", "d", "e", "f"]);
+
+    let mut m = dangling_c();
+    m.set_val_at(b"e", ());
+    m.set_val_at(b"f", ());
+    { let mut wz = m.write_zipper(); wz.descend_to(b"cxy"); let mut o = PathMap::new(); o.set_val_at(b"z", ()); wz.graft_map(o); }
+    assert_eq!(keys(&m), ["cxyz", "d", "e", "f"]);
+
+    //At the dangling byte itself, and in a pair-node parent, which already worked
+    let mut m = dangling_c();
+    m.set_val_at(b"e", ());
+    m.set_val_at(b"f", ());
+    m.set_val_at(b"c", ());
+    assert_eq!(keys(&m), ["c", "d", "e", "f"]);
+    let mut m = dangling_c();
+    m.set_val_at(b"cx", ());
+    assert_eq!(keys(&m), ["cx", "d"]);
 }

@@ -662,6 +662,22 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         self.val_or_child0 = payload;
         self.header = Self::header0(is_child_ptr, key.len());
     }
+    /// Installs a payload in slot 0 after its key has already been written to `key_bytes`.
+    #[inline]
+    fn set_payload_0_for_existing_key(&mut self, key_len: usize, payload: ValOrChild<V, A>) {
+        debug_assert!(!self.is_used::<0>());
+        debug_assert!(key_len > 0 && key_len <= KEY_BYTES_CNT);
+        match payload {
+            ValOrChild::Child(child) => {
+                self.val_or_child0.child = ManuallyDrop::new(child);
+                self.header = Self::header0(true, key_len);
+            },
+            ValOrChild::Val(val) => {
+                self.val_or_child0.val = ManuallyDrop::new(LocalOrHeap::new(val));
+                self.header = Self::header0(false, key_len);
+            },
+        }
+    }
     #[inline]
     unsafe fn set_payload_1(&mut self, key: &[u8], is_child_ptr: bool, payload: ValOrChildUnion<V, A>) {
         let key_0_used_cnt = self.key_len_0();
@@ -974,8 +990,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_0 = unsafe{ self.key_unchecked::<0>() };
         let mut overlap = find_prefix_overlap(key, node_key_0);
         if overlap > 0 {
-            // Replacing a downstream branch also needs to replace any payload strictly below `key`
-            // Hopefully the caller accounted for this
+            // Can we replace the downstream branch ptr?  Or do we need to split the node?
             if IS_CHILD && overlap == key.len() &&
                 (self.is_child_ptr::<0>() || node_key_0.len() > key.len()) {
                 let _ = self.take_payload::<0>();
@@ -1006,7 +1021,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_1 = unsafe{ self.key_unchecked::<1>() };
         let mut overlap = find_prefix_overlap(key, node_key_1);
         if overlap > 0 {
-            // See the corresponding slot_0 case above.  Replacing a downstream branch also needs to replace any payload strictly below `key`
+            //See if we should totally replace the existing downstream branch ptr, or split the node
             if IS_CHILD && overlap == key.len() &&
                 (self.is_child_ptr::<1>() || node_key_1.len() > key.len()) {
                 let _ = self.take_payload::<1>();
@@ -1060,10 +1075,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let (key0, key1) = self.get_both_keys();
         let overlap = find_prefix_overlap(key0, key1);
         //Overlap of 1 is legal if and only if ONE OF the following two conditions are true:
-        // A: slot0 contains a value
+        // A: slot0 contains a value AND has a 1-byte key (a value at the shared byte, slot1 continuing below it)
         // B: both slots have a length of 1, and one is a value
         let legal_overlap = overlap == 1 && (
-            !self.is_child_ptr::<0>() ||
+            (!self.is_child_ptr::<0>() && key0.len() == 1) ||
             (!self.is_child_ptr::<1>() && key0.len()==1 && key1.len()==1 ));
 
         //If the overlap is illegal, split the prefix
@@ -1188,8 +1203,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     let restricted_node_result = if onward_key.len() == 0 {
                         self_onward_link.as_tagged().prestrict_dyn(onward_node)
                     } else {
-                        let other_onward_node = onward_node.get_node_at_key(onward_key);
-                        self_onward_link.as_tagged().prestrict_dyn(other_onward_node.as_tagged())
+                        match onward_node.get_node_at_key(onward_key).into_option() {
+                            Some(other_onward_node) => self_onward_link.as_tagged().prestrict_dyn(other_onward_node.as_tagged()),
+                            None => AlgebraicResult::None,
+                        }
                     };
                     restricted_node_result.map(|node| ValOrChildUnion::from(node))
                 } else {
@@ -1537,6 +1554,14 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
         }
     }
 
+    //Two empty nodes (e.g. roots emptied by `remove_branches`) produce no entries at all.  This must be
+    // decided before touching `entries[0]`: reading it would be `assume_init` on uninitialized memory,
+    // and dropping the garbage payload it yields corrupts an arbitrary refcount.
+    if entry_cnt == 0 {
+        debug_assert!(a.node_is_empty() && b.node_is_empty());
+        return Ok(AlgebraicResult::None)
+    }
+
     //Do we have two or fewer paths, that can fit into a new ListNode?
     if entry_cnt <= 2 {
         let mut joined_node = LineListNode::new_in(a.alloc.clone());
@@ -1572,10 +1597,6 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
                     debug_assert!(validate_node(&joined_node));
                     return Ok(AlgebraicResult::Element(joined_node))
                 }
-            },
-            0 => {
-                debug_assert!(a.node_is_empty() && b.node_is_empty());
-                return Ok(AlgebraicResult::None)
             },
             _ => unreachable!()
         }
@@ -1917,6 +1938,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
 
     fn node_is_empty(&self) -> bool {
         !self.is_used::<0>()
+    }
+
+    fn debug_validate(&self) -> bool {
+        validate_node(self)
     }
 
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
@@ -2489,7 +2514,11 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self) {
-                    AlgebraicStatus::None => unreachable!(), //Joining a non-empty node with another non-empty node should never produce an empty node
+                    //Both nodes were empty so the join is empty too
+                    AlgebraicStatus::None => {
+                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        AlgebraicResult::None
+                    },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
                     AlgebraicStatus::Element => AlgebraicResult::Element(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
                 }
@@ -2502,7 +2531,11 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self) {
-                    AlgebraicStatus::None => unreachable!(), //Joining a non-empty node with another non-empty node should never produce an empty node
+                    //See the DENSE_BYTE_NODE_TAG arm: two empty nodes join to an empty result
+                    AlgebraicStatus::None => {
+                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        AlgebraicResult::None
+                    },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
                     AlgebraicStatus::Element => AlgebraicResult::Element(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
                 }
@@ -2593,6 +2626,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                     ValOrChild::Child(child) => child,
                     ValOrChild::Val(_) => unreachable!(),
                 };
+                //A dangling child (the empty sentinel) has nothing below the dropped bytes and can't be made mutable
+                if child.is_empty() {
+                    return None
+                }
                 if remaining_bytes > 0 {
                     return child.make_mut().drop_head_dyn(remaining_bytes)
                 } else {
@@ -2610,8 +2647,48 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         let key0_len = key0.len();
         let key1_len = key1.len();
 
-        //If byte_cnt < both key lengths, reuse this node but shorten the keys
-        if byte_cnt < key0_len && byte_cnt < key1_len {
+        //Both keys survive.  Shorten them in-place; if they collide, the two payloads must first
+        //be joined into one.  This is deliberately destructive: unlike `factor_prefix`, it avoids
+        //cloning values or child references just to replace this temporary node.
+        if byte_cnt < key0_len.min(key1_len) {
+            let shortened_key0 = &key0[byte_cnt..];
+            let shortened_key1 = &key1[byte_cnt..];
+            if shortened_key0 == shortened_key1
+                && temp_node.is_child_ptr::<0>() == temp_node.is_child_ptr::<1>() {
+                let new_key_len = shortened_key0.len();
+                unsafe {
+                    let key_bytes = temp_node.key_bytes.as_mut_ptr().cast::<u8>();
+                    core::ptr::copy(key_bytes.add(byte_cnt), key_bytes, new_key_len);
+                }
+
+                //Take slot 1 first: taking slot 0 would shift slot 1 into its place.
+                let payload1 = temp_node.take_payload::<1>().unwrap();
+                let payload0 = temp_node.take_payload::<0>().unwrap();
+                let merged = match (payload0, payload1) {
+                    (ValOrChild::Val(v0), ValOrChild::Val(v1)) => match v0.pjoin(&v1) {
+                        AlgebraicResult::Element(v) => Some(ValOrChild::Val(v)),
+                        AlgebraicResult::Identity(mask) => Some(ValOrChild::Val(if mask & SELF_IDENT > 0 { v0 } else { v1 })),
+                        AlgebraicResult::None => None,
+                    },
+                    (ValOrChild::Child(c0), ValOrChild::Child(c1)) => match c0.pjoin(&c1) {
+                        AlgebraicResult::Element(c) => Some(ValOrChild::Child(c)),
+                        AlgebraicResult::Identity(mask) => Some(ValOrChild::Child(if mask & SELF_IDENT > 0 { c0 } else { c1 })),
+                        AlgebraicResult::None => None,
+                    },
+                    _ => unreachable!(), //Both slots have the same kind; checked above.
+                };
+                return match merged {
+                    Some(payload) => {
+                        temp_node.set_payload_0_for_existing_key(new_key_len, payload);
+                        debug_assert!(validate_node(&temp_node));
+                        Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
+                    },
+                    None => None,
+                }
+            }
+
+            //The shortened keys are distinct, or form the legal value-and-child case.  Preserve
+            //slot order before factoring any now-illegal shared prefix.
             let mut slot0_child = temp_node.is_child_ptr::<0>();
             let mut slot1_child = temp_node.is_child_ptr::<1>();
             let mut new_key0_len = key0_len-byte_cnt;
@@ -2680,6 +2757,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         };
 
         if let ValOrChild::Child(mut child_node) = merged_payload {
+            //A dangling child (the empty sentinel) has nothing below the dropped bytes and can't be made mutable
+            if child_node.is_empty() {
+                return None
+            }
             if chop_bytes == byte_cnt {
                 return Some(child_node)
             } else {
@@ -3443,9 +3524,16 @@ mod tests {
         let mut source_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
         source_node.node_set_val(b"1ab", 1).unwrap_or_else(|_| panic!());
         source_node.node_set_val(b"2ac", 2).unwrap_or_else(|_| panic!());
-        source_node.drop_head_dyn(1).unwrap();
+        let dropped = source_node.drop_head_dyn(1).unwrap();
 
-        let dropped_ref = source_node.as_tagged();
+        // Dropping the distinct leading bytes factors the shared "a" into an onward child.
+        let dropped_ref = dropped.as_tagged();
+        let (consumed, child) = dropped_ref.node_get_child(b"a").unwrap();
+        assert_eq!(consumed, 1);
+        assert_eq!(child.as_tagged().node_get_val(b"b"), Some(&1));
+        assert_eq!(child.as_tagged().node_get_val(b"c"), Some(&2));
+
+        // `get_node_at_key` must expose that same factored child as the focused node.
         let focus = dropped_ref.get_node_at_key(b"a");
         assert_eq!(focus.as_tagged().node_get_val(b"b"), Some(&1));
         assert_eq!(focus.as_tagged().node_get_val(b"c"), Some(&2));
@@ -3484,48 +3572,37 @@ mod tests {
         assert_eq!(by_index.child_count(), by_path.child_count());
         assert_eq!(by_index.child_mask(), by_path.child_mask());
     }
+
+    /// Issue #85: `restrict` panicked when a child-link slot was followed into `other` and
+    /// landed on a dangling byte there (in the child mask, no node behind it).
+    #[test]
+    fn restrict_against_dangling_branch() {
+        use crate::PathMap;
+        use crate::zipper::*;
+        fn mk(keys: &[&[u8]]) -> PathMap<()> { let mut m = PathMap::new(); for k in keys { m.set_val_at(k, ()); } m }
+        fn keys(m: &PathMap<()>) -> Vec<String> { m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect() }
+        fn other_dangling_a() -> PathMap<()> {
+            let mut o = mk(&[b"a", b"b", b"c", b"e"]);
+            o.remove_val_at(b"a", false);
+            assert_eq!(keys(&o), ["b", "c", "e"]);
+            o
+        }
+        let m = mk(&[b"ab", b"ac"]);
+        let r = m.restrict(&other_dangling_a());
+        assert_eq!(keys(&r), Vec::<String>::new());
+
+        let mut m = mk(&[b"ab", b"ac"]);
+        let o = other_dangling_a();
+        m.write_zipper().restrict(&o.read_zipper());
+        assert_eq!(keys(&m), Vec::<String>::new());
+
+        let mut m = mk(&[b"dab", b"dac"]);
+        { let mut wz = m.write_zipper(); wz.descend_to(b"d"); wz.restrict(&o.read_zipper()); }
+        assert_eq!(keys(&m), Vec::<String>::new());
+
+        //A path that `other` does validate survives beside one it does not
+        let mut m = mk(&[b"ab", b"ac", b"bx"]);
+        m.write_zipper().restrict(&o.read_zipper());
+        assert_eq!(keys(&m), ["bx"]);
+    }
 }
-
-//GOAT, merge wrappers for lattice impls on primitives
-//
-//GOAT, remove garbage lattice impls
-//
-//GOAT Catamorphism names:  https://github.com/Adam-Vandervorst/PathMap/pull/8#discussion_r2004745719
-//
-//GOAT, document how path existence can't be used to confirm the existence of a value, only the non-existence
-//  and document the meaning of path existence more generally.
-//GOAT, consider exposing an explicit prune method.  Possibly also consider exposing a "create_path" method.
-//  SEE "PATH EXISTS DISCUSSION" below
-//
-//GOAT, consider adding a "prune" flag to methods that might remove values
-//
-
-
-// PATH EXISTS DISCUSSION
-// Ok... Fork 1 is about paths, and specifically what information about values you can get from whether or not a path exists.  In the current code, the *nonexistence* of a path guarantees no value is below that point (how could there be one?) but the *existence* of a path does **not** guarantee a value is.
-// Earlier drafts of PathMap (about 3 months ago) we were upholding that property that all paths led to values.  But I realized this property is impossible to uphold with the a multi write-zipper implementation.
-// Bottom line, with the current set of guarantees, you can't use `path_exists` to conclude that there are zippers above you.  You will have to call `to_next_value` to search downwards.
-// Looking forwards, I think I may add explicit methods like `ascend_prune` that ascends the zipper upwards from an empty leaf, pruning as it goes, and `descend_create` to do the opposite.  (although I'm a little on the fence about how descend_create would actually be useful.)  Maybe it might make sense to implement versions of these methods that don't move the zipper focus.
-// But if we tweak the zipper contract so that paths are explicitly managed, just like values, and document the behavior of every operation with respect to paths, then the existence of a path might become a reliable signal.
-// However, that brings up another question: Do you *want* to be pruning the path each time?  Consider a loop where a zipper is acquired, dropped, acquired, dropped, etc.  If each acquisition means creating the path, and each drop means pruning it, that is a lot of wasted work.  On the other hand, just setting and clearing a value is a lot cheaper.
-// Anyway, let me know your thoughts.
-
-
-//GOAT, steps to moving `val_count` method onto a new "TrieSummary" trait, and removing it from the ZipperMoving trait
-// (and remove the node_val_count method from the TrieNode trait)
-//
-//GOAT - Wait until TrieNode trait is re-jigged to put root values on the node and not the
-// parent, because there is bound to be a lot of edge-case logic to account for root values
-// under the current TrieNode trait contract.  I'd prefer to only write this code once.
-//
-// 1. implement a caching_cata inner loop that uses the TrieNode API instead of the zipper API
-//       a. This means it has no access to the origin_path, and the cata implementation needs
-//          to maintain its own path_buffer
-//       b. It means paths are relative to the node where it is called
-//       c. It borrows the zipper, rather than taking ownership.
-//       d. It works from the focus, rather than from a the root.
-//       e. It can then be implemented on more zipper types that don't support ReadOnlyValues
-//          and ZipperMoving
-// 2. implement a val_count convenience on top of 1.
-
-//GOAT, Paths in caching Cata:  https://github.com/Adam-Vandervorst/PathMap/pull/8#discussion_r2004828957
