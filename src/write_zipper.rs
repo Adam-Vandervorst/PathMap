@@ -6228,7 +6228,7 @@ mod tests {
         rz.descend_to_byte(b'a');
         assert!(rz.path_exists());
         assert_eq!(rz.child_count(), 2);
-        assert!(rz.descend_indexed_byte(1).is_some());
+        assert!(rz.descend_indexed_byte(1));
         //the (zipper-driven) cached cata must agree with iteration
         let n = m.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
         assert_eq!(n, 2);
