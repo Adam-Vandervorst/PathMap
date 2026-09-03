@@ -1076,11 +1076,15 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
         let mut ascended = 0;
         loop {
             ascended += self.ascend_within_node();
-            if self.at_root() {
-                return ascended;
-            }
+            //Normalise *before* deciding we are done, the way `ascend` does.  Returning first
+            //left the zipper at its root still holding a spent node key, and at the root `val()`
+            //and `set_val` read `root_val` -- so the zipper denied its own root value, and
+            //`set_val` unwrapped a `None`.
             if self.key.node_key().len() == 0 {
                 self.ascend_across_nodes();
+            }
+            if self.at_root() {
+                return ascended;
             }
             if self.child_count() > 1 || self.is_val() {
                 break;
@@ -1097,11 +1101,15 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
         let mut ascended = 0;
         loop {
             ascended += self.ascend_within_node();
-            if self.at_root() {
-                return ascended;
-            }
+            //Normalise *before* deciding we are done, the way `ascend` does.  Returning first
+            //left the zipper at its root still holding a spent node key, and at the root `val()`
+            //and `set_val` read `root_val` -- so the zipper denied its own root value, and
+            //`set_val` unwrapped a `None`.
             if self.key.node_key().len() == 0 {
                 self.ascend_across_nodes();
+            }
+            if self.at_root() {
+                return ascended;
             }
             if self.child_count() > 1 {
                 break;
@@ -6036,4 +6044,36 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    /// `ascend_until` and `ascend_until_branch` checked `at_root()` and returned before
+    /// the step that closes out a spent node key, so a zipper could arrive at its own
+    /// root still holding a key it had ascended past.  At the root `val()` and
+    /// `set_val` read `root_val` rather than the focus node, so the zipper denied its
+    /// own root value and `set_val` unwrapped a `None`.  `ascend` normalises first.
+    #[test]
+    fn write_zipper_ascend_until_normalises_at_the_root() {
+        let ups: Vec<(&str, fn(&mut WriteZipperUntracked<'_, '_, u64>) -> usize)> = vec![
+            ("ascend_until", |wz| wz.ascend_until()),
+            ("ascend_until_branch", |wz| wz.ascend_until_branch()),
+        ];
+        for (label, up) in ups {
+            let mut map = PathMap::<u64>::new();
+            map.insert(&[2u8, 2, 0, 2], 52);
+            let mut wz = map.write_zipper_at_path(&[2u8, 1]);
+            wz.get_val_or_set_mut_with(|| 198);   //a value at the zipper's root [2,1]
+            wz.move_to_path(&[2u8, 2, 1, 1]);     //off the trie
+            wz.create_path();                     //materialise it
+            let n = up(&mut wz);
+            assert!(wz.at_root(), "{label}");
+            assert_eq!(n, 4, "{label}");
+            assert_eq!(wz.val(), Some(&198), "{label}");
+            assert!(wz.is_val(), "{label}");
+            //Writing at the root must work too
+            assert_eq!(wz.set_val(199), Some(198), "{label}");
+            assert_eq!(wz.remove_val(false), Some(199), "{label}");
+            drop(wz);
+            assert_eq!(map.get_val_at(&[2u8, 1]), None, "{label}");
+            assert_eq!(map.get_val_at(&[2u8, 2, 0, 2]), Some(&52), "{label}");
+        }
+    }
 }
