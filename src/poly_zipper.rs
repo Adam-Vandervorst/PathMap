@@ -13,6 +13,7 @@ use crate::zipper::*;
 /// * [`ZipperConcrete`]
 /// * [`ZipperIteration`]
 /// * [`ZipperMoving`]
+/// * [`ZipperPath`]
 /// * [`ZipperPathBuffer`]
 /// * [`ZipperReadOnlyConditionalIteration`]
 /// * [`ZipperReadOnlyConditionalValues`]
@@ -142,7 +143,7 @@ mod tests {
     // ======================================================================================
     // Cocktail of recursive zipper madness
     #[derive(PolyZipperExplicit)]
-    #[poly_zipper_explicit(traits(Zipper, ZipperValues, ZipperMoving, ZipperIteration))]
+    #[poly_zipper_explicit(traits(Zipper, ZipperValues, ZipperMoving, ZipperPath, ZipperIteration))]
     pub enum ExprFactor<'trie, V: Clone + Send + Sync + Unpin + 'static = ()> {
         Specific(ReadZipperOwned<V>),
         Generic(PrefixZipper<'trie,

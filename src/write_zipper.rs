@@ -236,7 +236,12 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.meet_into(read_zipper, true)
     }
 
-    /// Experiment.  GOAT, document this
+    /// Replaces the subtrie below this zipper's focus with the intersection of the subtries below
+    /// the foci of `rz_a` and `rz_b`.
+    ///
+    /// This operation does not inspect the destination's existing contents. Consequently, it never
+    /// returns [AlgebraicStatus::Identity]: it returns `Element` for a nonempty intersection and
+    /// `None` for an empty one.
     fn meet_2<'z, ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice;
 
     /// Subtracts the subtrie downstream of the focus of `read_zipper` from the subtrie below the `self` zipper's
@@ -421,21 +426,26 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubt
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperTracked<'a, 'path, V, A> {
+    #[inline] fn depth(&self) -> usize { self.z.depth() }
     fn at_root(&self) -> bool { self.z.at_root() }
+    #[inline] fn focus_byte(&self) -> Option<u8> { self.z.focus_byte() }
     fn reset(&mut self) { self.z.reset() }
-    fn path(&self) -> &[u8] { self.z.path() }
     fn val_count(&self) -> usize { self.z.val_count() }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) { self.z.descend_to(k) }
     fn descend_to_byte(&mut self, k: u8) { self.z.descend_to_byte(k) }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool { self.z.descend_indexed_byte(child_idx) }
-    fn descend_first_byte(&mut self) -> bool { self.z.descend_first_byte() }
-    fn descend_until(&mut self) -> bool { self.z.descend_until() }
-    fn to_next_sibling_byte(&mut self) -> bool { self.z.to_next_sibling_byte() }
-    fn to_prev_sibling_byte(&mut self) -> bool { self.z.to_prev_sibling_byte() }
-    fn ascend(&mut self, steps: usize) -> bool { self.z.ascend(steps) }
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> { self.z.descend_indexed_byte(child_idx) }
+    fn descend_first_byte(&mut self) -> Option<u8> { self.z.descend_first_byte() }
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool { self.z.descend_until_observed(obs) }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { self.z.to_next_sibling_byte() }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { self.z.to_prev_sibling_byte() }
+    fn ascend(&mut self, steps: usize) -> usize { self.z.ascend(steps) }
     fn ascend_byte(&mut self) -> bool { self.z.ascend_byte() }
-    fn ascend_until(&mut self) -> bool { self.z.ascend_until() }
-    fn ascend_until_branch(&mut self) -> bool { self.z.ascend_until_branch() }
+    fn ascend_until(&mut self) -> usize { self.z.ascend_until() }
+    fn ascend_until_branch(&mut self) -> usize { self.z.ascend_until_branch() }
+}
+
+impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPath for WriteZipperTracked<'a, 'path, V, A> {
+    fn path(&self) -> &[u8] { self.z.path() }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperTracked<'a, 'path, V, A> {
@@ -581,21 +591,26 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubt
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperUntracked<'a, 'path, V, A> {
+    #[inline] fn depth(&self) -> usize { self.z.depth() }
     fn at_root(&self) -> bool { self.z.at_root() }
+    #[inline] fn focus_byte(&self) -> Option<u8> { self.z.focus_byte() }
     fn reset(&mut self) { self.z.reset() }
-    fn path(&self) -> &[u8] { self.z.path() }
     fn val_count(&self) -> usize { self.z.val_count() }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) { self.z.descend_to(k) }
     fn descend_to_byte(&mut self, k: u8) { self.z.descend_to_byte(k) }
-    fn descend_indexed_byte(&mut self, child_idx: usize) -> bool { self.z.descend_indexed_byte(child_idx) }
-    fn descend_first_byte(&mut self) -> bool { self.z.descend_first_byte() }
-    fn descend_until(&mut self) -> bool { self.z.descend_until() }
-    fn to_next_sibling_byte(&mut self) -> bool { self.z.to_next_sibling_byte() }
-    fn to_prev_sibling_byte(&mut self) -> bool { self.z.to_prev_sibling_byte() }
-    fn ascend(&mut self, steps: usize) -> bool { self.z.ascend(steps) }
+    fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> { self.z.descend_indexed_byte(child_idx) }
+    fn descend_first_byte(&mut self) -> Option<u8> { self.z.descend_first_byte() }
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool { self.z.descend_until_observed(obs) }
+    fn to_next_sibling_byte(&mut self) -> Option<u8> { self.z.to_next_sibling_byte() }
+    fn to_prev_sibling_byte(&mut self) -> Option<u8> { self.z.to_prev_sibling_byte() }
+    fn ascend(&mut self, steps: usize) -> usize { self.z.ascend(steps) }
     fn ascend_byte(&mut self) -> bool { self.z.ascend_byte() }
-    fn ascend_until(&mut self) -> bool { self.z.ascend_until() }
-    fn ascend_until_branch(&mut self) -> bool { self.z.ascend_until_branch() }
+    fn ascend_until(&mut self) -> usize { self.z.ascend_until() }
+    fn ascend_until_branch(&mut self) -> usize { self.z.ascend_until_branch() }
+}
+
+impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPath for WriteZipperUntracked<'a, 'path, V, A> {
+    fn path(&self) -> &[u8] { self.z.path() }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperUntracked<'a, 'path, V, A> {
@@ -723,6 +738,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for WriteZipperOwned<V
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperValues self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperMoving for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperMoving self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPath for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperPath self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPathBuffer for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperPathBuffer self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperAbsolutePath self => self.z); }
 
@@ -1003,22 +1019,24 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperCore<'a, 
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperCore<'a, 'path, V, A> {
     #[inline]
+    fn depth(&self) -> usize {
+        self.key.prefix_buf.len().saturating_sub(self.key.origin_path.len())
+    }
+
+    #[inline]
     fn at_root(&self) -> bool {
         self.key.prefix_buf.len() <= self.key.origin_path.len()
+    }
+
+    #[inline]
+    fn focus_byte(&self) -> Option<u8> {
+        self.key.prefix_buf.last().cloned()
     }
 
     fn reset(&mut self) {
         self.focus_stack.to_root();
         self.key.prefix_buf.truncate(self.key.origin_path.len());
         self.key.prefix_idx.clear();
-    }
-
-    fn path(&self) -> &[u8] {
-        if self.key.prefix_buf.len() > 0 {
-            &self.key.prefix_buf[self.key.origin_path.len()..]
-        } else {
-            &[]
-        }
     }
 
     fn val_count(&self) -> usize {
@@ -1037,32 +1055,34 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
         self.descend_to_internal();
     }
 
-    fn ascend(&mut self, mut steps: usize) -> bool {
+    fn ascend(&mut self, steps: usize) -> usize {
+        let mut remaining = steps;
         loop {
             if self.key.node_key().len() == 0 {
                 self.ascend_across_nodes();
             }
-            if steps == 0 {
-                return true
+            if remaining == 0 {
+                return steps
             }
             if self.at_root() {
-                return false
+                return steps - remaining
             }
             debug_assert!(self.key.node_key().len() > 0);
-            let cur_jump = steps.min(self.key.excess_key_len());
+            let cur_jump = remaining.min(self.key.excess_key_len());
             self.key.prefix_buf.truncate(self.key.prefix_buf.len() - cur_jump);
-            steps -= cur_jump;
+            remaining -= cur_jump;
         }
     }
 
-    fn ascend_until(&mut self) -> bool {
+    fn ascend_until(&mut self) -> usize {
         if self.at_root() {
-            return false;
+            return 0;
         }
+        let mut ascended = 0;
         loop {
-            self.ascend_within_node();
+            ascended += self.ascend_within_node();
             if self.at_root() {
-                return true;
+                return ascended;
             }
             if self.key.node_key().len() == 0 {
                 self.ascend_across_nodes();
@@ -1072,17 +1092,18 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
             }
         }
         debug_assert!(self.key.node_key().len() > 0); //We should never finish with a zero-length node-key
-        true
+        ascended
     }
 
-    fn ascend_until_branch(&mut self) -> bool {
+    fn ascend_until_branch(&mut self) -> usize {
         if self.at_root() {
-            return false;
+            return 0;
         }
+        let mut ascended = 0;
         loop {
-            self.ascend_within_node();
+            ascended += self.ascend_within_node();
             if self.at_root() {
-                return true;
+                return ascended;
             }
             if self.key.node_key().len() == 0 {
                 self.ascend_across_nodes();
@@ -1092,7 +1113,17 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
             }
         }
         debug_assert!(self.key.node_key().len() > 0); //We should never finish with a zero-length node-key
-        true
+        ascended
+    }
+}
+
+impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPath for WriteZipperCore<'a, 'path, V, A> {
+    fn path(&self) -> &[u8] {
+        if self.key.prefix_buf.len() > 0 {
+            &self.key.prefix_buf[self.key.origin_path.len()..]
+        } else {
+            &[]
+        }
     }
 }
 
@@ -1888,18 +1919,18 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     fn k_path_internal(&mut self, k: usize, base_idx: usize) -> bool {
         loop {
             if self.path().len() < base_idx + k {
-                while self.descend_first_byte() {
+                while self.descend_first_byte().is_some() {
                     if self.path().len() == base_idx + k { return true }
                 }
             }
-            if self.to_next_sibling_byte() {
+            if self.to_next_sibling_byte().is_some() {
                 if self.path().len() == base_idx + k { return true }
                 continue
             }
             while self.path().len() > base_idx {
                 self.ascend_byte();
                 if self.path().len() == base_idx { return false }
-                if self.to_next_sibling_byte() { break }
+                if self.to_next_sibling_byte().is_some() { break }
             }
         }
     }
@@ -1925,7 +1956,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
         let downstream_node = self.get_focus().into_option();
 
-        let fully_ascended = self.ascend(n);
+        let fully_ascended = self.ascend(n) == n;
 
         self.graft_internal(downstream_node);
         fully_ascended
@@ -2030,14 +2061,23 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 AlgebraicStatus::None
             },
             AlgebraicResult::Identity(mask) => {
-                if mask & SELF_IDENT > 0 {
-                    //GOAT, document that meet_2 will not return identify because it doesn't actually check what's in the destination
-                    self.graft_internal(Some(a_focus.into_option().unwrap()));
+                let src = if mask & SELF_IDENT > 0 {
+                    a_focus.into_option()
                 } else {
                     debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be a or b
-                    self.graft_internal(Some(b_focus.into_option().unwrap()));
+                    b_focus.into_option()
+                };
+                match src {
+                    Some(node) => {
+                        self.graft_internal(Some(node));
+                        AlgebraicStatus::Element
+                    }
+                    None => {
+                        //An empty result subtrie means clear the destination
+                        self.graft_internal(None);
+                        AlgebraicStatus::None
+                    }
                 }
-                AlgebraicStatus::Element
             },
         }
     }
@@ -2581,10 +2621,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// Internal method used to impement `ascend_until` when ascending within a node
     #[inline]
-    fn ascend_within_node(&mut self) {
+    fn ascend_within_node(&mut self) -> usize {
         let branch_key = self.focus_stack.top().unwrap().prior_branch_key(self.key.node_key());
         let new_len = self.key.origin_path.len().max(self.key.node_key_start() + branch_key.len());
+        let old_len = self.key.prefix_buf.len();
         self.key.prefix_buf.truncate(new_len);
+        old_len - new_len
     }
 }
 
@@ -3521,7 +3563,7 @@ mod tests {
         wz.descend_to([194, 7, 162]);
         assert!(wz.path_exists());
         assert!(wz.val().is_some());
-        assert!(wz.ascend(3));
+        assert_eq!(wz.ascend(3), 3);
         wz.descend_to([194, 7, 163]);
         assert!(wz.path_exists());
         assert!(wz.val().is_some());
@@ -3906,26 +3948,26 @@ mod tests {
         assert!(wz.path_exists());
         assert_eq!(wz.path(), b"mulus");
         assert_eq!(wz.child_count(), 0);
-        assert!(wz.ascend_until());
+        assert!(wz.ascend_until() > 0);
         assert_eq!(wz.path(), b"m");
         assert_eq!(wz.child_count(), 3);
 
         //Make sure we can't ascend above the zipper's root with ascend_until
-        assert!(wz.ascend_until());
+        assert!(wz.ascend_until() > 0);
         assert_eq!(wz.path(), b"");
-        assert!(!wz.ascend_until());
+        assert_eq!(wz.ascend_until(), 0);
 
         //Test step-wise `ascend`
         wz.descend_to(b"manus");
         assert_eq!(wz.path(), b"manus");
-        assert_eq!(wz.ascend(1), true);
+        assert_eq!(wz.ascend(1), 1);
         assert_eq!(wz.path(), b"manu");
-        assert_eq!(wz.ascend(5), false);
+        assert!(wz.ascend(5) < 5);
         assert_eq!(wz.path(), b"");
         assert_eq!(wz.at_root(), true);
         wz.descend_to(b"mane");
         assert_eq!(wz.path(), b"mane");
-        assert_eq!(wz.ascend(3), true);
+        assert_eq!(wz.ascend(3), 3);
         assert_eq!(wz.path(), b"m");
         assert_eq!(wz.child_count(), 3);
     }
@@ -4934,9 +4976,9 @@ mod tests {
         assert_eq!(wz.path(), &[0, 0, 1, 0, 0, 2, 3, 4]);
         assert_eq!(wz.prune_path(), 6); //Prune back to the value at [0, 0, 0]
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(4), true);
+        assert_eq!(wz.ascend(4), 4);
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(2), true);
+        assert_eq!(wz.ascend(2), 2);
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.path(), &[0, 0]);
 
@@ -4996,16 +5038,16 @@ mod tests {
         assert_eq!(wz.prune_path(), 0);
 
         //And try pruning above the end
-        assert_eq!(wz.ascend(2), true);
+        assert_eq!(wz.ascend(2), 2);
         assert_eq!(wz.prune_path(), 0);
-        assert_eq!(wz.descend_first_byte(), true);
+        assert!(wz.descend_first_byte().is_some());
 
         //Now validate that prune goes all the way to the root
         assert_eq!(wz.path(), &[0, 0, 0, 1, 2, 3, 4]);
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.prune_path(), 7);
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(7), true);
+        assert_eq!(wz.ascend(7), 7);
         assert_eq!(wz.path(), &[]);
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.child_count(), 0);
@@ -5057,9 +5099,9 @@ mod tests {
         assert_eq!(wz.path(), &[1, 0, 3, 4, 5, 6]);
         assert_eq!(wz.prune_path(), 4); //Prune back to the value at [1, 0, 0]
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(3), true);
+        assert_eq!(wz.ascend(3), 3);
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(1), true);
+        assert_eq!(wz.ascend(1), 1);
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.path(), &[1, 0]);
         assert_eq!(wz.child_count(), 3);
@@ -5090,7 +5132,7 @@ mod tests {
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.prune_path(), 50);
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(49), true);
+        assert_eq!(wz.ascend(49), 49);
         assert_eq!(wz.path_exists(), false);
         assert_eq!(wz.ascend_byte(), true);
         assert_eq!(wz.path_exists(), true);
@@ -5112,7 +5154,7 @@ mod tests {
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.prune_path(), 3);
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(3), true);
+        assert_eq!(wz.ascend(3), 3);
         assert_eq!(wz.child_count(), 2);
     }
 
@@ -5139,18 +5181,18 @@ mod tests {
         assert_eq!(wz.prune_path(), 3);
         assert_eq!(wz.path(), &[0, 0, 1, 0, 0]);
         assert_eq!(wz.path_exists(), false);
-        assert_eq!(wz.ascend(3), true);
+        assert_eq!(wz.ascend(3), 3);
         assert_eq!(wz.path_exists(), true);
 
         //Recreate some new paths, remove one and try re-extending it
         wz.descend_to([0, 0, 0, 0]);
         assert_eq!(wz.path_exists(), false);
         assert_eq!(wz.set_val(()), None);
-        assert_eq!(wz.ascend(4), true);
+        assert_eq!(wz.ascend(4), 4);
         wz.descend_to([0, 0, 1, 0]);
         assert_eq!(wz.path_exists(), false);
         assert_eq!(wz.set_val(()), None);
-        assert_eq!(wz.ascend(2), true);
+        assert_eq!(wz.ascend(2), 2);
         wz.descend_to_byte(0);
         assert_eq!(wz.remove_branches(false), true);
         assert_eq!(wz.path_exists(), true);
@@ -5208,7 +5250,7 @@ mod tests {
         assert_eq!(src_z.prune_path(), 3);
         assert_eq!(src_z.path(), &[0, 0, 1, 0, 0]);
         assert_eq!(src_z.path_exists(), false);
-        assert_eq!(src_z.ascend(3), true);
+        assert_eq!(src_z.ascend(3), 3);
         assert_eq!(src_z.path_exists(), true);
 
         //Test removing from a node boundary
@@ -5282,11 +5324,11 @@ mod tests {
 
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.create_path(), false);
-        assert_eq!(wz.descend_first_byte(), true);
+        assert!(wz.descend_first_byte().is_some());
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.create_path(), false);
         assert_eq!(wz.val(), Some(&()));
-        assert_eq!(wz.descend_first_byte(), false);
+        assert_eq!(wz.descend_first_byte(), None);
         wz.descend_to_byte(0);
         assert_eq!(wz.path_exists(), false);
         assert_eq!(wz.create_path(), true);
@@ -5315,7 +5357,7 @@ mod tests {
         wz.descend_to([3, 0, 0, 0]);
         assert_eq!(wz.path_exists(), false);
         assert_eq!(wz.create_path(), true);
-        assert_eq!(wz.ascend(4), true);
+        assert_eq!(wz.ascend(4), 4);
         assert_eq!(wz.child_count(), 4);
     }
 
@@ -6016,6 +6058,41 @@ mod tests {
             btm.clone().into_write_zipper(path)
     });
 
+    /// Exercises `meet_2` when one source is rooted at a dangling path: an empty node
+    /// left behind by `create_path`. The intersection with an empty node is empty, so
+    /// the operation returns `None` and does not graft anything.
+    #[test]
+    fn write_zipper_meet_2_with_an_empty_source_node() {
+        for (label, b_keys, b_dangling) in [
+            ("b holds a value below", &[&[0u8, 1][..]][..], &[][..]),
+            ("b dangling too", &[][..], &[&[0u8][..]][..]),
+            ("b empty", &[][..], &[][..]),
+        ] {
+            let mut a = PathMap::<u64>::new();
+            a.create_path(&[0u8]);
+            let mut b = PathMap::<u64>::new();
+            for k in b_keys { b.insert(k, 2); }
+            for k in b_dangling { b.create_path(k); }
+
+            let mut dst = PathMap::<u64>::new();
+            dst.insert(&[5u8], 9);
+            let ra = a.read_zipper_at_path(&[0u8]);
+            let rb = b.read_zipper_at_path(&[0u8]);
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None, "{label}");
+            assert_eq!(wz.child_count(), 0, "{label}");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}");
+
+            //With the operands swapped
+            let mut dst = PathMap::<u64>::new();
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&rb, &ra), AlgebraicStatus::None, "{label}, swapped");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}, swapped");
+        }
+}
+
     /// A map holding `extra` plus `{ca, cb}`, after `remove_branches(prune = false)` at "c": the node
     /// holding "c" now has a dangling child there, i.e. the empty sentinel.  With one extra key the
     /// parent is a LineListNode; with three or more it is a DenseByteNode carrying the sentinel in a CoFree.
@@ -6228,7 +6305,7 @@ mod tests {
         rz.descend_to_byte(b'a');
         assert!(rz.path_exists());
         assert_eq!(rz.child_count(), 2);
-        assert!(rz.descend_indexed_byte(1));
+        assert!(rz.descend_indexed_byte(1).is_some());
         //the (zipper-driven) cached cata must agree with iteration
         let n = m.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
         assert_eq!(n, 2);

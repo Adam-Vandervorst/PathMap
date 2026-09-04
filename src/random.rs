@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use rand::distr::Uniform;
 use crate::TrieValue;
 use crate::utils::{BitMask, ByteMask};
-use crate::zipper::{ReadZipperUntracked, Zipper, ZipperReadOnlyIteration, ZipperMoving, ZipperReadOnlyValues};
+use crate::zipper::{ReadZipperUntracked, Zipper, ZipperPath, ZipperReadOnlyIteration, ZipperMoving, ZipperReadOnlyValues};
 
 // Re-export generic combinators
 pub use distr_combinators::*;

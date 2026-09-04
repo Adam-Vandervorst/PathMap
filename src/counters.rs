@@ -104,7 +104,7 @@ impl Counters {
 
         let mut zipper = map.read_zipper();
         while zipper.to_next_step() {
-            let depth = zipper.path().len();
+            let depth = zipper.depth();
 
             counters.run_counter_update(depth);
             if let Some(focus_node) = zipper.get_focus().try_as_tagged() {
@@ -187,7 +187,7 @@ impl Counters {
     }
 }
 
-pub fn print_traversal<'a, V: 'a + Clone + Unpin, Z: ZipperIteration + Clone>(zipper: &Z) {
+pub fn print_traversal<'a, V: 'a + Clone + Unpin, Z: ZipperIteration + ZipperPath + Clone>(zipper: &Z) {
     let mut zipper = zipper.clone();
 
     println!("{:?}", zipper.path());
