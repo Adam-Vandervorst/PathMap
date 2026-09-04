@@ -185,6 +185,14 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// Returns `true` if the node contains no children nor values, otherwise false
     fn node_is_empty(&self) -> bool;
 
+    /// Performs node-type-specific structural checks used by debug test helpers.
+    ///
+    /// Node implementations with no additional local invariants may retain this
+    /// default. The trie-wide validator walks physical children separately.
+    fn debug_validate(&self) -> bool {
+        true
+    }
+
     /// Generates a new iter token, to iterate the children and values contained within this node
     ///
     /// The iter token is a node-local cursor.  It must represent any position within a node type, and
@@ -1205,6 +1213,19 @@ mod tagged_node_ref {
         }
 
         #[inline(always)]
+        pub fn debug_validate(&self) -> bool {
+            match self {
+                Self::DenseByteNode(node) => node.debug_validate(),
+                Self::LineListNode(node) => node.debug_validate(),
+                #[cfg(feature = "bridge_nodes")]
+                Self::BridgeNode(node) => node.debug_validate(),
+                Self::CellByteNode(node) => node.debug_validate(),
+                Self::TinyRefNode(node) => node.debug_validate(),
+                Self::EmptyNode => <EmptyNode as TrieNode<V, A>>::debug_validate(&EMPTY_NODE),
+            }
+        }
+
+        #[inline(always)]
         pub fn new_iter_token(&self) -> IterToken {
             match self {
                 Self::DenseByteNode(node) => node.new_iter_token(),
@@ -1824,6 +1845,19 @@ mod tagged_node_ref {
                 LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.node_is_empty(),
                 CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.node_is_empty(),
                 TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.node_is_empty(),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+
+        #[inline]
+        pub fn debug_validate(&self) -> bool {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                EMPTY_NODE_TAG => true,
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.debug_validate(),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.debug_validate(),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.debug_validate(),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.debug_validate(),
                 _ => unsafe{ unreachable_unchecked() }
             }
         }
@@ -3115,6 +3149,15 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
     }
     #[inline]
     pub fn join_into(&mut self, node: TrieNodeODRc<V, A>) -> AlgebraicStatus {
+        //Joining into an empty node means replacement, exactly as `EmptyNode::join_into_dyn` says,
+        // and joining an empty node into anything is the identity.
+        if node.as_tagged().node_is_empty() {
+            return if self.is_empty() { AlgebraicStatus::None } else { AlgebraicStatus::Identity }
+        }
+        if self.is_empty() {
+            *self = node;
+            return AlgebraicStatus::Element
+        }
         let (status, result) = self.make_mut().join_into_dyn(node);
         match result {
             Ok(()) => {},
@@ -3244,6 +3287,31 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLat
                 }
             }
         }
+    }
+}
+
+/// Asserts the local invariants of every physical node reachable from `root`.
+///
+/// This intentionally knows only the [`TrieNode`] interface: each concrete
+/// node type supplies its own `debug_validate` implementation.
+#[cfg(test)]
+pub(crate) fn assert_valid_trie<V: Clone + Send + Sync, A: Allocator>(root: Option<&TrieNodeODRc<V, A>>) {
+    fn walk<V: Clone + Send + Sync, A: Allocator>(node: &TrieNodeODRc<V, A>) {
+        if node.is_empty() {
+            return;
+        }
+
+        let tagged = node.as_tagged();
+        assert!(tagged.debug_validate(), "invalid trie node");
+        let (mut token, mut child) = tagged.node_child_iter_start();
+        while let Some(child_node) = child {
+            walk(child_node);
+            (token, child) = tagged.node_child_iter_next(token);
+        }
+    }
+
+    if let Some(root) = root {
+        walk(root);
     }
 }
 

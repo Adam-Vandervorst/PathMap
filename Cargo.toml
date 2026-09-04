@@ -9,7 +9,7 @@ repository = "https://github.com/adam-Vandervorst/pathMap/"
 keywords = ["trie", "MORK", "path", "algebra"]
 categories = ["algorithms", "data-structures", "database-implementations"]
 readme = "README.md"
-exclude = ["target/", "benches/", "pathmap-book/", ".*", "fuzz/"]
+exclude = ["target/", "benches/", "pathmap-book/", ".*"]
 
 [package.metadata.docs.rs]
 rustc-args = ["-C", "target-feature=+aes,+sse2"]
@@ -143,5 +143,5 @@ harness = false
 required-features = ["arena_compact", "serialization"]
 
 [workspace]
-members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests"]
+members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "differential"]
 resolver = "2"

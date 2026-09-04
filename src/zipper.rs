@@ -2504,11 +2504,11 @@ pub(crate) mod read_zipper_core {
             } else {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
                     let (_key_len, focus_node) = parent.node_get_child(self.parent_key()).unwrap();
-                    focus_node.refcount() > 1
+                    !focus_node.is_empty() && focus_node.refcount() > 1
                 } else {
                     match &self.root_node {
-                        OwnedOrBorrowed::Owned(root) => root.refcount() > 1,
-                        OwnedOrBorrowed::Borrowed(root) => root.refcount() > 1,
+                        OwnedOrBorrowed::Owned(root) => !root.is_empty() && root.refcount() > 1,
+                        OwnedOrBorrowed::Borrowed(root) => !root.is_empty() && root.refcount() > 1,
                         OwnedOrBorrowed::None => false,
                     }
                 }
@@ -5475,6 +5475,31 @@ mod tests {
         assert!(zipper.shared_node_id().is_some());
         assert_eq!(zipper.shared_node_id(), snapshot.shared_node_id());
         assert!(snapshot.is_shared());
+    }
+
+    /// A retained dangling path is represented by an empty sentinel.  It is not a
+    /// physical node and therefore must not be reported as shareable.
+    #[test]
+    fn read_zipper_shared_node_id_at_dangling_path() {
+        let mut map: PathMap<()> = [(b"aa".as_slice(), ()), (b"ab", ()), (b"ba", ()), (b"bb", ()), (b"b", ())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(map.remove_val_at(b"ba", false), Some(()));
+        assert_eq!(map.remove_val_at(b"bb", false), Some(()));
+
+        let zipper = map.read_zipper_at_path(b"ba");
+        assert!(zipper.path_exists());
+        assert!(!zipper.is_val());
+        assert_eq!(zipper.is_shared(), false);
+        assert_eq!(zipper.shared_node_id(), None);
+
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"ba");
+        assert!(zipper.path_exists());
+        assert!(!zipper.is_val());
+        assert_eq!(zipper.is_shared(), false);
+        assert_eq!(zipper.shared_node_id(), None);
     }
 
     /// This behavior is a bit counter-intuitive, but it is correct.
