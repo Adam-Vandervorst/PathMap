@@ -3117,6 +3117,10 @@ pub(crate) mod read_zipper_core {
                         //The descent overshot `k`, so retract the excess from the observer as well
                         obs.ascend(self.prefix_buf.len() - (k+base_idx));
                         self.prefix_buf.truncate(k+base_idx);
+                        //The token has advanced past the complete node-local key run, but the
+                        //focus is only its `k`-byte prefix.  It therefore no longer describes
+                        //this focus and must be reconstructed by a later iterator operation.
+                        self.focus_iter_token = NODE_ITER_INVALID;
                     }
 
                     //See if we have a result to return
@@ -5706,24 +5710,6 @@ mod tests {
         assert_eq!(exact_from_first_byte.path(), exact_from_path.path());
         assert_eq!(exact_from_first_byte.val(), exact_from_path.val());
     }
-
-    // // GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_val_after_descend_first_k_path_matches_descend_to() {
-    //     let map = value_iteration_history_test_map();
-
-    //     let mut from_k_path = map.read_zipper();
-    //     assert!(from_k_path.descend_first_k_path(1));
-
-    //     let mut from_path = map.read_zipper();
-    //     from_path.descend_to(&[0u8]);
-    //     assert_eq!(from_k_path.path(), from_path.path());
-    //     assert!(from_path.to_next_val());
-
-    //     assert!(from_k_path.to_next_val());
-    //     assert_eq!(from_k_path.path(), from_path.path());
-    //     assert_eq!(from_k_path.val(), from_path.val());
-    // }
 
     /// Tests none of the flavors of ascend corrput internal zipper state relied upon by to_next_val
     #[test]
