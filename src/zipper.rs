@@ -2087,9 +2087,9 @@ pub(crate) mod read_zipper_core {
             timed_span!(DescendFirstByte, COUNTERS);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
-            let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
-            self.focus_iter_token = cur_tok;
-
+            if self.focus_iter_token == NODE_ITER_INVALID {
+                self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
+            }
             let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, false);
 
             if new_tok != NODE_ITER_FINISHED {
@@ -2272,52 +2272,55 @@ pub(crate) mod read_zipper_core {
             }
 
             if self.focus_iter_token == NODE_ITER_FINISHED {
+                self.focus_iter_token = NODE_ITER_INVALID;
                 self.regularize();
                 return None
             }
 
-            let (mut new_tok, mut key_bytes, mut child_node, mut _value) = self.focus_node.next_items(self.focus_iter_token, false);
-            while new_tok != NODE_ITER_FINISHED {
-                //Check to see if the iter result has modified more than one byte
-                let node_key = self.node_key();
-                if node_key.len() == 0 {
-                    self.focus_iter_token = NODE_ITER_INVALID;
-                    return None;
-                }
-                let fixed_len = node_key.len() - 1;
-                if fixed_len >= key_bytes.len() || key_bytes[..fixed_len] != node_key[..fixed_len] {
-                    self.regularize();
-                    return None;
-                }
-
-                if key_bytes[fixed_len] > node_key[fixed_len] {
-                    let byte = key_bytes[node_key.len()-1];
-                    *self.prefix_buf.last_mut().unwrap() = byte;
-                    self.focus_iter_token = new_tok;
-
-                    //If this operation landed us at the end of the path within the node, then we
-                    // should re-regularize the zipper before returning
-                    if key_bytes.len() == 1 {
-                        match child_node {
-                            None => {},
-                            Some(rec) => {
-                                self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
-                                *self.focus_node = rec.as_tagged();
-                                self.focus_iter_token = NODE_ITER_INVALID
-                            },
-                        }
-                    }
-
-                    debug_assert!(self.is_regularized());
-                    return Some(byte)
-                }
-
-                (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(new_tok, false);
+            let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, true);
+            if new_tok == NODE_ITER_FINISHED {
+                self.regularize();
+                return None;
             }
 
-            self.focus_iter_token = NODE_ITER_FINISHED;
-            self.regularize();
-            None
+            let node_key = self.node_key();
+            if node_key.len() == 0 {
+                return None;
+            }
+            let node_key_len = node_key.len();
+            let fixed_len = node_key_len - 1;
+            if fixed_len >= key_bytes.len()
+                || key_bytes[..fixed_len] != node_key[..fixed_len]
+                || key_bytes[fixed_len] <= node_key[fixed_len]
+            {
+                self.regularize();
+                return None;
+            }
+
+            let byte = key_bytes[fixed_len];
+            let focus_iter_token = if key_bytes.len() == node_key_len {
+                new_tok
+            } else {
+                self.focus_node.ascend_iter_token(new_tok, key_bytes.len() - node_key_len)
+            };
+            *self.prefix_buf.last_mut().unwrap() = byte;
+            self.focus_iter_token = focus_iter_token;
+
+            //If this operation landed us at the end of the path within the node, then we
+            // should re-regularize the zipper before returning
+            if key_bytes.len() == node_key_len {
+                match child_node {
+                    None => {},
+                    Some(rec) => {
+                        self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
+                        *self.focus_node = rec.as_tagged();
+                        self.focus_iter_token = NODE_ITER_INVALID
+                    },
+                }
+            }
+
+            debug_assert!(self.is_regularized());
+            Some(byte)
         }
 
         fn to_prev_sibling_byte(&mut self) -> Option<u8> {
@@ -5739,79 +5742,97 @@ mod tests {
         }
     }
 
-    // // GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_k_path_after_descend_first_k_path_matches_descend_to() {
-    //     let map = k_path_history_test_map();
+    #[test]
+    fn read_zipper_to_next_sibling_from_partial_focus_matches_direct_focus() {
+        let mut map = PathMap::<u64>::new();
+        map.insert(b"abc", 10);
+        map.insert(b"wxyz", 11);
 
-    //     let mut from_k_path = map.read_zipper();
-    //     assert!(from_k_path.descend_first_k_path(2));
+        let mut after_sibling = map.read_zipper();
+        after_sibling.descend_to(b"a");
+        assert_eq!(after_sibling.to_next_sibling_byte(), Some(b'w'));
+        assert_eq!(after_sibling.path(), b"w");
+        assert_eq!(after_sibling.to_next_sibling_byte(), None);
+        assert_eq!(after_sibling.path(), b"w");
 
-    //     let mut from_path = map.read_zipper();
-    //     from_path.descend_to(from_k_path.path());
-    //     assert_eq!(from_k_path.path(), from_path.path());
-    //     assert!(from_path.to_next_k_path(2));
+        let mut direct = map.read_zipper();
+        direct.descend_to(b"w");
+        assert!(direct.to_next_val());
 
-    //     assert!(from_k_path.to_next_k_path(2));
-    //     assert_eq!(from_k_path.path(), from_path.path());
-    // }
+        assert!(after_sibling.to_next_val());
+        assert_eq!(after_sibling.path(), direct.path());
+        assert_eq!(after_sibling.val(), direct.val());
+    }
 
-    // // GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_k_path_after_k_path_descent_and_ascent_matches_unmoved_focus() {
-    //     let map = nested_k_path_history_test_map();
+    #[test]
+    fn read_zipper_to_next_k_path_after_descend_first_k_path_matches_descend_to() {
+        let map = k_path_history_test_map();
 
-    //     let mut after_movement = map.read_zipper();
-    //     assert!(after_movement.descend_first_k_path(2));
-    //     assert_eq!(after_movement.descend_first_byte(), Some(0));
-    //     assert!(after_movement.ascend_byte());
+        let mut from_k_path = map.read_zipper();
+        assert!(from_k_path.descend_first_k_path(2));
 
-    //     let mut unmoved = map.read_zipper();
-    //     assert!(unmoved.descend_first_k_path(2));
-    //     assert_eq!(after_movement.path(), unmoved.path());
-    //     assert!(unmoved.to_next_k_path(2));
+        let mut from_path = map.read_zipper();
+        from_path.descend_to(from_k_path.path());
+        assert_eq!(from_k_path.path(), from_path.path());
+        assert!(from_path.to_next_k_path(2));
 
-    //     assert!(after_movement.to_next_k_path(2));
-    //     assert_eq!(after_movement.path(), unmoved.path());
-    // }
+        assert!(from_k_path.to_next_k_path(2));
+        assert_eq!(from_k_path.path(), from_path.path());
+    }
 
-    // // GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_k_path_after_prior_k_path_step_matches_unmoved_focus() {
-    //     let map = k_path_history_test_map();
+    #[test]
+    fn read_zipper_to_next_k_path_after_k_path_descent_and_ascent_matches_unmoved_focus() {
+        let map = nested_k_path_history_test_map();
 
-    //     let mut after_prior_step = map.read_zipper();
-    //     assert!(after_prior_step.descend_first_k_path(2));
-    //     assert!(after_prior_step.to_next_k_path(2));
-    //     assert_eq!(after_prior_step.to_prev_sibling_byte(), Some(0));
+        let mut after_movement = map.read_zipper();
+        assert!(after_movement.descend_first_k_path(2));
+        assert_eq!(after_movement.descend_first_byte(), Some(0));
+        assert!(after_movement.ascend_byte());
 
-    //     let mut unmoved = map.read_zipper();
-    //     assert!(unmoved.descend_first_k_path(2));
-    //     assert_eq!(after_prior_step.path(), unmoved.path());
-    //     assert!(unmoved.to_next_k_path(2));
+        let mut unmoved = map.read_zipper();
+        assert!(unmoved.descend_first_k_path(2));
+        assert_eq!(after_movement.path(), unmoved.path());
+        assert!(unmoved.to_next_k_path(2));
 
-    //     assert!(after_prior_step.to_next_k_path(2));
-    //     assert_eq!(after_prior_step.path(), unmoved.path());
-    // }
+        assert!(after_movement.to_next_k_path(2));
+        assert_eq!(after_movement.path(), unmoved.path());
+    }
 
-    // // GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_k_path_after_nested_k_path_step_matches_unmoved_focus() {
-    //     let map = nested_k_path_history_test_map();
+    #[test]
+    fn read_zipper_to_next_k_path_after_prior_k_path_step_matches_unmoved_focus() {
+        let map = k_path_history_test_map();
 
-    //     let mut after_nested_step = map.read_zipper();
-    //     assert!(after_nested_step.descend_first_k_path(2));
-    //     assert!(after_nested_step.descend_first_k_path(1));
-    //     assert!(!after_nested_step.to_next_k_path(1));
+        let mut after_prior_step = map.read_zipper();
+        assert!(after_prior_step.descend_first_k_path(2));
+        assert!(after_prior_step.to_next_k_path(2));
+        assert_eq!(after_prior_step.to_prev_sibling_byte(), Some(0));
 
-    //     let mut unmoved = map.read_zipper();
-    //     assert!(unmoved.descend_first_k_path(2));
-    //     assert_eq!(after_nested_step.path(), unmoved.path());
-    //     assert!(unmoved.to_next_k_path(2));
+        let mut unmoved = map.read_zipper();
+        assert!(unmoved.descend_first_k_path(2));
+        assert_eq!(after_prior_step.path(), unmoved.path());
+        assert!(unmoved.to_next_k_path(2));
 
-    //     assert!(after_nested_step.to_next_k_path(2));
-    //     assert_eq!(after_nested_step.path(), unmoved.path());
-    // }
+        assert!(after_prior_step.to_next_k_path(2));
+        assert_eq!(after_prior_step.path(), unmoved.path());
+    }
+
+    #[test]
+    fn read_zipper_to_next_k_path_after_nested_k_path_step_matches_unmoved_focus() {
+        let map = nested_k_path_history_test_map();
+
+        let mut after_nested_step = map.read_zipper();
+        assert!(after_nested_step.descend_first_k_path(2));
+        assert!(after_nested_step.descend_first_k_path(1));
+        assert!(!after_nested_step.to_next_k_path(1));
+
+        let mut unmoved = map.read_zipper();
+        assert!(unmoved.descend_first_k_path(2));
+        assert_eq!(after_nested_step.path(), unmoved.path());
+        assert!(unmoved.to_next_k_path(2));
+
+        assert!(after_nested_step.to_next_k_path(2));
+        assert_eq!(after_nested_step.path(), unmoved.path());
+    }
 
     /// Tests iteration behavior of to_next_val implementations, comparing the default impl
     /// against the native imple, and a third run that interleaves calls to each

@@ -298,6 +298,21 @@ fn superdense_zipper_cursor(bencher: Bencher, n: u64) {
     });
 }
 
+#[divan::bench(args = [100, 200, 400, 800, 1600, 3200])]
+fn superdense_zipper_step_iter(bencher: Bencher, n: u64) {
+    let mut map: PathMap<u64> = PathMap::new();
+    for i in 0..n { map.set_val_at(prefix_key(&i), i); }
+
+    bencher.bench_local(|| {
+        let mut steps = 0usize;
+        let mut zipper = map.read_zipper();
+        while zipper.to_next_step() {
+            steps += 1;
+        }
+        black_box(steps);
+    });
+}
+
 fn prefix_key(k: &u64) -> &[u8] {
     let bs = (8 - k.leading_zeros()/8) as u8;
     let kp: *const u64 = k;
