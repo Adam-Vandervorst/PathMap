@@ -236,7 +236,12 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.meet_into(read_zipper, true)
     }
 
-    /// Experiment.  GOAT, document this
+    /// Replaces the subtrie below this zipper's focus with the intersection of the subtries below
+    /// the foci of `rz_a` and `rz_b`.
+    ///
+    /// This operation does not inspect the destination's existing contents. Consequently, it never
+    /// returns [AlgebraicStatus::Identity]: it returns `Element` for a nonempty intersection and
+    /// `None` for an empty one.
     fn meet_2<'z, ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice;
 
     /// Subtracts the subtrie downstream of the focus of `read_zipper` from the subtrie below the `self` zipper's
@@ -2030,9 +2035,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 AlgebraicStatus::None
             },
             AlgebraicResult::Identity(mask) => {
-                //`meet_2` never reports `Identity` itself, because it does not look at what is
-                // already at the destination; the mask here says which *operand* the intersection
-                // equals.
                 let src = if mask & SELF_IDENT > 0 {
                     a_focus.into_option()
                 } else {
@@ -2044,13 +2046,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                         self.graft_internal(Some(node));
                         AlgebraicStatus::Element
                     }
-                    //The operand the intersection is equal to holds an empty node, so the
-                    // intersection is empty.  This used to `unwrap`, and it is reachable:
-                    // `try_as_tagged` above answers `Some` for a `BorrowedRc` whose node is
-                    // empty, while `into_option` answers `None` for exactly that case, so the
-                    // two guards disagree.  An empty node is materialised by `create_path` or
-                    // by `remove_val` (FINDINGS #8), which is how a fuzzer reaches it.
                     None => {
+                        //An empty result subtrie means clear the destination
                         self.graft_internal(None);
                         AlgebraicStatus::None
                     }
