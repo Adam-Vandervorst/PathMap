@@ -1656,6 +1656,7 @@ pub(crate) mod read_zipper_core {
                 return true;
             }
             if self.focus_node.node_contains_partial_key(node_key) {
+                self.focus_iter_token = NODE_ITER_INVALID;
                 true
             } else {
                 self.prefix_buf.pop();
@@ -1667,10 +1668,10 @@ pub(crate) mod read_zipper_core {
             timed_span!(DescendIndexedByte, COUNTERS);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
-
             match self.focus_node.nth_child_from_key(self.node_key(), child_idx) {
                 (Some(prefix), Some(child_node)) => {
                     self.prefix_buf.push(prefix);
+                    self.focus_iter_token = NODE_ITER_INVALID;
                     self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
                     *self.focus_node = child_node;
                     self.focus_iter_token = NODE_ITER_INVALID;
@@ -1692,7 +1693,7 @@ pub(crate) mod read_zipper_core {
             let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
             self.focus_iter_token = cur_tok;
 
-            let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token);
+            let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, false);
 
             if new_tok != NODE_ITER_FINISHED {
                 let node_key = self.node_key();
@@ -1718,7 +1719,8 @@ pub(crate) mod read_zipper_core {
                         },
                     }
                 } else {
-                    self.focus_iter_token = NODE_ITER_INVALID;
+                    self.focus_iter_token = self.focus_node
+                        .ascend_iter_token(new_tok, key_bytes.len() - (byte_idx + 1));
                 }
                 debug_assert!(self.is_regularized());
                 true
@@ -1772,6 +1774,7 @@ pub(crate) mod read_zipper_core {
                 moved = true;
                 self.prefix_buf.extend(&prefix[..take]);
                 remaining -= take;
+                self.focus_iter_token = NODE_ITER_INVALID;
 
                 if take < prefix.len() {
                     break;
@@ -1874,7 +1877,7 @@ pub(crate) mod read_zipper_core {
                 return false
             }
 
-            let (mut new_tok, mut key_bytes, mut child_node, mut _value) = self.focus_node.next_items(self.focus_iter_token);
+            let (mut new_tok, mut key_bytes, mut child_node, mut _value) = self.focus_node.next_items(self.focus_iter_token, false);
             while new_tok != NODE_ITER_FINISHED {
                 //Check to see if the iter result has modified more than one byte
                 let node_key = self.node_key();
@@ -1909,7 +1912,7 @@ pub(crate) mod read_zipper_core {
                     return true
                 }
 
-                (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(new_tok);
+                (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(new_tok, false);
             }
 
             self.focus_iter_token = NODE_ITER_FINISHED;
@@ -1941,7 +1944,7 @@ pub(crate) mod read_zipper_core {
                 let cur_jump = steps.min(self.excess_key_len());
                 if cur_jump > 0 {
                     self.prefix_buf.truncate(self.prefix_buf.len() - cur_jump);
-                    self.focus_iter_token = NODE_ITER_INVALID;
+                    self.reascend_iter_token(cur_jump);
                     steps -= cur_jump;
                 }
             }
@@ -1963,9 +1966,8 @@ pub(crate) mod read_zipper_core {
                         return false
                     }
                 };
-            } else {
-                self.focus_iter_token = NODE_ITER_INVALID;
             }
+            self.reascend_iter_token(1);
             self.prefix_buf.pop();
             debug_assert!(self.is_regularized());
             true
@@ -1982,7 +1984,6 @@ pub(crate) mod read_zipper_core {
                     self.ascend_across_nodes();
                 }
                 self.ascend_within_node();
-                self.focus_iter_token = NODE_ITER_INVALID;
                 if self.child_count() > 1 || self.is_val() || self.at_root() {
                     return true;
                 }
@@ -2000,7 +2001,6 @@ pub(crate) mod read_zipper_core {
                     self.ascend_across_nodes();
                 }
                 self.ascend_within_node();
-                self.focus_iter_token = NODE_ITER_INVALID;
                 if self.child_count() > 1 || self.at_root() {
                     return true;
                 }
@@ -2142,10 +2142,9 @@ pub(crate) mod read_zipper_core {
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
-            let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
-            self.focus_iter_token = cur_tok;
+            self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
 
-            self.k_path_internal(k, self.prefix_buf.len())
+            self.k_path_internal(k, self.prefix_buf.len(), false)
         }
         fn to_next_k_path(&mut self, k: usize) -> bool {
             timed_span!(ToNextKPath, COUNTERS);
@@ -2157,7 +2156,7 @@ pub(crate) mod read_zipper_core {
             //De-regularize the zipper
             debug_assert!(self.is_regularized());
             self.deregularize();
-            self.k_path_internal(k, base_idx)
+            self.k_path_internal(k, base_idx, true)
         }
     }
 
@@ -2396,7 +2395,7 @@ pub(crate) mod read_zipper_core {
                 }
 
                 let (new_tok, key_bytes, child_node, value) = if self.focus_iter_token != NODE_ITER_FINISHED {
-                    self.focus_node.next_items(self.focus_iter_token)
+                    self.focus_node.next_items(self.focus_iter_token, false)
                 } else {
                     (NODE_ITER_FINISHED, &[][..] as &[u8], None, None)
                 };
@@ -2518,9 +2517,7 @@ pub(crate) mod read_zipper_core {
             (self, key)
         }
 
-        /// Internal implementation of `to_next_sibling_byte` / `to_prev_sibling_byte`, which
-        /// performs about as well as the `to_next_sibling_byte` that is there, but doesn't
-        /// update the zipper's iter tokens
+        /// Internal implementation of `to_next_sibling_byte` / `to_prev_sibling_byte`.
         #[inline]
         fn to_sibling(&mut self, next: bool) -> bool {
             self.prepare_buffers();
@@ -2529,6 +2526,7 @@ pub(crate) mod read_zipper_core {
                 match self.focus_node.get_sibling_of_child(self.node_key(), next) {
                     (Some(prefix), Some(child_node)) => {
                         *self.prefix_buf.last_mut().unwrap() = prefix;
+                        self.focus_iter_token = NODE_ITER_INVALID;
                         self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
                         *self.focus_node = child_node;
                         self.focus_iter_token = NODE_ITER_INVALID;
@@ -2536,6 +2534,7 @@ pub(crate) mod read_zipper_core {
                     },
                     (Some(prefix), None) => {
                         *self.prefix_buf.last_mut().unwrap() = prefix;
+                        self.focus_iter_token = NODE_ITER_INVALID;
                         true
                     },
                     (None, _) => false
@@ -2563,6 +2562,9 @@ pub(crate) mod read_zipper_core {
                         }
                     }
                 };
+                if result.is_some() {
+                    self.ancestors.last_mut().unwrap().1 = NODE_ITER_INVALID;
+                }
                 if should_pop {
                     let (focus_node, iter_tok, _prefix_offset) = self.ancestors.pop().unwrap();
                     *self.focus_node = focus_node;
@@ -2574,38 +2576,20 @@ pub(crate) mod read_zipper_core {
 
         /// Internal method that implements both `k_path...` methods above
         #[inline]
-        fn k_path_internal(&mut self, k: usize, base_idx: usize) -> bool {
+        fn k_path_internal(&mut self, k: usize, base_idx: usize, mut continue_from_focus: bool) -> bool {
+            if self.focus_iter_token == NODE_ITER_INVALID {
+                self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
+            }
             loop {
-                //If either of these trip, the caller is probably misusing the API and likely didn't call
-                // `descend_first_k_path` before calling `to_next_k_path`
+                debug_assert_ne!(self.focus_iter_token, NODE_ITER_INVALID);
                 debug_assert!(self.prefix_buf.len() <= base_idx+k);
                 debug_assert!(self.prefix_buf.len() >= base_idx);
-
-                //Check to see if we need to reset the iter_token in the middle of the iteration.
-                // This shouldn't happen unless some other zipper methods invalidated the k_path iteration state,
-                // but that can happen and we should try our best to resume the iteration where we left it.
-                if self.focus_iter_token == NODE_ITER_INVALID {
-                    self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
-                    let (new_tok, key_bytes, _child_node, _value) = self.focus_node.next_items(self.focus_iter_token);
-                    let node_key = self.node_key();
-                    if key_bytes.len() >= node_key.len() {
-                        if &key_bytes[..node_key.len()] == node_key {
-                            self.focus_iter_token = new_tok;
-                        }
-                    }
-                }
-
                 if self.focus_iter_token == NODE_ITER_FINISHED {
-                    //This branch means we need to ascend or we're finished with the iteration and will
-                    // return a result at `path_len == base_idx`
-
-                    //Have we reached the root of this k_path iteration?
-                    if self.node_key_start() <= base_idx  {
+                    if self.node_key_start() <= base_idx {
                         self.focus_iter_token = NODE_ITER_FINISHED;
                         self.prefix_buf.truncate(base_idx);
                         return false
                     }
-
                     if let Some((focus_node, iter_tok, prefix_offset)) = self.ancestors.pop() {
                         *self.focus_node = focus_node;
                         self.focus_iter_token = iter_tok;
@@ -2617,30 +2601,21 @@ pub(crate) mod read_zipper_core {
                         return false
                     }
                 }
-
-                //Move the zipper to the next sibling position, if we can
-                let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token);
-
+                let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, continue_from_focus);
+                continue_from_focus = false;
                 if new_tok != NODE_ITER_FINISHED {
-
-                    //Check to see if the iteration has modified more characters than allowed by `k`
                     let key_start = self.node_key_start();
                     if key_start < base_idx {
-                        let base_key_len = base_idx - key_start; //The number of bytes we should not modify
+                        let base_key_len = base_idx - key_start;
                         if base_key_len > key_bytes.len() || &key_bytes[..base_key_len] != &self.prefix_buf[key_start..base_idx] {
                             self.prefix_buf.truncate(base_idx);
                             return false;
                         }
                     }
-
                     self.focus_iter_token = new_tok;
-
-                    //If we got here, it means we're either going to continue to descend, or return a
-                    // result at `path_len == base_idx+k`
                     let key_start = self.node_key_start();
                     self.prefix_buf.truncate(key_start);
                     self.prefix_buf.extend(key_bytes);
-
                     if self.prefix_buf.len() <= k+base_idx {
                         match child_node {
                             None => {},
@@ -2651,17 +2626,11 @@ pub(crate) mod read_zipper_core {
                             },
                         }
                     } else {
+                        let prefix_len = k + base_idx - key_start;
                         self.prefix_buf.truncate(k+base_idx);
-                        //The token has advanced past the complete node-local key run, but the
-                        //focus is only its `k`-byte prefix.  It therefore no longer describes
-                        //this focus and must be reconstructed by a later iterator operation.
-                        self.focus_iter_token = NODE_ITER_INVALID;
+                        self.focus_iter_token = self.focus_node.ascend_iter_token(new_tok, key_bytes.len() - prefix_len);
                     }
-
-                    //See if we have a result to return
-                    if self.prefix_buf.len() == k+base_idx {
-                        return true;
-                    }
+                    if self.prefix_buf.len() == k+base_idx { return true; }
                 } else {
                     self.focus_iter_token = NODE_ITER_FINISHED;
                 }
@@ -2728,6 +2697,9 @@ pub(crate) mod read_zipper_core {
                 (Some(prefix), Some(child_node)) => {
                     //Step to a new node
                     self.prefix_buf.extend(prefix);
+                    if !prefix.is_empty() {
+                        self.focus_iter_token = NODE_ITER_INVALID;
+                    }
                     self.ancestors.push((*self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
                     *self.focus_node = child_node;
                     self.focus_iter_token = NODE_ITER_INVALID;
@@ -2740,6 +2712,9 @@ pub(crate) mod read_zipper_core {
                 (Some(prefix), None) => {
                     //Stay within the same node
                     self.prefix_buf.extend(prefix);
+                    if !prefix.is_empty() {
+                        self.focus_iter_token = NODE_ITER_INVALID;
+                    }
                 },
                 (None, _) => unreachable!()
             }
@@ -2830,7 +2805,22 @@ pub(crate) mod read_zipper_core {
         fn ascend_within_node(&mut self) {
             let branch_key = self.focus_node.prior_branch_key(self.node_key());
             let new_len = self.origin_path.len().max(self.node_key_start() + branch_key.len());
+            let old_len = self.prefix_buf.len();
             self.prefix_buf.truncate(new_len);
+            let ascended = old_len - new_len;
+            if ascended > 0 {
+                self.reascend_iter_token(ascended);
+            }
+        }
+        /// Updates the compact cursor after removing bytes from within the current node.  An already
+        /// invalid cursor remains invalid; otherwise the node implementation must encode the new focus.
+        #[inline]
+        fn reascend_iter_token(&mut self, byte_count: usize) {
+            if self.focus_iter_token == NODE_ITER_INVALID {
+                return
+            }
+            self.focus_iter_token = self.focus_node
+                .ascend_iter_token(self.focus_iter_token, byte_count);
         }
         /// Push a new node-path pair onto the zipper.  This is used in the internal implementation of
         /// the [crate::zipper::ProductZipper]
@@ -4074,6 +4064,12 @@ pub(crate) mod zipper_iteration_tests {
                     let mut temp_store = $read_keys(crate::zipper::zipper_iteration_tests::K_PATH_TEST9_KEYS);
                     crate::zipper::zipper_iteration_tests::run_test(&mut temp_store, $make_z, &[2, 194], crate::zipper::zipper_iteration_tests::k_path_test9)
                 }
+
+                #[test]
+                fn [<$z_name _k_path_testa>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_iteration_tests::K_PATH_TESTA_KEYS);
+                    crate::zipper::zipper_iteration_tests::run_test(&mut temp_store, $make_z, b"", crate::zipper::zipper_iteration_tests::k_path_testa)
+                }
             }
         }
     }
@@ -4496,6 +4492,27 @@ pub(crate) mod zipper_iteration_tests {
         assert_eq!(zipper.path(), &[1]);
         assert_eq!(zipper.to_next_k_path(1), false);
         assert_eq!(zipper.path(), &[]);
+    }
+
+    pub const K_PATH_TESTA_KEYS: &[&[u8]] = &[
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+    ];
+
+    /// Tests `..k_path` in a subtrie without attitional branches to descend, when the outer trie does have branches
+    pub fn k_path_testa<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+        zipper.reset();
+        let mut observed = Vec::<u8>::new();
+        let k = K_PATH_TESTA_KEYS[0].len();
+        assert_eq!(zipper.descend_first_k_path_observed(k, &mut observed), true);
+        assert_eq!(zipper.path(), K_PATH_TESTA_KEYS[0]);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path_observed(k, &mut observed), true);
+        assert_eq!(zipper.path(), K_PATH_TESTA_KEYS[1]);
+        assert_eq!(&observed[..], zipper.path());
+        assert_eq!(zipper.to_next_k_path_observed(k, &mut observed), false);
+        assert_eq!(zipper.path(), []);
+        assert_eq!(&observed[..], zipper.path());
     }
 }
 
