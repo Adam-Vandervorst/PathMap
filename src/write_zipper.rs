@@ -236,7 +236,12 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.meet_into(read_zipper, true)
     }
 
-    /// Experiment.  GOAT, document this
+    /// Replaces the subtrie below this zipper's focus with the intersection of the subtries below
+    /// the foci of `rz_a` and `rz_b`.
+    ///
+    /// This operation does not inspect the destination's existing contents. Consequently, it never
+    /// returns [AlgebraicStatus::Identity]: it returns `Element` for a nonempty intersection and
+    /// `None` for an empty one.
     fn meet_2<'z, ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice;
 
     /// Subtracts the subtrie downstream of the focus of `read_zipper` from the subtrie below the `self` zipper's
@@ -1531,6 +1536,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
+        // The dense-node merge handles both pieces of the contract directly: it removes
+        // masked branches absent from `src`, and (when requested) every unmasked branch.
+        // Do not pre-clear or pre-filter `self`: that throws away the destination node the
+        // merge is meant to copy selectively, turning the bulk path into a rebuild.
         match child_mask.count_bits() {
             0 => {
                 if remove_unset {
@@ -1541,8 +1550,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 if remove_unset {
                     self.remove_branches(false);
                 }
-
-                let byte = child_mask.indexed_bit::<true>(0).expect("one bit set");
+                // SAFETY: this arm is selected only when `child_mask` has one bit.
+                let byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
                 self.descend_to_byte(byte);
                 self.graft_src_at(src, &[byte]);
                 self.ascend_byte();
@@ -1551,26 +1560,40 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 if remove_unset {
                     self.remove_branches(false);
                 }
-
-                let first_byte = child_mask.indexed_bit::<true>(0).expect("some bit set");
+                // SAFETY: this arm is selected only when `child_mask` has two bits.
+                let first_byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
                 self.descend_to_byte(first_byte);
                 self.graft_src_at(src, &[first_byte]);
                 self.ascend_byte();
 
-                let second_byte = child_mask.next_bit(first_byte).expect("two bits set");
+                // SAFETY: `first_byte` is one of the two set bits, so it has a successor.
+                let second_byte = unsafe { child_mask.next_bit(first_byte).unwrap_unchecked() };
                 self.descend_to_byte(second_byte);
                 self.graft_src_at(src, &[second_byte]);
                 self.ascend_byte();
             }
             _ => {
-                match src.get_focus().try_as_tagged() {
+                let src_focus = src.get_focus();
+                match src_focus.try_as_tagged() {
                     Some(src_tagged) => {
-                        // Split the focus if we're in the middle of another node
+                        // Split the focus if we're in the middle of another node.  A focus that
+                        // is a dangling stub (an empty child node, which `get_child_mut` declines
+                        // to hand out) has no node to merge into even after the split, so the
+                        // branches are merged into a fresh node that is grafted in afterwards.
+                        // This used to unwrap the missing node.
+                        let mut fresh_node: Option<TrieNodeODRc<V, A>> = None;
                         let self_focus_node = match self.try_borrow_focus_mut() {
                             Some(node) => node,
                             None => {
                                 self.split_at_focus();
-                                self.try_borrow_focus_mut().unwrap()
+                                match self.try_borrow_focus_mut() {
+                                    Some(node) => node,
+                                    None => {
+                                        let alloc = self.alloc.clone();
+                                        fresh_node.insert(TrieNodeODRc::new_in(
+                                            crate::dense_byte_node::DenseByteNode::<V, A>::new_in(alloc.clone()), alloc))
+                                    }
+                                }
                             }
                         };
                         match src_tagged {
@@ -1616,9 +1639,13 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                                 }
                             },
                         }
+                        if let Some(node) = fresh_node {
+                            if !node.as_tagged().node_is_empty() {
+                                self.graft_internal(Some(node));
+                            }
+                        }
                     },
                     None => {
-                        debug_assert_eq!(src.child_count(), 0);
                         if remove_unset {
                             self.remove_branches(false);
                         } else {
@@ -1805,16 +1832,20 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 }
             },
             Some(src) => {
+                //A dangling source focus is taken as the empty sentinel: nothing to join, and not
+                // a node graft_internal may be handed
+                if src.as_tagged().node_is_empty() {
+                    return if self.get_focus().is_none() { AlgebraicStatus::None } else { AlgebraicStatus::Identity }
+                }
                 match self.take_focus(false) {
-                    Some(mut self_node) => {
-                        let (status, result) = self_node.make_mut().join_into_dyn(src);
-                        match result {
-                            Ok(()) => self.graft_internal(Some(self_node)),
-                            Err(replacement_node) => self.graft_internal(Some(replacement_node)),
-                        }
+                    //A dangling destination focus is taken as the sentinel too, which cannot be
+                    // made mutable; the join into nothing is the source itself
+                    Some(mut self_node) if !self_node.as_tagged().node_is_empty() => {
+                        let status = self_node.join_into(src);
+                        self.graft_internal(Some(self_node));
                         status
                     },
-                    None => {
+                    _ => {
                         self.graft_internal(Some(src));
                         AlgebraicStatus::Element
                     }
@@ -1826,7 +1857,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice {
         let result = match self.get_focus().into_option() {
             Some(mut self_node) => {
-                let new_node = self_node.make_mut().drop_head_dyn(byte_cnt);
+                //An empty result means nothing remains below the focus: clear the branch rather than
+                // grafting an empty node (`graft_internal` requires a non-empty source)
+                let new_node = self_node.make_mut().drop_head_dyn(byte_cnt)
+                    .filter(|node| !node.as_tagged().node_is_empty());
                 let result = new_node.is_some();
                 self.graft_internal(new_node);
                 result
@@ -1906,6 +1940,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let prefix = prefix.as_ref();
         match self.get_focus().into_option() {
             Some(focus_node) => {
+                // Inserting zero bytes is a no-op
+                if prefix.is_empty() {
+                    return true;
+                }
                 let prefixed = make_parents_in(prefix, focus_node, self.alloc.clone());
                 self.graft_internal(Some(prefixed));
                 true
@@ -2023,14 +2061,23 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 AlgebraicStatus::None
             },
             AlgebraicResult::Identity(mask) => {
-                if mask & SELF_IDENT > 0 {
-                    //GOAT, document that meet_2 will not return identify because it doesn't actually check what's in the destination
-                    self.graft_internal(Some(a_focus.into_option().unwrap()));
+                let src = if mask & SELF_IDENT > 0 {
+                    a_focus.into_option()
                 } else {
                     debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be a or b
-                    self.graft_internal(Some(b_focus.into_option().unwrap()));
+                    b_focus.into_option()
+                };
+                match src {
+                    Some(node) => {
+                        self.graft_internal(Some(node));
+                        AlgebraicStatus::Element
+                    }
+                    None => {
+                        //An empty result subtrie means clear the destination
+                        self.graft_internal(None);
+                        AlgebraicStatus::None
+                    }
                 }
-                AlgebraicStatus::Element
             },
         }
     }
@@ -2315,6 +2362,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     //The focus_stack.top() is the parent node of the focus, so we'll replace its child
                     let sub_branch_added = self.in_zipper_mut_static_result(
                         |node, key| {
+                            // A graft replaces everything below the focus
+                            node.node_remove_all_branches(key, false);
                             node.node_set_branch(key, src)
                         },
                         |_, _| true);
@@ -2624,6 +2673,7 @@ pub(crate) fn swap_top_node<'cursor, V: Clone + Send + Sync, A: Allocator + 'cur
 /// Internal function to create a parent path leading up to the supplied `child_node`
 #[inline]
 fn make_parents_in<V: Clone + Send + Sync, A: Allocator>(path: &[u8], child_node: TrieNodeODRc<V, A>, alloc: A) -> TrieNodeODRc<V, A> {
+    debug_assert!(!path.is_empty(), "make_parents_in needs at least one path byte; an empty path would drop child_node");
 
     #[cfg(not(feature = "all_dense_nodes"))]
     {
@@ -4189,6 +4239,18 @@ mod tests {
         drop(wz);
     }
 
+    /// Tests a code path where a single PairNode could represent the trie before the drop_head, but now can't
+    #[test]
+    fn write_zipper_drop_head_test7() {
+        let mut map: PathMap<u64> = [
+            (b"1ab".as_slice(), 1),
+            (b"2ac".as_slice(), 2),
+        ].into_iter().collect();
+        assert!(map.write_zipper().join_k_path_into(1, true));
+        assert_eq!(map.get_val_at(b"ab"), Some(&1));
+        assert_eq!(map.get_val_at(b"ac"), Some(&2));
+    }
+
     #[test]
     fn write_zipper_meet_k_path_into_test1() {
         let keys = [
@@ -4260,6 +4322,168 @@ mod tests {
         drop(wz);
 
         assert_eq!(map.iter().map(|(k, _v)| k).collect::<Vec<Vec<u8>>>(), ref_keys);
+    }
+
+    /// A focus in the middle of a compressed key run must replace the old run,
+    /// rather than retain it alongside the prefixed copy.
+    #[test]
+    fn write_zipper_insert_prefix_mid_key_replaces_old_downstream_path() {
+        let mut map = PathMap::<()>::new();
+        map.set_val_at(b"aaa", ());
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"a");
+        assert!(wz.insert_prefix(b"b"));
+        drop(wz);
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"abaa".to_vec()]
+        );
+        assert!(map.get(b"aaa").is_none());
+        let mut rz = map.read_zipper();
+        rz.descend_to(b"aa");
+        assert!(!rz.path_exists(), "stale key run must be gone");
+        assert_valid_trie(map.root());
+
+        // The compressed run can continue into a branch as well.
+        let mut map = PathMap::<()>::new();
+        map.set_val_at(b"abcd", ());
+        map.set_val_at(b"abce", ());
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"ab");
+        assert!(wz.insert_prefix(b"X"));
+        drop(wz);
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"abXcd".to_vec(), b"abXce".to_vec()]
+        );
+        assert_valid_trie(map.root());
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_keeps_focus_value() {
+        let mut map = PathMap::<()>::new();
+        for key in [b"a".as_slice(), b"ab", b"ac"] {
+            map.set_val_at(key, ());
+        }
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"a");
+        assert!(wz.insert_prefix(b"Z"));
+        drop(wz);
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"a".to_vec(), b"aZb".to_vec(), b"aZc".to_vec()]
+        );
+        assert_valid_trie(map.root());
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_empty_is_identity() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(b"ab", 1);
+        map.set_val_at(b"ac", 2);
+        assert!(map.write_zipper().insert_prefix(b""));
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            vec![b"ab".to_vec(), b"ac".to_vec()]
+        );
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"a");
+        assert!(wz.insert_prefix(b""));
+        drop(wz);
+        assert_eq!(map.get(b"ab"), Some(&1));
+        assert_eq!(map.get(b"ac"), Some(&2));
+        assert_valid_trie(map.root());
+    }
+
+    #[test]
+    fn write_zipper_graft_over_single_line() {
+        for src_key in [[0u8, 3u8], [0u8, 0u8]] {
+            let mut dst = PathMap::<u64>::new();
+            dst.set_val_at([0, 0], 1);
+            let mut src = PathMap::<u64>::new();
+            src.set_val_at(src_key, 8);
+            let mut wz = dst.write_zipper_at_path(&[0]);
+            let mut rz = src.read_zipper();
+            rz.descend_to(&[0]);
+            wz.graft(&rz);
+            drop(wz);
+            assert_eq!(
+                dst.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+                vec![vec![0, src_key[1]]]
+            );
+            assert_eq!(dst.get([0, src_key[1]]), Some(&8));
+            assert_valid_trie(dst.root());
+        }
+    }
+
+    fn assert_insert_prefix_rewrite(mut keys: Vec<Vec<u8>>, focus: Vec<u8>, prefix: Vec<u8>) {
+        keys.sort();
+        keys.dedup();
+
+        let mut map = PathMap::<()>::new();
+        for key in &keys {
+            map.set_val_at(key, ());
+        }
+
+        let mut expected: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|key| {
+                if key.starts_with(&focus) && key.len() > focus.len() {
+                    [&focus[..], &prefix[..], &key[focus.len()..]].concat()
+                } else {
+                    key.clone()
+                }
+            })
+            .collect();
+        expected.sort();
+
+        let mut wz = map.write_zipper();
+        wz.descend_to(&focus);
+        wz.insert_prefix(&prefix);
+        drop(wz);
+
+        assert_eq!(
+            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
+            expected,
+            "keys {keys:?}, focus {focus:?}, prefix {prefix:?}"
+        );
+        assert_valid_trie(map.root());
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_randomized() {
+        // Miri runs this same corpus generator with a small budget. This keeps
+        // the test's behavior identical while completing comfortably quickly.
+        #[cfg(miri)]
+        const CASE_COUNT: usize = 20;
+        #[cfg(not(miri))]
+        const CASE_COUNT: usize = 2_000;
+
+        use rand::prelude::*;
+
+        let mut rng = StdRng::from_seed([42; 32]);
+        for _ in 0..CASE_COUNT {
+            let alphabet = rng.random_range(2..4u8);
+            let mut keys: Vec<Vec<u8>> = (0..rng.random_range(1..7))
+                .map(|_| {
+                    let len = rng.random_range(0..=5usize);
+                    (0..len)
+                        .map(|_| b'a' + rng.random_range(0..alphabet))
+                        .collect()
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+
+            let focus = {
+                let key = &keys[rng.random_range(0..keys.len())];
+                key[..rng.random_range(0..=key.len())].to_vec()
+            };
+            let prefix: Vec<u8> = (0..rng.random_range(1..=3usize))
+                .map(|_| b'a' + rng.random_range(0..alphabet))
+                .collect();
+            assert_insert_prefix_rewrite(keys, focus, prefix);
+        }
     }
 
     #[test]
@@ -5833,4 +6057,316 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    /// Exercises `meet_2` when one source is rooted at a dangling path: an empty node
+    /// left behind by `create_path`. The intersection with an empty node is empty, so
+    /// the operation returns `None` and does not graft anything.
+    #[test]
+    fn write_zipper_meet_2_with_an_empty_source_node() {
+        for (label, b_keys, b_dangling) in [
+            ("b holds a value below", &[&[0u8, 1][..]][..], &[][..]),
+            ("b dangling too", &[][..], &[&[0u8][..]][..]),
+            ("b empty", &[][..], &[][..]),
+        ] {
+            let mut a = PathMap::<u64>::new();
+            a.create_path(&[0u8]);
+            let mut b = PathMap::<u64>::new();
+            for k in b_keys { b.insert(k, 2); }
+            for k in b_dangling { b.create_path(k); }
+
+            let mut dst = PathMap::<u64>::new();
+            dst.insert(&[5u8], 9);
+            let ra = a.read_zipper_at_path(&[0u8]);
+            let rb = b.read_zipper_at_path(&[0u8]);
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None, "{label}");
+            assert_eq!(wz.child_count(), 0, "{label}");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}");
+
+            //With the operands swapped
+            let mut dst = PathMap::<u64>::new();
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&rb, &ra), AlgebraicStatus::None, "{label}, swapped");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}, swapped");
+        }
+    }
+
+    /// A map holding `extra` plus `{ca, cb}`, after `remove_branches(prune = false)` at "c": the node
+    /// holding "c" now has a dangling child there, i.e. the empty sentinel.  With one extra key the
+    /// parent is a LineListNode; with three or more it is a DenseByteNode carrying the sentinel in a CoFree.
+    fn with_dangling_c(extra: &[&[u8]]) -> PathMap<()> {
+        let mut m = PathMap::<()>::new();
+        for k in [b"ca".as_slice(), b"cb"] { m.set_val_at(k, ()); }
+        for k in extra { m.set_val_at(k, ()); }
+        let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); drop(wz);
+        let mut rz = m.read_zipper(); rz.descend_to(b"c");
+        assert!(rz.path_exists());
+        m
+    }
+    fn lln_with_dangling_child() -> PathMap<()> { with_dangling_c(&[b"d"]) }
+    fn dense_with_dangling_child() -> PathMap<()> { with_dangling_c(&[b"d", b"e", b"f"]) }
+
+    /// Joining into a dense node whose child at that byte is a dangling sentinel
+    #[test]
+    fn write_zipper_join_into_dangling_dense_child() {
+        let mut other = PathMap::<()>::new(); other.set_val_at(b"ca", ());
+        let joined = dense_with_dangling_child().join(&other);
+        assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"ca".to_vec(), b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
+        assert_valid_trie(joined.root());
+
+        let mut m = dense_with_dangling_child();
+        m.write_zipper().join_into(&other.read_zipper());
+        assert_eq!(m.iter().count(), 4);
+        assert_valid_trie(m.root());
+
+        //Symmetric: the dangling child arrives from the *other* operand
+        let mut dense = PathMap::<()>::new();
+        for k in [b"ca".as_slice(), b"d", b"e", b"f"] { dense.set_val_at(k, ()); }
+        let joined = dense.join(&lln_with_dangling_child());
+        assert_eq!(joined.iter().count(), 4);
+        dense.write_zipper().join_into(&lln_with_dangling_child().read_zipper());
+        assert_eq!(dense.iter().count(), 4);
+        assert_valid_trie(dense.root());
+    }
+
+    /// Dropping head bytes over a dangling sentinel child, in both node types.  (Values that sit within
+    /// the dropped bytes are discarded by `join_k_path_into`; only the downstream subtries are joined.)
+    #[test]
+    #[allow(deprecated)]
+    fn write_zipper_drop_head_over_dangling_child() {
+        let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
+
+        let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]); // dense parent
+        assert!(m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(keys(&m), vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]);
+        assert_valid_trie(m.root());
+
+        let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]);
+        assert!(m.write_zipper().drop_head(1));
+        assert_eq!(keys(&m), vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]);
+
+        let mut m = with_dangling_c(&[b"dx"]); // LineListNode parent
+        assert!(m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(keys(&m), vec![b"x".to_vec()]);
+        assert_valid_trie(m.root());
+
+        //Only a dangling path below the focus: the branch is cleared, nothing is grafted
+        let mut m = with_dangling_c(&[]);
+        assert!(!m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(m.iter().count(), 0);
+    }
+
+    /// Randomized: no-prune removals sprinkle dangling sentinels through random tries; join must be
+    /// the union of the value sets and join_k_path_into must be the head-dropped key set, with no panics
+    /// and valid nodes throughout
+    #[test]
+    fn write_zipper_dangling_children_algebra_randomized() {
+        use rand::prelude::*;
+        let mut rng = StdRng::from_seed([11; 32]);
+        for _ in 0..600 {
+            let alphabet = rng.random_range(2..6u8);
+            let gen_map = |rng: &mut StdRng| {
+                let mut keys: Vec<Vec<u8>> = (0..rng.random_range(1..12)).map(|_| {
+                    let len = rng.random_range(1..=5usize);
+                    (0..len).map(|_| b'a' + rng.random_range(0..alphabet)).collect()
+                }).collect();
+                let mut m = PathMap::<()>::new();
+                for k in &keys { m.set_val_at(k, ()); }
+                keys.shuffle(rng);
+                for k in keys.iter().take(keys.len() / 2) {
+                    let cut = rng.random_range(0..k.len());
+                    let mut wz = m.write_zipper(); wz.descend_to(&k[..cut]);
+                    if rng.random_bool(0.5) { wz.remove_branches(false); } else { wz.remove_val(false); }
+                }
+                m
+            };
+            let a = gen_map(&mut rng);
+            let b = gen_map(&mut rng);
+            let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
+            assert_valid_trie(a.root());
+            assert_valid_trie(b.root());
+
+            let mut expected = keys(&a); expected.extend(keys(&b)); expected.sort(); expected.dedup();
+            let joined = a.join(&b);
+            assert_eq!(keys(&joined), expected, "join");
+            assert_valid_trie(joined.root());
+            let mut a2 = a.clone();
+            a2.write_zipper().join_into(&b.read_zipper());
+            assert_eq!(keys(&a2), expected, "join_into");
+
+            let k = rng.random_range(1..=2usize);
+            // values within the dropped bytes are discarded; only keys longer than k survive
+            let mut expected: Vec<Vec<u8>> = keys(&a).into_iter().filter(|key| key.len() > k).map(|key| key[k..].to_vec()).collect();
+            expected.sort(); expected.dedup();
+            let mut a3 = a.clone();
+            a3.write_zipper().join_k_path_into(k, false);
+            assert_eq!(keys(&a3), expected, "join_k_path_into({k})");
+            assert_eq!(a3.val_count(), expected.len(), "join_k_path_into({k}) val_count");
+            assert_valid_trie(a3.root());
+        }
+    }
+
+    /// Joining two maps whose roots are allocated-but-empty nodes (here: emptied by `remove_branches`
+    /// at the root).  `merge_list_nodes` used to `assume_init` an entry that was never written and then
+    /// drop the garbage payload; the fault is only sometimes visible natively, always under miri.
+    #[test]
+    fn write_zipper_join_emptied_roots() {
+        let emptied = || { let mut m = PathMap::<()>::new(); m.set_val_at(b"x", ()); assert!(m.write_zipper().remove_branches(false)); assert_eq!(m.iter().count(), 0); m };
+        let joined = emptied().join(&emptied());
+        assert_eq!(joined.iter().count(), 0);
+        let mut a = emptied();
+        a.write_zipper().join_into(&emptied().read_zipper());
+        assert_eq!(a.iter().count(), 0);
+        let mut plain = PathMap::<()>::new(); plain.set_val_at(b"yz", ());
+        assert_eq!(emptied().join(&plain).iter().count(), 1);
+        assert_eq!(plain.join(&emptied()).iter().count(), 1);
+    }
+
+    /// The same byte is a dangling path (no value, no onward node) in two DenseByteNodes being joined
+    #[test]
+    fn write_zipper_join_dangling_in_both_dense_nodes() {
+        let dangling_c = || {
+            let mut m = PathMap::<()>::new();
+            for k in [b"ca".as_slice(), b"cb", b"d", b"e", b"f"] { m.set_val_at(k, ()); }
+            let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); drop(wz);
+            let mut rz = m.read_zipper(); rz.descend_to(b"c");
+            assert!(rz.path_exists());
+            m
+        };
+        let joined = dangling_c().join(&dangling_c());
+        assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
+        assert_valid_trie(joined.root());
+        let mut a = dangling_c();
+        a.write_zipper().join_into(&dangling_c().read_zipper());
+        assert_eq!(a.iter().count(), 3);
+        assert_valid_trie(a.root());
+    }
+
+    /// `join_k_path_into` where the two slots of a LineListNode shorten onto the *same* key: the payloads
+    /// must be merged.  Previously two value slots were left on one key (a path with two values:
+    /// iteration reported it once, `val_count` twice).
+    #[test]
+    fn write_zipper_join_k_path_collapsing_keys() {
+        let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
+
+        let mut m = PathMap::<()>::new();
+        for k in [b"aaaa".as_slice(), b"acaa"] { m.set_val_at(k, ()); }
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(keys(&m), vec![b"a".to_vec()]);
+        assert_eq!(m.val_count(), 1);
+        assert_valid_trie(m.root());
+
+        //two children collapsing onto one key
+        let mut m = PathMap::<()>::new();
+        for k in [b"abx1".as_slice(), b"abx2", b"acx1", b"acx3"] { m.set_val_at(k, ()); }
+        let mut wz = m.write_zipper(); wz.descend_to(b"a"); assert!(wz.join_k_path_into(1, false)); drop(wz);
+        assert_eq!(keys(&m), vec![b"ax1".to_vec(), b"ax2".to_vec(), b"ax3".to_vec()]);
+        assert_eq!(m.val_count(), 3);
+        assert_valid_trie(m.root());
+
+        //a value and a child on the same key is the legal representation and is left alone
+        let mut m = PathMap::<()>::new();
+        for k in [b"aaa".as_slice(), b"acab", b"acac"] { m.set_val_at(k, ()); }
+        assert!(m.write_zipper().join_k_path_into(2, false));
+        assert_eq!(keys(&m), vec![b"a".to_vec(), b"ab".to_vec(), b"ac".to_vec()]);
+        assert_eq!(m.val_count(), 3);
+    }
+
+    /// An emptied root (`remove_branches` at the root always leaves a LineListNode) joined with an empty
+    /// map whose root was materialized by a read (a dense node under `all_dense_nodes`): both orders,
+    /// with and without a root value.  Exercises the empty∪empty paths of every node-type pairing.
+    #[test]
+    fn write_zipper_join_mixed_empty_roots() {
+        let emptied = || { let mut m = PathMap::<()>::new(); m.set_val_at(b"x", ()); assert!(m.write_zipper().remove_branches(true)); m };
+        let empty_with_root = || { let m = PathMap::<()>::new(); assert_eq!(m.iter().count(), 0); m };
+        assert_eq!(emptied().join(&empty_with_root()).iter().count(), 0);
+        assert_eq!(empty_with_root().join(&emptied()).iter().count(), 0);
+        let mut a = emptied(); a.write_zipper().join_into(&empty_with_root().read_zipper()); assert_eq!(a.iter().count(), 0);
+        let mut a = empty_with_root(); a.write_zipper().join_into(&emptied().read_zipper()); assert_eq!(a.iter().count(), 0);
+        let mut a = emptied(); a.set_val_at(b"", ());
+        assert_eq!(a.join(&empty_with_root()).iter().count(), 1);
+        assert_eq!(empty_with_root().join(&a).iter().count(), 1);
+    }
+
+    /// `join_k_path_into` shortening two value keys onto a shared first byte must yield the canonical
+    /// layout (Child@"a" -> {a, b}), not (Val@"aa", Val@"ab"): the latter defeats indexed descent and
+    /// every catamorphism engine (the PR #31 iterative engine loops on it).
+    #[test]
+    fn write_zipper_drop_head_shared_first_byte_is_canonical() {
+        use crate::morphisms::Catamorphism;
+        let mut m = PathMap::<()>::new();
+        for k in [b"aaa".as_slice(), b"bab"] { m.set_val_at(k, ()); }
+        assert!(m.write_zipper().join_k_path_into(1, false));
+        assert_eq!(m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"aa".to_vec(), b"ab".to_vec()]);
+        //indexed descent must reach both children below "a"
+        let mut rz = m.read_zipper();
+        rz.descend_to_byte(b'a');
+        assert!(rz.path_exists());
+        assert_eq!(rz.child_count(), 2);
+        assert!(rz.descend_indexed_byte(1).is_some());
+        //the (zipper-driven) cached cata must agree with iteration
+        let n = m.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
+        assert_eq!(n, 2);
+        assert_valid_trie(m.root());
+
+        //the same through a shared (grafted) subtrie, as the randomized program found it
+        let mut map = PathMap::<()>::new(); map.set_val_at(b"", ());
+        let mut other = PathMap::<()>::new();
+        for k in [b"".as_slice(), b"a", b"aaaa", b"abab", b"b", b"ba", b"baa", b"bbaa", b"bbb"] { other.set_val_at(k, ()); }
+        { let mut rz = other.read_zipper(); rz.descend_to(b"a"); let mut wz = map.write_zipper(); wz.graft(&rz); }
+        assert!(map.write_zipper().join_k_path_into(1, false));
+        let n = map.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
+        assert_eq!(n, 3);
+        assert_valid_trie(map.root());
+    }
+
+    /// Issue #85: `join_into_take` at a dangling destination focus panicked in make_unique
+    /// (take_focus hands back the empty sentinel), and a dangling *source* focus handed the
+    /// sentinel to graft_internal.
+    #[test]
+    fn write_zipper_join_into_take_at_dangling_focus() {
+        fn mk(keys: &[&[u8]]) -> PathMap<()> { let mut m = PathMap::new(); for k in keys { m.set_val_at(k, ()); } m }
+        fn keys(m: &PathMap<()>) -> Vec<String> { m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect() }
+        fn dangling_c() -> PathMap<()> {
+            let mut m = mk(&[b"ca", b"cb", b"d"]);
+            { let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); }
+            assert_eq!(keys(&m), ["d"]);
+            m
+        }
+        //Dangling destination
+        let mut m = dangling_c();
+        let mut o = mk(&[b"x"]);
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            let mut src = o.write_zipper();
+            assert_eq!(wz.join_into_take(&mut src, false), AlgebraicStatus::Element);
+        }
+        assert_eq!(keys(&m), ["cx", "d"]);
+        assert_eq!(keys(&o), Vec::<String>::new());
+
+        //Dangling source
+        let mut m = mk(&[b"x"]);
+        let mut o = dangling_c();
+        {
+            let mut wz = m.write_zipper();
+            let mut src = o.write_zipper();
+            src.descend_to(b"c");
+            assert_eq!(wz.join_into_take(&mut src, false), AlgebraicStatus::Identity);
+        }
+        assert_eq!(keys(&m), ["x"]);
+
+        //Both real, which already worked
+        let mut m = mk(&[b"cy", b"d"]);
+        let mut o = mk(&[b"x"]);
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            let mut src = o.write_zipper();
+            assert_eq!(wz.join_into_take(&mut src, false), AlgebraicStatus::Element);
+        }
+        assert_eq!(keys(&m), ["cx", "cy", "d"]);
+    }
 }
