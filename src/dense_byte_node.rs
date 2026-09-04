@@ -1002,7 +1002,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         }
     }
     #[inline(always)]
-    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+    fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
+        debug_assert_ne!(token, NODE_ITER_INVALID, "cannot ascend an invalid iteration token");
+        debug_assert_eq!(byte_count, 1);
+        self.new_iter_token()
+    }
+    #[inline(always)]
+    fn next_items(&self, token: IterToken, _after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
         let Some((k, values_idx)) = self.next_iter_item_from(token) else {
             return (NODE_ITER_FINISHED, &[], None, None);
         };
@@ -2434,7 +2440,7 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     let mut token = node.new_iter_token();
     let mut visited = Vec::new();
     while token != NODE_ITER_FINISHED {
-        let (next_token, path, _child, value) = node.next_items(token);
+        let (next_token, path, _child, value) = node.next_items(token, false);
         token = next_token;
         if token != NODE_ITER_FINISHED {
             assert_eq!(path.len(), 1);
@@ -2447,7 +2453,7 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     let mut token = node.iter_token_for_path(&[127]);
     let mut visited_after_127 = Vec::new();
     while token != NODE_ITER_FINISHED {
-        let (next_token, path, _child, value) = node.next_items(token);
+        let (next_token, path, _child, value) = node.next_items(token, false);
         token = next_token;
         if token != NODE_ITER_FINISHED {
             assert_eq!(Some(&path[0]), value);
@@ -2459,7 +2465,7 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     let mut token = node.iter_token_for_path(&[65]);
     let mut visited_after_missing_65 = Vec::new();
     while token != NODE_ITER_FINISHED {
-        let (next_token, path, _child, value) = node.next_items(token);
+        let (next_token, path, _child, value) = node.next_items(token, false);
         token = next_token;
         if token != NODE_ITER_FINISHED {
             assert_eq!(Some(&path[0]), value);

@@ -204,7 +204,17 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// specified path
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken;
 
-    /// Steps to the next existing path within the node, in a depth-first order
+    /// Returns the token for the focus reached by ascending `byte_count` bytes within this node.
+    ///
+    /// `token` must be a valid token representing the current focus, and `byte_count` must be a
+    /// non-zero in-node ascent which does not pass the node root.  Implementations must represent every
+    /// result permitted by those preconditions.  They may panic when either precondition is violated.
+    fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken;
+
+    /// Steps to the next existing path within the node, in a depth-first order.
+    ///
+    /// When `after_focus` is true, steps to the first item strictly after (and not below) the
+    /// focus represented by `token`.
     ///
     /// Returns `(next_token, path, child_node, value)`
     /// - `next_token` is the value to pass to a subsequent call of this method.  Returns
@@ -212,7 +222,7 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// - `path` is relative to the start of `node`
     /// - `child_node` an onward node link, of `None`
     /// - `value` that exists at the path, or `None`
-    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
+    fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
 
     /// Returns the total number of leaves contained within the whole subtree defined by the node
     /// GOAT, this should be deprecated
@@ -1229,15 +1239,28 @@ mod tagged_node_ref {
             }
         }
         #[inline(always)]
-        pub fn next_items(&self, token: IterToken) -> (IterToken, &'a[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+        pub fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
             match self {
-                Self::DenseByteNode(node) => node.next_items(token),
-                Self::LineListNode(node) => node.next_items(token),
+                Self::DenseByteNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::LineListNode(node) => node.ascend_iter_token(token, byte_count),
                 #[cfg(feature = "bridge_nodes")]
-                Self::BridgeNode(node) => node.next_items(token),
-                Self::CellByteNode(node) => node.next_items(token),
-                Self::TinyRefNode(node) => node.next_items(token),
-                Self::EmptyNode => <EmptyNode as TrieNode<V, A>>::next_items(&EMPTY_NODE, token),
+                Self::BridgeNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::CellByteNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::TinyRefNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::EmptyNode => <EmptyNode as TrieNode<V, A>>::ascend_iter_token(&EMPTY_NODE, token, byte_count),
+            }
+        }
+
+        #[inline(always)]
+        pub fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &'a[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+            match self {
+                Self::DenseByteNode(node) => node.next_items(token, after_focus),
+                Self::LineListNode(node) => node.next_items(token, after_focus),
+                #[cfg(feature = "bridge_nodes")]
+                Self::BridgeNode(node) => node.next_items(token, after_focus),
+                Self::CellByteNode(node) => node.next_items(token, after_focus),
+                Self::TinyRefNode(node) => node.next_items(token, after_focus),
+                Self::EmptyNode => <EmptyNode as TrieNode<V, A>>::next_items(&EMPTY_NODE, token, after_focus),
             }
         }
 
@@ -1853,14 +1876,26 @@ mod tagged_node_ref {
             }
         }
         #[inline]
-        pub fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+        pub fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                EMPTY_NODE_TAG => <EmptyNode as TrieNode<V, A>>::ascend_iter_token(&EMPTY_NODE, token, byte_count),
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+        #[inline]
+        pub fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => (NODE_ITER_FINISHED, &[], None, None),
-                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.next_items(token),
-                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.next_items(token),
-                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.next_items(token),
-                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.next_items(token),
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.next_items(token, after_focus),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.next_items(token, after_focus),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.next_items(token, after_focus),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.next_items(token, after_focus),
                 _ => unsafe{ unreachable_unchecked() }
             }
         }
