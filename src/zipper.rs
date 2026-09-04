@@ -2103,11 +2103,11 @@ pub(crate) mod read_zipper_core {
                     debug_assert!(self.is_regularized());
                     return None; //We can't go any deeper down this path
                 }
-                self.focus_iter_token = new_tok;
                 let descended_byte = key_bytes[byte_idx];
                 self.prefix_buf.push(descended_byte);
 
                 if key_bytes.len() == byte_idx+1 {
+                    self.focus_iter_token = new_tok;
                     match child_node {
                         None => {},
                         Some(rec) => {
@@ -2116,6 +2116,8 @@ pub(crate) mod read_zipper_core {
                             self.focus_iter_token = self.focus_node.new_iter_token();
                         },
                     }
+                } else {
+                    self.focus_iter_token = NODE_ITER_INVALID;
                 }
                 debug_assert!(self.is_regularized());
                 Some(descended_byte)
@@ -5667,23 +5669,43 @@ mod tests {
         }
     }
 
-    //GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_val_after_descend_first_byte_matches_descend_to() {
-    //     let map = value_iteration_history_test_map();
+    /// Tests the particulars of descend_first_byte, which uses the iteration mechanism to find the first byte,
+    /// and thus can establish zipper state (iter_token) to speed up subsequent iteration.  But we need to make
+    /// sure that the zipper's state isn't poisoned with an incorrect token for the zipper position.
+    #[test]
+    fn read_zipper_to_next_val_after_descend_first_byte_matches_descend_to() {
+        let map = value_iteration_history_test_map();
 
-    //     let mut from_first_byte = map.read_zipper();
-    //     assert_eq!(from_first_byte.descend_first_byte(), Some(0));
+        let mut from_first_byte = map.read_zipper();
+        assert_eq!(from_first_byte.descend_first_byte(), Some(0));
 
-    //     let mut from_path = map.read_zipper();
-    //     from_path.descend_to(&[0u8]);
-    //     assert_eq!(from_first_byte.path(), from_path.path());
-    //     assert!(from_path.to_next_val());
+        let mut from_path = map.read_zipper();
+        from_path.descend_to(&[0u8]);
+        assert_eq!(from_first_byte.path(), from_path.path());
+        assert!(from_path.to_next_val());
 
-    //     assert!(from_first_byte.to_next_val());
-    //     assert_eq!(from_first_byte.path(), from_path.path());
-    //     assert_eq!(from_first_byte.val(), from_path.val());
-    // }
+        assert!(from_first_byte.to_next_val());
+        assert_eq!(from_first_byte.path(), from_path.path());
+        assert_eq!(from_first_byte.val(), from_path.val());
+
+        //Here the item selected by `descend_first_byte` ends at `[0]`, so its returned
+        //token is also the correct continuation token for that focus.
+        let mut exact_item_map = PathMap::<u64>::new();
+        exact_item_map.insert(&[0u8], 10);
+        exact_item_map.insert(&[1u8], 11);
+
+        let mut exact_from_first_byte = exact_item_map.read_zipper();
+        assert_eq!(exact_from_first_byte.descend_first_byte(), Some(0));
+
+        let mut exact_from_path = exact_item_map.read_zipper();
+        exact_from_path.descend_to(&[0u8]);
+        assert_eq!(exact_from_first_byte.path(), exact_from_path.path());
+        assert!(exact_from_path.to_next_val());
+
+        assert!(exact_from_first_byte.to_next_val());
+        assert_eq!(exact_from_first_byte.path(), exact_from_path.path());
+        assert_eq!(exact_from_first_byte.val(), exact_from_path.val());
+    }
 
     //GOAT, re-enable in some form
     // #[test]
