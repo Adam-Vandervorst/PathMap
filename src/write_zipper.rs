@@ -236,7 +236,12 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.meet_into(read_zipper, true)
     }
 
-    /// Experiment.  GOAT, document this
+    /// Replaces the subtrie below this zipper's focus with the intersection of the subtries below
+    /// the foci of `rz_a` and `rz_b`.
+    ///
+    /// This operation does not inspect the destination's existing contents. Consequently, it never
+    /// returns [AlgebraicStatus::Identity]: it returns `Element` for a nonempty intersection and
+    /// `None` for an empty one.
     fn meet_2<'z, ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice;
 
     /// Subtracts the subtrie downstream of the focus of `read_zipper` from the subtrie below the `self` zipper's
@@ -2056,14 +2061,23 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 AlgebraicStatus::None
             },
             AlgebraicResult::Identity(mask) => {
-                if mask & SELF_IDENT > 0 {
-                    //GOAT, document that meet_2 will not return identify because it doesn't actually check what's in the destination
-                    self.graft_internal(Some(a_focus.into_option().unwrap()));
+                let src = if mask & SELF_IDENT > 0 {
+                    a_focus.into_option()
                 } else {
                     debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be a or b
-                    self.graft_internal(Some(b_focus.into_option().unwrap()));
+                    b_focus.into_option()
+                };
+                match src {
+                    Some(node) => {
+                        self.graft_internal(Some(node));
+                        AlgebraicStatus::Element
+                    }
+                    None => {
+                        //An empty result subtrie means clear the destination
+                        self.graft_internal(None);
+                        AlgebraicStatus::None
+                    }
                 }
-                AlgebraicStatus::Element
             },
         }
     }
@@ -6043,6 +6057,41 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperOwned<()> {
             btm.clone().into_write_zipper(path)
     });
+
+    /// Exercises `meet_2` when one source is rooted at a dangling path: an empty node
+    /// left behind by `create_path`. The intersection with an empty node is empty, so
+    /// the operation returns `None` and does not graft anything.
+    #[test]
+    fn write_zipper_meet_2_with_an_empty_source_node() {
+        for (label, b_keys, b_dangling) in [
+            ("b holds a value below", &[&[0u8, 1][..]][..], &[][..]),
+            ("b dangling too", &[][..], &[&[0u8][..]][..]),
+            ("b empty", &[][..], &[][..]),
+        ] {
+            let mut a = PathMap::<u64>::new();
+            a.create_path(&[0u8]);
+            let mut b = PathMap::<u64>::new();
+            for k in b_keys { b.insert(k, 2); }
+            for k in b_dangling { b.create_path(k); }
+
+            let mut dst = PathMap::<u64>::new();
+            dst.insert(&[5u8], 9);
+            let ra = a.read_zipper_at_path(&[0u8]);
+            let rb = b.read_zipper_at_path(&[0u8]);
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None, "{label}");
+            assert_eq!(wz.child_count(), 0, "{label}");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}");
+
+            //With the operands swapped
+            let mut dst = PathMap::<u64>::new();
+            let mut wz = dst.write_zipper();
+            assert_eq!(wz.meet_2(&rb, &ra), AlgebraicStatus::None, "{label}, swapped");
+            drop(wz);
+            assert_eq!(dst.val_count(), 0, "{label}, swapped");
+        }
+    }
 
     /// A map holding `extra` plus `{ca, cb}`, after `remove_branches(prune = false)` at "c": the node
     /// holding "c" now has a dangling child there, i.e. the empty sentinel.  With one extra key the
