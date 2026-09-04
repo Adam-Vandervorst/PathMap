@@ -118,8 +118,13 @@ name = "product_zipper"
 harness = false
 
 [[bench]]
+name = "catamorphism"
+harness = false
+
+[[bench]]
 name = "sla"
 harness = false
+required-features = ["viz"]
 
 [[bench]]
 name = "multiplicities"

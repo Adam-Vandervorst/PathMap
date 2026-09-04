@@ -85,7 +85,7 @@ use crate::alloc::{GlobalAlloc, global_alloc};
 use crate::timed_span::{TimingEntries::*, COUNTERS, timed_span};
 use crate::{
     PathMap,
-    morphisms::Catamorphism,
+    morphisms::CatamorphismSideEffecting,
     utils::{BitMask, ByteMask, find_prefix_overlap},
     zipper::{
         Zipper, ZipperValues, ZipperForking, ZipperAbsolutePath, ZipperIteration,
@@ -896,7 +896,7 @@ impl ArenaCompactTree<Vec<u8>> {
     pub fn from_zipper<V, Z, M>(zipper: Z, map: M) -> Self
     where
         V: Clone + Send + Sync + Unpin,
-        Z: Catamorphism<V>,
+        Z: CatamorphismSideEffecting<V>,
         M: Fn(&V) -> u64,
     {
         build_arena_tree(zipper, map)
@@ -1066,7 +1066,7 @@ impl ArenaCompactTree<Mmap> {
     ) -> Result<Self, std::io::Error>
         where
             V: Clone + Send + Sync + Unpin,
-            Z: Catamorphism<V>,
+            Z: CatamorphismSideEffecting<V>,
             F: Fn(&V) -> u64,
             P: AsRef<Path>
     {
@@ -1146,7 +1146,7 @@ impl NodeBranch {
 fn build_arena_tree<V, Z, F>(zipper: Z, map_val: F) -> ArenaCompactTree<Vec<u8>>
     where
         V: Clone + Send + Sync + Unpin,
-        Z: Catamorphism<V>,
+        Z: CatamorphismSideEffecting<V>,
         F: Fn(&V) -> u64,
 {
     let mut arena = ArenaCompactTree::new();
@@ -1354,10 +1354,9 @@ struct CachedFrame {
 /// contiguous — and the copy keeps pointing at the original children.  So a
 /// repeated subtrie costs one node, not a subtrie.
 ///
-/// The traversal itself is the jumping catamorphism, unrolled (see
-/// `morphisms::into_cata_cached_body`, which this follows closely).  It is
+/// The traversal itself is an unrolled jumping catamorphism. It is
 /// spelled out here rather than delegating to
-/// [`Catamorphism::into_cata_jumping_cached`] for two reasons:
+/// [`CatamorphismCached::cata_jumping_cached`] for two reasons:
 /// - the cached cata only consults its cache one byte below a fork, whereas we
 ///   also consult it at the fork we land on after jumping over a chain of
 ///   bytes.  That is where a subtrie grafted under a multi-byte path shows up,
@@ -1368,7 +1367,7 @@ struct CachedFrame {
 /// - the cached cata's algebra is an `Fn`, so writing to the arena from it
 ///   would need interior mutability.
 ///
-/// TODO: GOAT: introduce an abstraction/modify `into_cata_jumping_cached`,
+/// TODO: GOAT: introduce an abstraction/modify `cata_jumping_cached`,
 ///  to address the problems listed above.  The suggested API is to have
 ///  `FnMut` variant for the caching catamorphism.
 ///
@@ -1576,7 +1575,7 @@ fn dump_arena_tree<V, Z, F, P>(
 ) -> Result<ArenaCompactTree<FileDumper>, std::io::Error>
     where
         V: Clone + Send + Sync + Unpin,
-        Z: Catamorphism<V>,
+        Z: CatamorphismSideEffecting<V>,
         F: Fn(&V) -> u64,
         P: AsRef<Path>,
 {
@@ -2518,6 +2517,10 @@ where Storage: AsRef<[u8]>
 impl<'tree, Storage, Value> ZipperPathBuffer for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        assert!(len <= self.path.capacity() - self.origin_depth);
+        unsafe{ core::slice::from_raw_parts(self.path.as_ptr().add(self.origin_depth), len) }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         // Safety: we're not creating a slice larger than capacity
         assert!(self.path.capacity() >= len);
@@ -2915,23 +2918,6 @@ where Storage: AsRef<[u8]>
         self.invalid = 0;
     }
 
-    /// Returns the total number of values contained at and below the zipper's focus, including the focus itself
-    ///
-    /// WARNING: This is not a cheap method. It may have an order-N cost
-    fn val_count(&self) -> usize {
-        timed_span!(ValueCount, COUNTERS);
-        let mut zipper = self.clone();
-        zipper.reset();
-        let mut count = 0;
-        if zipper.is_val() {
-            count += 1;
-        }
-        while zipper.to_next_val() {
-            count += 1;
-        }
-        count
-    }
-
     /// Moves the zipper deeper into the trie, to the `key` specified relative to the current zipper focus
     ///
     /// Returns `true` if the zipper points to an existing path within the tree, otherwise `false`.  The
@@ -3315,7 +3301,8 @@ where
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
     use crate::{
-        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues}
+        morphisms::CatamorphismSideEffecting,
+        PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues}
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,
@@ -3377,6 +3364,16 @@ mod tests {
             }
         }
     }
+
+    crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!(
+        act_zipper,
+        |keys: &[&[u8]]| {
+            let map = keys.iter().enumerate().map(|(idx, path)| (*path, idx as u64)).collect::<PathMap<u64>>();
+            ArenaCompactTree::from_zipper(map.read_zipper(), |&value| value)
+        },
+        |tree: &mut ArenaCompactTree<Vec<u8>>| tree.read_zipper_u64(),
+        CatamorphismCachedIterative
+    );
 
     /// Build `map` both ways and check the results describe the same trie.
     ///

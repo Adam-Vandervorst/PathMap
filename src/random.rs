@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use rand::distr::Uniform;
 use crate::TrieValue;
 use crate::utils::{BitMask, ByteMask};
-use crate::zipper::{ReadZipperUntracked, Zipper, ZipperPath, ZipperReadOnlyIteration, ZipperMoving, ZipperReadOnlyValues};
+use crate::zipper::{ReadZipperUntracked, Zipper, ZipperPath, ZipperReadOnlyIteration, ZipperMoving, ZipperReadOnlyValues, CatamorphismCached};
 
 // Re-export generic combinators
 pub use distr_combinators::*;
@@ -140,14 +140,15 @@ pub struct FairTriePath<T : TrieValue> {
 }
 impl <T : TrieValue + 'static> Distribution<(Vec<u8>, Option<T>)> for FairTriePath<T> {
   fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> (Vec<u8>, Option<T>) {
-    use crate::morphisms::Catamorphism;
+    //TODO: There has to be a more efficient way to implement this than making two passes through the whole trie
+    use crate::morphisms::{CatamorphismSideEffecting, CatamorphismCached};
     // it's much cheaper to draw many samples at once, but the current Distribution API is broken
-    let size = Catamorphism::into_cata_cached(self.source.clone(), |_: &ByteMask, ws: &mut [usize], _mv: Option<&T>| {
+    let size = self.source.cata_cached(|_: &ByteMask, ws: &mut [usize], _mv: Option<&T>| {
       ws.iter().sum::<usize>() + 1
     });
     let target = rng.random_range(0..size);
     let mut i = 0;
-    Catamorphism::into_cata_side_effect_fallible(self.source.clone(), |_: &ByteMask, _, mv: Option<&T>, path: &[u8]| {
+    self.source.clone().into_cata_side_effect_fallible(|_: &ByteMask, _, mv: Option<&T>, path: &[u8]| {
       if i == target { Err((path.to_vec(), mv.cloned())) } else { i += 1; Ok(()) }
     }).unwrap_err()
   }

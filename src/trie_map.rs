@@ -1,6 +1,7 @@
 use core::cell::UnsafeCell;
+use core::convert::Infallible;
 use crate::alloc::{Allocator, GlobalAlloc, global_alloc};
-use crate::morphisms::{new_map_from_ana_in, TrieBuilder};
+use crate::morphisms::{new_map_from_ana_in, CatamorphismCached, TrieBuilder};
 use crate::trie_node::*;
 use crate::zipper::*;
 use crate::merkleization::{MerkleizeResult, merkleize_impl};
@@ -498,24 +499,18 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     ///
     /// WARNING: This is not a cheap method. It may have an order-N cost
     pub fn val_count(&self) -> usize {
-        let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
         match self.root() {
-            Some(root) => val_count_below_root(root.as_tagged()) + root_val,
-            None => root_val
-        }
-    }
-
-    /// GOAT, temporary method to do side-by-side comparison between abstracted val_count and bespoke version
-    pub fn goat_val_count(&self) -> usize {
-        let root_val = unsafe{ &*self.root_val.get() }.is_some() as usize;
-        match self.root() {
-            Some(root) => {
-                traverse_physical(root,
-                    |node, ctx: usize| { ctx + node.node_goat_val_count() },
-                    |ctx, child_ctx| { ctx + child_ctx },
-                ) + root_val
+            Some(_root) => {
+                match self.factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
+                    |_| Ok(0usize),
+                    |_mask, w: usize, total| { *total += w; Ok(()) },
+                    |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+                ) {
+                    Ok(count) => count,
+                    Err(never) => match never {},
+                }
             },
-            None => root_val
+            None => unsafe{ &*self.root_val.get() }.is_some() as usize
         }
     }
 

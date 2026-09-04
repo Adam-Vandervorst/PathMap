@@ -388,6 +388,26 @@ impl From<u8> for ByteMask {
     }
 }
 
+impl From<(u8, u8)> for ByteMask {
+    #[inline]
+    fn from(byte_pair: (u8, u8)) -> Self {
+        let mut new_mask = Self::new();
+        new_mask.set_bit(byte_pair.0);
+        new_mask.set_bit(byte_pair.1);
+        new_mask
+    }
+}
+
+impl From<[u8; 2]> for ByteMask {
+    #[inline]
+    fn from(byte_pair: [u8; 2]) -> Self {
+        let mut new_mask = Self::new();
+        new_mask.set_bit(byte_pair[0]);
+        new_mask.set_bit(byte_pair[1]);
+        new_mask
+    }
+}
+
 impl From<Range<u8>> for ByteMask {
     #[inline]
     fn from(range: Range<u8>) -> Self {

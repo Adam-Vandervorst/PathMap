@@ -36,7 +36,6 @@ impl ZipperMoving for EmptyZipper {
     #[inline]
     fn focus_byte(&self) -> Option<u8> { self.path.last().cloned() }
     fn reset(&mut self) { self.path.truncate(self.path_start_idx) }
-    fn val_count(&self) -> usize { 0 }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         self.path.extend_from_slice(k.as_ref());
     }
@@ -118,6 +117,10 @@ impl<'a, V: Clone + Send + Sync> ZipperReadOnlyConditionalIteration<'a, V> for E
 }
 
 impl ZipperPathBuffer for EmptyZipper {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        assert!(len <= self.path.capacity() - self.path_start_idx);
+        unsafe{ core::slice::from_raw_parts(self.path.as_ptr().add(self.path_start_idx), len) }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         assert!(len <= self.path.capacity());
         unsafe{ core::slice::from_raw_parts(self.path.as_ptr(), len) }

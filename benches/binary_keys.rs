@@ -115,7 +115,7 @@ fn binary_descend_until_max_bytes(bencher: Bencher, n: u64) {
     });
 }
 
-#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000])]
+#[divan::bench(args = [125, 250, 500, 1000, 2000, 4000, 100000])]
 fn binary_val_count_bench(bencher: Bencher, n: u64) {
 
     let keys = make_keys(n as usize, 1);

@@ -425,12 +425,18 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubt
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> { self.z.try_borrow_focus() }
 }
 
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for WriteZipperTracked<'_, '_, V, A> {
+    #[inline]
+    fn shared_node_id(&self) -> Option<u64> { None }
+    #[inline]
+    fn is_shared(&self) -> bool { false }
+}
+
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperTracked<'a, 'path, V, A> {
     #[inline] fn depth(&self) -> usize { self.z.depth() }
     fn at_root(&self) -> bool { self.z.at_root() }
     #[inline] fn focus_byte(&self) -> Option<u8> { self.z.focus_byte() }
     fn reset(&mut self) { self.z.reset() }
-    fn val_count(&self) -> usize { self.z.val_count() }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) { self.z.descend_to(k) }
     fn descend_to_byte(&mut self, k: u8) { self.z.descend_to_byte(k) }
     fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> { self.z.descend_indexed_byte(child_idx) }
@@ -449,6 +455,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPath fo
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperTracked<'a, 'path, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
@@ -590,12 +597,18 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperInfallibleSubt
     fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> { self.z.try_borrow_focus() }
 }
 
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for WriteZipperUntracked<'_, '_, V, A> {
+    #[inline]
+    fn shared_node_id(&self) -> Option<u64> { None }
+    #[inline]
+    fn is_shared(&self) -> bool { false }
+}
+
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving for WriteZipperUntracked<'a, 'path, V, A> {
     #[inline] fn depth(&self) -> usize { self.z.depth() }
     fn at_root(&self) -> bool { self.z.at_root() }
     #[inline] fn focus_byte(&self) -> Option<u8> { self.z.focus_byte() }
     fn reset(&mut self) { self.z.reset() }
-    fn val_count(&self) -> usize { self.z.val_count() }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) { self.z.descend_to(k) }
     fn descend_to_byte(&mut self, k: u8) { self.z.descend_to_byte(k) }
     fn descend_indexed_byte(&mut self, child_idx: usize) -> Option<u8> { self.z.descend_indexed_byte(child_idx) }
@@ -614,6 +627,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPath fo
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperUntracked<'a, 'path, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
@@ -737,6 +751,7 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator> Clone for WriteZipp
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for WriteZipperOwned<V, A> { zipper_impl_lens!(Zipper self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperValues self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperConcrete self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperMoving for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperMoving self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPath for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperPath self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperPathBuffer for WriteZipperOwned<V, A> { zipper_impl_lens!(ZipperPathBuffer self => self.z); }
@@ -986,6 +1001,14 @@ impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zipper for Wri
     }
 }
 
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for WriteZipperCore<'_, '_, V, A> {
+    #[inline]
+    fn shared_node_id(&self) -> Option<u64> { None }
+
+    #[inline]
+    fn is_shared(&self) -> bool { false }
+}
+
 impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<V> for WriteZipperCore<'trie, '_, V, A> {
     type ReadZipperT<'a> = crate::zipper::read_zipper_core::ReadZipperCore<'a, 'a, V, A> where Self: 'a;
     fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
@@ -1039,15 +1062,6 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
         self.key.prefix_idx.clear();
     }
 
-    fn val_count(&self) -> usize {
-        let root_val = self.is_val() as usize;
-        let focus = self.get_focus();
-        if focus.is_none() {
-            root_val
-        } else {
-            val_count_below_root(focus.as_tagged()) + root_val
-        }
-    }
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
         let key = k.as_ref();
         self.key.prepare_buffers();
@@ -1137,6 +1151,16 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperAbsolut
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuffer for WriteZipperCore<'a, 'path, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        let start = self.key.origin_path.len();
+        if self.key.prefix_buf.capacity() > 0 {
+            assert!(len <= self.key.prefix_buf.capacity() - start);
+            unsafe{ core::slice::from_raw_parts(self.key.prefix_buf.as_ptr().add(start), len) }
+        } else {
+            assert_eq!(len, 0);
+            &[]
+        }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         if self.key.prefix_buf.capacity() > 0 {
             assert!(len <= self.key.prefix_buf.capacity());

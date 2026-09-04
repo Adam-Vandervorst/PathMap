@@ -1,0 +1,140 @@
+use divan::{Divan, Bencher, black_box};
+use core::convert::Infallible;
+use pathmap::alloc::GlobalAlloc;
+use pathmap::morphisms::CatamorphismCached;
+use pathmap::utils::ByteMask;
+use pathmap::utils::ints::gen_int_range;
+use pathmap::PathMap;
+
+fn main() {
+    // Run registered benchmarks.
+    let divan = Divan::from_args()
+        .sample_count(4000);
+
+    divan.main();
+}
+
+fn build_map(count: u64) -> PathMap<()> {
+    // Dense range of u64 keys encoded as paths; sized to keep benches fast and stable.
+    gen_int_range::<(), 8, u64>(0, count, 1, ())
+}
+
+const MAP_COUNT: u64 = 20_000_000;
+
+// A complete binary trie keeps every internal node as a two-entry LineListNode.
+const BINARY_TREE_DEPTH: usize = 18;
+const BINARY_TREE_LEAF_COUNT: usize = 1 << BINARY_TREE_DEPTH;
+
+fn build_binary_tree_map() -> PathMap<()> {
+    let mut map = PathMap::new();
+    for leaf in 0..BINARY_TREE_LEAF_COUNT {
+        let mut path = [0u8; BINARY_TREE_DEPTH];
+        for (level, byte) in path.iter_mut().enumerate() {
+            *byte = ((leaf >> (BINARY_TREE_DEPTH - level - 1)) & 1) as u8;
+        }
+        map.insert(path, ());
+    }
+    map
+}
+
+#[divan::bench()]
+fn factored_cata_jumping_val_count(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = CatamorphismCached::<(), GlobalAlloc>::factored_cata_jumping::<_, _, Infallible, _, _, _, false>(&rz,
+            |_| Ok(0usize),
+            |_mask, w: usize, total| { *total += w; Ok(()) },
+            |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+        ).unwrap();
+    });
+    assert_eq!(sink, MAP_COUNT as usize);
+}
+
+#[divan::bench()]
+fn factored_cata_binary_tree_leaf_count(bencher: Bencher) {
+    let map = build_binary_tree_map();
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = CatamorphismCached::<(), GlobalAlloc>
+            ::factored_cata_jumping::<_, _, Infallible, _, _, _, false>(&rz,
+                |_| Ok(0usize),
+                |_mask, child_count: usize, total| {
+                    *total += child_count;
+                    Ok(())
+                },
+                |_mask, value, total, _| Ok((value.is_some() as usize) + total.unwrap_or(0)),
+            )
+            .unwrap();
+    });
+    assert_eq!(sink, BINARY_TREE_LEAF_COUNT);
+}
+
+#[divan::bench()]
+fn cached_jumping_cata_val_count(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = 0usize;
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = CatamorphismCached::<(), GlobalAlloc>::cata_jumping_cached(&rz, |_mask: &ByteMask, children: &mut [usize], val, _sub_path| {
+            let mut sum: usize = children.iter().sum();
+            if val.is_some() {
+                sum += 1;
+            }
+            sum
+        });
+    });
+    assert_eq!(sink, MAP_COUNT as usize);
+}
+
+#[divan::bench()]
+fn factored_cata_jumping_total_len(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = (0usize, 0usize);
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = CatamorphismCached::<(), GlobalAlloc>::factored_cata_jumping::<_, _, Infallible, _, _, _, true>(&rz,
+            |_| Ok((0usize, 0usize)),
+            |_mask: &ByteMask, w: (usize, usize), acc: &mut (usize, usize)| {
+                acc.0 += w.0;
+                // Every folded child hangs below exactly one branch byte. `prefix` accounts
+                // for compressed runs separately in `summarize_f` below.
+                acc.1 += w.1 + w.0;
+                Ok(())
+            },
+            |_mask: &ByteMask, val, acc, prefix| {
+                let (count, total_len) = acc.unwrap_or((0, 0));
+                let count = count + val.is_some() as usize;
+                Ok((count, total_len + count * prefix.len()))
+            },
+        ).unwrap();
+    });
+    assert_eq!(sink, (MAP_COUNT as usize, MAP_COUNT as usize * 8));
+}
+
+#[divan::bench()]
+fn cached_jumping_cata_total_len(bencher: Bencher) {
+    let map = build_map(MAP_COUNT);
+    let mut sink = (0usize, 0usize);
+    bencher.bench_local(|| {
+        let rz = map.read_zipper();
+        *black_box(&mut sink) = CatamorphismCached::<(), GlobalAlloc>::cata_jumping_cached(&rz, |mask: &ByteMask, children: &mut [(usize, usize)], val, sub_path| {
+            let mut count = 0usize;
+            let mut total_len = 0usize;
+            let prefix_len = sub_path.len();
+            if val.is_some() {
+                count += 1;
+                total_len += prefix_len;
+            }
+            for (_byte, child) in mask.iter().zip(children.iter_mut()) {
+                count += child.0;
+                // The child is below one mask byte as well as this callback's prefix.
+                total_len += child.1 + child.0 * (prefix_len + 1);
+            }
+            (count, total_len)
+        });
+    });
+    assert_eq!(sink, (MAP_COUNT as usize, MAP_COUNT as usize * 8));
+}

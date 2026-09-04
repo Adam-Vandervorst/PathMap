@@ -1,6 +1,5 @@
 
 use core::fmt::Debug;
-use std::collections::HashMap;
 
 use crate::alloc::Allocator;
 use crate::trie_node::*;
@@ -67,10 +66,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn next_items(&self, _token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
         (NODE_ITER_FINISHED, &[], None, None)
     }
-    fn node_val_count(&self, _cache: &mut HashMap<u64, usize>) -> usize {
-        0
-    }
-    fn node_goat_val_count(&self) -> usize {
+    fn node_val_count(&self) -> usize {
         0
     }
     fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {

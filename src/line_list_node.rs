@@ -1,6 +1,5 @@
 use core::hint::unreachable_unchecked;
 use core::mem::{ManuallyDrop, MaybeUninit};
-use std::collections::HashMap;
 
 use fast_slice_utils::{find_prefix_overlap, starts_with};
 use local_or_heap::LocalOrHeap;
@@ -8,9 +7,11 @@ use local_or_heap::LocalOrHeap;
 use crate::utils::{BitMask, ByteMask};
 use crate::alloc::Allocator;
 use crate::trie_node::*;
+use crate::gxhash::HashMap;
 use crate::ring::*;
 use crate::dense_byte_node::{DenseByteNode, ByteNode, CoFree, OrdinaryCoFree, CellCoFree};
 use crate::tiny_node::TinyRefNode;
+use crate::morphisms::summarize_run;
 
 /// A LineListNode stores up to 2 children in a single cache line
 #[repr(C)]
@@ -414,7 +415,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         }
     }
     #[inline]
-    unsafe fn child_in_slot<const SLOT: usize>(&self) -> &TrieNodeODRc<V, A> {
+    pub(crate) unsafe fn child_in_slot<const SLOT: usize>(&self) -> &TrieNodeODRc<V, A> {
         match SLOT {
             0 => unsafe{ &*self.val_or_child0.child },
             1 => unsafe{ &*self.val_or_child1.child },
@@ -430,7 +431,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         }
     }
     #[inline]
-    unsafe fn val_in_slot<const SLOT: usize>(&self) -> &V {
+    pub(crate) unsafe fn val_in_slot<const SLOT: usize>(&self) -> &V {
         match SLOT {
             0 => unsafe{ &**self.val_or_child0.val },
             1 => unsafe{ &**self.val_or_child1.val },
@@ -2027,26 +2028,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
     }
     #[inline]
-    fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
-        let mut result = 0;
-        if self.is_used_value_0() {
-            result += 1;
-        }
-        if self.is_used_value_1() {
-            result += 1;
-        }
-        if self.is_used_child_0() {
-            let child_node = unsafe{ self.child_in_slot::<0>() };
-            result += val_count_below_node(child_node, cache);
-        }
-        if self.is_used_child_1() {
-            let child_node = unsafe{ self.child_in_slot::<1>() };
-            result += val_count_below_node(child_node, cache);
-        }
-        result
-    }
-    #[inline]
-    fn node_goat_val_count(&self) -> usize {
+    fn node_val_count(&self) -> usize {
         //Here are 3 alternative implementations.  They're basically the same in perf, with a slight edge to the
         // inline bitwise arithmetic version.
 
@@ -2843,6 +2825,225 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                 self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty()));
             }
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
+    where
+        W: Clone,
+        StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    {
+        macro_rules! summarize {
+            ($val:expr, $downstream:expr, $prefix:expr) => {
+                summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>($val, $downstream, $prefix, start_f, fold_child_f, finalize_f)
+            };
+        }
+        //Pair node can have the following permutations: (Slot0, Slot1)
+        //
+        // - Case 1 (Empty, Empty)
+        //   Run only `finalize_f` on default `Acc`
+        // - Case 2 (Child, Empty)
+        //   Recursively call on child, then run only `collapse_f` on the result, specifying the path.
+        //   When a value was passed in at the first byte of that path, split out that byte as a
+        //   value-bearing branch before collapsing the remaining run.
+        // - Case 3 (Child, Val), 1-byte key, same key byte
+        //   Recursively call on child, then run only `collapse_f` on the result, specifying the value and the 1-byte path
+        // - Case 4 (Child, Val), different key bytes
+        //   Recursively call on child, run `branch_f(collapse_f())` on the result. Then run `branch_f(collapse_f())` again
+        //   with the value's path.  And finally, run `finalize_f()`
+        // - Case 5 (Child, Child)
+        //   Recursively call on child0, run `branch_f(collapse_f())` on the result.  Do the same for child1.  Finally, run
+        //   `finalize_f()`
+        // - Case 6 (Val, Empty)
+        //   Run only `collapse_f` on the val
+        // - Case 7 (Val, Val), common first byte (meaning slot0 is a 1-byte path)
+        //   run `collapse_f` on the slot1 val, specifying the path, then run `collapse_f` again on the slot0 val, specifying
+        //   the common prefix byte
+        // - Case 8 (Val, Val), different first bytes
+        //   Run `branch_f(collapse_f())` on each val, then `finalize_f` at the end
+        // - Case 9 (Val, Child), 1-byte key, same key byte (We could eliminate this case by requiring a canonical ordering for identical one-byte keys, but currently we don't)
+        //   See "Case 3 (Child, Val), 1-byte key, same key byte"
+        // - Case 10 (Val, Child), different key bytes
+        //   See "Case 4 (Child, Val), different key bytes"
+        //
+        //GOAT, It would be nice to refactor the pair_node in order to express each of these permutations as a unique value for the 4 header bits, so we could take the appropriate code path without looking at any path bytes
+
+        match self.header >> 12 {
+            //Case 1 (Empty, Empty)
+            0 => finalize_f(&ByteMask::EMPTY, passed_in_val, None, &[]),
+            //Case 2 (Child, Empty) = (1 << 3) + (1 << 1) | (1 << 3) + (1 << 1) + 1
+            10 | 11 => {
+                let child_node = unsafe{ self.child_in_slot::<0>() };
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                let path = unsafe{ self.key_unchecked::<0>() };
+                if passed_in_val.is_none() {
+                    summarize!(None, Some(child_w), path)
+                } else {
+                    let child_w = summarize!(None, Some(child_w), &path[1..])?;
+                    let mask = ByteMask::from(path[0]);
+                    let mut acc = start_f(&mask)?;
+                    fold_child_f(&mask, child_w, &mut acc)?;
+                    finalize_f(&mask, passed_in_val, Some(acc), &[])
+                }
+            },
+            //(Child, Val) = (1 << 3) + (1 << 2) + (1 << 1)
+            14 => {
+                let child_node = unsafe{ self.child_in_slot::<0>() };
+                let key0 = unsafe{ self.key_unchecked::<0>() };
+                let key1 = unsafe{ self.key_unchecked::<1>() };
+                let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                if key0_byte == key1_byte {
+                    //Case 3
+                    debug_assert_eq!(key0.len(), 1);
+                    debug_assert_eq!(key1.len(), 1);
+                    let val = unsafe { self.val_in_slot::<1>() };
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?;
+                    summarize!(passed_in_val, Some(child_w), key0)
+                } else {
+                    //Case 4
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                    let path = &key0[1..];
+                    let mask = ByteMask::from((key0_byte, key1_byte));
+                    let mut acc = start_f(&mask)?;
+                    fold_child_f(&mask, summarize!(None, Some(child_w), path)?, &mut acc)?;
+
+                    let val = unsafe { self.val_in_slot::<1>() };
+                    let path = &key1[1..];
+                    fold_child_f(&mask, summarize!(Some(val), None, path)?, &mut acc)?;
+
+                    finalize_f(&mask, passed_in_val, Some(acc), &[])
+                }
+            },
+            //Case 5 (Child, Child) = (1 << 3) + (1 << 2) + (1 << 1) + 1
+            15 => {
+                    let key0 = unsafe{ self.key_unchecked::<0>() };
+                    let key1 = unsafe{ self.key_unchecked::<1>() };
+                    let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                    let path0 = &key0[1..];
+                    let path1 = &key1[1..];
+                    let mask = ByteMask::from((key0_byte, key1_byte));
+                let mut acc = start_f(&mask)?;
+                let child_node = unsafe{ self.child_in_slot::<0>() };
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                fold_child_f(&mask, summarize!(None, Some(child_w), path0)?, &mut acc)?;
+
+                let child_node = unsafe{ self.child_in_slot::<1>() };
+                let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                fold_child_f(&mask, summarize!(None, Some(child_w), path1)?, &mut acc)?;
+
+                finalize_f(&mask, passed_in_val, Some(acc), &[])
+            },
+            //Case 6 (Val, Empty) = (1 << 3) | (1 << 3) + 1
+            8 | 9 => {
+                let val = unsafe { self.val_in_slot::<0>() };
+                let path = unsafe{ self.key_unchecked::<0>() };
+                if passed_in_val.is_none() {
+                    summarize!(None, Some(summarize!(Some(val), None, path)?), &[])
+                } else {
+                    let child_w = summarize!(Some(val), None, &path[1..])?;
+                    let mask = ByteMask::from(path[0]);
+                    let mut acc = start_f(&mask)?;
+                    fold_child_f(&mask, child_w, &mut acc)?;
+                    finalize_f(&mask, passed_in_val, Some(acc), &[])
+                }
+            },
+            //(Val, Val) = (1 << 3) + (1 << 2)
+            12 => {
+                let key0 = unsafe{ self.key_unchecked::<0>() };
+                let key1 = unsafe{ self.key_unchecked::<1>() };
+                let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                if key0_byte == key1_byte {
+                    //Case 7 (Val, Val), common first byte (meaning slot0 is a 1-byte path)
+                    debug_assert_eq!(key0.len(), 1);
+                    debug_assert!(key1.len() > 1);
+                    let val = unsafe { self.val_in_slot::<1>() };
+                    let child_w = summarize!(Some(val), None, &key1[2..])?;
+                    let mask = ByteMask::from(key1[1]);
+                    let mut acc = start_f(&mask)?;
+                    fold_child_f(&mask, child_w, &mut acc)?;
+
+                    let val = unsafe { self.val_in_slot::<0>() };
+                    let w = finalize_f(&mask, Some(val), Some(acc), &[])?;
+                    summarize!(passed_in_val, Some(w), &key1[0..1])
+                } else {
+                    //Case 8 (Val, Val), different first bytes
+                    let path0 = &key0[1..];
+                    let path1 = &key1[1..];
+                    let mask = ByteMask::from((key0_byte, key1_byte));
+                    let mut acc = start_f(&mask)?;
+                    let val = unsafe{ self.val_in_slot::<0>() };
+                    fold_child_f(&mask, summarize!(Some(val), None, path0)?, &mut acc)?;
+
+                    let val = unsafe{ self.val_in_slot::<1>() };
+                    fold_child_f(&mask, summarize!(Some(val), None, path1)?, &mut acc)?;
+
+                    finalize_f(&mask, passed_in_val, Some(acc), &[])
+                }
+            },
+            //(Val, Child) = (1 << 3) + (1 << 2) + 1
+            13 => {
+                let child_node = unsafe{ self.child_in_slot::<1>() };
+                let key0 = unsafe{ self.key_unchecked::<0>() };
+                let key1 = unsafe{ self.key_unchecked::<1>() };
+                let (key0_byte, key1_byte) = unsafe{ (*key0.get_unchecked(0), *key1.get_unchecked(0)) };
+                if key0_byte == key1_byte {
+                    //Case 9 (Val, Child), same key byte. The value is at the common first byte;
+                    // the child may carry a further compressed suffix below that byte.
+                    debug_assert_eq!(key0.len(), 1);
+                    let val = unsafe { self.val_in_slot::<0>() };
+                    let child_w = if key1.len() == 1 {
+                        recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?
+                    } else {
+                        let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                        summarize!(Some(val), Some(child_w), &key1[1..])?
+                    };
+                    summarize!(passed_in_val, Some(child_w), key0)
+                } else {
+                    //Case 10 (Val, Child), different key bytes
+                    let mask = ByteMask::from((key0_byte, key1_byte));
+                    let mut acc = start_f(&mask)?;
+
+                    let val = unsafe { self.val_in_slot::<0>() };
+                    let path = &key0[1..];
+                    fold_child_f(&mask, summarize!(Some(val), None, path)?, &mut acc)?;
+
+                    let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
+                    let path = &key1[1..];
+                    fold_child_f(&mask, summarize!(None, Some(child_w), path)?, &mut acc)?;
+
+                    finalize_f(&mask, passed_in_val, Some(acc), &[])
+                }
+            },
+            _ => { unsafe { unreachable_unchecked() } }
+        }
+
+        // let mut ws = Some(Acc::default());
+
+        // if self.is_used_value_0() {
+        //     let downstream = collapse_f(Some(unsafe { self.val_in_slot::<0>() }), None, &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+        // }
+        // if self.is_used_value_1() {
+        //     let downstream = collapse_f(Some(unsafe { self.val_in_slot::<1>() }), None, &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+        // }
+        // if self.is_used_child_0() {
+        //     let child_node = unsafe{ self.child_in_slot::<0>() };
+        //     let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+        //     let downstream = collapse_f(None, Some(w), &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+
+        // }
+        // if self.is_used_child_1() {
+        //     let child_node = unsafe{ self.child_in_slot::<1>() };
+        //     let w = recursive_cata::<_, _, _, _, _, _, _, COMPUTE_PATH>(child_node, collapse_f, branch_f, finalize_f);
+        //     let downstream = collapse_f(None, Some(w), &[]);
+        //     branch_f(&ByteMask::new(), downstream, unsafe { ws.as_mut().unwrap_unchecked() });
+        // }
+
+        // finalize_f(&ByteMask::new(), unsafe { std::mem::take(&mut ws).unwrap_unchecked() })
     }
 }
 

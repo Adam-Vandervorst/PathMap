@@ -1,7 +1,6 @@
 
 use core::fmt::{Debug, Formatter};
 use core::ptr;
-use std::collections::HashMap;
 use std::hint::unreachable_unchecked;
 
 use crate::alloc::Allocator;
@@ -10,7 +9,9 @@ use crate::utils::ByteMask;
 
 use crate::utils::BitMask;
 use crate::trie_node::*;
+use crate::gxhash::HashMap;
 use crate::line_list_node::LineListNode;
+use crate::morphisms::summarize_run;
 
 //NOTE: This: `core::array::from_fn(|i| i as u8);` ought to work, but https://github.com/rust-lang/rust/issues/109341
 const ALL_BYTES: [u8; 256] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255];
@@ -365,6 +366,10 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     /// Iterates the entries in `self`, calling `func` for each entry
     /// The arguments to `func` are: `func(self, key_byte, n)`, where `n` is the number of times
     /// `func` has been called prior.  This corresponds to index of the `CoFree` in the `values` vec
+    ///
+    /// PERF GOAT: this method is useful if you know you need the corresponding path byte.  If, however, the
+    /// byte might be unneeded, it's better to let self.values govern the loop, because using the mask
+    /// in the loop means the bitwise ops to manipulate the mask are always required.
     #[inline]
     fn for_each_item<F: FnMut(&Self, u8, usize)>(&self, mut func: F) {
         let mut n = 0;
@@ -380,6 +385,46 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 lm ^= 1u64 << index;
             }
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
+    where
+        W: Clone,
+        StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    {
+        let mask = &self.mask;
+        let mut ws = start_f(mask)?;
+        for cf in self.values.iter() {
+            let path = &[];
+
+            //Do the recursive calling
+            //PERF NOTE: The reason we have four code paths around the call to `branch_f` instead of just doing
+            // `let w = cf.rec().map(|rec| recursive_cata(...))` and then calling branch_f with the appropriate
+            // pair of `Option<&V>` and `Option<W>` is that the compiler won't optimize the implemntation of
+            // `branch_f` around whether the options are none or not.  That means we often pay for two dependent
+            // branches instead of one, and the difference was 25% to the val_count benchmark.  Breaking out the calls
+            // like this gives the optimizer a site to specialize for each permutation
+            match (cf.rec(), cf.val()) {
+                (Some(rec), Some(val)) => {
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(rec, Some(val), start_f, fold_child_f, finalize_f, cache)?;
+                    fold_child_f(mask, w, &mut ws)?;
+                },
+                (Some(rec), None) => {
+                    let w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(rec, None, start_f, fold_child_f, finalize_f, cache)?;
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(None, Some(w), path, start_f, fold_child_f, finalize_f)?, &mut ws)?;
+                },
+                (None, Some(val)) => {
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(Some(val), None, path, start_f, fold_child_f, finalize_f)?, &mut ws)?;
+                },
+                (None, None) => {
+                    fold_child_f(mask, summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(None, None, path, start_f, fold_child_f, finalize_f)?, &mut ws)?;
+                },
+            }
+        }
+        finalize_f(mask, passed_in_val, Some(ws), &[])
     }
 }
 
@@ -1012,34 +1057,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         let k = k as usize;
         (next_token, &ALL_BYTES[k..=k], cf.rec(), cf.val())
     }
-    fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
-        //Discussion: These two implementations do the same thing but with a slightly different ordering of
-        // the operations.  In `all_dense_nodes`, the "Branchy" impl wins.  But in a mixed-node setting, the
-        // IMPL B is the winner.  My suspicion is that the ListNode's heavily branching structure leads to
-        // underutilization elsewhere in the CPU so we get better instruction parallelism with IMPL B.
-
-        //IMPL A "Branchy"
-        // let mut result = 0;
-        // for cf in self.values.iter() {
-        //     if cf.value.is_some() {
-        //         result += 1;
-        //     }
-        //     match &cf.rec {
-        //         Some(rec) => result += rec.borrow().node_subtree_len(),
-        //         None => {}
-        //     }
-        // }
-        // result
-
-        //IMPL B "Arithmetic"
-        return self.values.iter().rfold(0, |t, cf| {
-            t + cf.has_val() as usize + cf.rec().map(|r| val_count_below_node(r, cache)).unwrap_or(0)
-        });
-    }
-    fn node_goat_val_count(&self) -> usize {
-        return self.values.iter().rfold(0, |t, cf| {
-            t + cf.has_val() as usize
-        });
+    #[inline]
+    fn node_val_count(&self) -> usize {
+        let mut result = 0;
+        for cf in self.values.iter() {
+            result += cf.has_val() as usize
+        }
+        result
     }
     fn node_child_iter_start(&self) -> (u64, Option<&TrieNodeODRc<V, A>>) {
         for (pos, cf) in self.values.iter().enumerate() {

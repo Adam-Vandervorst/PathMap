@@ -219,6 +219,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         PrimaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
         SecondaryZ: ZipperMoving + ZipperPathBuffer,
 {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.primary.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.primary.reserve_buffers(path_len, stack_depth) }
@@ -346,9 +347,6 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         self.factor_paths.clear();
         self.secondary.clear();
         self.primary.reset();
-    }
-    fn val_count(&self) -> usize {
-        unimplemented!("method will probably get removed")
     }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, path: K) -> usize {
         let mut path = path.as_ref();

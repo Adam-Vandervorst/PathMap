@@ -490,12 +490,6 @@ fn derive_poly_zipper_with_traits(
                     }
                 }
 
-                fn val_count(&self) -> usize {
-                    match self {
-                        #(#variant_arms => inner.val_count(),)*
-                    }
-                }
-
                 fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
                     match self {
                         #(#variant_arms => inner.descend_to(k),)*
@@ -653,6 +647,12 @@ fn derive_poly_zipper_with_traits(
             impl #impl_generics pathmap::zipper::ZipperPathBuffer for #enum_name #ty_generics
             #zipper_path_buffer_where
             {
+                unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+                    match self {
+                        #(#variant_arms => unsafe { inner.path_assert_len(len) },)*
+                    }
+                }
+
                 unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
                     match self {
                         #(#variant_arms => unsafe { inner.origin_path_assert_len(len) },)*

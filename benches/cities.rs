@@ -171,10 +171,7 @@ fn cities_val_count(bencher: Bencher) {
 #[cfg(feature="arena_compact")]
 #[divan::bench()]
 fn cities_val_count_act(bencher: Bencher) {
-    use pathmap::{
-        arena_compact::ArenaCompactTree,
-        zipper::ZipperMoving,
-    };
+    use pathmap::{morphisms::CatamorphismCachedIterative, arena_compact::ArenaCompactTree};
     let pairs = read_data();
     let mut map = PathMap::new();
     let mut unique_count = 0;

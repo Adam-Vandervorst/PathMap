@@ -12,8 +12,8 @@
 //! ### Catamorphism
 //!
 //! Process a trie from the leaves towards the root.  This algorithm proceeds in a depth-first order,
-//! working from the leaves upward calling a closure on each path in the trie.  A summary "accumulator"
-//! type `W` is used to represent the information about the trie and carry it upwards to the next invocation
+//! working from the leaves upward calling a closure on each path in the trie.  A summary type `W` is
+//! used to represent the information about the sub-trie and carry it upwards to the next invocation
 //! of the closure.
 //!
 //! The word "catamorphism" comes from the Greek for "down", because the root is considered the bottom
@@ -23,10 +23,10 @@
 //!
 //! **NOTE**: The traversal order, while depth-first, is subtly different from the order of
 //! [`ZipperIteration::to_next_val`](crate::zipper::ZipperIteration::to_next_val) and
-//! [`ZipperMoving::to_next_step`](crate::zipper::ZipperMoving::to_next_step).  The
-//! zipper methods visit values occurring along a path first before descending to the
-//! branches below, while the `cata` methods visit the deepest values first, before
-//! returning to higher levels to aggregate information from deeper in the trie.
+//! [`ZipperMoving::to_next_step`](crate::zipper::ZipperMoving::to_next_step).  The zipper methods
+//! visit values occurring along a path first before descending to the branches below, while the `cata`
+//! methods visit the deepest values first, before returning to higher levels to aggregate information
+//! from deeper in the trie.
 //!
 //! ### Anamorphism
 //!
@@ -42,7 +42,7 @@
 //!
 //! In most cases, jumping morphisms will perform substantially better than stepping morphisms, so you should use
 //! them when it is convenient.  It is always possible to re-express an `alg` for a stepping morphism in terms of
-//! an `alg` for a jumping morphism, however sometimes the logic become uglier and / or the performance benefit
+//! an `alg` for a jumping morphism, however sometimes the logic becomes uglier and / or the performance benefit
 //! is negligible.  Therefore, the stepping methods can be thought of as a convenience API.
 //!
 //! ### Side-Effecting vs Cached Iteration
@@ -52,12 +52,12 @@
 //!
 //! | side_effect                                     | cached                                      |
 //! |-------------------------------------------------|---------------------------------------------|
-//! | Visits the entire trie                          | Short-circuits shared branches              |
+//! | Visits every path in the trie                   | Short-circuits shared subtries              |
 //! | Always re-computes subtrie info (e.g. `W`)      | Reuses shared subtrie info                  |
 //! | Guaranteed and deterministic `alg` exec order   | Unpredictable callback `alg` exec order     |
 //! | `alg` may capture and modify environment ([`FnMut`](https://doc.rust-lang.org/std/ops/trait.FnMut.html))      | `alg` must be a pure [`Fn`](https://doc.rust-lang.org/std/ops/trait.Fn.html)           |
 //! | Owned `W` type passed between `alg` invocations | `W` type must implement [`Clone`](https://doc.rust-lang.org/std/clone/trait.Clone.html) |
-//! | `alg` is aware of the entire `path`             | `alg` only sees path byte, or sub-path slice |
+//! | `alg` is aware of the entire `path`             | `alg` only sees path byte, or prefix slice |
 //!
 //! All else being equal, `cached` methods are likely to be more efficient because structural sharing
 //! occurs frequently in pathmap tries.  At the extreme, `side_effect` methods may produce a combinitoric
@@ -71,17 +71,18 @@ use std::ptr::slice_from_raw_parts;
 use reusing_vec::ReusingQueue;
 
 use crate::utils::*;
-use crate::alloc::Allocator;
+use crate::alloc::{Allocator, GlobalAlloc};
 use crate::PathMap;
 use crate::trie_node::TrieNodeODRc;
+use crate::trie_node::recursive_cata_cached;
 use crate::zipper;
 use crate::zipper::*;
 
 use crate::gxhash::{self, HashMap, HashMapExt};
 
-/// Provides methods to perform a catamorphism on types that can reference or contain a trie
-pub trait Catamorphism<V> {
-    /// Applies a "stepping" catamorphism to the trie descending from the zipper's root, running the `alg_f` at every
+/// Provides methods to perform side-effecting catamorphisms appropriate for serialization and full-path operations
+pub trait CatamorphismSideEffecting<V> {
+    /// Applies a "stepping" catamorphism to the subtrie descending from the zipper's focus, running the `alg_f` at every
     /// step (at every byte)
     ///
     /// ## Arguments to `alg_f`:
@@ -96,12 +97,9 @@ pub trait Catamorphism<V> {
     /// - `value`: A value associated with a given path in the trie, or `None` if the trie has no value at
     /// that path.
     ///
-    /// - `path`: The [`origin_path`](ZipperAbsolutePath::origin_path) for the invocation.  The `alg_f` will
-    /// be run exactly once for each unique path in the trie.
+    /// - `path`: The absolute [`origin_path`](ZipperAbsolutePath::origin_path) for the invocation.  The `alg_f` will
+    /// be run exactly once for each path in the subtrie rooted at the initial focus.
     ///
-    /// ## Behavior
-    ///
-    /// The focus position of the zipper will be ignored and it will be immediately reset to the root.
     fn into_cata_side_effect<W, AlgF>(self, mut alg_f: AlgF) -> W
         where
         AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
@@ -114,11 +112,11 @@ pub trait Catamorphism<V> {
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
-    /// See [Catamorphism::into_cata_side_effect]
+    /// See [CatamorphismSideEffecting::into_cata_side_effect]
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>;
 
-    /// Applies a "jumping" catamorphism to the trie
+    /// Applies a "jumping" catamorphism to the subtrie descending from the zipper's focus.
     ///
     /// A "jumping" catamorphism is a form of catamorphism where the `alg_f` "jumps over" (isn't called for)
     /// path bytes in the trie where there isn't either a `value` or a branch where `children.len() > 1`.
@@ -129,7 +127,7 @@ pub trait Catamorphism<V> {
     /// - `jumped_byte_cnt`: The number of bytes before the `alg_f` will be called again.  The "jumped" substring
     /// is equal to `path[path.len()-jumped_byte_cnt..]`
     ///
-    /// See [into_cata_side_effect](Catamorphism::into_cata_side_effect) for explanation of other arguments and
+    /// See [into_cata_side_effect](CatamorphismSideEffecting::into_cata_side_effect) for explanation of other arguments and
     /// behavior
     fn into_cata_jumping_side_effect<W, AlgF>(self, mut alg_f: AlgF) -> W
         where
@@ -143,121 +141,351 @@ pub trait Catamorphism<V> {
 
     /// Allows the closure to return an error, stopping traversal immediately
     ///
-    /// See [Catamorphism::into_cata_jumping_side_effect]
+    /// See [CatamorphismSideEffecting::into_cata_jumping_side_effect]
     fn into_cata_jumping_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> Result<W, Err>;
+}
 
-    /// Applies a **cached**, **stepping**, catamorphism to the trie descending from the zipper's
-    /// root, running the `alg_f` at every step (at every byte)
+macro_rules! define_cached_cata_trait {
+    ($(#[$meta:meta])* $trait_name:ident [$($generics:tt)*]) => {
+        $(#[$meta])*
+        pub trait $trait_name<$($generics)*> {
+            /// Applies a **cached**, **stepping**, catamorphism to the subtrie descending from the
+            /// zipper's current focus, running `alg_f` at every step (every byte).
+            ///
+            /// This method may reuse previously calculated `W` values when a shared subtrie has
+            /// already been computed.
+            ///
+            /// ## Arguments to `alg_f`
+            ///
+            /// `(child_mask: &`[`ByteMask`]`, children: &mut [W], value: Option<&V>)`
+            ///
+            /// - `child_mask` indicates the corresponding byte for every downstream branch in
+            ///   `children`.
+            /// - `children` contains the `W` values produced for downstream branches.
+            /// - `value` is the value associated with this path, or `None` when there is none.
+            ///
+            fn cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
+            where
+                W: Clone,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W
+            {
+                self.cata_cached_fallible(|mask, children, val| -> Result<W, Infallible> {
+                    Ok(alg_f(mask, children, val))
+                }).unwrap()
+            }
+
+            /// Allows the closure to return an error, stopping traversal immediately.
+            ///
+            /// See [`Self::cata_cached`] for the closure arguments and traversal behavior.
+            fn cata_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
+            where
+                W: Clone,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
+            {
+                self.cata_jumping_cached_fallible(|mask, children, val, prefix| {
+                    let mut w = alg_f(mask, children, val)?;
+                    for &byte in prefix.iter().rev() {
+                        let child_mask = ByteMask::from(byte);
+                        w = alg_f(&child_mask, core::slice::from_mut(&mut w), None)?;
+                    }
+                    Ok(w)
+                })
+            }
+
+            /// Applies a **cached**, **jumping** catamorphism to the subtrie descending from the
+            /// zipper's current focus.
+            ///
+            /// A jumping catamorphism may omit calls to `alg_f` for path bytes that have neither
+            /// a value nor a branch with more than one child, passing those bytes as `prefix`
+            /// instead. Implementations may also fall back to stepping through some or all such
+            /// bytes, in which case `prefix` is shorter or empty.
+            ///
+            /// This method may reuse previously calculated `W` values when a shared subtrie has
+            /// already been computed.
+            ///
+            /// ## Arguments to `alg_f`
+            ///
+            /// `(child_mask: &`[`ByteMask`]`, children: &mut [W], value: Option<&V>, prefix: &[u8])`
+            ///
+            /// `prefix` is the sequence of bytes collapsed into this `alg_f` call. For example,
+            /// an implementation that collapses every non-branching run in this trie:
+            ///
+            /// ```text
+            /// ─── c ─── o ─── m ─┬─ b ─── o               → "combo"
+            ///                    ├─ e ─── t               → "comet"
+            ///                    └─ f ─── o ─── r ─── t   → "comfort"
+            /// ```
+            ///
+            /// This implementation calls `alg_f` four times:
+            ///
+            /// 1. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"o")`
+            /// 2. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"t")`
+            /// 3. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"ort")`
+            /// 4. `alg_f(ByteMask::from_iter([b'b', b'e', b'f']), &[..], None, b"com")`
+            ///
+            /// See [`Self::cata_cached`] for the other arguments and traversal behavior.
+            fn cata_jumping_cached<W, AlgF>(&self, alg_f: AlgF) -> W
+            where
+                W: Clone,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W
+            {
+                self.cata_jumping_cached_fallible(|mask, children, val, prefix| -> Result<W, Infallible> {
+                    Ok(alg_f(mask, children, val, prefix))
+                }).unwrap()
+            }
+
+            /// Allows the closure to return an error, stopping traversal immediately.
+            ///
+            /// See [`Self::cata_jumping_cached`] for the closure arguments and traversal behavior.
+            fn cata_jumping_cached_fallible<W, E, AlgF>(&self, alg_f: AlgF) -> Result<W, E>
+            where
+                W: Clone,
+                AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>
+            {
+                let children = std::cell::RefCell::new(CataChildren::<W>::new());
+                let children = &children;
+                let alg_f = &alg_f;
+
+                self.factored_cata_jumping::<CataChildrenAcc, W, E, _, _, _, true>(
+                    move |mask| {
+                        debug_assert!(children.try_borrow_mut().is_ok());
+                        Ok(unsafe { &mut *children.as_ptr() }.new_acc(mask.count_bits()))
+                    },
+                    move |_mask, child, acc| {
+                        debug_assert!(children.try_borrow_mut().is_ok());
+                        unsafe { &mut *children.as_ptr() }.push(acc, child);
+                        Ok(())
+                    },
+                    move |mask, value, acc, prefix| match acc {
+                        Some(acc) => {
+                            debug_assert!(children.try_borrow_mut().is_ok());
+                            unsafe { &mut *children.as_ptr() }.summarize(acc, mask.count_bits(), |children| {
+                                alg_f(mask, children, value, prefix)
+                            })
+                        },
+                        None => alg_f(mask, &mut [], value, prefix),
+                    },
+                )
+            }
+
+            /// Hashes the logical trie and all of its values.
+            fn hash(&self) -> u128
+            where
+                V: std::hash::Hash,
+            {
+                self.hash_with(|v| {
+                    let mut hasher = gxhash::GxHasher::with_seed(0);
+                    v.hash(&mut hasher);
+                    hasher.finish_u128()
+                })
+            }
+
+            /// Hashes the logical trie using the provided function to hash values.
+            fn hash_with<F>(&self, val_hash: F) -> u128
+            where
+                F: Fn(&V) -> u128,
+            {
+                self.cata_cached(|bm, hs, mv| {
+                    let mut hasher = gxhash::GxHasher::with_seed(0b0100001010101101111110010110100110000010011000100100100111110111i64);
+                    hasher.write(unsafe { slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap_unchecked() });
+                    hasher.write(unsafe { slice_from_raw_parts(hs.as_ptr() as *const u8, 16 * hs.len()).as_ref().unwrap_unchecked() });
+                    if let Some(v) = mv { hasher.write_u128(val_hash(v)) };
+                    hasher.finish_u128()
+                })
+            }
+
+            /// Returns the total number of values contained at and below the zipper's focus, including the
+            /// focus itself
+            fn val_count(&self) -> usize {
+                self.factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
+                    |_| Ok(0usize),
+                    |_mask, w: usize, total| { *total += w; Ok(()) },
+                    |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+                ).unwrap_or(0)
+            }
+
+            /// A low-level cached catamorphism API that decomposes the algebra into multiple
+            /// functions and can avoid redundant path computation.
+            ///
+            /// ## Closures
+            ///
+            /// `NewAccF` creates an accumulator for a logical trie node with one or more downstream
+            /// child branches: `fn(child_mask: &ByteMask) -> Result<Acc, Err>`.
+            ///
+            /// `FoldChildF` folds one downstream child's `W` into that accumulator. It is called
+            /// once per downstream branch, in the same order as the bits in `child_mask`. Every
+            /// call for a logical trie node receives its complete child mask, so use call
+            /// order to associate a child result with its byte:
+            /// `fn(child_mask: &ByteMask, downstream: W, accumulator: &mut Acc) -> Result<(), Err>`.
+            ///
+            /// `SummarizeF` produces the `W` for a logical trie node and a non-branching path
+            /// `prefix` above it. Its result must summarize the subtrie from the start of `prefix`,
+            /// including `value` and downstream children.
+            ///
+            /// - `child_mask` describes the node's immediate child bytes.
+            /// - `accumulator` contains results folded from child branches, or is `None` when no
+            ///   accumulator was needed.
+            /// - `prefix` is a collapsed non-branching path above the traversal node. It never
+            ///   includes a path position that is part of a `child_mask` for this or another
+            ///   `summarize_f` call. It may be empty when an implementation falls back to stepping.
+            ///
+            /// The `SummarizeF` signature is
+            /// `fn(child_mask: &ByteMask, value: Option<&V>, accumulator: Option<Acc>, prefix: &[u8]) -> Result<W, Err>`.
+            ///
+            /// ## Behavior
+            ///
+            /// * Errors from any callback stop traversal immediately and are returned to the caller.
+            /// * Every call to `new_acc_f` will lead to a matching call to `summarize_f` where ownership
+            /// of the `Acc` object is given to the `SummarizeF` callback, unless an error halts the catamorphism.
+            /// * `prefix` is **only an optimization** for path bytes with a single child.  Your
+            /// algebra must not rely on a given path byte being represented as a prefix, instead of as
+            /// a sequence of `new_acc_f`, then `fold_child_f`.
+            ///
+            /// With `COMPUTE_PATH = false`, path runs are not materialized and `prefix` is always
+            /// empty. Use that only when the algebra does not depend on path bytes, only on values
+            /// and/or path endpoints.
+            fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+                &self,
+                new_acc_f: NewAccF,
+                fold_child_f: FoldChildF,
+                summarize_f: SummarizeF,
+            ) -> Result<W, Err>
+            where
+                W: Clone,
+                NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+                FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+                SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>;
+
+            /// A **stepping** catamorphism based on a similar factored algebra to [`Self::factored_cata_jumping`]
+            ///
+            /// Use this when the cata must evaluate once per path byte, including bytes in
+            /// non-branching runs. Unlike the jumping version, `summarize_f` has no `prefix`: it
+            /// is called once for every path byte. The callback roles and child-mask ordering are
+            /// otherwise the same as for [`Self::factored_cata_jumping`].
+            fn factored_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF>(
+                &self,
+                new_acc_f: NewAccF,
+                fold_child_f: FoldChildF,
+                summarize_f: SummarizeF,
+            ) -> Result<W, Err>
+            where
+                W: Clone,
+                NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+                FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+                SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>) -> Result<W, Err>,
+                Self: Sized,
+            {
+                self.factored_cata_jumping::<_, _, _, _, _, _, true>(
+                    new_acc_f,
+                    fold_child_f,
+                    |mask, val, acc, prefix| {
+                        let mut w = summarize_f(mask, val, acc)?;
+                        for byte in prefix.iter().rev() {
+                            let mask = ByteMask::from(*byte);
+                            let mut acc = new_acc_f(&mask)?;
+                            fold_child_f(&mask, w, &mut acc)?;
+                            w = summarize_f(&mask, None, Some(acc))?;
+                        }
+                        Ok(w)
+                    },
+                )
+            }
+        }
+    };
+}
+
+define_cached_cata_trait! {
+    /// Cached catamorphisms evaluated with recursive traversal.
     ///
-    /// This method may re-use previous calculations of `W`, if the value for a shared subtrie has
-    /// been previously computed.
+    /// This is the normal choice: it is substantially faster (about 10x) than
+    /// [`CatamorphismCachedIterative`] for typical tries and does not require cloning or creating
+    /// a zipper.  It uses the call stack, so prefer [`CatamorphismCachedIterative`] when paths can
+    /// be deeply nested so there may be a risk of stack overflow.
     ///
-    /// ## Arguments to `alg_f`:
-    /// `(child_mask: &`[`ByteMask`]`, children: &mut [W], val: Option<&V>`
+    /// [`CatamorphismCachedIterative`] deliberately has the same method names and signatures so it
+    /// is perfectly interchangeable.  Import one trait for ordinary method syntax.  When both
+    /// strategies are needed in one scope, call the desired trait with fully qualified syntax.
+    CatamorphismCached [V, A = GlobalAlloc]
+}
+
+define_cached_cata_trait! {
+    /// Cached catamorphisms evaluated with iterative zipper traversal.
     ///
-    /// - `child_mask`: A [`ByteMask`] indicating the corresponding byte for each downstream branche in
-    /// `children`.
+    /// Prefer this trait when the trie can contain unbounded or adversarially deep paths and stack
+    /// safety matters more than throughput. It traverses a zipper, so an implementation must be
+    /// able to create or clone a movable zipper; for ordinary bounded-depth tries,
+    /// [`CatamorphismCached`] is faster.
     ///
-    /// - `children`: A slice containing all the `W` values from previous invocations of `alg_f` for
-    /// downstream branches.
-    ///
-    /// - `value`: A value associated with a given path in the trie, or `None` if the trie has no value at
-    /// that path.
-    ///
-    /// ## Behavior
-    ///
-    /// The focus position of the zipper will be ignored and it will be immediately reset to the root.
-    fn into_cata_cached<W, AlgF>(self, alg_f: AlgF) -> W
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
-        Self: Sized
-    {
-        self.into_cata_cached_fallible(|mask, children, val| -> Result<W, Infallible> {
-            Ok(alg_f(mask, children, val))
-        }).unwrap()
+    /// This trait intentionally has the same method names and signatures as [`CatamorphismCached`].
+    /// Import one trait for ordinary method syntax.  When both strategies are needed in one scope,
+    /// call the desired trait with fully qualified syntax. such as
+    /// `CatamorphismCachedIterative::cata_cached(&zipper, algebra)`.
+    CatamorphismCachedIterative [V]
+}
+
+/// Shared child-result storage used to adapt the factored cached-cata API to a single-function algebra.
+struct CataChildren<W> {
+    children: Vec<W>,
+    #[cfg(debug_assertions)]
+    allocations: Vec<(usize, usize)>,
+    #[cfg(debug_assertions)]
+    next_allocation: usize,
+}
+
+struct CataChildrenAcc {
+    start: usize,
+    #[cfg(debug_assertions)]
+    allocation: usize,
+}
+
+impl<W> CataChildren<W> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            children: Vec::new(),
+            #[cfg(debug_assertions)]
+            allocations: Vec::new(),
+            #[cfg(debug_assertions)]
+            next_allocation: 0,
+        }
     }
 
-    /// Allows the closure to return an error, stopping traversal immediately
-    ///
-    /// See [Catamorphism::into_cata_cached]
-    fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>;
-
-    /// Applies a "jumping" catamorphism to the trie
-    ///
-    /// A "jumping" catamorphism is a form of catamorphism where the `alg_f` "jumps over" (isn't called for)
-    /// path bytes in the trie where there isn't either a `value` or a branch where `children.len() > 1`.
-    ///
-    /// This method may re-use previous calculations of `W`, if the value for a shared subtrie has
-    /// been previously computed.
-    ///
-    /// ## Arguments to `alg_f`:
-    /// `(child_mask: &`[`ByteMask`]`, children: &mut [W], value: Option<&V>, sub_path: &[u8]`
-    ///
-    /// - `sub_path`: A slice of path bytes for which the `alf_f` will not be called.  Consider the
-    /// trie below:
-    ///
-    /// ```txt
-    /// ─── c ─── o ─── m ─┬─ b ─── o               → "combo"
-    ///                    ├─ e ─── t               → "comet"
-    ///                    └─ f ─── o ─── r ─── t   → "comfort"
-    /// ```
-    /// The `alg_f` would be called 4 times for this trie.
-    /// 1. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"o")`
-    /// 2. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"t")`
-    /// 3. `alg_f(ByteMask::EMPTY, &[], Some(&()), b"ort")`
-    /// 4. `alg_f(ByteMask::from_iter([b'b', b'e', b'f']), &[..], None, b"com")`
-    ///
-    /// See [into_cata_cached](Catamorphism::into_cata_cached) for explanation of other arguments and behavior
-    fn into_cata_jumping_cached<W, AlgF>(self, alg_f: AlgF) -> W
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
-        Self: Sized
-    {
-        self.into_cata_jumping_cached_fallible(|mask, children, val, sub_path| -> Result<W, Infallible> {
-            Ok(alg_f(mask, children, val, sub_path))
-        }).unwrap()
+    #[inline]
+    fn new_acc(&mut self, capacity: usize) -> CataChildrenAcc {
+        let start = self.children.len();
+        self.children.reserve(capacity);
+        #[cfg(debug_assertions)]
+        let allocation = {
+            let allocation = self.next_allocation;
+            self.next_allocation += 1;
+            self.allocations.push((start, allocation));
+            allocation
+        };
+        CataChildrenAcc {
+            start,
+            #[cfg(debug_assertions)]
+            allocation,
+        }
     }
 
-    /// Allows the closure to return an error, stopping traversal immediately
-    ///
-    /// See [Catamorphism::into_cata_jumping_cached]
-    fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>;
-
-    /// Hash the logical `PathMap` and all its values
-    fn hash(self) -> u128
-    where
-        Self: Sized,
-        V: std::hash::Hash
-    {
-        self.hash_with(|v| {
-            let mut hasher = gxhash::GxHasher::with_seed(0);
-            v.hash(&mut hasher);
-            hasher.finish_u128()
-        })
+    #[inline(always)]
+    fn push(&mut self, _acc: &CataChildrenAcc, child: W) {
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(self.allocations.last(), Some(&(_acc.start, _acc.allocation)));
+        self.children.push(child);
     }
 
-    /// Hash the logical `PathMap`, using the provided function to hash values
-    fn hash_with<F>(self, val_hash: F) -> u128
-    where
-        Self: Sized,
-        F: Fn(&V) -> u128
-    {
-        self.into_cata_cached(|bm, hs, mv| {
-            let mut hasher = gxhash::GxHasher::with_seed(0b0100001010101101111110010110100110000010011000100100100111110111i64);
-            hasher.write(unsafe { slice_from_raw_parts(bm.0.as_ptr() as *const u8, 32).as_ref().unwrap_unchecked() });
-            hasher.write(unsafe { slice_from_raw_parts(hs.as_ptr() as *const u8, 16*hs.len()).as_ref().unwrap_unchecked() });
-            if let Some(v) = mv { hasher.write_u128(val_hash(v)) };
-            hasher.finish_u128()
-        })
+    #[inline]
+    fn summarize<R>(&mut self, acc: CataChildrenAcc, child_count: usize, summarize_f: impl FnOnce(&mut [W]) -> R) -> R {
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(self.allocations.pop(), Some((acc.start, acc.allocation)));
+        debug_assert!(acc.start <= self.children.len());
+        debug_assert_eq!(self.children.len() - acc.start, child_count);
+
+        let result = summarize_f(&mut self.children[acc.start..]);
+        self.children.truncate(acc.start);
+        result
     }
 }
 
@@ -323,8 +551,8 @@ impl SplitCata {
 
 /// A compatibility shim to provide a 4-function "jumping" catamorphism API
 ///
-/// - `jump_f`: `FnMut(sub_path: &[u8], w: W, path: &[u8]) -> W`
-/// Elevates a result `w` descending from the relative path, `sub_path` to the current position at `path`
+/// - `jump_f`: `FnMut(prefix: &[u8], w: W, path: &[u8]) -> W`
+/// Elevates a result `w` descending from the relative path, `prefix` to the current position at `path`
 ///
 /// See [`SplitCata`] for a description of additional args
 #[deprecated]
@@ -383,7 +611,7 @@ impl SplitCataJumping {
     }
 }
 
-impl<'a, Z, V: 'a> Catamorphism<V> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer {
+impl<'a, Z, V: 'a> CatamorphismSideEffecting<V> for Z where Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer {
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, mut alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>,
     {
@@ -399,27 +627,9 @@ impl<'a, Z, V: 'a> Catamorphism<V> for Z where Z: Zipper + ZipperReadOnlyConditi
             alg_f(mask, children, jump_len, val, path)
         })
     }
-    fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
-    {
-        into_cata_cached_body::<Self, V, W, E, _, DoCache, false, false>(self, |mask, children, val, sub_path, _debug_path, _z| {
-            debug_assert_eq!(sub_path.len(), 0);
-            alg_f(mask, children, val)
-        })
-    }
-    fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>
-    {
-        into_cata_cached_body::<Self, V, W, E, _, DoCache, true, false>(self,
-            |mask, children, val, sub_path, _debug_path, _z| alg_f(mask, children, val, sub_path))
-    }
 }
 
-impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorphism<V> for PathMap<V, A> {
+impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> CatamorphismSideEffecting<V> for PathMap<V, A> {
     fn into_cata_side_effect_fallible<W, Err, AlgF>(self, alg_f: AlgF) -> Result<W, Err>
         where AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, Err>
     {
@@ -432,21 +642,116 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator + 'static> Catamorph
         let rz = self.into_read_zipper(&[]);
         rz.into_cata_jumping_side_effect_fallible(alg_f)
     }
-    fn into_cata_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> Result<W, E>
+}
+
+impl<Z, V: Clone + Send + Sync, A: Allocator> CatamorphismCached<V, A> for Z where Z: Zipper + ZipperConcrete + ZipperInfallibleSubtries<V, A> {
+    fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    where
+        W: Clone,
+        NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
     {
-        let rz = self.into_read_zipper(&[]);
-        rz.into_cata_cached_fallible(alg_f)
+        let focus = self.get_focus();
+        let mut cache = HashMap::new();
+        let w = if let Some(node) = focus.0.borrow() {
+            recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)?
+        } else {
+            match focus.into_option() {
+                Some(node) => recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(&node, self.val(), new_acc_f, fold_child_f, summarize_f, &mut cache)?,
+                None => return summarize_f(&ByteMask::EMPTY, self.val(), None, &[]),
+            }
+        };
+        Ok(w)
     }
-    fn into_cata_jumping_cached_fallible<W, E, AlgF>(self, alg_f: AlgF) -> Result<W, E>
-        where
-            W: Clone,
-            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> Result<W, E>
+}
+
+impl<'a, Z, V: 'a> CatamorphismCachedIterative<V> for Z where Z: Clone + Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer {
+    fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    where
+        W: Clone,
+        NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
     {
-        let rz = self.into_read_zipper(&[]);
-        rz.into_cata_jumping_cached_fallible(alg_f)
+        summarize_cached_body::<_, V, Acc, _, _, _, _, _, COMPUTE_PATH>(
+            self.clone(),
+            new_acc_f,
+            fold_child_f,
+            summarize_f,
+        )
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCached<V, A> for PathMap<V, A> {
+    fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    where
+        W: Clone,
+        NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    {
+        let w = match self.root() {
+            Some(node) => {
+                let mut cache = HashMap::new();
+                recursive_cata_cached::<_, _, Acc, _, Err, _, _, _, COMPUTE_PATH>(node, self.root_val(), new_acc_f, fold_child_f, summarize_f, &mut cache)
+            },
+            None => summarize_f(&ByteMask::EMPTY, None, None, &[]),
+        };
+        w
+    }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> CatamorphismCachedIterative<V> for PathMap<V, A> {
+    fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+    where
+        W: Clone,
+        NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    {
+        summarize_cached_body::<_, V, Acc, _, _, _, _, _, COMPUTE_PATH>(
+            self.read_zipper(),
+            new_acc_f,
+            fold_child_f,
+            summarize_f,
+        )
+    }
+}
+
+
+/// Helper function to summarize one path run (section of non-branching path bytes)
+//
+//NOTE: #[inline(always)] here leads to a huge bloating of the size of the a stack frame in the recursive cata
+// (about 2.5x bloat.  but #[inline(never)] costs about 25% performance.  Letting the compiler do its thing seems
+// to be the sweet spot.
+pub(crate) fn summarize_run<V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(
+    val: Option<&V>,
+    downstream: Option<W>,
+    prefix: &[u8],
+    start_f: StartF,
+    fold_child_f: FoldChildF,
+    finalize_f: FinalizeF,
+) -> Result<W, Err>
+where
+    StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+    FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+{
+    match (val, downstream, prefix) {
+        (None, Some(w), []) => Ok(w),
+        (val, Some(w), prefix) => {
+            let mask = if !prefix.is_empty() { ByteMask::from(*prefix.last().unwrap()) } else { ByteMask::EMPTY };
+            let mut acc = start_f(&mask)?;
+            fold_child_f(&mask, w, &mut acc)?;
+            let prefix = if COMPUTE_PATH {
+                if prefix.is_empty() { prefix } else { &prefix[..prefix.len() - 1] }
+            } else {
+                &[]
+            };
+            finalize_f(&mask, val, Some(acc), prefix)
+        },
+        (val, None, prefix) => finalize_f(&ByteMask::EMPTY, val, None, if COMPUTE_PATH { prefix } else { &[] }),
     }
 }
 
@@ -457,16 +762,16 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
 {
     //`stack` holds a "frame" at each forking point above the zipper position.  No frames exist for values
-    let mut stack = Vec::<StackFrame>::with_capacity(12);
+    let mut stack = Vec::<SideEffectStackFrame>::with_capacity(12);
     let mut children = Vec::<W>::new();
     let mut frame_idx = 0;
 
-    z.reset();
+    let focus_depth = z.depth();
     z.prepare_buffers();
-    //Push a stack frame for the root, and start on the first branch off the root
-    stack.push(StackFrame::from(&z));
+    // Push a stack frame for the initial focus, and start on its first branch.
+    stack.push(SideEffectStackFrame::new(&z));
     if z.descend_first_byte().is_none() {
-        //Empty trie is a special case
+        // A leaf focus is a special case.
         return alg_f(&ByteMask::EMPTY, &mut [], 0, z.val(), z.origin_path(), &z)
     }
 
@@ -482,7 +787,15 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
 
         if is_leaf {
             //Ascend back to the last fork point from this leaf
-            let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, &mut [])?;
+            let cur_w = match ascend_to_focus_or_fork::<Z, V, W, Err, AlgF, JUMPING>(
+                &mut z,
+                focus_depth,
+                &mut alg_f,
+                &mut [],
+            )? {
+                AscendResult::Parent(w) => w,
+                AscendResult::Focus(w) => return Ok(w),
+            };
             children.push(cur_w);
             stack[frame_idx].child_idx += 1;
 
@@ -508,7 +821,15 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
                     debug_assert_eq!(stack[frame_idx].child_idx, stack[frame_idx].child_cnt);
                     let child_start = children.len() - stack[frame_idx].child_cnt as usize;
                     let children2 = &mut children[child_start..];
-                    let cur_w = ascend_to_fork::<Z, V, W, Err, AlgF, JUMPING>(&mut z, &mut alg_f, children2)?;
+                    let cur_w = match ascend_to_focus_or_fork::<Z, V, W, Err, AlgF, JUMPING>(
+                        &mut z,
+                        focus_depth,
+                        &mut alg_f,
+                        children2,
+                    )? {
+                        AscendResult::Parent(w) => w,
+                        AscendResult::Focus(w) => return Ok(w),
+                    };
                     children.truncate(child_start);
                     frame_idx -= 1;
 
@@ -522,8 +843,16 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
             let descended = z.descend_indexed_byte(stack[frame_idx].child_idx as usize);
             debug_assert!(descended.is_some());
         } else {
-            //Push a new stack frame for this branch
-            Stack::push_state_raw(&mut stack, &mut frame_idx, &z);
+            // Push a new stack frame for this branch, reusing a frame left by a completed
+            // sibling branch when possible.
+            frame_idx += 1;
+            assert!(frame_idx <= stack.len(), "stack invariant: frame index <= length");
+            let frame = SideEffectStackFrame::new(&z);
+            if frame_idx == stack.len() {
+                stack.push(frame);
+            } else {
+                stack[frame_idx] = frame;
+            }
 
             //Descend the first child branch
             let descended = z.descend_first_byte();
@@ -532,153 +861,126 @@ fn cata_side_effect_body<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(mut z:
     }
 }
 
+/// Ascends from a completed child to either its parent fork or the initial cata focus.
+///
+/// A jumping ascent may otherwise pass a valueless unary focus in one movement, so the focus
+/// boundary is checked explicitly rather than relying on `at_root()`.
 #[inline(always)]
-fn ascend_to_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(z: &mut Z, 
-        alg_f: &mut AlgF, children: &mut [W]
-) -> Result<W, Err>
-    where
+fn ascend_to_focus_or_fork<'a, Z, V: 'a, W, Err, AlgF, const JUMPING: bool>(
+    z: &mut Z,
+    focus_depth: usize,
+    alg_f: &mut AlgF,
+    children: &mut [W],
+) -> Result<AscendResult<W>, Err>
+where
     Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>
+    AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8], &Z) -> Result<W, Err>,
 {
-    let z_witness = z.witness();
-    let mut w;
+    let witness = z.witness();
     let mut child_mask = ByteMask::from(z.child_mask());
     let mut children = &mut children[..];
+
     if JUMPING {
-        //This loop runs until we got to a fork or the root.  We will take a spin through the loop
-        // for each value we encounter along the way while ascending
+        let mut w;
         loop {
+            let old_depth = z.depth();
             let old_path_len = z.origin_path().len();
-            let old_val = z.get_val_with_witness(&z_witness);
+            let old_value = z.get_val_with_witness(&witness);
             let ascended = z.ascend_until();
             debug_assert!(ascended > 0);
 
-            let origin_path = unsafe{ z.origin_path_assert_len(old_path_len) };
-            let jump_len = if z.child_count() != 1 || z.is_val() {
-                old_path_len - (z.origin_path().len()+1)
-            } else {
-                old_path_len - z.origin_path().len()
-            };
+            // SAFETY: `ascend_until` only shortens the path, so the former path remains initialized
+            // in the prepared buffer until the next movement.
+            let origin_path = unsafe { z.origin_path_assert_len(old_path_len) };
 
-            w = alg_f(&child_mask, children, jump_len, old_val, origin_path, &z)?;
+            if z.depth() < focus_depth {
+                // A valueless unary focus is not an `ascend_until` stopping point.  Its jumping
+                // cata is just its child's result, but the preceding callback must report the
+                // jump relative to this focus rather than to the zipper's root.
+                debug_assert!(old_depth > focus_depth);
+                w = alg_f(
+                    &child_mask,
+                    children,
+                    old_depth - focus_depth,
+                    old_value,
+                    origin_path,
+                    z,
+                )?;
+                return Ok(AscendResult::Focus(w))
+            }
+
+            let jump_len = if z.child_count() != 1 || z.is_val() {
+                ascended - 1
+            } else {
+                ascended
+            };
+            w = alg_f(&child_mask, children, jump_len, old_value, origin_path, z)?;
+
+            if z.depth() == focus_depth && z.child_count() == 1 {
+                // A valued unary focus stops `ascend_until`; complete that focus here rather
+                // than continuing to its parent. A valueless focus is a jumping passthrough.
+                return if z.is_val() {
+                    let byte = origin_path[old_path_len - jump_len - 1];
+                    let child_mask = ByteMask::from(byte);
+                    let mut child = [w];
+                    alg_f(&child_mask, &mut child, 0, z.val(), z.origin_path(), z)
+                        .map(AscendResult::Focus)
+                } else {
+                    Ok(AscendResult::Focus(w))
+                }
+            }
 
             if z.child_count() != 1 || z.at_root() {
-                return Ok(w)
+                return Ok(AscendResult::Parent(w))
             }
 
             children = core::array::from_mut(&mut w);
-
-            // SAFETY: We will never over-read the path buffer because we only get here after we ascended
-            let byte = *unsafe{ z.origin_path_assert_len(old_path_len-jump_len) }.last().unwrap();
-            child_mask = ByteMask::EMPTY;
-            child_mask.set_bit(byte);
+            let byte = origin_path[old_path_len - jump_len - 1];
+            child_mask = ByteMask::from(byte);
         }
     } else {
-        //This loop runs at each byte step as we ascend
+        let mut w;
         loop {
             let origin_path = z.origin_path();
             let byte = origin_path.last().copied().unwrap_or(0);
-            let val = z.val();
-            w = alg_f(&child_mask, children, 0, val, origin_path, &z)?;
+            let value = z.val();
+            w = alg_f(&child_mask, children, 0, value, origin_path, z)?;
 
             let ascended = z.ascend_byte();
             debug_assert!(ascended);
 
+            if z.depth() == focus_depth && z.child_count() == 1 {
+                let child_mask = ByteMask::from(byte);
+                let mut child = [w];
+                return alg_f(&child_mask, &mut child, 0, z.val(), z.origin_path(), z)
+                    .map(AscendResult::Focus)
+            }
+
             if z.child_count() != 1 || z.at_root() {
-                return Ok(w)
+                return Ok(AscendResult::Parent(w))
             }
 
             children = core::array::from_mut(&mut w);
-            child_mask = ByteMask::EMPTY;
-            child_mask.set_bit(byte);
+            child_mask = ByteMask::from(byte);
         }
     }
 }
 
-/// Internal structure to hold temporary info used inside morphism apply methods
-struct StackFrame {
+/// A frame for the side-effecting cata's explicit traversal stack.
+struct SideEffectStackFrame {
     child_idx: u16,
     child_cnt: u16,
-    child_addr: Option<u64>,
 }
 
-impl StackFrame {
-    /// Allocates a new StackFrame
-    fn from<Z>(zipper: &Z) -> Self
-        where Z: Zipper,
+impl SideEffectStackFrame {
+    #[inline]
+    fn new<Z>(zipper: &Z) -> Self
+    where
+        Z: Zipper,
     {
-        let mut stack_frame = StackFrame {
-            child_cnt: 0,
-            child_idx: 0,
-            child_addr: None,
-        };
-        stack_frame.reset(zipper);
-        stack_frame
-    }
-
-    /// Resets a StackFrame to the state needed to iterate a new forking point
-    fn reset<Z>(&mut self, zipper: &Z)
-        where Z: Zipper,
-    {
-        self.child_cnt = zipper.child_count() as u16;
-        self.child_idx = 0;
-    }
-}
-
-struct Stack {
-    stack: Vec<StackFrame>,
-    position: usize,
-}
-
-impl Stack {
-    pub fn new() -> Self {
         Self {
-            stack: Vec::with_capacity(12),
-            position: !0,
-        }
-    }
-    /// Return the reference to the top stack frame
-    #[inline]
-    pub fn last_mut(&mut self) -> Option<&mut StackFrame> {
-        let idx = self.position;
-        self.stack.get_mut(idx)
-    }
-
-    /// Return the reference to the top stack frame
-    /// and decrease stack pointer. Doesn't free the stack frame.
-    #[inline]
-    pub fn pop_mut(&mut self) -> Option<&mut StackFrame> {
-        if self.position == !0 {
-            return None;
-        }
-        let idx = self.position;
-        self.position = self.position.wrapping_sub(1);
-        self.stack.get_mut(idx)
-    }
-
-    /// Push stack state for current zipper position
-    ///
-    /// This function re-uses allocations for stack frames,
-    /// to avoid allocator thrashing.
-    pub fn push_state<Z>(&mut self, z: &Z)
-        where Z: Zipper + ZipperPath,
-    {
-        Self::push_state_raw(&mut self.stack, &mut self.position, z);
-    }
-
-    pub fn push_state_raw<'a, Z>(
-        stack: &mut Vec<StackFrame>,
-        position: &mut usize,
-        zipper: &Z)
-        where Z: Zipper + ZipperPath,
-    {
-        *position = position.wrapping_add(1);
-        assert!(*position <= stack.len(),
-            "stack invariant: position <= len");
-        if *position == stack.len() {
-            stack.push(StackFrame::from(zipper));
-        } else {
-            stack[*position].reset(zipper);
+            child_idx: 0,
+            child_cnt: zipper.child_count() as u16,
         }
     }
 }
@@ -759,106 +1061,337 @@ impl<W: Clone> CacheStrategy<W> for DoCache {
     fn clone(w: &W) -> W { w.clone() }
 }
 
-/// Internal implementation behind all cached catas
-///
-/// AlgF args: (child_mask, children, value, sub_path, debug_path, zipper)
-pub(crate) fn into_cata_cached_body<'a, Z, V: 'a, W, E, AlgF, Cache, const JUMPING: bool, const DEBUG_PATH: bool>(
-    mut zipper: Z, mut alg_f: AlgF
-) -> Result<W, E>
-    where
-    Cache: CacheStrategy<W>,
-    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
-    AlgF: FnMut(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8], &Z) -> Result<W, E>
+/// Stack frame used in iterative (zipper-based) implementation of Summarization trait
+struct SummarizeStackFrame<Acc> {
+    child_idx: u16,
+    child_cnt: u16,
+    child_addr: Option<u64>,
+    accumulator: Acc,
+}
+
+impl<Acc> SummarizeStackFrame<Acc> {
+    #[inline]
+    fn new(child_cnt: usize, accumulator: Acc) -> Self {
+        Self {
+            child_idx: 0,
+            child_cnt: child_cnt as u16,
+            child_addr: None,
+            accumulator,
+        }
+    }
+}
+
+/// Result of ascending from a completed child.
+enum AscendResult<W> {
+    Parent(W),
+    Focus(W),
+}
+
+#[inline(always)]
+fn no_debug_path<Z>(_zipper: &Z, _depth: usize) -> &[u8] {
+    &[]
+}
+
+/// Ascend from a leaf or completed fork, summarizing each value and non-branching path run on the
+/// way to the parent fork.
+#[inline(always)]
+fn summarize_ascend_to_fork<'a, Z, V: 'a, Acc, W, E, DebugPathF, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const DEBUG_PATH: bool>(
+    zipper: &mut Z,
+    focus_depth: usize,
+    mut accumulator: Option<Acc>,
+    debug_path_f: DebugPathF,
+    new_acc_f: NewAccF,
+    fold_child_f: FoldChildF,
+    summarize_f: SummarizeF,
+) -> Result<AscendResult<W>, E>
+where
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperPathBuffer,
+    DebugPathF: Copy + for<'z> Fn(&'z Z, usize) -> &'z [u8],
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8], &[u8]) -> Result<W, E>,
 {
-    zipper.reset();
+    let witness = zipper.witness();
+    let mut child_mask = ByteMask::from(zipper.child_mask());
+
+    loop {
+        let old_depth = zipper.depth();
+        let old_value = zipper.get_val_with_witness(&witness);
+        if old_depth == focus_depth {
+            let debug_path = if DEBUG_PATH { debug_path_f(zipper, old_depth) } else { &[] };
+            return summarize_f(&child_mask, old_value, accumulator, &[], debug_path)
+                .map(AscendResult::Focus);
+        }
+
+        let ascended = zipper.ascend_until();
+        debug_assert!(ascended > 0);
+        let depth = zipper.depth();
+        debug_assert_eq!(old_depth - depth, ascended);
+
+        // SAFETY: `ascend_until` only shortens the logical path; the bytes it removed remain
+        // initialized in the zipper's prepared path buffer until the next zipper movement.
+        let path = unsafe { zipper.path_assert_len(old_depth) };
+        let debug_path = if DEBUG_PATH { debug_path_f(zipper, old_depth) } else { &[] };
+
+        // `ascend_until` can pass the initial focus when that focus is a valueless unary
+        // position in a compressed run. That position is the traversal root, so preserve the
+        // entire suffix below it and finish there rather than continuing toward the zipper root.
+        if depth < focus_depth {
+            debug_assert!(focus_depth < old_depth);
+            return summarize_f(
+                &child_mask,
+                old_value,
+                accumulator,
+                if COMPUTE_PATH { &path[focus_depth..old_depth] } else { &[] },
+                debug_path,
+            ).map(AscendResult::Focus);
+        }
+
+        let jump_len = if zipper.child_count() != 1 || zipper.is_val() {
+            ascended - 1
+        } else {
+            ascended
+        };
+        let prefix = if COMPUTE_PATH {
+            &path[old_depth - jump_len..]
+        } else {
+            &[]
+        };
+
+        let w = summarize_f(&child_mask, old_value, accumulator, prefix, debug_path)?;
+
+        if zipper.child_count() != 1 || zipper.at_root() {
+            return Ok(AscendResult::Parent(w))
+        }
+
+        debug_assert!(old_depth > jump_len);
+        let byte = path[old_depth - jump_len - 1];
+        child_mask = ByteMask::from(byte);
+        let mut next_accumulator = new_acc_f(&child_mask)?;
+        fold_child_f(&child_mask, w, &mut next_accumulator)?;
+        accumulator = Some(next_accumulator);
+    }
+}
+
+/// Iterative cached traversal behind [`CatamorphismCached::factored_cata_jumping`].
+fn summarize_cached_body<'a, Z, V: 'a, Acc, W, E, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+    zipper: Z,
+    new_acc_f: NewAccF,
+    fold_child_f: FoldChildF,
+    summarize_f: SummarizeF,
+) -> Result<W, E>
+where
+    W: Clone,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer,
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, E>,
+{
+    summarize_cached_body_with_debug::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, false>(
+        zipper,
+        no_debug_path::<Z>,
+        new_acc_f,
+        fold_child_f,
+        move |mask, value, accumulator, prefix, _debug_path| {
+            summarize_f(mask, value, accumulator, prefix)
+        },
+    )
+}
+
+/// Shared iterative cached traversal used by the ordinary and debug cata adapters.
+fn summarize_cached_body_with_debug<'a, Z, V: 'a, Acc, W, E, DebugPathF, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool, const DEBUG_PATH: bool>(
+    mut zipper: Z,
+    debug_path_f: DebugPathF,
+    new_acc_f: NewAccF,
+    fold_child_f: FoldChildF,
+    summarize_f: SummarizeF,
+) -> Result<W, E>
+where
+    W: Clone,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperPathBuffer,
+    DebugPathF: Copy + for<'z> Fn(&'z Z, usize) -> &'z [u8],
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, E>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), E>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8], &[u8]) -> Result<W, E>,
+{
+    let focus_depth = zipper.depth();
     zipper.prepare_buffers();
 
-    let mut stack = Stack::new();
-    let mut children = Vec::<W>::new();
+    let root_child_cnt = zipper.child_count();
+    if root_child_cnt == 0 {
+        let debug_path = if DEBUG_PATH { debug_path_f(&zipper, focus_depth) } else { &[] };
+        return summarize_f(&ByteMask::EMPTY, zipper.val(), None, &[], debug_path)
+    }
+
+    let passthrough_root = root_child_cnt == 1 && !zipper.is_val();
+    let mut stack = Vec::<SummarizeStackFrame<Acc>>::with_capacity(12);
+    if passthrough_root {
+        // A unary root without a value passes its child's W through unchanged, so it has no Acc.
+        zipper.descend_indexed_byte(0);
+        while zipper.child_count() < 2 {
+            if !zipper.descend_until() {
+                return summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
+                    &mut zipper,
+                    focus_depth,
+                    None,
+                    debug_path_f,
+                    new_acc_f,
+                    fold_child_f,
+                    summarize_f,
+                ).map(|result| match result {
+                    AscendResult::Parent(w) | AscendResult::Focus(w) => w,
+                })
+            }
+        }
+        let accumulator = new_acc_f(&ByteMask::from(zipper.child_mask()))?;
+        stack.push(SummarizeStackFrame::new(zipper.child_count(), accumulator));
+    } else {
+        let accumulator = new_acc_f(&ByteMask::from(zipper.child_mask()))?;
+        stack.push(SummarizeStackFrame::new(zipper.child_count(), accumulator));
+    }
+
     let mut cache = HashMap::<u64, W>::new();
-    stack.push_state(&zipper);
     'outer: loop {
         let frame_mut = stack.last_mut()
-            .expect("into_cata stack is emptied before we returned to root");
-        // This branch represents the body of the for loop.
+            .expect("summarization stack is emptied before we returned to root");
+
         if frame_mut.child_idx < frame_mut.child_cnt {
-            let descended = zipper.descend_indexed_byte(frame_mut.child_idx as usize);
-            debug_assert!(descended.is_some());
+            zipper.descend_indexed_byte(frame_mut.child_idx as usize);
             frame_mut.child_idx += 1;
             frame_mut.child_addr = zipper.shared_node_id();
 
-            // Read and reuse value from cache, if exists
-            if let Some(cache) = Cache::get(&cache, frame_mut.child_addr) {
-                // DO NOT modify the W from cache
-                children.push(cache);
+            if let Some(cached) = DoCache::get(&cache, frame_mut.child_addr) {
                 zipper.ascend_byte();
+                let child_mask = ByteMask::from(zipper.child_mask());
+                fold_child_f(&child_mask, cached, &mut frame_mut.accumulator)?;
                 continue 'outer;
             }
 
-            // Descend until leaf or branch
             let mut is_leaf = false;
-            'descend: while zipper.child_count() < 2 {
+            while zipper.child_count() < 2 {
                 if !zipper.descend_until() {
                     is_leaf = true;
-                    break 'descend;
+                    break;
                 }
             }
 
             if is_leaf {
-                // If we encounter a leaf, ascend immediately.
-                // This branch will preserve the current stack frame.
-                let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-                    &mut zipper, &mut |mask, children, jump, val, path, z| {
-                        alg_f(mask, children, val, &path[path.len()-jump..], path, z)
-                    }, &mut [])?;
-                // Put value to cache (1)
-                Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
-                children.push(cur_w);
+                let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
+                    &mut zipper,
+                    focus_depth,
+                    None,
+                    debug_path_f,
+                    new_acc_f,
+                    fold_child_f,
+                    summarize_f,
+                )? {
+                    AscendResult::Parent(w) => w,
+                    AscendResult::Focus(w) => return Ok(w),
+                };
+                DoCache::insert(&mut cache, frame_mut.child_addr, &cur_w);
+                let child_mask = ByteMask::from(zipper.child_mask());
+                fold_child_f(&child_mask, cur_w, &mut frame_mut.accumulator)?;
                 continue 'outer;
             }
 
-            // Enter one recursion step
-            stack.push_state(&zipper);
+            let accumulator = new_acc_f(&ByteMask::from(zipper.child_mask()))?;
+            stack.push(SummarizeStackFrame::new(zipper.child_count(), accumulator));
             continue 'outer;
         }
 
-        // This branch represents the rest of the function after the loop
-        let frame_idx = stack.position;
-        let StackFrame { child_cnt, .. } = stack.pop_mut()
-            .expect("we just checked that stack is not empty, pop must return Some");
-        let child_start = children.len() - *child_cnt as usize;
-        let children2 = &mut children[child_start..];
+        let frame = stack.pop()
+            .expect("we just checked that the summarization stack is not empty");
 
-        if frame_idx == 0 {
-            // Final branch
-            debug_assert!(zipper.at_root(), "must be at root when cata is done");
-            let value = zipper.val();
-            let child_mask = ByteMask::from(zipper.child_mask());
-            return if JUMPING && *child_cnt == 1 && value.is_none() {
-                Ok(children.pop().unwrap())
+        if stack.is_empty() {
+            return if passthrough_root {
+                summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
+                    &mut zipper,
+                    focus_depth,
+                    Some(frame.accumulator),
+                    debug_path_f,
+                    new_acc_f,
+                    fold_child_f,
+                    summarize_f,
+                ).map(|result| match result {
+                    AscendResult::Parent(w) | AscendResult::Focus(w) => w,
+                })
             } else {
-                let debug_path = if DEBUG_PATH {
-                    zipper.origin_path()
-                } else {
-                    &[]
-                };
-                alg_f(&child_mask, children2, value, &[], debug_path, &zipper)
+                debug_assert_eq!(zipper.depth(), focus_depth, "must be at the initial focus when summarization is done");
+                let child_mask = ByteMask::from(zipper.child_mask());
+                let debug_path = if DEBUG_PATH { debug_path_f(&zipper, focus_depth) } else { &[] };
+                summarize_f(&child_mask, zipper.val(), Some(frame.accumulator), &[], debug_path)
             };
         }
 
-        let cur_w = ascend_to_fork::<Z, V, W, E, _, JUMPING>(
-            &mut zipper, &mut |mask, children, jump, val, path, z| {
-                alg_f(mask, children, val, &path[path.len()-jump..], path, z)
-            }, children2)?;
-        children.truncate(child_start);
+        let cur_w = match summarize_ascend_to_fork::<Z, V, Acc, W, E, _, _, _, _, COMPUTE_PATH, DEBUG_PATH>(
+            &mut zipper,
+            focus_depth,
+            Some(frame.accumulator),
+            debug_path_f,
+            new_acc_f,
+            fold_child_f,
+            summarize_f,
+        )? {
+            AscendResult::Parent(w) => w,
+            AscendResult::Focus(w) => return Ok(w),
+        };
 
-        // Exit one recursion step
         let frame_mut = stack.last_mut()
-            .expect("when we're not at root, expect parent stack");
-        // Put value to cache (2) after recursion
-        Cache::insert(&mut cache, frame_mut.child_addr, &cur_w);
-        children.push(cur_w);
+            .expect("when we're not at root, expect a parent summarization stack frame");
+        DoCache::insert(&mut cache, frame_mut.child_addr, &cur_w);
+        let child_mask = ByteMask::from(zipper.child_mask());
+        fold_child_f(&child_mask, cur_w, &mut frame_mut.accumulator)?;
     }
+}
+
+#[inline(always)]
+fn debug_origin_path<'a, Z>(zipper: &'a Z, depth: usize) -> &'a [u8]
+where
+    Z: Zipper + ZipperAbsolutePath + ZipperPathBuffer,
+{
+    let root_prefix_len = zipper.origin_path().len() - zipper.depth();
+    // SAFETY: the caller supplies a depth that the zipper occupied earlier in this traversal;
+    // `prepare_buffers` keeps that path initialized until the next movement.
+    unsafe { zipper.origin_path_assert_len(root_prefix_len + depth) }
+}
+
+/// Debug-only adapter over the iterative cached cata. The extra path is an absolute path borrowed
+/// directly from the zipper buffer and must not influence the cached algebra's result.
+pub(crate) fn cata_jumping_cached_debug_body<'a, Z, V: 'a, W, E, AlgF>(
+    zipper: Z,
+    alg_f: AlgF,
+) -> Result<W, E>
+where
+    W: Clone,
+    Z: Zipper + ZipperReadOnlyConditionalValues<'a, V> + ZipperConcrete + ZipperAbsolutePath + ZipperPathBuffer,
+    AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8], &[u8]) -> Result<W, E>,
+{
+    let children = std::cell::RefCell::new(CataChildren::<W>::new());
+    let children = &children;
+    let alg_f = &alg_f;
+
+    summarize_cached_body_with_debug::<Z, V, CataChildrenAcc, W, E, _, _, _, _, true, true>(
+        zipper,
+        debug_origin_path::<Z>,
+        move |mask| {
+            debug_assert!(children.try_borrow_mut().is_ok());
+            Ok(unsafe { &mut *children.as_ptr() }.new_acc(mask.count_bits()))
+        },
+        move |_mask, child, accumulator| {
+            debug_assert!(children.try_borrow_mut().is_ok());
+            unsafe { &mut *children.as_ptr() }.push(accumulator, child);
+            Ok(())
+        },
+        move |mask, value, accumulator, prefix, debug_path| match accumulator {
+            Some(accumulator) => {
+                debug_assert!(children.try_borrow_mut().is_ok());
+                unsafe { &mut *children.as_ptr() }.summarize(accumulator, mask.count_bits(), |children| {
+                    alg_f(mask, children, value, prefix, debug_path)
+                })
+            },
+            None => alg_f(mask, &mut [], value, prefix, debug_path),
+        },
+    )
 }
 
 // This is a naive implementation of caching/jumping cata
@@ -1307,6 +1840,802 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
 //     }
 // }
 
+/// Shared cached-cata conformance tests for zipper implementations.
+#[cfg(test)]
+pub(crate) mod cached_catamorphism_tests {
+    use core::convert::Infallible;
+
+    use crate::alloc::GlobalAlloc;
+    use crate::utils::{ByteMask, ByteMaskIter};
+    use crate::write_zipper::{WriteZipperOwned, ZipperWriting};
+    use crate::zipper::{Zipper, ZipperIteration, ZipperMoving, ZipperPath};
+    use crate::PathMap;
+
+    pub const CACHED_CATA_TEST_KEYS: &[&[u8]] = &[
+        b"arrow", b"bow", b"cannon", b"roman", b"romane", b"romanus", b"romulus",
+        b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i",
+    ];
+    pub const CACHED_CATA_FOLD_ORDER_KEYS: &[&[u8]] = &[b"a", b"b"];
+    pub const CACHED_CATA_PASSTHROUGH_KEYS: &[&[u8]] = &[b"abc"];
+
+    /// The branch bytes a node owes its `fold_child` calls.
+    ///
+    /// The contract is one fold per bit, in ascending mask-bit order.  The reconstruction
+    /// probe uses this to make an invalid callback sequence fail at the first bad fold.
+    pub(crate) struct BranchBytes(ByteMaskIter);
+
+    impl BranchBytes {
+        fn of(child_mask: &ByteMask) -> Self {
+            Self(child_mask.iter())
+        }
+
+        fn take(&mut self) -> u8 {
+            self.0.next().expect(
+                "cached-cata contract violation: more fold_child calls than child-mask bits",
+            )
+        }
+
+        fn finish(mut self) {
+            assert!(
+                self.0.next().is_none(),
+                "cached-cata contract violation: fewer fold_child calls than child-mask bits",
+            );
+        }
+    }
+
+    /// Accumulator for the cached-cata reconstruction probe.
+    ///
+    /// Every branch owns one write zipper.  Child maps are grafted one mask-selected byte below
+    /// that zipper; `recon_summarize` then places the prefix and optional value around them.
+    pub(crate) struct ReconAcc {
+        branch_bytes: BranchBytes,
+        wz: WriteZipperOwned<()>,
+    }
+
+    pub(crate) fn recon_start(child_mask: &ByteMask) -> Result<ReconAcc, Infallible> {
+        Ok(ReconAcc {
+            branch_bytes: BranchBytes::of(child_mask),
+            wz: PathMap::new().into_write_zipper(b""),
+        })
+    }
+
+    pub(crate) fn recon_fold(
+        _child_mask: &ByteMask,
+        child: PathMap<()>,
+        accumulator: &mut ReconAcc,
+    ) -> Result<(), Infallible> {
+        let branch_byte = accumulator.branch_bytes.take();
+        accumulator.wz.descend_to_byte(branch_byte);
+        accumulator.wz.graft_map(child);
+        accumulator.wz.ascend_byte();
+        Ok(())
+    }
+
+    pub(crate) fn recon_summarize(
+        _child_mask: &ByteMask,
+        value: Option<&()>,
+        children: Option<ReconAcc>,
+        prefix: &[u8],
+    ) -> Result<PathMap<()>, Infallible> {
+        match children {
+            Some(ReconAcc { branch_bytes, mut wz }) => {
+                branch_bytes.finish();
+                if !prefix.is_empty() {
+                    wz.insert_prefix(prefix);
+                }
+                if value.is_some() {
+                    wz.descend_to(prefix);
+                    wz.set_val(());
+                }
+                Ok(wz.into_map())
+            }
+            None => {
+                let mut map = PathMap::new();
+                if value.is_some() {
+                    map.set_val_at(prefix, ());
+                }
+                Ok(map)
+            }
+        }
+    }
+
+    /// Reconstructs a logical trie through a named cached-cata implementation.
+    ///
+    /// This is intentionally a macro because the two engines are traits with the same methods,
+    /// rather than values of a common engine type.
+    macro_rules! reconstruct_trie {
+        (CatamorphismCached, $subject:expr) => {{
+            <_ as $crate::morphisms::CatamorphismCached<(), $crate::alloc::GlobalAlloc>>
+                ::factored_cata_jumping::<_, _, core::convert::Infallible, _, _, _, true>(
+                    $subject,
+                    $crate::morphisms::cached_catamorphism_tests::recon_start,
+                    $crate::morphisms::cached_catamorphism_tests::recon_fold,
+                    $crate::morphisms::cached_catamorphism_tests::recon_summarize,
+                )
+                .unwrap()
+        }};
+        (CatamorphismCachedIterative, $subject:expr) => {{
+            <_ as $crate::morphisms::CatamorphismCachedIterative<()>>
+                ::factored_cata_jumping::<_, _, core::convert::Infallible, _, _, _, true>(
+                    $subject,
+                    $crate::morphisms::cached_catamorphism_tests::recon_start,
+                    $crate::morphisms::cached_catamorphism_tests::recon_fold,
+                    $crate::morphisms::cached_catamorphism_tests::recon_summarize,
+                )
+                .unwrap()
+        }};
+    }
+    #[allow(unused_imports)] // Exported for conformance tests in other modules.
+    pub(crate) use reconstruct_trie;
+
+    /// Compares value paths without materializing either map's complete path list.
+    #[track_caller]
+    pub(crate) fn assert_same_paths(
+        got: &PathMap<()>,
+        expected: &PathMap<()>
+    ) {
+        let mut got = got.read_zipper();
+        let mut expected = expected.read_zipper();
+
+        assert_eq!(got.is_val(), expected.is_val());
+        if got.is_val() {
+            assert_eq!(got.path(), expected.path());
+        }
+
+        loop {
+            let got_has_value = got.to_next_val();
+            let expected_has_value = expected.to_next_val();
+            assert_eq!(got_has_value, expected_has_value, );
+            if !got_has_value {
+                break;
+            }
+            assert_eq!(got.path(), expected.path());
+        }
+    }
+
+    /// Runs both cached-cata engines through the reconstruction probe and checks each result
+    /// against the expected logical trie as well as against one another.
+    #[track_caller]
+    pub(crate) fn assert_reconstructs_like<Z>(subject: &Z, expected: &PathMap<()>)
+    where
+        Z: crate::morphisms::CatamorphismCached<(), GlobalAlloc>
+            + crate::morphisms::CatamorphismCachedIterative<()>,
+    {
+        let iterative = reconstruct_trie!(CatamorphismCachedIterative, subject);
+        assert_same_paths(&iterative, expected);
+
+        let recursive = reconstruct_trie!(CatamorphismCached, subject);
+        assert_same_paths(&recursive, expected);
+        assert_same_paths(&recursive, &iterative);
+    }
+
+    fn map_from_keys(keys: &[&[u8]]) -> PathMap<()> {
+        keys.iter().copied().map(|path| (path, ())).collect()
+    }
+
+    fn map_from_owned_keys(keys: &[Vec<u8>]) -> PathMap<()> {
+        keys.iter().map(|path| (path.as_slice(), ())).collect()
+    }
+
+    /// Checks a logical key set in both insertion orders.  This deliberately does not inspect
+    /// the resulting storage layout: a valid cached cata must honor the same observable contract
+    /// regardless of how the implementation stores these keys.
+    #[track_caller]
+    fn assert_logical_key_case_roundtrips(keys: &[Vec<u8>]) {
+        let map = map_from_owned_keys(keys);
+        assert_reconstructs_like(&map, &map);
+
+        let mut reversed = keys.to_vec();
+        reversed.reverse();
+        let map = map_from_owned_keys(&reversed);
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// Finds prefixes where the logical input keys have at least two different following bytes.
+    /// These are derived from the test data alone, not from the trie's concrete representation.
+    fn logical_branch_prefixes(keys: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut prefixes = Vec::new();
+        for key in keys {
+            for len in 0..key.len() {
+                let prefix = &key[..len];
+                let first_child = keys.iter()
+                    .filter(|candidate| candidate.starts_with(prefix))
+                    .filter_map(|candidate| candidate.get(len))
+                    .next();
+                let is_branch = first_child.is_some_and(|first| {
+                    keys.iter()
+                        .filter(|candidate| candidate.starts_with(prefix))
+                        .filter_map(|candidate| candidate.get(len))
+                        .any(|child| child != first)
+                });
+                if is_branch && !prefixes.iter().any(|existing| existing == prefix) {
+                    prefixes.push(prefix.to_vec());
+                }
+            }
+        }
+        prefixes
+    }
+
+    /// Runs the focused-zipper portion of the differential harness.  Both the requested focus
+    /// and the expected subtrie come from the logical source keys, keeping this test independent
+    /// of the storage representation.
+    fn assert_logical_focus_roundtrips(keys: &[Vec<u8>], focus: &[u8]) {
+        let map = map_from_owned_keys(keys);
+        let expected_keys: Vec<Vec<u8>> = keys.iter()
+            .filter_map(|key| key.strip_prefix(focus).map(ToOwned::to_owned))
+            .collect();
+        let expected = map_from_owned_keys(&expected_keys);
+
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(focus);
+        assert_eq!(zipper.path(), focus);
+        assert_reconstructs_like(&zipper, &expected);
+    }
+
+    fn assert_random_case(
+        seed: &[u8; 32],
+        round: usize,
+        focus: Option<&[u8]>,
+        test: impl FnOnce(),
+    ) {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(test)).is_err() {
+            panic!(
+                "random cached-cata regression: seed={seed:?}, round={round}, focus={focus:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn reconstruction_harness_sanity() {
+        let map = map_from_keys(&[b"a1", b"a2", b"b"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A value and a child with different first bytes must be folded in ascending byte order.
+    ///
+    /// The keys are deliberately chosen only through the public map API; their physical node
+    /// representation is not part of this test's setup or assertion.
+    #[test]
+    fn recursive_cata_regression_val_child_fold_order() {
+        let map = map_from_keys(&[b"a", b"b1", b"b2"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A short value sharing its first byte with a longer value must stay at its exact path.
+    #[test]
+    fn recursive_cata_regression_shared_byte_value_position() {
+        let map = map_from_keys(&[b"a", b"abc"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A value passed through a non-branching run must not cause its downstream child to be
+    /// folded through an empty mask.
+    #[test]
+    fn recursive_cata_regression_passed_value_child_mask() {
+        let map = map_from_keys(&[b"x", b"xy", b"xyz", b"xa1", b"xa2", b"q"]);
+
+        assert_reconstructs_like(&map, &map);
+    }
+
+    /// A focus within a compressed path must include every value below it, including any value
+    /// held at the focus. Reconstructed paths are relative to that focus.
+    #[test]
+    fn recursive_cata_regression_mid_node_focus() {
+        let map = map_from_keys(&[b"abc1", b"abc2"]);
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"ab");
+        assert_eq!(zipper.path(), b"ab");
+        assert_reconstructs_like(&zipper, &map_from_keys(&[b"c1", b"c2"]));
+
+        let map = map_from_keys(&[b"ab", b"abcd"]);
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"ab");
+        assert_eq!(zipper.path(), b"ab");
+        assert_reconstructs_like(&zipper, &map_from_keys(&[b"", b"cd"]));
+
+        let map = map_from_keys(&[b"abc"]);
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"abc");
+        assert_eq!(zipper.path(), b"abc");
+        assert_reconstructs_like(&zipper, &map_from_keys(&[b""]));
+    }
+
+    /// Systematically exercises logical value/branch/prefix combinations that may be represented
+    /// compactly in different ways.  The corpus speaks only in paths and values; it neither
+    /// assumes nor inspects a particular concrete node representation.
+    #[test]
+    fn recursive_cata_logical_prefix_and_branch_corpus() {
+        let mut cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![],
+            vec![b"".to_vec()],
+            vec![b"abcd".to_vec()],
+            vec![b"a".to_vec(), b"ab".to_vec(), b"abc".to_vec()],
+            vec![b"a".to_vec(), b"b".to_vec()],
+            vec![b"a1".to_vec(), b"a2".to_vec(), b"b1".to_vec(), b"b2".to_vec()],
+            vec![b"a".to_vec(), b"ab1".to_vec(), b"ab2".to_vec()],
+            vec![b"".to_vec(), b"q1".to_vec(), b"q2".to_vec()],
+            // A value mid-run with both a deeper child and a sibling branch.
+            vec![b"accab".to_vec(), b"ac".to_vec(), b"accac".to_vec(), b"abacc".to_vec()],
+        ];
+
+        for tail_len in 1..=4 {
+            let tail = &b"cdef"[..tail_len];
+
+            let mut shared_value_tail = b"a".to_vec();
+            shared_value_tail.extend_from_slice(tail);
+            cases.push(vec![b"a".to_vec(), shared_value_tail]);
+
+            let mut high_child_1 = b"b1".to_vec();
+            high_child_1.extend_from_slice(tail);
+            let mut high_child_2 = b"b2".to_vec();
+            high_child_2.extend_from_slice(tail);
+            cases.push(vec![b"a".to_vec(), high_child_1, high_child_2]);
+
+            let mut low_child_1 = b"a1".to_vec();
+            low_child_1.extend_from_slice(tail);
+            let mut low_child_2 = b"a2".to_vec();
+            low_child_2.extend_from_slice(tail);
+            cases.push(vec![low_child_1, low_child_2, b"b".to_vec()]);
+
+            let mut same_byte_child_1 = b"ab1".to_vec();
+            same_byte_child_1.extend_from_slice(tail);
+            let mut same_byte_child_2 = b"ab2".to_vec();
+            same_byte_child_2.extend_from_slice(tail);
+            cases.push(vec![b"a".to_vec(), same_byte_child_1, same_byte_child_2]);
+        }
+
+        for keys in cases {
+            assert_logical_key_case_roundtrips(&keys);
+        }
+    }
+
+    /// A 256-way logical branch exercises storage configurations that use wide byte-indexed
+    /// nodes without making the test depend on any particular node representation. Miri uses
+    /// representative mask-word-boundary bytes instead of the full branch fanout.
+    #[test]
+    fn recursive_cata_wide_logical_branch() {
+        #[cfg(miri)]
+        let keys: Vec<Vec<u8>> = [0, 1, 63, 64, 127, 128, 191, 192, 254, 255]
+            .into_iter()
+            .map(|byte| vec![byte, b'a', byte])
+            .collect();
+        #[cfg(not(miri))]
+        let keys: Vec<Vec<u8>> = (0u8..=u8::MAX)
+            .map(|byte| vec![byte, b'a', byte])
+            .collect();
+
+        assert_logical_key_case_roundtrips(&keys);
+        #[cfg(miri)]
+        let focus_bytes = [0, 64, 128, 255];
+        #[cfg(not(miri))]
+        let focus_bytes = [0, 63, 64, 127, 128, 191, 192, 255];
+        for byte in focus_bytes {
+            assert_logical_focus_roundtrips(&keys, &[byte]);
+        }
+    }
+
+    /// Differential coverage over seeded logical maps and root/value/branch/proper-prefix
+    /// focuses. The seed is fixed so any failure is reproducible without observing concrete
+    /// node layout.
+    #[test]
+    fn recursive_cata_randomized_maps_and_foci() {
+        const SEED: [u8; 32] = [31; 32];
+
+        #[cfg(miri)]
+        const ROUNDS: usize = 1;
+        #[cfg(not(miri))]
+        const ROUNDS: usize = 64;
+
+        #[cfg(miri)]
+        const KEYS_PER_ROUND: usize = 12;
+        #[cfg(not(miri))]
+        const KEYS_PER_ROUND: usize = 48;
+
+        #[cfg(miri)]
+        const FOCI_PER_ROUND: usize = 3;
+        #[cfg(not(miri))]
+        const FOCI_PER_ROUND: usize = 8;
+
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        let mut rng = StdRng::from_seed(SEED);
+        for round in 0..ROUNDS {
+            let keys: Vec<Vec<u8>> = (0..KEYS_PER_ROUND)
+                .map(|_| {
+                    let len = rng.random_range(0..=6);
+                    (0..len)
+                        .map(|_| b'a' + rng.random_range(0..3))
+                        .collect()
+                })
+                .collect();
+            let branch_prefixes = logical_branch_prefixes(&keys);
+
+            assert_random_case(&SEED, round, None, || {
+                assert_logical_key_case_roundtrips(&keys);
+            });
+            assert_random_case(&SEED, round, Some(b""), || {
+                assert_logical_focus_roundtrips(&keys, b"");
+            });
+
+            for focus_idx in 0..FOCI_PER_ROUND {
+                let key = &keys[rng.random_range(0..keys.len())];
+                let focus = match focus_idx % 3 {
+                    // An exact value path.
+                    0 => key.clone(),
+                    // A proper prefix, which may fall inside a compressed run.
+                    1 if !key.is_empty() => {
+                        key[..rng.random_range(0..key.len())].to_vec()
+                    }
+                    // A logical branch prefix, or root if the generated map has none.
+                    _ if branch_prefixes.is_empty() => Vec::new(),
+                    _ => branch_prefixes[rng.random_range(0..branch_prefixes.len())].clone(),
+                };
+                assert_random_case(&SEED, round, Some(&focus), || {
+                    assert_logical_focus_roundtrips(&keys, &focus);
+                });
+            }
+        }
+    }
+
+    macro_rules! define_cached_catamorphism_test_suite {
+        ($suite_name:ident, $cata_trait:ident, [$($cata_args:ty),+]) => {
+            pub(crate) mod $suite_name {
+                use super::{Infallible, ZipperMoving, ZipperPath};
+                use crate::morphisms::$cata_trait;
+                use crate::utils::BitMask;
+
+    pub fn factored_cata_propagates_callback_errors<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let error = $cata_trait::<$($cata_args),*>
+            ::factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
+                &zipper,
+                |_| Err("new"),
+                |_mask, _child, _acc| Ok(()),
+                |_mask, _value, _acc, _prefix| Ok(()),
+            );
+        assert_eq!(error, Err("new"));
+
+        let error = $cata_trait::<$($cata_args),*>
+            ::factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
+                &zipper,
+                |_| Ok(()),
+                |_mask, _child, _acc| Err("fold"),
+                |_mask, _value, _acc, _prefix| Ok(()),
+            );
+        assert_eq!(error, Err("fold"));
+
+        let error = $cata_trait::<$($cata_args),*>
+            ::factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
+                &zipper,
+                |_| Ok(()),
+                |_mask, _child, _acc| Ok(()),
+                |_mask, _value, _acc, _prefix| Err("summarize"),
+            );
+        assert_eq!(error, Err("summarize"));
+    }
+
+    pub fn leaf_count_stepping<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let count = $cata_trait::<$($cata_args),*>::cata_cached(
+            &zipper,
+            |_mask, children: &mut [usize], value| {
+                if children.is_empty() {
+                    assert!(value.is_some());
+                    1
+                } else {
+                    children.iter().sum()
+                }
+            },
+        );
+        assert_eq!(count, 11);
+    }
+
+    pub fn leaf_count_jumping<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let count = $cata_trait::<$($cata_args),*>::cata_jumping_cached(
+            &zipper,
+            |_mask, children: &mut [usize], value, _prefix| {
+                if children.is_empty() {
+                    assert!(value.is_some());
+                    1
+                } else {
+                    children.iter().sum()
+                }
+            },
+        );
+        assert_eq!(count, 11);
+    }
+
+    pub fn leaf_count_factored_jumping<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let count = $cata_trait::<$($cata_args),*>
+            ::factored_cata_jumping::<usize, usize, Infallible, _, _, _, false>(
+                &zipper,
+                |_| Ok(0),
+                |_mask, child, total| { *total += child; Ok(()) },
+                |_mask, value, total, _prefix| match total {
+                    Some(total) => Ok(total),
+                    None => {
+                        assert!(value.is_some());
+                        Ok(1)
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(count, 11);
+    }
+
+    pub fn leaf_count_factored_stepping<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let count = $cata_trait::<$($cata_args),*>
+            ::factored_cata::<usize, usize, Infallible, _, _, _>(
+                &zipper,
+                |_| Ok(0),
+                |_mask, child, total| { *total += child; Ok(()) },
+                |_mask, value, total| match total {
+                    Some(total) => Ok(total),
+                    None => {
+                        assert!(value.is_some());
+                        Ok(1)
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(count, 11);
+    }
+
+    /// A cached cata starts at the zipper's focus: it includes a value held there and all of its
+    /// descendants, but not values elsewhere in the trie.
+    pub fn cata_from_value_focus<Z>(mut zipper: Z)
+    where
+        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        zipper.descend_to(b"roman");
+        let count = $cata_trait::<$($cata_args),*>::cata_cached(
+            &zipper,
+            |_mask, children: &mut [usize], value| {
+                value.is_some() as usize + children.iter().sum::<usize>()
+            },
+        );
+
+        assert_eq!(count, 3);
+        assert_eq!(zipper.path(), b"roman");
+    }
+
+    /// The focus may be within a compressed run rather than at an explicit logical branch.
+    /// Traversal still covers precisely the subtrie below that point.
+    pub fn cata_from_mid_run_focus<Z>(mut zipper: Z)
+    where
+        Z: ZipperMoving + ZipperPath + crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        zipper.descend_to(b"roma");
+        let count = $cata_trait::<$($cata_args),*>::cata_jumping_cached(
+            &zipper,
+            |_mask, children: &mut [usize], value, _prefix| {
+                value.is_some() as usize + children.iter().sum::<usize>()
+            },
+        );
+
+        assert_eq!(count, 3);
+        assert_eq!(zipper.path(), b"roma");
+    }
+
+    pub fn longest_path_jumping<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let longest = $cata_trait::<$($cata_args),*>::cata_jumping_cached(
+            &zipper,
+            |mask, children: &mut [Vec<u8>], _value, prefix| {
+                let mut longest = mask.iter().zip(children.iter_mut())
+                    .max_by_key(|(_byte, rest)| rest.len())
+                    .map_or_else(Vec::new, |(byte, rest)| {
+                        let mut path = core::mem::take(rest);
+                        path.insert(0, byte);
+                        path
+                    });
+                let mut path = prefix.to_vec();
+                path.append(&mut longest);
+                path
+            },
+        );
+        assert_eq!(longest, b"rubicundus");
+    }
+
+    pub fn longest_path_factored_jumping<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let longest = $cata_trait::<$($cata_args),*>
+            ::factored_cata_jumping::<Vec<Vec<u8>>, Vec<u8>, Infallible, _, _, _, true>(
+                &zipper,
+                |_| Ok(Vec::new()),
+                |_mask, child, children| { children.push(child); Ok(()) },
+                |mask, _value, children, prefix| {
+                    let mut longest = children.map_or_else(Vec::new, |children| {
+                        if mask.is_empty_mask() {
+                            children.into_iter().max_by_key(|rest| rest.len()).unwrap_or_default()
+                        } else {
+                            mask.iter().zip(children).max_by_key(|(_byte, rest)| rest.len())
+                                .map_or_else(Vec::new, |(byte, mut rest)| {
+                                    rest.insert(0, byte);
+                                    rest
+                                })
+                        }
+                    });
+                    let mut path = prefix.to_vec();
+                    path.append(&mut longest);
+                    Ok(path)
+                },
+            )
+            .unwrap();
+        assert_eq!(longest, b"rubicundus");
+    }
+
+    pub fn branch_values_stepping<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let values = $cata_trait::<$($cata_args),*>::cata_cached(
+            &zipper,
+            |_mask, children: &mut [Vec<u64>], value| {
+                if children.is_empty() {
+                    Vec::new()
+                } else if let Some(value) = value {
+                    vec![*value]
+                } else {
+                    let mut values = children.first_mut().map_or_else(Vec::new, core::mem::take);
+                    for child in &mut children[1..] {
+                        values.append(child);
+                    }
+                    values
+                }
+            },
+        );
+        assert_eq!(values, vec![3]);
+    }
+
+    pub fn factored_cata_folds_each_child_immediately<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let result = $cata_trait::<$($cata_args),*>
+            ::factored_cata_jumping::<Vec<u64>, u64, Infallible, _, _, _, false>(
+                &zipper,
+                |_mask| {
+                    events.borrow_mut().push("new");
+                    Ok(Vec::new())
+                },
+                |_mask, child, accumulator| {
+                    events.borrow_mut().push(if child == 0 { "fold 0" } else { "fold 1" });
+                    accumulator.push(child);
+                    Ok(())
+                },
+                |_mask, value, accumulator, _prefix| {
+                    match value {
+                        Some(0) => events.borrow_mut().push("summarize 0"),
+                        Some(1) => events.borrow_mut().push("summarize 1"),
+                        _ => events.borrow_mut().push("summarize root"),
+                    }
+                    Ok(value.copied().unwrap_or_else(|| accumulator.unwrap().into_iter().sum()))
+                },
+            )
+            .unwrap();
+        assert_eq!(result, 1);
+        assert_eq!(events.into_inner(), ["new", "summarize 0", "fold 0", "summarize 1", "fold 1", "summarize root"]);
+    }
+
+    pub fn factored_cata_passthrough_root<Z>(zipper: Z)
+    where
+        Z: crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        let result = $cata_trait::<$($cata_args),*>
+            ::factored_cata_jumping::<Vec<(u8, Vec<u8>)>, Vec<u8>, Infallible, _, _, _, true>(
+                &zipper,
+                |_| Ok(Vec::new()),
+                |mask, child, children| {
+                    let byte = mask.iter().nth(children.len())
+                        .expect("fold_child called more times than child-mask bits");
+                    children.push((byte, child));
+                    Ok(())
+                },
+                |_mask, value, children, prefix| {
+                    let mut path = prefix.to_vec();
+                    match (value, children) {
+                        (Some(&0), None) => {},
+                        (None, Some(mut children)) => {
+                            assert_eq!(children.len(), 1);
+                            let (byte, child) = children.pop().unwrap();
+                            path.push(byte);
+                            path.extend(child);
+                        },
+                        _ => panic!("unexpected callback shape for a single value path"),
+                    }
+                    Ok(path)
+                },
+            )
+            .unwrap();
+        assert_eq!(result, b"abc");
+    }
+
+    /// Internal helper that gives the zipper constructor the lifetime of the test store.
+    pub fn run_test<'a, Z, Store>(
+        store: &'a mut Store,
+        make_z: impl Fn(&'a mut Store) -> Z,
+        test: impl Fn(Z),
+    )
+    where
+        Z: 'a + crate::morphisms::$cata_trait<$($cata_args),*>,
+    {
+        test(make_z(store));
+    }
+
+            }
+        };
+    }
+
+    define_cached_catamorphism_test_suite!(recursive, CatamorphismCached, [u64, crate::alloc::GlobalAlloc]);
+    define_cached_catamorphism_test_suite!(iterative, CatamorphismCachedIterative, [u64]);
+
+    macro_rules! cached_catamorphism_case {
+        ($z_name:ident, $implementation:ident, $suite:ident, $read_keys:expr, $make_z:expr, $keys:ident, $test:ident) => {
+            paste::paste! {
+                #[test]
+                fn [<$z_name _ $implementation _ $test>]() {
+                    let mut temp_store = ($read_keys)(crate::morphisms::cached_catamorphism_tests::$keys);
+                    crate::morphisms::cached_catamorphism_tests::$suite::run_test(
+                        &mut temp_store,
+                        $make_z,
+                        crate::morphisms::cached_catamorphism_tests::$suite::$test,
+                    );
+                }
+            }
+        };
+    }
+    pub(crate) use cached_catamorphism_case;
+
+    macro_rules! cached_catamorphism_tests {
+        ($z_name:ident, $read_keys:expr, $make_z:expr, CatamorphismCached) => {
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!($z_name, $read_keys, $make_z, recursive, recursive);
+        };
+        ($z_name:ident, $read_keys:expr, $make_z:expr, CatamorphismCachedIterative) => {
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!($z_name, $read_keys, $make_z, iterative, iterative);
+        };
+        ($z_name:ident, $read_keys:expr, $make_z:expr, $implementation:ident, $suite:ident) => {
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, leaf_count_stepping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, leaf_count_jumping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, leaf_count_factored_jumping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, leaf_count_factored_stepping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, cata_from_value_focus);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, cata_from_mid_run_focus);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, longest_path_jumping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, longest_path_factored_jumping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, branch_values_stepping);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_FOLD_ORDER_KEYS, factored_cata_folds_each_child_immediately);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_PASSTHROUGH_KEYS, factored_cata_passthrough_root);
+            $crate::morphisms::cached_catamorphism_tests::cached_catamorphism_case!($z_name, $implementation, $suite, $read_keys, $make_z, CACHED_CATA_TEST_KEYS, factored_cata_propagates_callback_errors);
+        };
+    }
+    pub(crate) use cached_catamorphism_tests;
+}
+
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
@@ -1314,10 +2643,106 @@ mod tests {
     use crate::utils::BitMask;
     use super::*;
 
+    trait TestRecursiveCata<V: Clone + Send + Sync>: Sized {
+        fn recursive_cata_cached<W, AlgF>(&self, alg_f: AlgF) -> W
+        where
+            Self: CatamorphismCached<V, GlobalAlloc>,
+            W: Clone,
+            AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
+        {
+            CatamorphismCached::<V, GlobalAlloc>::cata_cached(self, alg_f)
+        }
+
+        fn recursive_cata_jumping_cached<W, AlgF>(&self, alg_f: AlgF) -> W
+        where
+            Self: CatamorphismCached<V, GlobalAlloc>,
+            W: Clone,
+            AlgF: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
+        {
+            CatamorphismCached::<V, GlobalAlloc>::cata_jumping_cached(self, alg_f)
+        }
+
+        fn recursive_factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+        where
+            Self: CatamorphismCached<V, GlobalAlloc>,
+            W: Clone,
+            NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+            FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+            SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+        {
+            CatamorphismCached::<V, GlobalAlloc>::factored_cata_jumping::<Acc, W, Err, _, _, _, COMPUTE_PATH>(self, new_acc_f, fold_child_f, summarize_f)
+        }
+
+        fn recursive_factored_cata<Acc, W, Err, NewAccF, FoldChildF, SummarizeF>(&self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF) -> Result<W, Err>
+        where
+            Self: CatamorphismCached<V, GlobalAlloc>,
+            W: Clone,
+            NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+            FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+            SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>) -> Result<W, Err>,
+        {
+            CatamorphismCached::<V, GlobalAlloc>::factored_cata(self, new_acc_f, fold_child_f, summarize_f)
+        }
+    }
+
+    impl<V: Clone + Send + Sync, Z> TestRecursiveCata<V> for Z {}
+
+    #[test]
+    fn recursive_and_iterative_cached_catas_agree() {
+        let map: PathMap<usize> = [
+            (b"abc".as_slice(), 1),
+            (b"abd".as_slice(), 2),
+            (b"ax".as_slice(), 3),
+        ]
+        .into_iter()
+        .collect();
+
+        let alg = |_mask: &ByteMask, children: &mut [usize], value: Option<&usize>| {
+            children.iter().sum::<usize>() + value.copied().unwrap_or(0)
+        };
+        let recursive_zipper = map.read_zipper();
+        let recursive = CatamorphismCached::<usize, GlobalAlloc>::cata_cached(
+            &recursive_zipper,
+            alg,
+        );
+        let iterative_zipper = map.read_zipper();
+        let iterative = CatamorphismCachedIterative::<usize>::cata_cached(
+            &iterative_zipper,
+            alg,
+        );
+
+        assert_eq!(recursive, iterative);
+        assert_eq!(recursive, 6);
+    }
+
+    #[test]
+    fn cached_cata_facade_borrows_its_receiver() {
+        let map: PathMap<u64> = [(b"a".as_slice(), 42)].into_iter().collect();
+        let stepping = CatamorphismCached::cata_cached(&map, |_mask, children: &mut [u64], value| {
+            children.iter().sum::<u64>() + value.copied().unwrap_or_default()
+        });
+        let jumping = CatamorphismCached::cata_jumping_cached(&map, |_mask, children: &mut [u64], value, _prefix| {
+            children.iter().sum::<u64>() + value.copied().unwrap_or_default()
+        });
+        let fallible = CatamorphismCached::cata_cached_fallible(&map, |_mask, children: &mut [u64], value| {
+            Ok::<_, Infallible>(children.iter().sum::<u64>() + value.copied().unwrap_or_default())
+        });
+        let jumping_fallible = CatamorphismCached::cata_jumping_cached_fallible(&map, |_mask, children: &mut [u64], value, _prefix| {
+            Ok::<_, Infallible>(children.iter().sum::<u64>() + value.copied().unwrap_or_default())
+        });
+
+        assert_eq!((stepping, jumping, fallible, jumping_fallible), (42, 42, Ok(42), Ok(42)));
+        assert_eq!(CatamorphismCached::hash(&map), CatamorphismCached::hash(&map));
+        assert_eq!(
+            CatamorphismCached::hash_with(&map, |value| *value as u128),
+            CatamorphismCached::hash_with(&map, |value| *value as u128),
+        );
+    }
+
     fn check_side_effect_catas<'a, W, V, Z, AlgF, Assert>(
         zipper: Z, mut f_side: AlgF, mut assert: Assert)
         where
-            Z: Clone + Catamorphism<V>, W: Clone,
+            Z: Clone + CatamorphismSideEffecting<V>, W: Clone,
             AlgF: FnMut(&ByteMask, &mut [W], usize, Option<&V>, &[u8]) -> W,
             Assert: FnMut(W, &str),
     {
@@ -1329,32 +2754,32 @@ mod tests {
         assert(output, "into_cata_jumping_side_effect");
     }
 
-    fn check_pure_catas<'a, W, V, Z, AlgFP, Assert>(
+    fn check_pure_catas<'a, W, V: Clone + Send + Sync, Z, AlgFP, Assert>(
         zipper: Z, f_pure: AlgFP, mut assert: Assert)
         where
-            Z: Clone + Catamorphism<V>, W: Clone,
+            Z: Clone + CatamorphismCached<V>, W: Clone,
             AlgFP: Fn(&ByteMask, &mut [W], Option<&V>, &[u8]) -> W,
             Assert: FnMut(W, &str),
     {
-        let output = zipper.clone().into_cata_cached(
+        let output = zipper.clone().recursive_cata_cached(
             |bm, ch, v| f_pure(bm, ch, v, &[]));
-        assert(output, "into_cata_cached");
-        let output = zipper.clone().into_cata_jumping_cached(
-            |bm, ch, v, sub_path| f_pure(bm, ch, v, sub_path));
-        assert(output, "into_cata_jumping_cached");
+        assert(output, "cata_cached");
+        let output = zipper.clone().recursive_cata_jumping_cached(
+            |bm, ch, v, prefix| f_pure(bm, ch, v, prefix));
+        assert(output, "cata_jumping_cached");
     }
 
-    fn check_all_catas<'a, W, V, Z, AlgF, Assert>(
+    fn check_all_catas<'a, W, V: Clone + Send + Sync, Z, AlgF, Assert>(
         zipper: Z, alg_f: AlgF, mut assert: Assert)
         where
-            Z: Clone + Catamorphism<V>, W: Clone,
+            Z: Clone + CatamorphismSideEffecting<V> + CatamorphismCached<V>, W: Clone,
             AlgF: Fn(&ByteMask, &mut [W], Option<&V>) -> W,
             Assert: FnMut(W, &str),
     {
         check_side_effect_catas(zipper.clone(), |mask, children, _jmp, val, _path| {
             alg_f(mask, children, val)
         }, &mut assert);
-        check_pure_catas(zipper.clone(), |mask, children, val, _sub_path| {
+        check_pure_catas(zipper.clone(), |mask, children, val, _prefix| {
             alg_f(mask, children, val)
         }, &mut assert);
     }
@@ -1405,19 +2830,20 @@ mod tests {
                 }
                 (val.is_some(), sum)
             };
-            let output = map.read_zipper().into_cata_cached(pure_alg_stepping);
+            let zipper = map.read_zipper();
+            let output = CatamorphismCached::<(), GlobalAlloc>::cata_cached(&zipper, pure_alg_stepping);
             assert_eq!(output.1, expected_sum);
 
             //The pure jumping cata is a variant on the above, but we also need to care about
-            // the sub_path we jump over.  So we either count the value associated with the last
-            // byte of the sub-path, or with the next parent path byte.
+            // the prefix we jump over.  So we either count the value associated with the last
+            // byte of the prefix, or with the next parent path byte.
             //
             //This code works fine for both stepping and jumping, but is a little more complicated
             // than the stepping-only version
-            let pure_alg = |child_mask: &ByteMask, children: &mut [(bool, u32)], val: Option<&()>, sub_path: &[u8]| {
+            let pure_alg = |child_mask: &ByteMask, children: &mut [(bool, u32)], val: Option<&()>, prefix: &[u8]| {
                 let mut sum = 0;
                 if val.is_some() {
-                    if let Some(path_byte) = sub_path.last() {
+                    if let Some(path_byte) = prefix.last() {
                         sum += (*path_byte as char).to_digit(10).unwrap();
                     }
                 }
@@ -1427,7 +2853,7 @@ mod tests {
                     }
                     sum += *downstream_sum;
                 }
-                (val.is_some() && sub_path.len()==0, sum)
+                (val.is_some() && prefix.len()==0, sum)
             };
 
             //Test both stepping and jumping cached catas
@@ -1474,11 +2900,11 @@ mod tests {
             assert_eq!(std::str::from_utf8(longest.as_slice()).unwrap(), "rubicundus"));
 
         //=================================================================================
-        // PureLongestPath - Finds the longest path in the trie by concatenating sub-paths;
+        // PureLongestPath - Finds the longest path in the trie by concatenating prefix paths;
         //  This is necessary for pure catas because the same subtrie may share multiple base paths
-        fn longest_partial_path(child_mask: &ByteMask, children: &mut[Vec<u8>], sub_path: &[u8]) -> Vec<u8> {
+        fn longest_partial_path(child_mask: &ByteMask, children: &mut[Vec<u8>], prefix: &[u8]) -> Vec<u8> {
             if children.len() == 0 {
-                sub_path.to_vec()
+                prefix.to_vec()
             } else {
                 let mut longest_downstream_path = child_mask.iter()
                     .zip(children.iter_mut()).max_by_key(|(_byte, path_rest)| path_rest.len())
@@ -1487,7 +2913,7 @@ mod tests {
                         path_rest.insert(0, byte);
                         path_rest
                     });
-                let mut path = sub_path.to_vec();
+                let mut path = prefix.to_vec();
                 path.append(&mut longest_downstream_path);
                 path
             }
@@ -1766,8 +3192,8 @@ mod tests {
                 // println!("alg: \"{}\"", String::from_utf8_lossy(_path));
                 alg_cnt += 1;
             },
-            |_sub_path, _, _path| {
-                // println!("jump: over \"{}\" to \"{}\"", String::from_utf8_lossy(_sub_path), String::from_utf8_lossy(_path));
+            |_prefix, _, _path| {
+                // println!("jump: over \"{}\" to \"{}\"", String::from_utf8_lossy(_prefix), String::from_utf8_lossy(_path));
                 jump_cnt += 1;
             }
         ));
@@ -1807,8 +3233,8 @@ mod tests {
                 // println!("alg: {_path:?}, mask: {_mask:?}");
                 alg_cnt += 1;
             },
-            |_sub_path, _, _path| {
-                // println!("jump: over {_sub_path:?} to {_path:?}");
+            |_prefix, _, _path| {
+                // println!("jump: over {_prefix:?} to {_path:?}");
                 jump_cnt += 1;
             }
         ));
@@ -1847,9 +3273,9 @@ mod tests {
                 // println!("alg: {path:?}");
                 assert_eq!(path, &[]);
             },
-            |sub_path, _, path| {
-                // println!("jump: over {sub_path:?} to {path:?}");
-                assert_eq!(sub_path, &[98]);
+            |prefix, _, path| {
+                // println!("jump: over {prefix:?} to {path:?}");
+                assert_eq!(prefix, &[98]);
                 assert_eq!(path, &[97]);
             }
         ))
@@ -1971,7 +3397,7 @@ mod tests {
         // println!("tree: {:#?}", visit(&mut make_map().read_zipper()));
         use core::sync::atomic::{AtomicU64, Ordering::*};
         let calls_cached = AtomicU64::new(0);
-        let tree_cached: Rc::<Node<u8>> = make_map().into_cata_cached(
+        let tree_cached: Rc::<Node<u8>> = make_map().recursive_cata_cached(
             |_bm, children, value| {
                 calls_cached.fetch_add(1, Relaxed);
                 Rc::new(Node::new(value, children))
@@ -1987,6 +3413,523 @@ mod tests {
 
         assert_eq!(tree_side, tree_cached);
         eprintln!("calls_cached: {calls_cached}\ncalls_side: {calls_side}");
+    }
+
+    /// Adapted from morphisms::cata_test1 for recursive_cata (jumping).
+    #[test]
+    fn recursive_cata_jumping_sum_digits() {
+        let tests = [
+            (vec![], 0),
+            (vec!["1"], 1),
+            (vec!["1", "2"], 3),
+            (vec!["1", "2", "3", "4", "5", "6"], 21),
+            (vec!["a1", "a2"], 3),
+            (vec!["a1", "a2", "a3", "a4", "a5", "a6"], 21),
+            (vec!["12345"], 5),
+            (vec!["1", "12", "123", "1234", "12345"], 15),
+            (vec!["123", "123456", "123789"], 18),
+            (vec!["12", "123", "123456", "123789"], 20),
+            (vec!["1", "2", "123", "123765", "1234", "12345", "12349"], 29),
+        ];
+
+        #[derive(Default)]
+        struct SumAcc {
+            idx: usize,
+            sum: u32,
+        }
+
+        for (keys, expected_sum) in tests {
+            let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
+            let sum = map.recursive_factored_cata_jumping::<_, _, Infallible, _, _, _, true>(
+                |_| Ok(SumAcc::default()),
+                |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
+                    if let Some(byte) = mask.indexed_bit::<true>(acc.idx) {
+                        acc.idx += 1;
+                        if w.0 {
+                            acc.sum += (byte as char).to_digit(10).unwrap();
+                        }
+                    }
+                    acc.sum += w.1;
+                    Ok(())
+                },
+                |_mask, val, acc, prefix| {
+                    let mut sum = acc.map(|acc| acc.sum).unwrap_or(0);
+                    if val.is_some() {
+                        if let Some(byte) = prefix.last() {
+                            sum += (*byte as char).to_digit(10).unwrap();
+                        }
+                    }
+                    Ok((val.is_some() && prefix.is_empty(), sum))
+                },
+            ).unwrap().1;
+            assert_eq!(sum, expected_sum);
+        }
+    }
+
+    /// Adapted from morphisms::cata_test1 for recursive_cata_stepping (non-jumping).
+    #[test]
+    fn recursive_cata_stepping_sum_digits() {
+        let tests = [
+            (vec![], 0),
+            (vec!["1"], 1),
+            (vec!["1", "2"], 3),
+            (vec!["1", "2", "3", "4", "5", "6"], 21),
+            (vec!["a1", "a2"], 3),
+            (vec!["a1", "a2", "a3", "a4", "a5", "a6"], 21),
+            (vec!["12345"], 5),
+            (vec!["1", "12", "123", "1234", "12345"], 15),
+            (vec!["123", "123456", "123789"], 18),
+            (vec!["12", "123", "123456", "123789"], 20),
+            (vec!["1", "2", "123", "123765", "1234", "12345", "12349"], 29),
+        ];
+
+        #[derive(Default)]
+        struct SumAcc {
+            idx: usize,
+            sum: u32,
+        }
+
+        for (keys, expected_sum) in tests {
+            let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
+            let sum = map.recursive_factored_cata::<SumAcc, (bool, u32), Infallible, _, _, _>(
+                |_| Ok(SumAcc::default()),
+                |mask: &ByteMask, w: (bool, u32), acc: &mut SumAcc| {
+                    if let Some(byte) = mask.iter().nth(acc.idx) {
+                        acc.idx += 1;
+                        if w.0 {
+                            acc.sum += (byte as char).to_digit(10).unwrap();
+                        }
+                    }
+                    acc.sum += w.1;
+                    Ok(())
+                },
+                |_mask, val, acc| {
+                    Ok((val.is_some(), acc.map(|acc| acc.sum).unwrap_or(0)))
+                },
+            ).unwrap().1;
+            assert_eq!(sum, expected_sum);
+        }
+    }
+
+    /// Ports the leaf-count portion of `cata_test2` to the summarization API and
+    /// compares both summarization traversals with the existing cached catas.
+    #[test]
+    fn recursive_cata_leaf_count_matches_cached_catas() {
+        let mut map = PathMap::new();
+        let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
+
+        let cached_stepping = map.read_zipper().recursive_cata_cached(|_mask, children: &mut [usize], val| {
+            if children.is_empty() {
+                assert!(val.is_some());
+                1
+            } else {
+                children.iter().sum()
+            }
+        });
+        let cached_jumping = map.read_zipper().recursive_cata_jumping_cached(|_mask, children: &mut [usize], val, _prefix| {
+            if children.is_empty() {
+                assert!(val.is_some());
+                1
+            } else {
+                children.iter().sum()
+            }
+        });
+
+        let jumping = map.recursive_factored_cata_jumping::<usize, usize, Infallible, _, _, _, false>(
+            |_| Ok(0),
+            |_mask, child, total| { *total += child; Ok(()) },
+            |_mask, val, children, _prefix| match children {
+                Some(total) => Ok(total),
+                None => {
+                    assert!(val.is_some());
+                    Ok(1)
+                },
+            },
+        );
+        let stepping = map.recursive_factored_cata::<usize, usize, Infallible, _, _, _>(
+            |_| Ok(0),
+            |_mask, child, total| { *total += child; Ok(()) },
+            |_mask, val, children| match children {
+                Some(total) => Ok(total),
+                None => {
+                    assert!(val.is_some());
+                    Ok(1)
+                },
+            },
+        );
+
+        assert_eq!(cached_stepping, 11);
+        assert_eq!(cached_jumping, cached_stepping);
+        assert_eq!(jumping.unwrap(), cached_jumping);
+        assert_eq!(stepping.unwrap(), cached_stepping);
+    }
+
+    /// Ports the pure longest-path calculation from `cata_test2`. The stepping
+    /// version deliberately uses the fold ordinal to associate each child with
+    /// the corresponding bit in the shared mask.
+    #[test]
+    fn recursive_cata_longest_path_matches_cached_cata() {
+        let mut map = PathMap::new();
+        let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
+
+        let cached = map.read_zipper().recursive_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
+            let mut longest = mask.iter().zip(children.iter_mut())
+                .max_by_key(|(_byte, rest)| rest.len())
+                .map_or_else(Vec::new, |(byte, rest)| {
+                    let mut path = std::mem::take(rest);
+                    path.insert(0, byte);
+                    path
+                });
+            let mut path = prefix.to_vec();
+            path.append(&mut longest);
+            path
+        });
+
+        // This uses allocation for readability; performance-sensitive code can fold a longest path directly.
+        let jumping = map.recursive_factored_cata_jumping::<Vec<Vec<u8>>, Vec<u8>, Infallible, _, _, _, true>(
+            |_| Ok(Vec::new()),
+            |_mask, child, children| { children.push(child); Ok(()) },
+            |mask, _val, children, prefix| {
+                let mut longest = children.map_or_else(Vec::new, |children| {
+                    if mask.is_empty_mask() {
+                        children.into_iter().max_by_key(|rest| rest.len()).unwrap_or_default()
+                    } else {
+                        mask.iter().zip(children)
+                            .max_by_key(|(_byte, rest)| rest.len())
+                            .map_or_else(Vec::new, |(byte, mut rest)| {
+                                rest.insert(0, byte);
+                                rest
+                            })
+                    }
+                });
+                let mut path = prefix.to_vec();
+                path.append(&mut longest);
+                Ok(path)
+            },
+        );
+        let stepping = map.recursive_factored_cata::<(usize, Vec<u8>), Vec<u8>, Infallible, _, _, _>(
+            |_| Ok((0, Vec::new())),
+            |mask, child, state| {
+                let mut path = Vec::with_capacity(child.len() + 1);
+                if let Some(byte) = mask.indexed_bit::<true>(state.0) {
+                    state.0 += 1;
+                    path.push(byte);
+                }
+                path.extend(child);
+                if path.len() > state.1.len() {
+                    state.1 = path;
+                }
+                Ok(())
+            },
+            |_mask, _val, state| Ok(state.map_or_else(Vec::new, |(_, path)| path)),
+        );
+        let adapted = map.recursive_cata_jumping_cached(|mask, children: &mut [Vec<u8>], _val, prefix| {
+            let mut longest = mask.iter().zip(children.iter_mut())
+                .max_by_key(|(_byte, rest)| rest.len())
+                .map_or_else(Vec::new, |(byte, rest)| {
+                    let mut path = std::mem::take(rest);
+                    path.insert(0, byte);
+                    path
+                });
+            let mut path = prefix.to_vec();
+            path.append(&mut longest);
+            path
+        });
+
+        assert_eq!(std::str::from_utf8(&cached).unwrap(), "rubicundus");
+        assert_eq!(adapted, cached);
+        assert_eq!(jumping.unwrap(), cached);
+        assert_eq!(stepping.unwrap(), cached);
+    }
+
+    /// Ports the branch-value portion of `cata_test2` to both summarization
+    /// traversals. Values with no downstream results are deliberately omitted.
+    #[test]
+    fn recursive_cata_branch_values_matches_cached_catas() {
+        let mut map = PathMap::new();
+        let words = ["arrow", "bow", "cannon", "roman", "romane", "romanus", "romulus", "rubens", "ruber", "rubicon", "rubicundus", "rom'i"];
+        words.iter().enumerate().for_each(|(i, word)| { map.set_val_at(word.as_bytes(), i); });
+
+        let cached_stepping = map.read_zipper().recursive_cata_cached(|_mask, children: &mut [Vec<usize>], val| {
+            if children.is_empty() {
+                Vec::new()
+            } else if let Some(val) = val {
+                vec![*val]
+            } else {
+                let mut values = children.first_mut().map_or_else(Vec::new, std::mem::take);
+                for child in &mut children[1..] {
+                    values.append(child);
+                }
+                values
+            }
+        });
+        let cached_jumping = map.read_zipper().recursive_cata_jumping_cached(|_mask, children: &mut [Vec<usize>], val, _prefix| {
+            if children.is_empty() {
+                Vec::new()
+            } else if let Some(val) = val {
+                vec![*val]
+            } else {
+                let mut values = children.first_mut().map_or_else(Vec::new, std::mem::take);
+                for child in &mut children[1..] {
+                    values.append(child);
+                }
+                values
+            }
+        });
+
+        let jumping = map.recursive_factored_cata_jumping::<Vec<usize>, Vec<usize>, Infallible, _, _, _, false>(
+            |_| Ok(Vec::new()),
+            |_mask, child, values| { values.extend(child); Ok(()) },
+            |_mask, val, children, _prefix| match children {
+                None => Ok(Vec::new()),
+                Some(values) => Ok(val.map_or(values, |val| vec![*val])),
+            },
+        );
+        let stepping = map.recursive_factored_cata::<Vec<usize>, Vec<usize>, Infallible, _, _, _>(
+            |_| Ok(Vec::new()),
+            |_mask, child, values| { values.extend(child); Ok(()) },
+            |_mask, val, children| match children {
+                None => Ok(Vec::new()),
+                Some(values) => Ok(val.map_or(values, |val| vec![*val])),
+            },
+        );
+
+        assert_eq!(cached_stepping, vec![3]);
+        assert_eq!(cached_jumping, cached_stepping);
+        assert_eq!(jumping.unwrap(), cached_jumping);
+        assert_eq!(stepping.unwrap(), cached_stepping);
+    }
+
+    /// Parallel port of `cata_test_cached`: the input deliberately contains
+    /// shared subtries, so this exercises `CatamorphismCached`'s factored traversal.
+    #[test]
+    fn recursive_cata_cached_dag_matches_cached_cata() {
+        fn make_map() -> PathMap<u8> {
+            let mut map: PathMap<u8> = PathMap::from_iter([([0], 0)]);
+            for _level in 0..3 {
+                let previous = map.read_zipper();
+                let next = PathMap::new_from_ana(false, |quit, _val, children, _path| {
+                    if quit { return; }
+                    for byte in 0..=2 {
+                        children.graft_at_byte(byte, &previous);
+                    }
+                });
+                drop(previous);
+                map = next;
+            }
+            map
+        }
+
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        use std::rc::Rc;
+
+        #[derive(Clone, Debug, PartialEq)]
+        struct Node<V> {
+            value: Option<V>,
+            children: Vec<Rc<Node<V>>>,
+        }
+        impl<V: Clone> Node<V> {
+            fn new(value: Option<&V>, children: Option<Vec<Rc<Node<V>>>>) -> Self {
+                Self { value: value.cloned(), children: children.unwrap_or_default() }
+            }
+        }
+
+        let cached_calls = AtomicU64::new(0);
+        let cached: Rc<Node<u8>> = make_map().recursive_cata_cached(|_mask, children, value| {
+            cached_calls.fetch_add(1, Relaxed);
+            Rc::new(Node { value: value.cloned(), children: children.to_vec() })
+        });
+
+        let jumping_calls = AtomicU64::new(0);
+        let jumping: Rc<Node<u8>> = make_map().read_zipper().recursive_cata_jumping_cached(|_mask, children, value, _prefix| {
+            jumping_calls.fetch_add(1, Relaxed);
+            Rc::new(Node { value: value.cloned(), children: children.to_vec() })
+        });
+
+        let adapted_calls = AtomicU64::new(0);
+        let adapted: Rc<Node<u8>> = make_map().recursive_cata_jumping_cached(|_mask, children, value, _prefix| {
+            adapted_calls.fetch_add(1, Relaxed);
+            Rc::new(Node { value: value.cloned(), children: children.to_vec() })
+        });
+
+        assert_eq!(adapted, jumping);
+        assert_eq!(adapted_calls.load(Relaxed), jumping_calls.load(Relaxed));
+
+        let summarization_calls = AtomicU64::new(0);
+        let summarized = make_map().recursive_factored_cata::<Vec<Rc<Node<u8>>>, Rc<Node<u8>>, Infallible, _, _, _>(
+            |_| Ok(Vec::new()),
+            |_mask, child, children| { children.push(child); Ok(()) },
+            |_mask, value, children| {
+                summarization_calls.fetch_add(1, Relaxed);
+                Ok(Rc::new(Node::new(value, children)))
+            },
+        );
+
+        assert_eq!(summarized.unwrap(), cached);
+        assert_eq!(summarization_calls.load(Relaxed), cached_calls.load(Relaxed));
+
+        let iterative_calls = AtomicU64::new(0);
+        let iterative_map = make_map();
+        let iterative = iterative_map.read_zipper().recursive_factored_cata::<Vec<Rc<Node<u8>>>, Rc<Node<u8>>, Infallible, _, _, _>(
+            |_| Ok(Vec::new()),
+            |_mask, child, children| { children.push(child); Ok(()) },
+            |_mask, value, children| {
+                iterative_calls.fetch_add(1, Relaxed);
+                Ok(Rc::new(Node::new(value, children)))
+            },
+        );
+
+        assert_eq!(iterative.unwrap(), cached);
+        assert_eq!(iterative_calls.load(Relaxed), cached_calls.load(Relaxed));
+    }
+
+    #[test]
+    fn recursive_cata_on_zipper_uses_its_focus_as_root() {
+        let map: PathMap<()> = [
+            (b"a".as_slice(), ()),
+            (b"ab".as_slice(), ()),
+            (b"ac".as_slice(), ()),
+            (b"z".as_slice(), ()),
+        ]
+        .into_iter()
+        .collect();
+        let mut zipper = map.read_zipper();
+        zipper.descend_to(b"a");
+
+        let count = zipper.recursive_factored_cata_jumping::<usize, usize, Infallible, _, _, _, false>(
+            |_| Ok(0),
+            |_mask, child, total| { *total += child; Ok(()) },
+            |_mask, value, children, _prefix| {
+                Ok(value.is_some() as usize + children.unwrap_or(0))
+            },
+        );
+
+        assert_eq!(count.unwrap(), 3);
+        assert_eq!(zipper.path(), b"a");
+    }
+
+    #[test]
+    fn side_effecting_cata_uses_its_focus_as_root() {
+        let map: PathMap<()> = [
+            (b"a".as_slice(), ()),
+            (b"ab".as_slice(), ()),
+            (b"ac".as_slice(), ()),
+            (b"z".as_slice(), ()),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut stepping_zipper = map.read_zipper();
+        stepping_zipper.descend_to(b"a");
+        let mut stepping_paths = Vec::new();
+        let stepping = stepping_zipper.into_cata_side_effect(|_mask, children: &mut [usize], value, path| {
+            stepping_paths.push(path.to_vec());
+            value.is_some() as usize + children.iter().sum::<usize>()
+        });
+
+        assert_eq!(stepping, 3);
+        assert!(stepping_paths.iter().all(|path| path.starts_with(b"a")));
+        assert!(stepping_paths.contains(&b"a".to_vec()));
+
+        let mut jumping_zipper = map.read_zipper();
+        jumping_zipper.descend_to(b"a");
+        let jumping = jumping_zipper.into_cata_jumping_side_effect(|_mask, children: &mut [usize], _jump, value, _path| {
+            value.is_some() as usize + children.iter().sum::<usize>()
+        });
+
+        assert_eq!(jumping, 3);
+
+        // A valueless unary focus may lie in a compressed path, so the jumping traversal must
+        // not ascend past it while looking for the next logical callback point.
+        let unary_map: PathMap<()> = [(b"abc".as_slice(), ()), (b"z".as_slice(), ())]
+            .into_iter()
+            .collect();
+        let mut unary_zipper = unary_map.read_zipper();
+        unary_zipper.descend_to(b"a");
+        let unary = unary_zipper.into_cata_jumping_side_effect(|_mask, children: &mut [usize], _jump, value, _path| {
+            value.is_some() as usize + children.iter().sum::<usize>()
+        });
+
+        assert_eq!(unary, 1);
+    }
+
+    /// A bounded deep-path smoke test for the recursive cata.
+    ///
+    /// The implementation uses the Rust call stack once per physical node.  `all_dense_nodes`
+    /// creates more physical nodes for a path, so it needs a smaller safe bound; intentionally
+    /// testing beyond that bound can abort the whole test process instead of reporting a normal
+    /// assertion failure.
+    #[test]
+    fn recursive_cata_deep_path_smoke() {
+        #[cfg(feature = "all_dense_nodes")]
+        const PATH_LEN: usize = 200;
+        #[cfg(not(feature = "all_dense_nodes"))]
+        const PATH_LEN: usize = 8_000;
+
+        let mut map = PathMap::<()>::new();
+        let path = vec![b'a'; PATH_LEN];
+        map.set_val_at(&path, ());
+
+        let count = map.recursive_factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
+            |_| Ok(0usize),
+            |_mask, w: usize, total| { *total += w; Ok(()) },
+            |_mask, v, total, _| Ok((v.is_some() as usize) + total.unwrap_or(0)),
+        );
+        assert_eq!(count.unwrap(), 1);
+    }
+
+    #[test]
+    fn recursive_cata_propagates_callback_errors() {
+        let map: PathMap<()> = [(b"a".as_slice(), ()), (b"b".as_slice(), ())].into_iter().collect();
+
+        let error = map.recursive_factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
+            |_| Err("start"),
+            |_mask, _child, _acc| Ok(()),
+            |_mask, _value, _acc, _prefix| Ok(()),
+        );
+        assert_eq!(error, Err("start"));
+
+        let error = map.recursive_factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
+            |_| Ok(()),
+            |_mask, _child, _acc| Err("fold"),
+            |_mask, _value, _acc, _prefix| Ok(()),
+        );
+        assert_eq!(error, Err("fold"));
+
+        let error = map.recursive_factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
+            |_| Ok(()),
+            |_mask, _child, _acc| Ok(()),
+            |_mask, _value, _acc, _prefix| Err("summarize"),
+        );
+        assert_eq!(error, Err("summarize"));
+    }
+
+    #[test]
+    fn recursive_cata_stops_after_summarize_error() {
+        use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+        let map: PathMap<()> = [
+            (b"a".as_slice(), ()),
+            (b"b".as_slice(), ()),
+            (b"c".as_slice(), ()),
+        ]
+        .into_iter()
+        .collect();
+        let summarize_calls = AtomicUsize::new(0);
+
+        let error = map.recursive_factored_cata_jumping::<(), (), &'static str, _, _, _, false>(
+            |_| Ok(()),
+            |_mask, _child, _acc| Ok(()),
+            |_mask, _value, _acc, _prefix| {
+                summarize_calls.fetch_add(1, Relaxed);
+                Err("summarize")
+            },
+        );
+
+        assert_eq!(error, Err("summarize"));
+        assert_eq!(summarize_calls.load(Relaxed), 1);
     }
 
     /// Generate some basic tries using the [TrieBuilder::push_byte] API

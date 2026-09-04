@@ -74,7 +74,6 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
             None
         }
     }
-    fn val_count(&self) -> usize { self.zipper.val_count() }
     fn descend_to<K: AsRef<[u8]>>(&mut self, path: K) {
         let path = path.as_ref();
         self.path.extend_from_slice(path);
@@ -206,6 +205,10 @@ impl<'a, Z: ZipperReadOnlyConditionalValues<'a, V>, V: Clone + Send + Sync> Zipp
 }
 
 impl<Z: ZipperMoving> ZipperPathBuffer for PathTracker<Z> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        assert!(len <= self.path.capacity() - self.origin_len);
+        unsafe { core::slice::from_raw_parts(self.path.as_ptr().add(self.origin_len), len) }
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         assert!(len <= self.path.capacity());
         let ptr = self.path.as_ptr();
