@@ -5707,25 +5707,7 @@ mod tests {
         assert_eq!(exact_from_first_byte.val(), exact_from_path.val());
     }
 
-    //GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_val_after_to_next_step_matches_descend_to() {
-    //     let map = value_iteration_history_test_map();
-
-    //     let mut from_step = map.read_zipper();
-    //     assert!(from_step.to_next_step());
-
-    //     let mut from_path = map.read_zipper();
-    //     from_path.descend_to(&[0u8]);
-    //     assert_eq!(from_step.path(), from_path.path());
-    //     assert!(from_path.to_next_val());
-
-    //     assert!(from_step.to_next_val());
-    //     assert_eq!(from_step.path(), from_path.path());
-    //     assert_eq!(from_step.val(), from_path.val());
-    // }
-
-    //GOAT, re-enable in some form
+    // // GOAT, re-enable in some form
     // #[test]
     // fn read_zipper_to_next_val_after_descend_first_k_path_matches_descend_to() {
     //     let map = value_iteration_history_test_map();
@@ -5741,26 +5723,6 @@ mod tests {
     //     assert!(from_k_path.to_next_val());
     //     assert_eq!(from_k_path.path(), from_path.path());
     //     assert_eq!(from_k_path.val(), from_path.val());
-    // }
-
-    //GOAT, re-enable in some form
-    // #[test]
-    // fn read_zipper_to_next_val_after_reset_matches_fresh_zipper() {
-    //     let mut map = PathMap::<u64>::new();
-    //     map.insert(&[1u8, 1, 1], 72);
-
-    //     let mut after_reset = map.read_zipper();
-    //     assert!(after_reset.to_next_val());
-    //     assert!(!after_reset.to_next_val());
-    //     after_reset.reset();
-
-    //     let mut fresh = map.read_zipper();
-    //     assert_eq!(after_reset.path(), fresh.path());
-    //     assert!(fresh.to_next_val());
-
-    //     assert!(after_reset.to_next_val());
-    //     assert_eq!(after_reset.path(), fresh.path());
-    //     assert_eq!(after_reset.val(), fresh.val());
     // }
 
     /// Tests none of the flavors of ascend corrput internal zipper state relied upon by to_next_val
@@ -5794,7 +5756,7 @@ mod tests {
         }
     }
 
-    //GOAT, re-enable in some form
+    // // GOAT, re-enable in some form
     // #[test]
     // fn read_zipper_to_next_k_path_after_descend_first_k_path_matches_descend_to() {
     //     let map = k_path_history_test_map();
@@ -5811,7 +5773,7 @@ mod tests {
     //     assert_eq!(from_k_path.path(), from_path.path());
     // }
 
-    //GOAT, re-enable in some form
+    // // GOAT, re-enable in some form
     // #[test]
     // fn read_zipper_to_next_k_path_after_k_path_descent_and_ascent_matches_unmoved_focus() {
     //     let map = nested_k_path_history_test_map();
@@ -5830,7 +5792,7 @@ mod tests {
     //     assert_eq!(after_movement.path(), unmoved.path());
     // }
 
-    //GOAT, re-enable in some form
+    // // GOAT, re-enable in some form
     // #[test]
     // fn read_zipper_to_next_k_path_after_prior_k_path_step_matches_unmoved_focus() {
     //     let map = k_path_history_test_map();
@@ -5849,7 +5811,7 @@ mod tests {
     //     assert_eq!(after_prior_step.path(), unmoved.path());
     // }
 
-    //GOAT, re-enable in some form
+    // // GOAT, re-enable in some form
     // #[test]
     // fn read_zipper_to_next_k_path_after_nested_k_path_step_matches_unmoved_focus() {
     //     let map = nested_k_path_history_test_map();
