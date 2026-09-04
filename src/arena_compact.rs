@@ -2920,13 +2920,24 @@ where Storage: AsRef<[u8]>
     /// WARNING: This is not a cheap method. It may have an order-N cost
     fn val_count(&self) -> usize {
         timed_span!(ValueCount, COUNTERS);
+        //`ZipperMoving::val_count` counts the values at and below the *focus*.  This used to
+        // `reset()` first, so it counted the whole subtrie below the zipper's root and returned
+        // the same number wherever the focus was -- right only when the focus was at the root.
+        //
+        //`to_next_val` walks the zipper's entire subtrie, not just the part below the focus, so
+        // the walk has to stop when it leaves: depth-first order visits everything below the
+        // focus before anything outside it, so the first path that no longer starts with the
+        // focus ends the count.
         let mut zipper = self.clone();
-        zipper.reset();
+        let focus: Vec<u8> = zipper.path().to_vec();
         let mut count = 0;
         if zipper.is_val() {
             count += 1;
         }
         while zipper.to_next_val() {
+            if !zipper.path().starts_with(&focus) {
+                break;
+            }
             count += 1;
         }
         count
@@ -4073,5 +4084,33 @@ mod tests {
 
         assert_act_matches_map(&map, &tree);
         Ok(())
+    }
+
+    /// `ACTZipper::val_count` opened with `reset()`, so it counted the values below
+    /// the zipper's *root* whatever the focus was, and was right only at the root.
+    /// `ZipperValues::val_count` counts at and below the focus.
+    #[test]
+    fn act_zipper_val_count_counts_from_the_focus() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(b"aa", 1);
+        m.insert(b"ab", 2);
+        m.insert(b"b", 3);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+        for path in [&b""[..], b"a", b"aa", b"ab", b"b", b"zz"] {
+            let mut az = t.read_zipper_u64();
+            let mut pz = m.read_zipper();
+            az.descend_to(path);
+            pz.descend_to(path);
+            assert_eq!(az.val_count(), pz.val_count(), "focus {path:?}");
+        }
+        //And from a zipper rooted below the map root
+        for path in [&b""[..], b"a", b"b"] {
+            let mut az = t.read_zipper_at_path_u64(b"a");
+            let mut pz = m.read_zipper_at_path(b"a");
+            az.descend_to(path);
+            pz.descend_to(path);
+            assert_eq!(az.val_count(), pz.val_count(), "root a, focus {path:?}");
+        }
     }
 }
