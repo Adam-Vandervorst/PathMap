@@ -2257,7 +2257,13 @@ pub(crate) mod read_zipper_core {
         fn to_next_sibling_byte(&mut self) -> Option<u8> {
             timed_span!(ToNextSiblingByte, COUNTERS);
             self.prepare_buffers();
-            if self.prefix_buf.len() == 0 {
+            //A sibling step rewrites the last byte of `prefix_buf`.  At this zipper's *root* that
+            // byte belongs to the root path, so rewriting it moves the zipper's own root:
+            // `origin_path` changes while `root_key_start` and `focus_node` still describe the
+            // old one.  `ZipperMoving` documents the answer here as "did not move", and
+            // `ZipperHead` depends on it -- a zipper must never leave the subtrie it was granted.
+            // This used to test `prefix_buf.len() == 0`, which asks "at the *map* root".
+            if self.at_root() {
                 return None
             }
             debug_assert!(self.is_regularized());
@@ -2292,8 +2298,16 @@ pub(crate) mod read_zipper_core {
                     self.focus_iter_token = new_tok;
 
                     //If this operation landed us at the end of the path within the node, then we
-                    // should re-regularize the zipper before returning
-                    if key_bytes.len() == 1 {
+                    // should re-regularize the zipper before returning.
+                    //
+                    //`node_key.len()` is `fixed_len + 1`, so this is "the sibling's key ends
+                    // exactly where the node key does".  It used to test `key_bytes.len() == 1`,
+                    // which says the same thing only when the node key is a single byte -- i.e.
+                    // when the zipper's root happens to sit on a node boundary.  Rooted inside a
+                    // node, `node_key` is longer, the descent was skipped, and the zipper was
+                    // returned deregularized.  `descend_to` asserts on that in a debug build and
+                    // loops forever in a release one.
+                    if key_bytes.len() == fixed_len + 1 {
                         match child_node {
                             None => {},
                             Some(rec) => {
@@ -2954,6 +2968,12 @@ pub(crate) mod read_zipper_core {
         #[inline]
         fn to_sibling(&mut self, next: bool) -> Option<u8> {
             self.prepare_buffers();
+            //Same contract as `to_next_sibling_byte`, and for the same reason: every arm below
+            // rewrites the last byte of `prefix_buf`, and at this zipper's root that byte belongs
+            // to the root path, so rewriting it moves the zipper's own root.
+            if self.at_root() {
+                return None
+            }
             debug_assert!(self.is_regularized());
             if self.node_key().len() != 0 {
                 match self.focus_node.get_sibling_of_child(self.node_key(), next) {
@@ -5612,5 +5632,93 @@ mod tests {
         assert!(rz.descend_last_path_observed(&mut observed));
         assert_eq!(rz.path(), b"rubicundus");
         assert_eq!(&observed[..], rz.path());
+    }
+
+    /// A sibling step at the zipper's own root must not move.  `to_next_sibling_byte`
+    /// used to guard on the *map* root (`prefix_buf.len() == 0`) and `to_sibling` had no
+    /// guard at all, so at a zipper rooted anywhere else the step rewrote the last byte
+    /// of the root path: `at_root()` and `path()` still said "at my root" while
+    /// `origin_path()` had moved into a sibling subtrie the zipper was never granted.
+    /// `ZipperHead` relies on that containment, and the corrupt root also left the
+    /// zipper deregularized, so a later `descend_to` looped forever in release.
+    #[test]
+    fn read_zipper_sibling_step_never_leaves_its_root() {
+        let mut map = PathMap::<u64>::new();
+        map.insert(&[0u8, 0, 1], 7);
+        map.insert(&[0u8, 0, 3], 161);
+
+        //A root that does not exist, with an existing sibling on one side or both
+        for root in [&[0u8, 0, 2][..], &[0u8, 0, 0], &[0u8, 0, 4]] {
+            let mut rz = map.read_zipper_at_path(root);
+            assert!(!rz.path_exists());
+            assert_eq!(rz.to_next_sibling_byte(), None, "root {root:?}");
+            assert_eq!(rz.origin_path(), root, "root {root:?}");
+            assert_eq!(rz.val(), None);
+            assert_eq!(rz.to_prev_sibling_byte(), None, "root {root:?}");
+            assert_eq!(rz.origin_path(), root, "root {root:?}");
+            assert_eq!(rz.val(), None);
+            assert!(rz.at_root());
+            assert_eq!(rz.path(), &[]);
+            //The zipper must still be usable afterwards
+            rz.reset();
+            assert!(!rz.path_exists());
+            assert_eq!(rz.origin_path(), root);
+        }
+
+        //A root that exists, with an existing sibling
+        for (root, val) in [(&[0u8, 0, 1][..], 7u64), (&[0u8, 0, 3], 161)] {
+            let mut rz = map.read_zipper_at_path(root);
+            assert_eq!(rz.to_next_sibling_byte(), None);
+            assert_eq!(rz.to_prev_sibling_byte(), None);
+            assert_eq!(rz.origin_path(), root);
+            assert_eq!(rz.val(), Some(&val));
+        }
+
+        //Below the root the step works as before, in both directions
+        let mut rz = map.read_zipper_at_path(&[0u8, 0]);
+        rz.descend_to(&[1u8]);
+        assert_eq!(rz.to_next_sibling_byte(), Some(3));
+        assert_eq!(rz.val(), Some(&161));
+        assert_eq!(rz.to_prev_sibling_byte(), Some(1));
+        assert_eq!(rz.val(), Some(&7));
+        assert_eq!(rz.origin_path(), &[0u8, 0, 1]);
+    }
+
+    /// Sibling steps from zippers rooted at every depth inside a shared prefix, each
+    /// followed by further movement, so a step that hands back a deregularized zipper
+    /// trips the invariant here rather than somewhere downstream.  (The re-descent
+    /// after a sibling step used to test `key_bytes.len() == 1`, which is "landed at
+    /// the end of the node key" only for a single-byte key; it now tests against
+    /// `node_key.len()`.  This test did not reach that condition on the shapes tried,
+    /// so it guards the neighbourhood rather than reproducing that half.)
+    #[test]
+    fn read_zipper_sibling_steps_when_rooted_inside_a_node() {
+        let mut map = PathMap::<u64>::new();
+        //Two long lines sharing a prefix, each with a fan-out below so that the
+        // subtrie under each sibling byte is a node of its own
+        for a in 0u8..4 {
+            for b in 0u8..4 {
+                map.insert(&[1u8, 1, 1, 1, 2, a, b], 20 + a as u64);
+                map.insert(&[1u8, 1, 1, 1, 3, a, b], 30 + a as u64);
+            }
+        }
+        //Roots at every depth inside the shared prefix
+        for root_len in 0..=4 {
+            let root = &[1u8, 1, 1, 1][..root_len];
+            let mut rz = map.read_zipper_at_path(root);
+            rz.descend_to(&[1u8, 1, 1, 1, 2][root_len..]);
+            assert!(rz.path_exists(), "root {root:?}");
+            assert_eq!(rz.to_next_sibling_byte(), Some(3), "root {root:?}");
+            //Movement after the sibling step exercises the regularized invariant
+            rz.descend_to(&[2u8, 2]);
+            assert_eq!(rz.val(), Some(&32), "root {root:?}");
+            rz.ascend(2);
+            assert_eq!(rz.to_prev_sibling_byte(), Some(2), "root {root:?}");
+            rz.descend_to(&[3u8, 1]);
+            assert_eq!(rz.val(), Some(&23), "root {root:?}");
+            rz.reset();
+            rz.descend_to(&[1u8, 1, 1, 1, 3, 0, 0][root_len..]);
+            assert_eq!(rz.val(), Some(&30), "root {root:?}");
+        }
     }
 }
