@@ -2339,8 +2339,11 @@ pub(crate) mod read_zipper_core {
                     };
                 }
                 let cur_jump = remaining.min(self.excess_key_len());
-                self.prefix_buf.truncate(self.prefix_buf.len() - cur_jump);
-                remaining -= cur_jump;
+                if cur_jump > 0 {
+                    self.prefix_buf.truncate(self.prefix_buf.len() - cur_jump);
+                    self.focus_iter_token = NODE_ITER_INVALID;
+                    remaining -= cur_jump;
+                }
             }
             debug_assert!(self.is_regularized());
             steps
@@ -2360,6 +2363,8 @@ pub(crate) mod read_zipper_core {
                         return false
                     }
                 };
+            } else {
+                self.focus_iter_token = NODE_ITER_INVALID;
             }
             self.prefix_buf.pop();
             debug_assert!(self.is_regularized());
@@ -2377,7 +2382,11 @@ pub(crate) mod read_zipper_core {
                 if self.node_key().len() == 0 {
                     self.ascend_across_nodes();
                 }
-                ascended += self.ascend_within_node();
+                let ascended_within_node = self.ascend_within_node();
+                ascended += ascended_within_node;
+                if ascended_within_node > 0 {
+                    self.focus_iter_token = NODE_ITER_INVALID;
+                }
                 if self.child_count() > 1 || self.is_val() || self.at_root() {
                     return ascended;
                 }
@@ -2395,7 +2404,11 @@ pub(crate) mod read_zipper_core {
                 if self.node_key().len() == 0 {
                     self.ascend_across_nodes();
                 }
-                ascended += self.ascend_within_node();
+                let ascended_within_node = self.ascend_within_node();
+                ascended += ascended_within_node;
+                if ascended_within_node > 0 {
+                    self.focus_iter_token = NODE_ITER_INVALID;
+                }
                 if self.child_count() > 1 || self.at_root() {
                     return ascended;
                 }
@@ -5587,6 +5600,293 @@ mod tests {
         assert!(rz.descend_last_path_observed(&mut observed));
         assert_eq!(rz.path(), b"rubicundus");
         assert_eq!(&observed[..], rz.path());
+    }
+
+    fn value_iteration_history_test_map() -> PathMap<u64> {
+        let mut map = PathMap::<u64>::new();
+        { let mut w = map.write_zipper(); w.set_val(0); }
+        map.insert(&[0u8, 0], 7);
+        map.insert(&[1u8], 9);
+        map
+    }
+
+    fn multi_node_value_iteration_history_test_map() -> (PathMap<u64>, Vec<u8>) {
+        let prefix = vec![3; crate::line_list_node::KEY_BYTES_CNT];
+        let mut first_key = prefix.clone();
+        let mut second_key = prefix.clone();
+        first_key.push(0);
+        second_key.push(1);
+
+        let mut map = PathMap::<u64>::new();
+        map.insert(&first_key, 24);
+        map.insert(&second_key, 25);
+        (map, prefix)
+    }
+
+    fn k_path_history_test_map() -> PathMap<u64> {
+        let mut map = PathMap::<u64>::new();
+        for key in [&[0u8, 0][..], &[0u8, 1], &[1u8, 0], &[1u8, 1]] {
+            map.insert(key, 1);
+        }
+        map
+    }
+
+    fn nested_k_path_history_test_map() -> PathMap<u64> {
+        let mut map = PathMap::<u64>::new();
+        for key in [&[0u8, 0, 0][..], &[0u8, 1, 0], &[1u8, 0, 0], &[1u8, 1, 0]] {
+            map.insert(key, 1);
+        }
+        map
+    }
+
+    /// Mirrors the default `ZipperIteration::to_next_val_observed` implementation without
+    /// invoking a concrete zipper's optimized override.
+    fn to_next_val_default<Z: ZipperIteration>(zipper: &mut Z) -> bool {
+        loop {
+            if zipper.descend_first_byte().is_some() {
+                if zipper.is_val() {
+                    return true
+                }
+                if zipper.descend_until() && zipper.is_val() {
+                    return true
+                }
+            } else {
+                loop {
+                    if zipper.to_next_sibling_byte().is_some() {
+                        if zipper.is_val() {
+                            return true
+                        }
+                        break
+                    }
+                    zipper.ascend_byte();
+                    if zipper.at_root() {
+                        return false
+                    }
+                }
+            }
+        }
+    }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_val_after_descend_first_byte_matches_descend_to() {
+    //     let map = value_iteration_history_test_map();
+
+    //     let mut from_first_byte = map.read_zipper();
+    //     assert_eq!(from_first_byte.descend_first_byte(), Some(0));
+
+    //     let mut from_path = map.read_zipper();
+    //     from_path.descend_to(&[0u8]);
+    //     assert_eq!(from_first_byte.path(), from_path.path());
+    //     assert!(from_path.to_next_val());
+
+    //     assert!(from_first_byte.to_next_val());
+    //     assert_eq!(from_first_byte.path(), from_path.path());
+    //     assert_eq!(from_first_byte.val(), from_path.val());
+    // }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_val_after_to_next_step_matches_descend_to() {
+    //     let map = value_iteration_history_test_map();
+
+    //     let mut from_step = map.read_zipper();
+    //     assert!(from_step.to_next_step());
+
+    //     let mut from_path = map.read_zipper();
+    //     from_path.descend_to(&[0u8]);
+    //     assert_eq!(from_step.path(), from_path.path());
+    //     assert!(from_path.to_next_val());
+
+    //     assert!(from_step.to_next_val());
+    //     assert_eq!(from_step.path(), from_path.path());
+    //     assert_eq!(from_step.val(), from_path.val());
+    // }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_val_after_descend_first_k_path_matches_descend_to() {
+    //     let map = value_iteration_history_test_map();
+
+    //     let mut from_k_path = map.read_zipper();
+    //     assert!(from_k_path.descend_first_k_path(1));
+
+    //     let mut from_path = map.read_zipper();
+    //     from_path.descend_to(&[0u8]);
+    //     assert_eq!(from_k_path.path(), from_path.path());
+    //     assert!(from_path.to_next_val());
+
+    //     assert!(from_k_path.to_next_val());
+    //     assert_eq!(from_k_path.path(), from_path.path());
+    //     assert_eq!(from_k_path.val(), from_path.val());
+    // }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_val_after_reset_matches_fresh_zipper() {
+    //     let mut map = PathMap::<u64>::new();
+    //     map.insert(&[1u8, 1, 1], 72);
+
+    //     let mut after_reset = map.read_zipper();
+    //     assert!(after_reset.to_next_val());
+    //     assert!(!after_reset.to_next_val());
+    //     after_reset.reset();
+
+    //     let mut fresh = map.read_zipper();
+    //     assert_eq!(after_reset.path(), fresh.path());
+    //     assert!(fresh.to_next_val());
+
+    //     assert!(after_reset.to_next_val());
+    //     assert_eq!(after_reset.path(), fresh.path());
+    //     assert_eq!(after_reset.val(), fresh.val());
+    // }
+
+    /// Tests none of the flavors of ascend corrput internal zipper state relied upon by to_next_val
+    #[test]
+    fn read_zipper_to_next_val_after_each_ascent_matches_direct_position_in_multi_node_map() {
+        let (map, prefix) = multi_node_value_iteration_history_test_map();
+
+        type Rz<'a> = ReadZipperUntracked<'a, 'static, u64>;
+        let ascents: [(&str, fn(&mut Rz)); 4] = [
+            ("ascend", |z| { assert_eq!(z.ascend(1), 1); }),
+            ("ascend_byte", |z| { assert!(z.ascend_byte()); }),
+            ("ascend_until", |z| { assert_eq!(z.ascend_until(), 1); }),
+            ("ascend_until_branch", |z| { assert_eq!(z.ascend_until_branch(), 1); }),
+        ];
+
+        for (label, ascend) in ascents {
+            let mut after_ascent = map.read_zipper();
+            assert!(after_ascent.to_next_val(), "first value before {label}");
+            assert!(after_ascent.to_next_val(), "second value before {label}");
+            ascend(&mut after_ascent);
+            assert_eq!(after_ascent.path(), &prefix, "{label}");
+
+            let mut direct = map.read_zipper();
+            direct.descend_to(&prefix);
+            assert_eq!(after_ascent.path(), direct.path(), "{label}");
+            assert!(direct.to_next_val(), "direct to_next_val after {label}");
+
+            assert!(after_ascent.to_next_val(), "to_next_val after {label}");
+            assert_eq!(after_ascent.path(), direct.path(), "{label}");
+            assert_eq!(after_ascent.val(), direct.val(), "{label}");
+        }
+    }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_k_path_after_descend_first_k_path_matches_descend_to() {
+    //     let map = k_path_history_test_map();
+
+    //     let mut from_k_path = map.read_zipper();
+    //     assert!(from_k_path.descend_first_k_path(2));
+
+    //     let mut from_path = map.read_zipper();
+    //     from_path.descend_to(from_k_path.path());
+    //     assert_eq!(from_k_path.path(), from_path.path());
+    //     assert!(from_path.to_next_k_path(2));
+
+    //     assert!(from_k_path.to_next_k_path(2));
+    //     assert_eq!(from_k_path.path(), from_path.path());
+    // }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_k_path_after_k_path_descent_and_ascent_matches_unmoved_focus() {
+    //     let map = nested_k_path_history_test_map();
+
+    //     let mut after_movement = map.read_zipper();
+    //     assert!(after_movement.descend_first_k_path(2));
+    //     assert_eq!(after_movement.descend_first_byte(), Some(0));
+    //     assert!(after_movement.ascend_byte());
+
+    //     let mut unmoved = map.read_zipper();
+    //     assert!(unmoved.descend_first_k_path(2));
+    //     assert_eq!(after_movement.path(), unmoved.path());
+    //     assert!(unmoved.to_next_k_path(2));
+
+    //     assert!(after_movement.to_next_k_path(2));
+    //     assert_eq!(after_movement.path(), unmoved.path());
+    // }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_k_path_after_prior_k_path_step_matches_unmoved_focus() {
+    //     let map = k_path_history_test_map();
+
+    //     let mut after_prior_step = map.read_zipper();
+    //     assert!(after_prior_step.descend_first_k_path(2));
+    //     assert!(after_prior_step.to_next_k_path(2));
+    //     assert_eq!(after_prior_step.to_prev_sibling_byte(), Some(0));
+
+    //     let mut unmoved = map.read_zipper();
+    //     assert!(unmoved.descend_first_k_path(2));
+    //     assert_eq!(after_prior_step.path(), unmoved.path());
+    //     assert!(unmoved.to_next_k_path(2));
+
+    //     assert!(after_prior_step.to_next_k_path(2));
+    //     assert_eq!(after_prior_step.path(), unmoved.path());
+    // }
+
+    //GOAT, re-enable in some form
+    // #[test]
+    // fn read_zipper_to_next_k_path_after_nested_k_path_step_matches_unmoved_focus() {
+    //     let map = nested_k_path_history_test_map();
+
+    //     let mut after_nested_step = map.read_zipper();
+    //     assert!(after_nested_step.descend_first_k_path(2));
+    //     assert!(after_nested_step.descend_first_k_path(1));
+    //     assert!(!after_nested_step.to_next_k_path(1));
+
+    //     let mut unmoved = map.read_zipper();
+    //     assert!(unmoved.descend_first_k_path(2));
+    //     assert_eq!(after_nested_step.path(), unmoved.path());
+    //     assert!(unmoved.to_next_k_path(2));
+
+    //     assert!(after_nested_step.to_next_k_path(2));
+    //     assert_eq!(after_nested_step.path(), unmoved.path());
+    // }
+
+    /// Tests iteration behavior of to_next_val implementations, comparing the default impl
+    /// against the native imple, and a third run that interleaves calls to each
+    #[test]
+    fn read_zipper_native_and_default_value_iteration_can_be_interleaved() {
+        let mut map = PathMap::<u64>::new();
+        map.insert(&[0u8, 0], 10);
+        map.insert(&[0u8, 1], 11);
+        map.insert(&[1u8], 12);
+        map.insert(&[2u8, 0], 13);
+        map.insert(&[2u8, 1], 14);
+
+        let mut native = map.read_zipper();
+        let mut native_values = Vec::new();
+        while native.to_next_val() {
+            native_values.push((native.path().to_vec(), *native.val().unwrap()));
+        }
+
+        let mut default = map.read_zipper();
+        let mut default_values = Vec::new();
+        while to_next_val_default(&mut default) {
+            default_values.push((default.path().to_vec(), *default.val().unwrap()));
+        }
+
+        let mut mixed = map.read_zipper();
+        let mut mixed_values = Vec::new();
+        let mut use_native = true;
+        loop {
+            let moved = if use_native {
+                mixed.to_next_val()
+            } else {
+                to_next_val_default(&mut mixed)
+            };
+            if !moved {
+                break
+            }
+            mixed_values.push((mixed.path().to_vec(), *mixed.val().unwrap()));
+            use_native = !use_native;
+        }
+
+        assert_eq!(default_values, native_values);
+        assert_eq!(mixed_values, native_values);
     }
 
     /// Checks that value iteration composes with common zipper movements.  Each movement
