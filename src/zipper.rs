@@ -6024,7 +6024,8 @@ mod tests {
     #[test]
     fn read_zipper_k_path_edge_cases() {
         let m: PathMap<()> = [
-            &b"bb"[..],
+            &b"b"[..],
+            b"bb",
             b"bc",
             b"bcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             b"cb",
@@ -6034,12 +6035,12 @@ mod tests {
 
         for (missing_path, expected_path, depth) in [
             (b"bd".as_slice(), b"b".as_slice(), 1), //Non-existent focus, middle of trie
-            (b"", b"", 5), //Trying to descend deeper than any paths
+            (b"", b"", 100), //Trying to descend deeper than any paths
             (b"bbb", b"bb", 1), //Non-existent focus, below trie, ending on existing path
             (b"aa", b"a", 1), //Non-existent focus, before trie
             (b"bbbbb", b"bbbb", 1), //Non-existent focus, below trie, ending on non-existing path
             (b"d", b"", 1), //Non-existent focus, after trie
-            (b"bbb", b"", 3), //Non-existent focus, ending higher up
+            (b"cbb", b"", 3), //Non-existent focus, ending higher up
             (b"ba", b"", 3), //to_next_k_path should go to the root
             (b"bcccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", b"", 70), //to_next_k_path returns to root when overshooting a Looooooong path
             ]
