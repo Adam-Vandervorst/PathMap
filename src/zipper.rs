@@ -2821,6 +2821,7 @@ pub(crate) mod read_zipper_core {
         /// always correct; only the granularity differs from a byte-at-a-time traversal.
         pub(crate) unsafe fn to_next_get_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> Option<&'a V> {
             timed_span!(ToNextGetValue, COUNTERS);
+            debug_assert_iter_token_layout();
             self.prepare_buffers();
             loop {
                 if self.focus_iter_token == NODE_ITER_INVALID {
@@ -2828,7 +2829,7 @@ pub(crate) mod read_zipper_core {
                     self.focus_iter_token = cur_tok;
                 }
 
-                let (new_tok, key_bytes, child_node, value) = if self.focus_iter_token != NODE_ITER_FINISHED {
+                let (new_tok, key_bytes, child_node, value) = if self.focus_iter_token < TOKEN_LAST {
                     self.focus_node.next_items(self.focus_iter_token, false)
                 } else {
                     (NODE_ITER_FINISHED, &[][..] as &[u8], None, None)
@@ -3022,6 +3023,10 @@ pub(crate) mod read_zipper_core {
         }
 
         fn k_path_internal<Obs: PathObserver>(&mut self, k: usize, base_idx: usize, mut continue_from_focus: bool, obs: &mut Obs) -> bool {
+            debug_assert_iter_token_layout();
+
+            //Note: we may be able to eke out a win using the guarantees provided by TOKEN_LAST,
+            // however all experiements so far have been worse
             let obs_floor = self.origin_path.len();
             if self.focus_iter_token == NODE_ITER_INVALID {
                 self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());

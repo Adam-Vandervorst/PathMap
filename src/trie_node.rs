@@ -213,10 +213,12 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///
     /// A token with [`NODE_TOKEN_NONEXISTENT_BIT`] clear describes an exact existing in-node path.
     /// A token with the bit set describes a nonexistent path below or after the corresponding
-    /// token with the bit cleared.
+    /// token with the bit cleared.  This relationship also applies to the special pair
+    /// [`TOKEN_LAST`] and [`TOKEN_AFTER_LAST`].
     ///
-    /// [`NODE_ITER_INVALID`] and [`NODE_ITER_FINISHED`] remain special sentinels and never carry
-    /// the lower-bound meaning.
+    /// [`TOKEN_LAST`] is always the last valid path in a node, although not every node is
+    /// guaranteed to have a `TOKEN_LAST`.  [`NODE_ITER_INVALID`] and [`NODE_ITER_FINISHED`] are
+    /// control sentinels and never describe paths.
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken;
 
     /// Returns the token for the focus reached by ascending `byte_count` bytes within this node.
@@ -231,8 +233,13 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// `token` must not be [`NODE_ITER_INVALID`] or [`NODE_ITER_FINISHED`].
     ///
     /// `token` may have [`NODE_TOKEN_NONEXISTENT_BIT`] set. In that case, it is a lower-bound
-    /// cursor and this method must treat it as the corresponding unflagged token. Returned
-    /// non-sentinel tokens must have the bit clear.
+    /// cursor and this method must treat it as the corresponding unflagged token. Returned tokens
+    /// which describe existing paths must have the bit clear.
+    ///
+    /// [`TOKEN_LAST`] is a canonical existing-path token for nodes which use it.  If `TOKEN_LAST`
+    /// is passed to this method, the result is guaranteed to be
+    /// `(`[`NODE_ITER_FINISHED`]`, &[], None, None)`.  [`TOKEN_AFTER_LAST`] has the same iteration
+    /// result and represents a nonexistent path after that final path.
     ///
     /// When `after_focus` is true, steps to the first item strictly after (and not below) the
     /// focus represented by `token`.
@@ -244,8 +251,8 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///   node. `child_node` and `value` are the items stored at that path.
     /// - When there are no more paths, the result must be
     ///   `(`[`NODE_ITER_FINISHED`]`, &[], None, None)`. No item is returned in that call. In
-    ///   particular, the final item is returned by the preceding call with an ordinary token; a
-    ///   subsequent call using that token reports exhaustion.
+    ///   particular, the final item is returned by the preceding call with an existing-path token;
+    ///   a subsequent call using that token reports exhaustion.
     fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
 
     /// Returns the total number of leaves contained within the whole subtree defined by the node
@@ -403,32 +410,71 @@ pub type IterToken = u64;
 
 /// Reserved high bit marking a token with a special, non-node-specific meaning.
 ///
-/// When set, the complete token value identifies a sentinel such as [`NODE_ITER_INVALID`] or
-/// [`NODE_ITER_FINISHED`]. Node-specific token encodings must leave this bit clear.
+/// Bit 63 is reserved across every node token.  When set, the complete token value identifies one
+/// of the global meanings [`TOKEN_LAST`], [`TOKEN_AFTER_LAST`], [`NODE_ITER_INVALID`], or
+/// [`NODE_ITER_FINISHED`].  Node-specific token encodings must leave this bit clear.
 pub const NODE_TOKEN_SPECIAL_BIT: IterToken = 1 << (IterToken::BITS - 1);
 
-/// Special sentinel token value indicating an unknown or invalid location
-pub const NODE_ITER_INVALID: IterToken = IterToken::MAX;
+/// Reserved flag returned by [`TrieNode::iter_token_for_path`] for a nonexistent path.
+///
+/// Bit 62 is reserved across every node token.  The ordinary meaning is:
+/// clear = token represents a path that exists within the node
+/// set = token represents a path *below or after* the the path represented by the corresponding
+///    token with this bit clear.
+///
+/// Setting it on [`TOKEN_LAST`] produces the global [`TOKEN_AFTER_LAST`] token.  This bit has no
+/// singular meaning in the control sentinels [`NODE_ITER_INVALID`] and [`NODE_ITER_FINISHED`].
+pub const NODE_TOKEN_NONEXISTENT_BIT: IterToken = 1 << (IterToken::BITS - 2);
+
+/// Canonical token for the last valid path in a node which supports this special token.
+///
+/// Not every node is guaranteed to have a `TOKEN_LAST`.  If it is passed to
+/// [`TrieNode::next_items`], the result is guaranteed to be
+/// `(`[`NODE_ITER_FINISHED`]`, &[], None, None)`.
+pub const TOKEN_LAST: IterToken = IterToken::MAX & !NODE_TOKEN_NONEXISTENT_BIT;
+
+/// The nonexistent-path companion to [`TOKEN_LAST`], representing a focus after the node's last
+/// valid path.
+pub const TOKEN_AFTER_LAST: IterToken = TOKEN_LAST | NODE_TOKEN_NONEXISTENT_BIT;
+
+/// Special sentinel token value indicating an unknown or invalid location.
+pub const NODE_ITER_INVALID: IterToken = NODE_TOKEN_SPECIAL_BIT;
 
 /// Special sentinel token value indicating iteration of a node has concluded.  Returned from some iteration
 /// functions, but should not be passed as an input to any functions accepting an input token
 pub const NODE_ITER_FINISHED: IterToken = IterToken::MAX - 1;
 
-/// Reserved flag on an ordinary [`IterToken`] returned by [`TrieNode::iter_token_for_path`] for a
-/// nonexistent path.
-///
-/// Bit 62 is meaningful only when [`NODE_TOKEN_SPECIAL_BIT`] is clear. The remaining bits hold a
-/// token that describes the corresponding existing path within the node. This flag is reserved for
-/// this use and must never be used in the node-specific position encoding. Node iteration and
-/// ascent methods return unflagged tokens.
-pub const NODE_TOKEN_NONEXISTENT_BIT: IterToken = 1 << (IterToken::BITS - 2);
+/// Checks the relationships on which generic and node-specific token handling relies.
+#[inline(always)]
+pub(crate) const fn debug_assert_iter_token_layout() {
+    debug_assert!(TOKEN_LAST & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(TOKEN_LAST & NODE_TOKEN_NONEXISTENT_BIT == 0);
+    debug_assert!(TOKEN_LAST & !(NODE_TOKEN_SPECIAL_BIT | NODE_TOKEN_NONEXISTENT_BIT)
+        == NODE_TOKEN_NONEXISTENT_BIT - 1);
+    debug_assert!(TOKEN_AFTER_LAST == TOKEN_LAST | NODE_TOKEN_NONEXISTENT_BIT);
+    debug_assert!(TOKEN_AFTER_LAST == IterToken::MAX);
+    debug_assert!(NODE_ITER_FINISHED == IterToken::MAX - 1);
+    debug_assert!(NODE_ITER_INVALID == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(TOKEN_AFTER_LAST & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(NODE_ITER_INVALID & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(NODE_ITER_FINISHED & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(TOKEN_LAST != NODE_ITER_INVALID);
+    debug_assert!(TOKEN_LAST != NODE_ITER_FINISHED);
+    debug_assert!(TOKEN_AFTER_LAST != NODE_ITER_INVALID);
+    debug_assert!(TOKEN_AFTER_LAST != NODE_ITER_FINISHED);
+    debug_assert!(NODE_ITER_INVALID != NODE_ITER_FINISHED);
+    debug_assert!(NODE_ITER_INVALID < TOKEN_LAST);
+    debug_assert!(TOKEN_LAST < NODE_ITER_FINISHED);
+    debug_assert!(NODE_ITER_FINISHED < TOKEN_AFTER_LAST);
+}
 
 /// Returns whether `token` represents a nonexistent path within the node.
 ///
-/// Must only be called with a non-sentinel token.
+/// Must not be called with [`NODE_ITER_FINISHED`], or [`NODE_ITER_INVALID`].
 #[inline(always)]
 pub const fn node_iter_token_is_nonexistent(token: IterToken) -> bool {
-    debug_assert!(token & NODE_TOKEN_SPECIAL_BIT == 0);
+    debug_assert!(token != NODE_ITER_FINISHED);
+    debug_assert!(token != NODE_ITER_INVALID);
     token & NODE_TOKEN_NONEXISTENT_BIT != 0
 }
 

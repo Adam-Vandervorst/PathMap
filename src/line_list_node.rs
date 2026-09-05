@@ -1950,24 +1950,28 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
     // * Explanation of the meaning of iter_tokens for LineListNode
     // *
-    // * Tokens use the shared reserved bits and a six-bit node-local offset:
+    // * Node-specific tokens use the shared reserved bits and a six-bit node-local offset.  Global
+    // * special tokens use their complete value instead of the node-specific fields:
     // *
     // *    63          62          61                         6 5              0
     // *     +-----------+-----------+---------------------------+----------------+
     // *     | special   | non-exist | always zero               | buffer offset  |
     // *     +-----------+-----------+---------------------------+----------------+
     // *
-    // * Bit 63 is set only by `NODE_ITER_INVALID` and `NODE_ITER_FINISHED`.  Bit 62 marks a
-    // * nonexistent lower-bound focus.  Ordinary exact-focus and returned item tokens leave both
-    // * bits clear.  The low six bits are an absolute offset in the node's contiguous key buffer:
+    // * Bit 63 marks a global special token.  `TOKEN_LAST` uses it for the final valid path in this
+    // * node, and `TOKEN_AFTER_LAST` is its bit-62-marked nonexistent companion.  The control
+    // * sentinels `NODE_ITER_INVALID` and `NODE_ITER_FINISHED` also set bit 63.  Other exact-focus
+    // * and returned item tokens leave both reserved bits clear.  The low six bits are an absolute
+    // * offset in the node's contiguous key buffer:
     // *
     // *     0                 key_end_0                         key_end_1
     // *     |---- slot 0 key ----|---------- slot 1 key -----------|
     // *
     // * Token zero represents the node root.  An offset before a key's end represents the prefix at
     // * that offset; a key's end offset represents its complete path.  If the two physical slots hold
-    // * the value and child at the same one-byte path, `key_end_1` is its sole canonical token and
-    // * `key_end_0` is never produced.  A token in the middle of a key represents that exact prefix,
+    // * the value and child at the same one-byte path, `TOKEN_LAST` is its sole canonical token and
+    // * `key_end_0` is never produced.  The final path in every nonempty LineListNode likewise uses
+    // * `TOKEN_LAST`.  A token in the middle of a key represents that exact prefix,
     // * and `next_items` returns the containing item.  Passing `after_focus` skips that containing item
     // * when the focus is partial, which lets k-path iteration continue without another node dispatch.
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
@@ -1975,45 +1979,59 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     fn new_iter_token(&self) -> IterToken {
         0
     }
-    /// Maps `key` to its canonical absolute offset in the key buffer.  A missing key is marked as a
-    /// lower-bound cursor for the next item at or after it.
+    /// Maps `key` to its canonical token.  Nonterminal paths use their absolute offset in the key
+    /// buffer; the terminal path uses [`TOKEN_LAST`].  A missing key is marked as a lower-bound
+    /// cursor for the next item at or after it.
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
+        debug_assert_iter_token_layout();
+        debug_assert_eq!(TOKEN_LAST & ITER_TOKEN_OFFSET_MASK, ITER_TOKEN_OFFSET_MASK,
+            "TOKEN_LAST must decode as the maximum LineListNode offset");
         if key.len() == 0 {
             return 0
         }
         let (key0, key1) = self.get_both_keys();
         let key_end_0 = key0.len() as IterToken;
-        let key_end_1 = key_end_0 + key1.len() as IterToken;
+        let slot_1_used = self.is_used::<1>();
         if starts_with(key0, key) {
             if key.len() < key0.len() {
                 return key.len() as IterToken
             }
-            return if self.is_used::<1>() && key0 == key1 { key_end_1 } else { key_end_0 }
+            return if !slot_1_used || key0 == key1 { TOKEN_LAST } else { key_end_0 }
         }
         if key < key0 {
             return NODE_TOKEN_NONEXISTENT_BIT
         }
-        if self.is_used::<1>() && starts_with(key1, key) {
-            return key_end_0 + key.len() as IterToken
+        if slot_1_used && starts_with(key1, key) {
+            return if key.len() == key1.len() {
+                TOKEN_LAST
+            } else {
+                key_end_0 + key.len() as IterToken
+            }
         }
-        if self.is_used::<1>() && key < key1 {
+        if slot_1_used && key < key1 {
             return key_end_0 | NODE_TOKEN_NONEXISTENT_BIT
         }
-        key_end_1 | NODE_TOKEN_NONEXISTENT_BIT
+        TOKEN_AFTER_LAST
     }
     #[inline(always)]
     fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
         debug_assert_ne!(token, NODE_ITER_INVALID, "cannot ascend an invalid iteration token");
         debug_assert_ne!(token, NODE_ITER_FINISHED, "cannot ascend a finished iteration token");
+        debug_assert!(!node_iter_token_is_nonexistent(token),
+            "cannot ascend a nonexistent iteration token");
         debug_assert!(byte_count > 0, "cannot ascend zero bytes within a node");
         let key0 = unsafe { self.key_unchecked::<0>() };
         let key1 = unsafe { self.key_unchecked::<1>() };
-        debug_assert_eq!(token & !ITER_TOKEN_OFFSET_MASK, 0,
-            "iteration token is not a LineListNode token");
-        let offset = token & ITER_TOKEN_OFFSET_MASK;
         let key_end_0 = key0.len() as IterToken;
         let key_end_1 = key_end_0 + key1.len() as IterToken;
+        let offset = if token == TOKEN_LAST {
+            key_end_1
+        } else {
+            debug_assert_eq!(token & !ITER_TOKEN_OFFSET_MASK, 0,
+                "iteration token is not a LineListNode token");
+            token & ITER_TOKEN_OFFSET_MASK
+        };
         debug_assert!(offset > 0 && offset <= key_end_1,
             "iteration token does not describe an in-node focus");
 
@@ -2041,7 +2059,11 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
         debug_assert_ne!(token, NODE_ITER_INVALID, "cannot continue an invalid iteration token");
         debug_assert_ne!(token, NODE_ITER_FINISHED, "cannot continue a finished iteration token");
-        debug_assert_eq!(token & !(ITER_TOKEN_OFFSET_MASK | NODE_TOKEN_NONEXISTENT_BIT), 0,
+        debug_assert_iter_token_layout();
+        debug_assert_eq!(TOKEN_LAST & ITER_TOKEN_OFFSET_MASK, ITER_TOKEN_OFFSET_MASK,
+            "TOKEN_LAST must decode as the maximum LineListNode offset");
+        debug_assert!(token == TOKEN_LAST || token == TOKEN_AFTER_LAST
+            || token & !(ITER_TOKEN_OFFSET_MASK | NODE_TOKEN_NONEXISTENT_BIT) == 0,
             "iteration token is not a LineListNode token");
         let offset = (token & ITER_TOKEN_OFFSET_MASK) as usize;
         let header = self.header;
@@ -2072,11 +2094,13 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                     } else {
                         value = Some(unsafe { self.val_in_slot::<1>() });
                     }
-                    key_end_0 + 1
+                    TOKEN_LAST
+                } else if header & SLOT_1_USED_MASK != 0 {
+                    key_end_0 as IterToken
                 } else {
-                    key_end_0
+                    TOKEN_LAST
                 };
-                return (next_token as IterToken, key0, child, value)
+                return (next_token, key0, child, value)
             }
             if header & SLOT_1_USED_MASK != 0 {
                 if !(after_focus && offset > key_end_0) {
@@ -2091,7 +2115,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                     } else {
                         (None, Some(unsafe { self.val_in_slot::<1>() }))
                     };
-                    return (key_end_1 as IterToken, key1, child, value)
+                    return (TOKEN_LAST, key1, child, value)
                 }
             }
         }
@@ -3110,7 +3134,7 @@ mod tests {
         let slot_1_partial = node.iter_token_for_path(b"wxy");
         let slot_1_complete = node.iter_token_for_path(b"wxyz");
         assert_eq!(slot_1_partial, 6);
-        assert_eq!(slot_1_complete, 7);
+        assert_eq!(slot_1_complete, TOKEN_LAST);
         assert_eq!(node.ascend_iter_token(slot_1_partial, 1), 5);
         assert_eq!(node.ascend_iter_token(slot_1_complete, 1), slot_1_partial);
         assert_eq!(node.ascend_iter_token(slot_1_complete, 4), 0);
@@ -3128,8 +3152,10 @@ mod tests {
         );
         assert_eq!(
             node.iter_token_for_path(b"zz"),
-            7 | NODE_TOKEN_NONEXISTENT_BIT,
+            TOKEN_AFTER_LAST,
         );
+        assert!(!node_iter_token_is_nonexistent(TOKEN_LAST));
+        assert!(node_iter_token_is_nonexistent(TOKEN_AFTER_LAST));
 
         // Root, invalid, zero-byte, and over-ascent inputs violate the method's preconditions and
         // must not be silently converted into a reconstructed cursor in debug builds.
@@ -3142,7 +3168,7 @@ mod tests {
             assert_panics(|| { node.ascend_iter_token(NODE_ITER_FINISHED, 1); });
         }
 
-        // The two slots at the same path share one canonical token at the end of both keys.
+        // The two slots at the same path share the canonical last-path token.
         let mut duplicate = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
         duplicate.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
         let child = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
@@ -3151,14 +3177,20 @@ mod tests {
         }
         assert!(validate_node(&duplicate));
         let duplicate_complete = duplicate.iter_token_for_path(b"a");
-        assert_eq!(duplicate_complete, 2);
+        assert_eq!(duplicate_complete, TOKEN_LAST);
         assert_eq!(duplicate.ascend_iter_token(duplicate_complete, 1), 0);
         assert_eq!(duplicate.next_items(duplicate_complete, false).0, NODE_ITER_FINISHED);
 
         let mut single = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
         single.node_set_val(b"abc", 0).unwrap_or_else(|_| panic!());
         let single_complete = single.iter_token_for_path(b"abc");
-        assert_eq!(single_complete, 3);
+        assert_eq!(single_complete, TOKEN_LAST);
+        assert_eq!(single.iter_token_for_path(b"abcd"), TOKEN_AFTER_LAST);
+        assert_eq!(single.ascend_iter_token(single_complete, 1), 2);
+        let (single_next, single_key, _, single_value) = single.next_items(0, false);
+        assert_eq!(single_next, TOKEN_LAST);
+        assert_eq!(single_key, b"abc");
+        assert_eq!(single_value, Some(&0));
         assert_eq!(single.next_items(single_complete, false).0, NODE_ITER_FINISHED);
 
         // Ascending from slot 1 canonicalizes a shared path to its slot-0 buffer position.
@@ -3183,7 +3215,7 @@ mod tests {
         let (next_token_after_focus, key, _, value) = node.next_items(slot_0_partial, true);
         assert_eq!(key, b"wxyz");
         assert_eq!(value, Some(&1));
-        assert_eq!(next_token_after_focus, 7);
+        assert_eq!(next_token_after_focus, TOKEN_LAST);
 
         // The ordinary call returned the containing item and its continuation.  Applying the
         // after-focus operation at that item boundary is therefore the same as ordinary iteration.
@@ -3216,7 +3248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_line_list_next_items_uses_absolute_key_offsets() {
+    fn test_line_list_next_items_uses_canonical_tokens() {
         let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
         node.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
         node.node_set_val(b"z", 1).unwrap_or_else(|_| panic!());
@@ -3228,7 +3260,7 @@ mod tests {
         assert_eq!(value, Some(&0));
 
         let (token, key, child, value) = node.next_items(token, false);
-        assert_eq!(token, 2);
+        assert_eq!(token, TOKEN_LAST);
         assert_eq!(key, b"z");
         assert!(child.is_none());
         assert_eq!(value, Some(&1));
@@ -3246,11 +3278,21 @@ mod tests {
             duplicate.set_child_1(b"a", TrieNodeODRc::new_in(child_node, global_alloc()));
         }
         let (token, key, child, value) = duplicate.next_items(duplicate.new_iter_token(), false);
-        assert_eq!(token, 2);
+        assert_eq!(token, TOKEN_LAST);
         assert_eq!(key, b"a");
         assert!(child.is_some());
         assert_eq!(value, Some(&0));
         assert_eq!(duplicate.iter_token_for_path(key), token);
+
+        for exhausted_token in [TOKEN_LAST, TOKEN_AFTER_LAST] {
+            for after_focus in [false, true] {
+                let (token, key, child, value) = node.next_items(exhausted_token, after_focus);
+                assert_eq!(token, NODE_ITER_FINISHED);
+                assert!(key.is_empty());
+                assert!(child.is_none());
+                assert!(value.is_none());
+            }
+        }
     }
 
     /// `node_set_branch` replaces the downstream branch at its key. A value
