@@ -1966,8 +1966,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     fn new_iter_token(&self) -> IterToken {
         0
     }
-    /// Maps `key` to a slot-local token position.  A proper prefix maps to its offset within that slot;
-    /// a complete key maps to the canonical continuation after that item.
+    /// Maps `key` to a slot-local token position. A proper prefix maps to its offset within that
+    /// slot; a complete key maps to the canonical continuation after that item. A missing key is
+    /// marked as a lower-bound cursor for the next item at or after it.
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
         if key.len() == 0 {
@@ -1985,22 +1986,19 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             }
         }
         if key < key0 {
-            return 0
+            return NODE_TOKEN_NONEXISTENT_BIT
         }
-        if !self.is_used::<1>() {
-            return NODE_ITER_FINISHED
-        }
-        if starts_with(key1, key) {
+        if self.is_used::<1>() && starts_with(key1, key) {
             return if key.len() < key1.len() {
                 ITER_TOKEN_SLOT_1_BIT | key.len() as IterToken
             } else {
                 ITER_TOKEN_FINAL_ITEM
             }
         }
-        if key < key1 {
-            return ITER_TOKEN_SLOT_1_BIT
+        if self.is_used::<1>() && key < key1 {
+            return ITER_TOKEN_SLOT_1_BIT | NODE_TOKEN_NONEXISTENT_BIT
         }
-        NODE_ITER_FINISHED
+        ITER_TOKEN_FINAL_ITEM | NODE_TOKEN_NONEXISTENT_BIT
     }
     #[inline(always)]
     fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
@@ -2044,6 +2042,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     }
     #[inline(always)]
     fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+        let token = token & !NODE_TOKEN_NONEXISTENT_BIT;
         if !self.is_used::<0>() {
             // The node has no items.
             return (NODE_ITER_FINISHED, &[], None, None)
@@ -3126,6 +3125,21 @@ mod tests {
         assert_eq!(node.ascend_iter_token(slot_1_complete, 1), slot_1_partial);
         assert_eq!(node.ascend_iter_token(slot_1_complete, 4), 0);
         assert_eq!(node.ascend_iter_token(NODE_ITER_FINISHED, 1), slot_1_partial);
+
+        // Missing paths produce marked lower-bound cursors, never exact-focus tokens.
+        assert_eq!(node.iter_token_for_path(b"`"), NODE_TOKEN_NONEXISTENT_BIT);
+        assert_eq!(
+            node.iter_token_for_path(b"abcd"),
+            ITER_TOKEN_SLOT_1_BIT | NODE_TOKEN_NONEXISTENT_BIT,
+        );
+        assert_eq!(
+            node.iter_token_for_path(b"m"),
+            ITER_TOKEN_SLOT_1_BIT | NODE_TOKEN_NONEXISTENT_BIT,
+        );
+        assert_eq!(
+            node.iter_token_for_path(b"zz"),
+            ITER_TOKEN_FINAL_ITEM | NODE_TOKEN_NONEXISTENT_BIT,
+        );
 
         // Root, invalid, zero-byte, and over-ascent inputs violate the method's preconditions and
         // must not be silently converted into a reconstructed cursor.

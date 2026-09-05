@@ -313,10 +313,31 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     // ------ IterToken format for ByteNode ------
-    // Iter tokens pack the next byte position to inspect with the corresponding index into `values`.
-    // The low 9 bits store one more than the last returned byte, or 0 before iteration starts.  The
-    // upper bits store the index of the next CoFree in `values`, avoiding a `mask.index_of` recompute
-    // on every item.  `iter_token_for_path` computes the values index once for the requested path.
+    //
+    // Exact-focus and ordinary iteration tokens use the following layout:
+    //
+    //    63         62         61                18                     9                     0
+    //     +----------+----------+-----------------+---------------------+---------------------+
+    //     | special  | non-exist| always zero     | values_idx (9 bits) | next_byte (9 bits)  |
+    //     +----------+----------+-----------------+---------------------+---------------------+
+    //
+    // Bits 61 through 18 are always zero. The two high bits are shared by every IterToken:
+    //
+    // * `special` (bit 63) is set only on the global sentinel values `NODE_ITER_INVALID` and
+    //   `NODE_ITER_FINISHED`; the complete value, rather than bit 62, distinguishes those sentinels.
+    // * `non-existent` (bit 62) is meaningful only when `special` is clear. It marks a lower-bound
+    //   cursor for a nonexistent path. Exact-focus and node-produced iteration tokens leave it clear.
+    //
+    // `next_byte` is the first byte the next scan may return: zero before iteration begins, or
+    // one greater than the last returned byte. `values_idx` is the corresponding index in `values`.
+    // Keeping both fields avoids recalculating `mask.index_of` for every item. Both range from
+    // 0 through 256, inclusive.
+    //
+    // `iter_token_for_path` sets the shared bit 62, `NODE_TOKEN_NONEXISTENT_BIT`, when the key is
+    // not an exact one-byte path in this node. The low 18 bits still carry the lower-bound cursor;
+    // `next_items` clears the marker before decoding it. Node-produced iteration tokens always
+    // leave both reserved bits clear. `NODE_ITER_INVALID` and `NODE_ITER_FINISHED` are sentinels and
+    // do not use this layout.
     const ITER_TOKEN_BYTE_BITS: u64 = 9;
     const ITER_TOKEN_BYTE_MASK: IterToken = (1 << Self::ITER_TOKEN_BYTE_BITS) - 1;
 
@@ -990,17 +1011,19 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
-        match key.len() {
-            0 => self.new_iter_token(),
-            1 => {
-                let key_byte = unsafe{ *key.get_unchecked(0) };
-                let mut values_idx = self.mask.index_of(key_byte);
-                if self.mask.test_bit(key_byte) {
-                    values_idx += 1;
-                }
-                Self::iter_token(key_byte as u16 + 1, values_idx as u16)
-            },
-            _ => NODE_ITER_INVALID,
+        if key.len() == 0 {
+            return self.new_iter_token()
+        }
+        let key_byte = unsafe{ *key.get_unchecked(0) };
+        let mut values_idx = self.mask.index_of(key_byte);
+        if self.mask.test_bit(key_byte) {
+            values_idx += 1;
+        }
+        let token = Self::iter_token(key_byte as u16 + 1, values_idx as u16);
+        if key.len() == 1 && self.mask.test_bit(key_byte) {
+            token
+        } else {
+            token | NODE_TOKEN_NONEXISTENT_BIT
         }
     }
     #[inline(always)]
@@ -1011,6 +1034,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
     #[inline(always)]
     fn next_items(&self, token: IterToken, _after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+        let token = token & !NODE_TOKEN_NONEXISTENT_BIT;
         let Some((k, values_idx)) = self.next_iter_item_from(token) else {
             return (NODE_ITER_FINISHED, &[], None, None);
         };
@@ -2457,7 +2481,11 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     assert_eq!(visited, [0, 63, 64, 127, 128, 191, 192, 255]);
 
     assert_eq!(node.iter_token_for_path(&[]), node.new_iter_token());
-    assert_eq!(node.iter_token_for_path(&[127, 0]), NODE_ITER_INVALID);
+    assert!(!node_iter_token_is_nonexistent(node.iter_token_for_path(&[127])));
+    assert_eq!(
+        node.iter_token_for_path(&[127, 0]),
+        node.iter_token_for_path(&[127]) | NODE_TOKEN_NONEXISTENT_BIT,
+    );
 
     let mut token = node.iter_token_for_path(&[127]);
     let mut visited_after_127 = Vec::new();
@@ -2471,7 +2499,9 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     }
     assert_eq!(visited_after_127, [128, 191, 192, 255]);
 
-    let mut token = node.iter_token_for_path(&[65]);
+    let token = node.iter_token_for_path(&[65]);
+    assert!(node_iter_token_is_nonexistent(token));
+    let mut token = token;
     let mut visited_after_missing_65 = Vec::new();
     while token != NODE_ITER_FINISHED {
         let (next_token, path, _child, value) = node.next_items(token, false);

@@ -2087,9 +2087,15 @@ pub(crate) mod read_zipper_core {
             timed_span!(DescendFirstByte, COUNTERS);
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
+            debug_assert_ne!(self.focus_iter_token, NODE_ITER_FINISHED);
+
             if self.focus_iter_token == NODE_ITER_INVALID {
                 self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
             }
+            if node_iter_token_is_nonexistent(self.focus_iter_token) {
+                return None
+            }
+
             let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, false);
 
             if new_tok != NODE_ITER_FINISHED {
@@ -2271,10 +2277,9 @@ pub(crate) mod read_zipper_core {
                 self.focus_iter_token = cur_tok;
             }
 
-            if self.focus_iter_token == NODE_ITER_FINISHED {
-                self.focus_iter_token = NODE_ITER_INVALID;
+            if self.focus_iter_token == NODE_ITER_INVALID {
                 self.regularize();
-                return None
+                return None;
             }
 
             let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, true);
@@ -2371,8 +2376,8 @@ pub(crate) mod read_zipper_core {
                     }
                 };
             }
-            self.reascend_iter_token(1);
             self.prefix_buf.pop();
+            self.reascend_iter_token(1);
             debug_assert!(self.is_regularized());
             true
         }
@@ -3269,6 +3274,12 @@ pub(crate) mod read_zipper_core {
         #[inline]
         fn reascend_iter_token(&mut self, byte_count: usize) {
             if self.focus_iter_token == NODE_ITER_INVALID {
+                return
+            }
+            if self.focus_iter_token != NODE_ITER_FINISHED
+                && node_iter_token_is_nonexistent(self.focus_iter_token)
+            {
+                self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
                 return
             }
             self.focus_iter_token = self.focus_node
@@ -6093,6 +6104,24 @@ mod tests {
         assert_eq!(z.to_next_sibling_byte(), None);
         assert_eq!(z.ascend(2), 2);
         assert_eq!(z.path(), &[133, 52]);
+    }
+
+    #[test]
+    fn read_zipper_missing_dense_path_uses_lower_bound_for_iteration() {
+        let m: PathMap<()> = [&b"a"[..], b"b", b"z"].into_iter().collect();
+
+        let mut sibling = m.read_zipper();
+        sibling.move_to_path(b"m");
+        assert!(!sibling.path_exists());
+        assert_eq!(sibling.to_next_sibling_byte(), Some(b'z'));
+        assert_eq!(sibling.path(), b"z");
+
+        let mut value = m.read_zipper();
+        value.move_to_path(b"mm");
+        assert!(!value.path_exists());
+        assert_eq!(value.to_next_sibling_byte(), None);
+        assert!(value.to_next_val());
+        assert_eq!(value.path(), b"z");
     }
 
     // Sibling iteration must stay within a zipper rooted at a path and handle
