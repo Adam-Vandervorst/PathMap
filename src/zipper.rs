@@ -1731,7 +1731,6 @@ pub(crate) mod read_zipper_core {
                 debug_assert!(self.is_regularized());
                 true
             } else {
-                self.focus_iter_token = new_tok;
                 debug_assert!(self.is_regularized());
                 false
             }
