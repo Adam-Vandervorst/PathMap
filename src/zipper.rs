@@ -1874,10 +1874,6 @@ pub(crate) mod read_zipper_core {
             self.deregularize();
             if self.focus_iter_token == NODE_ITER_INVALID {
                 self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
-                if self.focus_iter_token == NODE_ITER_INVALID {
-                    self.regularize();
-                    return false;
-                }
             }
 
             let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, true);
@@ -2834,10 +2830,9 @@ pub(crate) mod read_zipper_core {
             if self.focus_iter_token == NODE_ITER_INVALID {
                 return
             }
-            if self.focus_iter_token != NODE_ITER_FINISHED
-                && node_iter_token_is_nonexistent(self.focus_iter_token)
+            if node_iter_token_is_nonexistent(self.focus_iter_token)
             {
-                self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
+                self.focus_iter_token = NODE_ITER_INVALID;
                 return
             }
             self.focus_iter_token = self.focus_node
