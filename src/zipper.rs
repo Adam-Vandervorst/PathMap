@@ -5377,6 +5377,40 @@ mod tests {
     // Focus state after moving through a nonexistent path.
 
     #[test]
+    fn read_zipper_k_path_edge_cases() {
+        let m: PathMap<()> = [
+            &b"bb"[..],
+            b"bc",
+            b"bcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            b"cb",
+        ]
+        .into_iter()
+        .collect();
+
+        for (missing_path, expected_path, depth) in [
+            (b"bd".as_slice(), b"b".as_slice(), 1), //Non-existent focus, middle of trie
+            (b"", b"", 5), //Trying to descend deeper than any paths
+            (b"bbb", b"bb", 1), //Non-existent focus, below trie, ending on existing path
+            (b"aa", b"a", 1), //Non-existent focus, before trie
+            (b"bbbbb", b"bbbb", 1), //Non-existent focus, below trie, ending on non-existing path
+            (b"d", b"", 1), //Non-existent focus, after trie
+            (b"bbb", b"", 3), //Non-existent focus, ending higher up
+            (b"ba", b"", 3), //to_next_k_path should go to the root
+            (b"bcccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", b"", 70), //to_next_k_path returns to root when overshooting a Looooooong path
+            ]
+        {
+            let mut z = m.read_zipper();
+
+            z.descend_to(missing_path);
+
+            assert!(!z.descend_first_k_path(depth), "{missing_path:?}");
+            assert_eq!(z.path(), missing_path, "{missing_path:?}");
+            assert!(!z.to_next_k_path(depth), "{missing_path:?}");
+            assert_eq!(z.path(), expected_path, "{missing_path:?}");
+        }
+    }
+
+    #[test]
     fn read_zipper_descend_first_byte_then_ascend_from_missing_path() {
         let cases: &[(&str, &[&[u8]], &[u8], u8)] = &[
             (
