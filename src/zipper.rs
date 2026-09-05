@@ -2596,25 +2596,9 @@ pub(crate) mod read_zipper_core {
             }
             loop {
                 debug_assert_ne!(self.focus_iter_token, NODE_ITER_INVALID);
+                debug_assert_ne!(self.focus_iter_token, NODE_ITER_FINISHED);
                 debug_assert!(self.prefix_buf.len() <= base_idx+k);
                 debug_assert!(self.prefix_buf.len() >= base_idx);
-                if self.focus_iter_token == NODE_ITER_FINISHED {
-                    if self.node_key_start() <= base_idx {
-                        self.focus_iter_token = NODE_ITER_FINISHED;
-                        self.prefix_buf.truncate(base_idx);
-                        return false
-                    }
-                    if let Some((focus_node, iter_tok, prefix_offset)) = self.ancestors.pop() {
-                        *self.focus_node = focus_node;
-                        self.focus_iter_token = iter_tok;
-                        self.prefix_buf.truncate(prefix_offset);
-                    } else {
-                        let new_len = self.origin_path.len();
-                        self.focus_iter_token = NODE_ITER_INVALID;
-                        self.prefix_buf.truncate(new_len);
-                        return false
-                    }
-                }
                 let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, continue_from_focus);
                 continue_from_focus = false;
                 if new_tok != NODE_ITER_FINISHED {
@@ -2646,7 +2630,27 @@ pub(crate) mod read_zipper_core {
                     }
                     if self.prefix_buf.len() == k+base_idx { return true; }
                 } else {
-                    self.focus_iter_token = NODE_ITER_FINISHED;
+                    if self.node_key_start() <= base_idx {
+                        let excess = self.prefix_buf.len() - base_idx;
+                        obs.ascend(excess);
+                        self.prefix_buf.truncate(base_idx);
+                        if excess > 0 {
+                            self.reascend_iter_token(excess);
+                        }
+                        return false
+                    }
+                    if let Some((focus_node, iter_tok, prefix_offset)) = self.ancestors.pop() {
+                        *self.focus_node = focus_node;
+                        self.focus_iter_token = iter_tok;
+                        obs.ascend(self.prefix_buf.len().saturating_sub(prefix_offset.max(obs_floor)));
+                        self.prefix_buf.truncate(prefix_offset);
+                    } else {
+                        let new_len = self.origin_path.len();
+                        self.focus_iter_token = NODE_ITER_INVALID;
+                        obs.ascend(self.prefix_buf.len().saturating_sub(new_len));
+                        self.prefix_buf.truncate(new_len);
+                        return false
+                    }
                 }
             }
         }
