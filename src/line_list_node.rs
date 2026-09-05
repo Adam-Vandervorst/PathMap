@@ -39,13 +39,8 @@ pub(crate) const KEY_BYTES_CNT: usize = 42;
 #[cfg(not(feature = "slim_ptrs"))]
 pub(crate) const KEY_BYTES_CNT: usize = 14;
 
-// LineListNode key lengths occupy six header bits, so an iteration token can use the low six bits
-// for a key-relative offset and the next bit to identify slot 1.
-const ITER_TOKEN_SLOT_1_BIT: IterToken = 1 << 6;
-const ITER_TOKEN_OFFSET_MASK: IterToken = ITER_TOKEN_SLOT_1_BIT - 1;
-// A LineListNode-local terminal focus.  It is distinct from NODE_ITER_FINISHED so the final item
-// can be returned before the subsequent call reports iteration exhaustion.
-const ITER_TOKEN_FINAL_ITEM: IterToken = ITER_TOKEN_SLOT_1_BIT | ITER_TOKEN_OFFSET_MASK;
+// The combined LineListNode key buffer is shorter than 64 bytes, so its position fits in six bits.
+const ITER_TOKEN_OFFSET_MASK: IterToken = (1 << 6) - 1;
 
 // Only the slim_ptrs layout is asserted. The not(slim_ptrs) TrieNodeODRc has no
 // empty-sentinel representation yet (`new_empty`/`is_empty`/`make_unique`/`==`
@@ -1955,158 +1950,152 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
     // * Explanation of the meaning of iter_tokens for LineListNode
     // *
-    // * Token zero represents the node root.  Otherwise, the low six bits are an offset within the
-    // * selected key; `ITER_TOKEN_SLOT_1_BIT | 0` represents the complete slot-0 item, and
-    // * `ITER_TOKEN_FINAL_ITEM` represents the complete final item.  A token in the middle of a key represents that exact prefix and
-    // * `next_items` returns the containing item.  This lets a zipper retain a token for a focus that
-    // * lies partway down a LineListNode key.  Passing `after_focus` to `next_items` skips the containing
-    // * item when the focus is partial, which lets k-path iteration continue without a second node dispatch.
+    // * Tokens use the shared reserved bits and a six-bit node-local offset:
+    // *
+    // *    63          62          61                         6 5              0
+    // *     +-----------+-----------+---------------------------+----------------+
+    // *     | special   | non-exist | always zero               | buffer offset  |
+    // *     +-----------+-----------+---------------------------+----------------+
+    // *
+    // * Bit 63 is set only by `NODE_ITER_INVALID` and `NODE_ITER_FINISHED`.  Bit 62 marks a
+    // * nonexistent lower-bound focus.  Ordinary exact-focus and returned item tokens leave both
+    // * bits clear.  The low six bits are an absolute offset in the node's contiguous key buffer:
+    // *
+    // *     0                 key_end_0                         key_end_1
+    // *     |---- slot 0 key ----|---------- slot 1 key -----------|
+    // *
+    // * Token zero represents the node root.  An offset before a key's end represents the prefix at
+    // * that offset; a key's end offset represents its complete path.  If the two physical slots hold
+    // * the value and child at the same one-byte path, `key_end_1` is its sole canonical token and
+    // * `key_end_0` is never produced.  A token in the middle of a key represents that exact prefix,
+    // * and `next_items` returns the containing item.  Passing `after_focus` skips that containing item
+    // * when the focus is partial, which lets k-path iteration continue without another node dispatch.
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
     #[inline(always)]
     fn new_iter_token(&self) -> IterToken {
         0
     }
-    /// Maps `key` to a slot-local token position. A proper prefix maps to its offset within that
-    /// slot; a complete key maps to the canonical continuation after that item. A missing key is
-    /// marked as a lower-bound cursor for the next item at or after it.
+    /// Maps `key` to its canonical absolute offset in the key buffer.  A missing key is marked as a
+    /// lower-bound cursor for the next item at or after it.
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
         if key.len() == 0 {
             return 0
         }
         let (key0, key1) = self.get_both_keys();
+        let key_end_0 = key0.len() as IterToken;
+        let key_end_1 = key_end_0 + key1.len() as IterToken;
         if starts_with(key0, key) {
             if key.len() < key0.len() {
                 return key.len() as IterToken
             }
-            return if self.is_used::<1>() && key0 != key1 {
-                ITER_TOKEN_SLOT_1_BIT
-            } else {
-                ITER_TOKEN_FINAL_ITEM
-            }
+            return if self.is_used::<1>() && key0 == key1 { key_end_1 } else { key_end_0 }
         }
         if key < key0 {
             return NODE_TOKEN_NONEXISTENT_BIT
         }
         if self.is_used::<1>() && starts_with(key1, key) {
-            return if key.len() < key1.len() {
-                ITER_TOKEN_SLOT_1_BIT | key.len() as IterToken
-            } else {
-                ITER_TOKEN_FINAL_ITEM
-            }
+            return key_end_0 + key.len() as IterToken
         }
         if self.is_used::<1>() && key < key1 {
-            return ITER_TOKEN_SLOT_1_BIT | NODE_TOKEN_NONEXISTENT_BIT
+            return key_end_0 | NODE_TOKEN_NONEXISTENT_BIT
         }
-        ITER_TOKEN_FINAL_ITEM | NODE_TOKEN_NONEXISTENT_BIT
+        key_end_1 | NODE_TOKEN_NONEXISTENT_BIT
     }
     #[inline(always)]
     fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
-        assert_ne!(token, NODE_ITER_INVALID, "cannot ascend an invalid iteration token");
-        assert!(byte_count > 0, "cannot ascend zero bytes within a node");
+        debug_assert_ne!(token, NODE_ITER_INVALID, "cannot ascend an invalid iteration token");
+        debug_assert_ne!(token, NODE_ITER_FINISHED, "cannot ascend a finished iteration token");
+        debug_assert!(byte_count > 0, "cannot ascend zero bytes within a node");
         let key0 = unsafe { self.key_unchecked::<0>() };
         let key1 = unsafe { self.key_unchecked::<1>() };
-        let (in_slot_1, offset) = if token == NODE_ITER_FINISHED || token == ITER_TOKEN_FINAL_ITEM {
-            // The terminal token's exact endpoint is determined by the node, so it can be
-            // re-ascended like any other focus token.
-            if self.is_used::<1>() {
-                (true, key1.len() as IterToken)
-            } else {
-                (false, key0.len() as IterToken)
-            }
+        debug_assert_eq!(token & !ITER_TOKEN_OFFSET_MASK, 0,
+            "iteration token is not a LineListNode token");
+        let offset = token & ITER_TOKEN_OFFSET_MASK;
+        let key_end_0 = key0.len() as IterToken;
+        let key_end_1 = key_end_0 + key1.len() as IterToken;
+        debug_assert!(offset > 0 && offset <= key_end_1,
+            "iteration token does not describe an in-node focus");
+
+        let (key, key_offset, key_start) = if offset <= key_end_0 {
+            (key0, offset, 0)
         } else {
-            assert_eq!(token & !(ITER_TOKEN_SLOT_1_BIT | ITER_TOKEN_OFFSET_MASK), 0,
-                "iteration token is not a LineListNode token");
-            let in_slot_1 = token & ITER_TOKEN_SLOT_1_BIT != 0;
-            let offset = token & ITER_TOKEN_OFFSET_MASK;
-            if in_slot_1 && offset == 0 {
-                // The slot-1 boundary is the canonical continuation after a complete slot-0 key.
-                (false, key0.len() as IterToken)
-            } else {
-                (in_slot_1, offset)
-            }
+            (key1, offset - key_end_0, key_end_0)
         };
         let byte_count = byte_count as IterToken;
-        let key_len = if in_slot_1 { key1.len() } else { key0.len() } as IterToken;
-        assert!(offset > 0 && offset <= key_len, "iteration token does not describe an in-node focus");
-        assert!(byte_count <= offset, "ascent passes the LineListNode root");
-        let ascended_offset = offset - byte_count;
+        debug_assert!(byte_count <= key_offset, "ascent passes the LineListNode root");
+        let ascended_offset = key_offset - byte_count;
         if ascended_offset == 0 {
             return 0
         }
-        if key0 == key1 && in_slot_1 {
-            //Identical keys are emitted as one combined item; ascend within the first physical copy.
+
+        // A shared prefix has one canonical token: its occurrence in slot 0's key.
+        if key_start > 0 && ascended_offset <= key_end_0 &&
+            key[..ascended_offset as usize] == key0[..ascended_offset as usize]
+        {
             return ascended_offset
         }
-        if in_slot_1 { ITER_TOKEN_SLOT_1_BIT | ascended_offset } else { ascended_offset }
+        key_start + ascended_offset
     }
     #[inline(always)]
     fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
-        let token = token & !NODE_TOKEN_NONEXISTENT_BIT;
-        if !self.is_used::<0>() {
-            // The node has no items.
+        debug_assert_ne!(token, NODE_ITER_INVALID, "cannot continue an invalid iteration token");
+        debug_assert_ne!(token, NODE_ITER_FINISHED, "cannot continue a finished iteration token");
+        debug_assert_eq!(token & !(ITER_TOKEN_OFFSET_MASK | NODE_TOKEN_NONEXISTENT_BIT), 0,
+            "iteration token is not a LineListNode token");
+        let offset = (token & ITER_TOKEN_OFFSET_MASK) as usize;
+        let header = self.header;
+        let key_end_0 = ((header & 0xfc0) >> 6) as usize;
+        let key_len_1 = (header & 0x3f) as usize;
+        let key_end_1 = key_end_0 + key_len_1;
+
+        if offset >= key_end_1 {
             return (NODE_ITER_FINISHED, &[], None, None)
         }
-        if token == NODE_ITER_FINISHED || token == ITER_TOKEN_FINAL_ITEM {
-            // The token is already past this node's final item.
-            return (NODE_ITER_FINISHED, &[], None, None)
-        }
-        let mut in_slot_1 = token & ITER_TOKEN_SLOT_1_BIT != 0;
-        let mut offset = token & ITER_TOKEN_OFFSET_MASK;
 
-        if after_focus && offset > 0 {
-            if in_slot_1 {
-                // Skip the slot-1 item containing the partial focus.
-                return (NODE_ITER_FINISHED, &[], None, None)
-            }
-            let key0 = unsafe { self.key_unchecked::<0>() };
-            debug_assert!(offset < key0.len() as IterToken);
-            if !self.is_used::<1>() || key0 == unsafe { self.key_unchecked::<1>() } {
-                // Skip the only item or combined duplicate-key item containing the partial focus.
-                return (NODE_ITER_FINISHED, &[], None, None)
-            }
-            // Skip the distinct slot-0 item containing the partial focus.
-            in_slot_1 = true;
-            offset = 0;
-        }
-
-        if !in_slot_1 {
-            // Emit slot 0, combining both payloads when the keys are identical.
-            let key0 = unsafe { self.key_unchecked::<0>() };
-            debug_assert!(offset < key0.len() as IterToken);
-            let mut child = None;
-            let mut value = None;
-            let mut next_token = ITER_TOKEN_FINAL_ITEM;
-            if self.is_child_ptr::<0>() {
-                child = Some(unsafe { self.child_in_slot::<0>() });
-            } else {
-                value = Some(unsafe { self.val_in_slot::<0>() });
-            }
-            if self.is_used::<1>() {
-                let key1 = unsafe { self.key_unchecked::<1>() };
-                if key0 != key1 {
-                    next_token = ITER_TOKEN_SLOT_1_BIT;
-                } else if self.is_child_ptr::<1>() {
-                    child = Some(unsafe { self.child_in_slot::<1>() });
+        if header & SLOT_0_USED_MASK != 0 {
+            let key0 = unsafe {
+                core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), key_end_0)
+            };
+            if offset < key_end_0 && !(after_focus && offset > 0) {
+                let (mut child, mut value) = if header & (1 << 13) != 0 {
+                    (Some(unsafe { self.child_in_slot::<0>() }), None)
                 } else {
-                    value = Some(unsafe { self.val_in_slot::<1>() });
+                    (None, Some(unsafe { self.val_in_slot::<0>() }))
+                };
+                let same_path = header & SLOT_1_USED_MASK != 0 && key_len_1 == 1 && unsafe {
+                    *key0.get_unchecked(0) == *self.key_bytes.get_unchecked(key_end_0).assume_init_ref()
+                };
+                let next_token = if same_path {
+                    if header & (1 << 12) != 0 {
+                        child = Some(unsafe { self.child_in_slot::<1>() });
+                    } else {
+                        value = Some(unsafe { self.val_in_slot::<1>() });
+                    }
+                    key_end_0 + 1
+                } else {
+                    key_end_0
+                };
+                return (next_token as IterToken, key0, child, value)
+            }
+            if header & SLOT_1_USED_MASK != 0 {
+                if !(after_focus && offset > key_end_0) {
+                    let key1 = unsafe {
+                        core::slice::from_raw_parts(
+                            self.key_bytes.as_ptr().cast::<u8>().add(key_end_0),
+                            key_len_1,
+                        )
+                    };
+                    let (child, value) = if header & (1 << 12) != 0 {
+                        (Some(unsafe { self.child_in_slot::<1>() }), None)
+                    } else {
+                        (None, Some(unsafe { self.val_in_slot::<1>() }))
+                    };
+                    return (key_end_1 as IterToken, key1, child, value)
                 }
             }
-            (next_token, key0, child, value)
-        } else {
-            // Emit slot 1 after slot 0 or for an ordinary partial-slot-1 focus.
-            debug_assert!(self.is_used::<1>());
-            let key1 = unsafe { self.key_unchecked::<1>() };
-            debug_assert!(offset < key1.len() as IterToken);
-            let mut child = None;
-            let mut value = None;
-            if self.is_child_ptr::<1>() {
-                child = Some(unsafe { self.child_in_slot::<1>() });
-            } else {
-                value = Some(unsafe { self.val_in_slot::<1>() });
-            }
-            (ITER_TOKEN_FINAL_ITEM, key1, child, value)
         }
+        (NODE_ITER_FINISHED, &[], None, None)
     }
     #[inline]
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
@@ -3099,6 +3088,7 @@ mod tests {
 
     #[test]
     fn test_line_list_ascend_iter_token() {
+        #[cfg(debug_assertions)]
         fn assert_panics(f: impl FnOnce()) {
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err());
         }
@@ -3107,58 +3097,76 @@ mod tests {
         node.node_set_val(b"abc", 0).unwrap_or_else(|_| panic!());
         node.node_set_val(b"wxyz", 1).unwrap_or_else(|_| panic!());
 
-        // Slot 0 has no slot bit.  A complete slot-0 key uses the slot-1 boundary token.
+        // Slot 0 occupies the first range in the contiguous key buffer.
         let slot_0_partial = node.iter_token_for_path(b"ab");
         let slot_0_complete = node.iter_token_for_path(b"abc");
         assert_eq!(slot_0_partial, 2);
-        assert_eq!(slot_0_complete, ITER_TOKEN_SLOT_1_BIT);
+        assert_eq!(slot_0_complete, 3);
         assert_eq!(node.ascend_iter_token(slot_0_partial, 1), 1);
         assert_eq!(node.ascend_iter_token(slot_0_complete, 1), slot_0_partial);
         assert_eq!(node.ascend_iter_token(slot_0_complete, 3), 0);
 
-        // Slot 1 has the slot bit, so ascending to any non-root prefix stays in slot 1.
+        // Slot 1 offsets follow slot 0's bytes in the same buffer.
         let slot_1_partial = node.iter_token_for_path(b"wxy");
         let slot_1_complete = node.iter_token_for_path(b"wxyz");
-        assert_eq!(slot_1_partial, ITER_TOKEN_SLOT_1_BIT | 3);
-        assert_eq!(slot_1_complete, ITER_TOKEN_FINAL_ITEM);
-        assert_eq!(node.ascend_iter_token(slot_1_partial, 1), ITER_TOKEN_SLOT_1_BIT | 2);
+        assert_eq!(slot_1_partial, 6);
+        assert_eq!(slot_1_complete, 7);
+        assert_eq!(node.ascend_iter_token(slot_1_partial, 1), 5);
         assert_eq!(node.ascend_iter_token(slot_1_complete, 1), slot_1_partial);
         assert_eq!(node.ascend_iter_token(slot_1_complete, 4), 0);
-        assert_eq!(node.ascend_iter_token(NODE_ITER_FINISHED, 1), slot_1_partial);
+        assert_eq!(node.next_items(slot_1_complete, false).0, NODE_ITER_FINISHED);
 
         // Missing paths produce marked lower-bound cursors, never exact-focus tokens.
         assert_eq!(node.iter_token_for_path(b"`"), NODE_TOKEN_NONEXISTENT_BIT);
         assert_eq!(
             node.iter_token_for_path(b"abcd"),
-            ITER_TOKEN_SLOT_1_BIT | NODE_TOKEN_NONEXISTENT_BIT,
+            3 | NODE_TOKEN_NONEXISTENT_BIT,
         );
         assert_eq!(
             node.iter_token_for_path(b"m"),
-            ITER_TOKEN_SLOT_1_BIT | NODE_TOKEN_NONEXISTENT_BIT,
+            3 | NODE_TOKEN_NONEXISTENT_BIT,
         );
         assert_eq!(
             node.iter_token_for_path(b"zz"),
-            ITER_TOKEN_FINAL_ITEM | NODE_TOKEN_NONEXISTENT_BIT,
+            7 | NODE_TOKEN_NONEXISTENT_BIT,
         );
 
         // Root, invalid, zero-byte, and over-ascent inputs violate the method's preconditions and
-        // must not be silently converted into a reconstructed cursor.
-        assert_panics(|| { node.ascend_iter_token(0, 0); });
-        assert_panics(|| { node.ascend_iter_token(0, 1); });
-        assert_panics(|| { node.ascend_iter_token(slot_0_partial, 3); });
-        assert_panics(|| { node.ascend_iter_token(NODE_ITER_INVALID, 1); });
+        // must not be silently converted into a reconstructed cursor in debug builds.
+        #[cfg(debug_assertions)]
+        {
+            assert_panics(|| { node.ascend_iter_token(0, 0); });
+            assert_panics(|| { node.ascend_iter_token(0, 1); });
+            assert_panics(|| { node.ascend_iter_token(slot_0_partial, 3); });
+            assert_panics(|| { node.ascend_iter_token(NODE_ITER_INVALID, 1); });
+            assert_panics(|| { node.ascend_iter_token(NODE_ITER_FINISHED, 1); });
+        }
 
-        // Equal keys share a single logical item, so its complete focus is the terminal token.
+        // The two slots at the same path share one canonical token at the end of both keys.
         let mut duplicate = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
-        duplicate.node_set_val(b"abc", 0).unwrap_or_else(|_| panic!());
+        duplicate.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
         let child = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
         unsafe {
-            duplicate.set_child_1(b"abc", TrieNodeODRc::new_in(child, global_alloc()));
+            duplicate.set_child_1(b"a", TrieNodeODRc::new_in(child, global_alloc()));
         }
-        let duplicate_complete = duplicate.iter_token_for_path(b"abc");
-        assert_eq!(duplicate_complete, ITER_TOKEN_FINAL_ITEM);
-        assert_eq!(duplicate.ascend_iter_token(duplicate_complete, 1), 2);
-        assert_eq!(duplicate.ascend_iter_token(duplicate_complete, 3), 0);
+        assert!(validate_node(&duplicate));
+        let duplicate_complete = duplicate.iter_token_for_path(b"a");
+        assert_eq!(duplicate_complete, 2);
+        assert_eq!(duplicate.ascend_iter_token(duplicate_complete, 1), 0);
+        assert_eq!(duplicate.next_items(duplicate_complete, false).0, NODE_ITER_FINISHED);
+
+        let mut single = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        single.node_set_val(b"abc", 0).unwrap_or_else(|_| panic!());
+        let single_complete = single.iter_token_for_path(b"abc");
+        assert_eq!(single_complete, 3);
+        assert_eq!(single.next_items(single_complete, false).0, NODE_ITER_FINISHED);
+
+        // Ascending from slot 1 canonicalizes a shared path to its slot-0 buffer position.
+        let mut ancestor = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        ancestor.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        ancestor.node_set_val(b"ab", 1).unwrap_or_else(|_| panic!());
+        let descendant = ancestor.iter_token_for_path(b"ab");
+        assert_eq!(ancestor.ascend_iter_token(descendant, 1), ancestor.iter_token_for_path(b"a"));
     }
 
     #[test]
@@ -3175,11 +3183,74 @@ mod tests {
         let (next_token_after_focus, key, _, value) = node.next_items(slot_0_partial, true);
         assert_eq!(key, b"wxyz");
         assert_eq!(value, Some(&1));
-        assert_eq!(next_token_after_focus, ITER_TOKEN_FINAL_ITEM);
+        assert_eq!(next_token_after_focus, 7);
 
         // The ordinary call returned the containing item and its continuation.  Applying the
         // after-focus operation at that item boundary is therefore the same as ordinary iteration.
         assert_eq!(node.next_items(next_token, true), node.next_items(next_token, false));
+
+        // Missing focuses before, between, and beyond the items retain their lower bound
+        // for either kind of iteration. Returned item tokens describe existing focuses.
+        for (missing, expected) in [
+            (&b"`"[..], Some((&b"abc"[..], 0))),
+            (&b"abcd"[..], Some((&b"wxyz"[..], 1))),
+            (&b"m"[..], Some((&b"wxyz"[..], 1))),
+            (&b"zz"[..], None),
+        ] {
+            let token = node.iter_token_for_path(missing);
+            assert!(node_iter_token_is_nonexistent(token));
+            for after_focus in [false, true] {
+                let (next, key, child, value) = node.next_items(token, after_focus);
+                assert!(child.is_none());
+                if let Some((expected_key, expected_value)) = expected {
+                    assert_eq!(key, expected_key);
+                    assert_eq!(value, Some(&expected_value));
+                    assert_eq!(next, node.iter_token_for_path(expected_key));
+                } else {
+                    assert_eq!(next, NODE_ITER_FINISHED);
+                    assert!(key.is_empty());
+                    assert!(value.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_line_list_next_items_uses_absolute_key_offsets() {
+        let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        node.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        node.node_set_val(b"z", 1).unwrap_or_else(|_| panic!());
+
+        let (token, key, child, value) = node.next_items(node.new_iter_token(), false);
+        assert_eq!(token, 1);
+        assert_eq!(key, b"a");
+        assert!(child.is_none());
+        assert_eq!(value, Some(&0));
+
+        let (token, key, child, value) = node.next_items(token, false);
+        assert_eq!(token, 2);
+        assert_eq!(key, b"z");
+        assert!(child.is_none());
+        assert_eq!(value, Some(&1));
+
+        let (token, key, child, value) = node.next_items(token, false);
+        assert_eq!(token, NODE_ITER_FINISHED);
+        assert!(key.is_empty());
+        assert!(child.is_none());
+        assert!(value.is_none());
+
+        let mut duplicate = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        duplicate.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        let child_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        unsafe {
+            duplicate.set_child_1(b"a", TrieNodeODRc::new_in(child_node, global_alloc()));
+        }
+        let (token, key, child, value) = duplicate.next_items(duplicate.new_iter_token(), false);
+        assert_eq!(token, 2);
+        assert_eq!(key, b"a");
+        assert!(child.is_some());
+        assert_eq!(value, Some(&0));
+        assert_eq!(duplicate.iter_token_for_path(key), token);
     }
 
     /// `node_set_branch` replaces the downstream branch at its key. A value
