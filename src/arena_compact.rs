@@ -3288,6 +3288,16 @@ mod tests {
         }
     );
 
+    zipper_moving_tests::zipper_val_at_tests!(arena_compact_zipper,
+        |keys: &[&[u8]]| {
+            let btm = keys.into_iter().map(|k| (k, ())).collect::<PathMap<()>>();
+            ArenaCompactTree::from_zipper(btm.read_zipper(), |&_v| 0)
+        },
+        |trie: &mut ArenaCompactTree<Vec<u8>>, path: &[u8]| -> ACTZipper<'_, Vec<u8>, ()> {
+            trie.read_zipper_at_path(path)
+        }
+    );
+
     zipper_iteration_tests::zipper_iteration_tests!(arena_compact_zipper,
         |keys: &[&[u8]]| {
             let btm = keys.into_iter().map(|k| (k, ())).collect::<PathMap<()>>();

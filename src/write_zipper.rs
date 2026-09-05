@@ -5715,6 +5715,16 @@ mod tests {
             btm.write_zipper_at_path(path)
     });
 
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(write_zipper,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> WriteZipperUntracked<(), GlobalAlloc> {
+            btm.write_zipper_at_path(path)
+    });
+
     crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(write_zipper_owned,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();

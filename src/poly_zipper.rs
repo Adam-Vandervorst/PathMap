@@ -108,6 +108,15 @@ mod tests {
         }
     );
 
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(poly_zipper_pm,
+        |keys: &[&[u8]]| {
+            keys.iter().map(|k| (k, ())).collect::<PathMap<()>>()
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> _ {
+            TestPolyZipper::PathMapU(btm.read_zipper_at_path(path))
+        }
+    );
+
     crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(poly_zipper_pm,
         |keys: &[&[u8]]| {
             keys.iter().map(|k| (k, ())).collect::<PathMap<()>>()
@@ -119,6 +128,17 @@ mod tests {
 
     #[cfg(feature = "arena_compact")]
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(poly_zipper_act,
+        |keys: &[&[u8]]| {
+            let btm = keys.iter().map(|k| (k, ())).collect::<PathMap<()>>();
+            ACTVec::from_zipper(btm.read_zipper(), |()| 0)
+        },
+        |act: &mut ACTVec, path: &[u8]| -> _ {
+            TestPolyZipper::ACTVecPrefix(PrefixZipper::new(&[], act.read_zipper_at_path(path)))
+        }
+    );
+
+     #[cfg(feature = "arena_compact")]
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(poly_zipper_act,
         |keys: &[&[u8]]| {
             let btm = keys.iter().map(|k| (k, ())).collect::<PathMap<()>>();
             ACTVec::from_zipper(btm.read_zipper(), |()| 0)
@@ -156,6 +176,15 @@ mod tests {
     }
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(recursive_zipper_madness,
+        |keys: &[&[u8]]| {
+            keys.iter().map(|k| (k, ())).collect::<PathMap<()>>()
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> _ {
+            ExprFactor::Specific(btm.clone().into_read_zipper(path))
+        }
+    );
+
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(recursive_zipper_madness,
         |keys: &[&[u8]]| {
             keys.iter().map(|k| (k, ())).collect::<PathMap<()>>()
         },

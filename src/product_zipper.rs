@@ -1811,6 +1811,16 @@ mod tests {
             ProductZipper::new::<_, TrieRef<()>, _>(btm.read_zipper_at_path(path), [])
     });
 
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(product_zipper,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> _ {
+            ProductZipper::new::<_, TrieRef<()>, _>(btm.read_zipper_at_path(path), [])
+    });
+
     crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(product_zipper,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
@@ -1822,6 +1832,16 @@ mod tests {
     });
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(product_zipper_generic,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> _ {
+            ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
+    });
+
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(product_zipper_generic,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
             keys.iter().for_each(|k| { btm.set_val_at(k, ()); });

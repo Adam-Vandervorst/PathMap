@@ -385,6 +385,23 @@ use super::{OverlayZipper};
         }
     );
 
+    zipper_moving_tests::zipper_val_at_tests!(overlay_zipper,
+        |keys: &[&[u8]]| {
+            let cutoff = keys.len() / 3 * 2;
+            // eprintln!("keys={:?}", &keys);
+            eprintln!("a_keys={:?}\nb_keys={:?}", &keys[..cutoff], &keys[cutoff..]);
+            let a = keys[..cutoff].into_iter().map(|k| (k, ())).collect::<PathMap<()>>();
+            let b = keys[cutoff..].into_iter().map(|k| (k, ())).collect::<PathMap<()>>();
+            (a, b)
+        },
+        |trie: &mut (PathMap<()>, PathMap<()>), path: &[u8]| -> OZ<'_, ()> {
+            OverlayZipper::new(
+                trie.0.read_zipper_at_path(path),
+                trie.1.read_zipper_at_path(path),
+            )
+        }
+    );
+
     zipper_iteration_tests::zipper_iteration_tests!(overlay_zipper,
         |keys: &[&[u8]]| {
             let cutoff = keys.len() / 3 * 2;

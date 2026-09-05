@@ -3216,7 +3216,17 @@ pub(crate) mod zipper_moving_tests {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_BYTES_ITER_TEST5_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_byte_iter_test5)
                 }
+            }
+        }
+    }
+    pub(crate) use zipper_moving_tests;
 
+    /// `$ident` is a unique identifier for the zipper, so the generated tests don't collide
+    /// `$read_keys` is a function that will create a store containing all paths, from which a zipper can be created
+    /// `$make_z` is a function that will create a zipper from a slice of paths
+    macro_rules! zipper_val_at_tests {
+        ($z_name:ident, $read_keys:expr, $make_z:expr)=>{
+            paste::paste! {
                 #[test]
                 fn [<$z_name _zipper_val_at_test>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_VAL_AT_TEST_KEYS);
@@ -3233,7 +3243,7 @@ pub(crate) mod zipper_moving_tests {
             }
         }
     }
-    pub(crate) use zipper_moving_tests;
+    pub(crate) use zipper_val_at_tests;
 
     /// Internal method to provide a lifetime bound on the macro arguments to the test macro
     pub fn run_test<'a, T: 'a + ZipperMoving, Store>(
@@ -4503,6 +4513,16 @@ mod tests {
             btm.read_zipper_at_path(path)
     });
 
+    super::zipper_moving_tests::zipper_val_at_tests!(read_zipper,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> ReadZipperUntracked<()> {
+            btm.read_zipper_at_path(path)
+    });
+
     super::zipper_iteration_tests::zipper_iteration_tests!(read_zipper,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
@@ -4514,6 +4534,16 @@ mod tests {
     });
 
     super::zipper_moving_tests::zipper_moving_tests!(read_zipper_owned,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> ReadZipperOwned<()> {
+            core::mem::take(btm).into_read_zipper(path)
+    });
+
+    super::zipper_moving_tests::zipper_val_at_tests!(read_zipper_owned,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
             keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
