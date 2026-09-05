@@ -208,18 +208,28 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// with a reasonable time and memory-fetch overhead.
     fn new_iter_token(&self) -> IterToken;
 
-    /// Generates an iter token that can be passed to [Self::next_items] to continue iteration from the
-    /// specified path
+    /// Returns an iter token representing `key` within this node.
+    ///
+    /// A token with [`NODE_TOKEN_NONEXISTENT_BIT`] clear describes an exact existing in-node path.
+    /// A token with the bit set describes a nonexistent path below or after the corresponding
+    /// token with the bit cleared.
+    ///
+    /// [`NODE_ITER_INVALID`] and [`NODE_ITER_FINISHED`] remain special sentinels and never carry
+    /// the lower-bound meaning.
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken;
 
     /// Returns the token for the focus reached by ascending `byte_count` bytes within this node.
     ///
-    /// `token` must be a valid token representing the current focus, and `byte_count` must be a
-    /// non-zero in-node ascent which does not pass the node root.  Implementations must represent every
-    /// result permitted by those preconditions.  They may panic when either precondition is violated.
+    /// `token` must be a valid token with the [`NODE_TOKEN_NONEXISTENT_BIT`] clear , and `byte_count` must
+    /// be a non-zero in-node ascent which does not pass the node root.  Implementations must represent
+    /// every result permitted by those preconditions.  They may panic when any precondition is violated.
     fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken;
 
     /// Steps to the next existing path within the node, in a depth-first order.
+    ///
+    /// `token` may have [`NODE_TOKEN_NONEXISTENT_BIT`] set. In that case, it is a lower-bound
+    /// cursor and this method must treat it as the corresponding unflagged token. Returned
+    /// non-sentinel tokens must have the bit clear.
     ///
     /// When `after_focus` is true, steps to the first item strictly after (and not below) the
     /// focus represented by `token`.
@@ -382,14 +392,39 @@ pub trait TrieNodeDowncast<V: Clone + Send + Sync, A: Allocator> {
     fn convert_to_cell_node(&mut self) -> TrieNodeODRc<V, A>;
 }
 
-/// Node-local cursor used by the trie-node iteration interface
+/// Node-specific encoding representing a position within the node
 pub type IterToken = u64;
 
-/// Special sentinel token value indicating iteration of a node has not been initialized
+/// Reserved high bit marking a token with a special, non-node-specific meaning.
+///
+/// When set, the complete token value identifies a sentinel such as [`NODE_ITER_INVALID`] or
+/// [`NODE_ITER_FINISHED`]. Node-specific token encodings must leave this bit clear.
+pub const NODE_TOKEN_SPECIAL_BIT: IterToken = 1 << (IterToken::BITS - 1);
+
+/// Special sentinel token value indicating an unknown or invalid location
 pub const NODE_ITER_INVALID: IterToken = IterToken::MAX;
 
-/// Special sentinel token value indicating iteration of a node has concluded
+/// Special sentinel token value indicating iteration of a node has concluded.  Returned from some iteration
+/// functions, but should not be passed as an input to any functions accepting an input token
 pub const NODE_ITER_FINISHED: IterToken = IterToken::MAX - 1;
+
+/// Reserved flag on an ordinary [`IterToken`] returned by [`TrieNode::iter_token_for_path`] for a
+/// nonexistent path.
+///
+/// Bit 62 is meaningful only when [`NODE_TOKEN_SPECIAL_BIT`] is clear. The remaining bits hold a
+/// token that describes the corresponding existing path within the node. This flag is reserved for
+/// this use and must never be used in the node-specific position encoding. Node iteration and
+/// ascent methods return unflagged tokens.
+pub const NODE_TOKEN_NONEXISTENT_BIT: IterToken = 1 << (IterToken::BITS - 2);
+
+/// Returns whether `token` represents a nonexistent path within the node.
+///
+/// Must only be called with a non-sentinel token.
+#[inline(always)]
+pub const fn node_iter_token_is_nonexistent(token: IterToken) -> bool {
+    debug_assert!(token & NODE_TOKEN_SPECIAL_BIT == 0);
+    token & NODE_TOKEN_NONEXISTENT_BIT != 0
+}
 
 /// Internal.  A pointer to an onward link or a value contained within a node
 pub(crate) enum PayloadRef<'a, V: Clone + Send + Sync, A: Allocator> {
