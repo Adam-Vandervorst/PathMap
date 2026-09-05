@@ -197,7 +197,8 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///
     /// The iter token is a node-local cursor.  It must represent any position within a node type, and
     /// should involve a minimum of computation to advance to the next position, but it does not need to
-    /// encode an arbitrary path through the trie.
+    /// encode an arbitrary path through the trie.  For a given node, every representable existing path
+    /// has one canonical token; implementations must not produce two different tokens for the same path.
     ///
     /// To the more general question of whether 64 bits will be enough for any possible future node
     /// structure, currently MAX_NODE_KEY_BYTES is limited to 48, but there is no limit on the branching
@@ -227,6 +228,8 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
 
     /// Steps to the next existing path within the node, in a depth-first order.
     ///
+    /// `token` must not be [`NODE_ITER_INVALID`] or [`NODE_ITER_FINISHED`].
+    ///
     /// `token` may have [`NODE_TOKEN_NONEXISTENT_BIT`] set. In that case, it is a lower-bound
     /// cursor and this method must treat it as the corresponding unflagged token. Returned
     /// non-sentinel tokens must have the bit clear.
@@ -235,11 +238,14 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// focus represented by `token`.
     ///
     /// Returns `(next_token, path, child_node, value)`
-    /// - `next_token` is the value to pass to a subsequent call of this method.  Returns
-    ///   [NODE_ITER_FINISHED] when there are no more sub-paths
-    /// - `path` is relative to the start of `node`
-    /// - `child_node` an onward node link, of `None`
-    /// - `value` that exists at the path, or `None`
+    /// - On success, `next_token` is the canonical token for the existing path returned by this call.
+    ///   It is also the continuation token to pass to the subsequent call.
+    /// - `path` is the path represented by a successful `next_token`, relative to the start of this
+    ///   node. `child_node` and `value` are the items stored at that path.
+    /// - When there are no more paths, the result must be
+    ///   `(`[`NODE_ITER_FINISHED`]`, &[], None, None)`. No item is returned in that call. In
+    ///   particular, the final item is returned by the preceding call with an ordinary token; a
+    ///   subsequent call using that token reports exhaustion.
     fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
 
     /// Returns the total number of leaves contained within the whole subtree defined by the node
