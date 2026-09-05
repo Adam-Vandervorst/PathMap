@@ -1017,11 +1017,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         }
         let key_byte = unsafe{ *key.get_unchecked(0) };
         let mut values_idx = self.mask.index_of(key_byte);
-        if self.mask.test_bit(key_byte) {
+        let has_bit = self.mask.test_bit(key_byte);
+        if has_bit {
             values_idx += 1;
         }
         let token = Self::iter_token(key_byte as u16 + 1, values_idx as u16);
-        if key.len() == 1 && self.mask.test_bit(key_byte) {
+        if key.len() == 1 && has_bit {
             token
         } else {
             token | NODE_TOKEN_NONEXISTENT_BIT

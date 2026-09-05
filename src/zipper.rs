@@ -1874,13 +1874,11 @@ pub(crate) mod read_zipper_core {
             debug_assert!(self.is_regularized());
             self.deregularize();
             if self.focus_iter_token == NODE_ITER_INVALID {
-                let cur_tok = self.focus_node.iter_token_for_path(self.node_key());
-                self.focus_iter_token = cur_tok;
-            }
-
-            if self.focus_iter_token == NODE_ITER_INVALID {
-                self.regularize();
-                return false
+                self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
+                if self.focus_iter_token == NODE_ITER_INVALID {
+                    self.regularize();
+                    return false;
+                }
             }
 
             let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, true);
@@ -1890,10 +1888,15 @@ pub(crate) mod read_zipper_core {
             }
 
             let node_key = self.node_key();
-            if node_key.len() == 0 {
+            let node_key_len = node_key.len();
+
+            //The root has no siblings.  But we don't want to underflow the logic after this point
+            if node_key_len == 0 {
+                debug_assert!(self.at_root());
                 return false;
             }
-            let node_key_len = node_key.len();
+
+            //Make sure the returned node-path is long enough to be a sibling of the focus
             let fixed_len = node_key_len - 1;
             if fixed_len >= key_bytes.len()
                 || key_bytes[..fixed_len] != node_key[..fixed_len]
@@ -1903,6 +1906,7 @@ pub(crate) mod read_zipper_core {
                 return false;
             }
 
+            //If the returned node path overshot deeper into the trie we need to walk back to this level
             let byte = key_bytes[fixed_len];
             let focus_iter_token = if key_bytes.len() == node_key_len {
                 new_tok
