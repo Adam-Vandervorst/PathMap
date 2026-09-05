@@ -990,15 +990,17 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
-        if key.len() != 1 {
-            self.new_iter_token()
-        } else {
-            let key_byte = unsafe{ *key.get_unchecked(0) };
-            let mut values_idx = self.mask.index_of(key_byte);
-            if self.mask.test_bit(key_byte) {
-                values_idx += 1;
-            }
-            Self::iter_token(key_byte as u16 + 1, values_idx as u16)
+        match key.len() {
+            0 => self.new_iter_token(),
+            1 => {
+                let key_byte = unsafe{ *key.get_unchecked(0) };
+                let mut values_idx = self.mask.index_of(key_byte);
+                if self.mask.test_bit(key_byte) {
+                    values_idx += 1;
+                }
+                Self::iter_token(key_byte as u16 + 1, values_idx as u16)
+            },
+            _ => NODE_ITER_INVALID,
         }
     }
     #[inline(always)]
@@ -2453,6 +2455,9 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
         }
     }
     assert_eq!(visited, [0, 63, 64, 127, 128, 191, 192, 255]);
+
+    assert_eq!(node.iter_token_for_path(&[]), node.new_iter_token());
+    assert_eq!(node.iter_token_for_path(&[127, 0]), NODE_ITER_INVALID);
 
     let mut token = node.iter_token_for_path(&[127]);
     let mut visited_after_127 = Vec::new();
