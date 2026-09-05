@@ -5859,6 +5859,274 @@ mod tests {
         assert_eq!(after_nested_step.path(), unmoved.path());
     }
 
+    #[test]
+    fn read_zipper_descend_first_byte_after_failed_descend_first_k_path() {
+        let m: PathMap<()> = [&b"ab"[..]].into_iter().collect();
+        let mut z = m.read_zipper();
+        assert!(!z.descend_first_k_path(3));
+        assert_eq!(z.path(), b"");
+        assert_eq!(z.descend_first_byte(), Some(b'a'));
+    }
+
+    #[test]
+    fn read_zipper_to_next_step_after_exhausted_to_next_k_path() {
+        let m: PathMap<()> = [&[0u8, 0, 0, 1, 0, 2, 2, 2, 1, 2, 1, 0, 3][..]]
+            .into_iter()
+            .collect();
+        let mut z = m.read_zipper();
+        assert!(z.to_next_val());
+        assert!(!z.to_next_k_path(5));
+        assert_eq!(z.path(), &[0, 0, 0, 1, 0, 2, 2, 2]);
+        assert!(z.to_next_step());
+        assert_eq!(z.path(), &[0, 0, 0, 1, 0, 2, 2, 2, 1]);
+    }
+
+    #[test]
+    fn read_zipper_descend_first_byte_after_exhausted_k_path_and_ascent() {
+        let m: PathMap<()> = [&b"ab"[..], b"wxyz"].into_iter().collect();
+        let mut z = m.read_zipper();
+        z.descend_to(b"w");
+        assert!(z.descend_first_k_path(1));
+        assert_eq!(z.path(), b"wx");
+        assert!(!z.to_next_k_path(1));
+        assert_eq!(z.path(), b"w");
+        assert!(z.ascend_byte());
+        assert_eq!(z.path(), b"");
+        assert_eq!(z.descend_first_byte(), Some(b'a'));
+    }
+
+    #[test]
+    fn read_zipper_reset_at_root_clears_iteration_token() {
+        let m: PathMap<()> = [&[24u8][..]].into_iter().collect();
+        let mut z = m.read_zipper();
+        assert!(z.to_next_step());
+        z.reset();
+        assert_eq!(z.descend_first_byte(), Some(24));
+        z.reset();
+        assert!(z.to_next_step());
+    }
+
+    #[test]
+    fn read_zipper_to_next_k_path_after_path_movement() {
+        #[derive(Clone, Copy)]
+        enum Movement {
+            DescendTo,
+            MoveToPath,
+            DescendToThenUntil,
+        }
+
+        let cases: &[(&str, Movement, &[&[u8]], usize, &[u8])] = &[
+            (
+                "descend_to across a node boundary",
+                Movement::DescendTo,
+                &[
+                    &[0u8, 0, 1, 1],
+                    &[0, 1, 0, 1, 0, 0],
+                    &[0, 1, 1, 0, 0, 0, 1, 0],
+                ],
+                2,
+                &[0],
+            ),
+            (
+                "move_to_path",
+                Movement::MoveToPath,
+                &[&[3u8, 2, 2], &[3, 2, 3, 1, 2, 3, 0], &[3, 2, 3, 3]],
+                4,
+                b"",
+            ),
+            (
+                "descend_to followed by descend_until",
+                Movement::DescendToThenUntil,
+                &[&[0u8, 0, 0, 0, 1, 0, 1], &[0, 1, 1, 1]],
+                4,
+                b"",
+            ),
+        ];
+
+        for (name, movement, paths, k, expected_path) in cases {
+            let m: PathMap<()> = paths.iter().copied().collect();
+            let mut z = m.read_zipper();
+            match movement {
+                Movement::DescendTo => z.descend_to(&[0, 1, 1]),
+                Movement::MoveToPath => {
+                    z.move_to_path(&[3, 2, 3, 3]);
+                }
+                Movement::DescendToThenUntil => {
+                    z.descend_to(&[0, 1]);
+                    assert!(z.descend_until(), "{name}");
+                    assert_eq!(z.path(), &[0, 1, 1, 1], "{name}");
+                }
+            }
+            assert!(!z.to_next_k_path(*k), "{name}");
+            assert_eq!(z.path(), *expected_path, "{name}");
+        }
+    }
+
+    #[test]
+    fn read_zipper_to_next_k_path_does_not_repeat_prefix_value() {
+        let m: PathMap<()> = [&b"a"[..], b"abcd"].into_iter().collect();
+        let mut z = m.read_zipper();
+        assert!(z.descend_first_k_path(1));
+        assert_eq!(z.path(), b"a");
+        assert!(!z.to_next_k_path(1));
+    }
+
+    #[test]
+    fn read_zipper_to_next_val_after_exhausted_k_path() {
+        let root: PathMap<()> = [&b"ab"[..], b"wxyz"].into_iter().collect();
+        let mut z = root.read_zipper();
+        assert!(z.descend_first_k_path(1), "root");
+        assert!(z.to_next_k_path(1), "root");
+        assert!(!z.to_next_k_path(1), "root");
+        assert!(z.at_root(), "root");
+        assert!(z.to_next_val(), "root");
+        assert_eq!(z.path(), b"ab", "root");
+
+        let subtree: PathMap<()> = [
+            &[1u8, 2, 1, 0, 0, 0, 2, 1, 1, 1, 2, 3, 1, 2][..],
+            &[2, 2, 1, 2, 3, 2, 3],
+            &[3, 3, 3, 2, 3, 0, 0, 3],
+        ]
+        .into_iter()
+        .collect();
+        let mut z = subtree.read_zipper();
+        assert_eq!(z.descend_indexed_byte(1), Some(2), "subtree");
+        assert!(z.descend_to_existing_byte(2), "subtree");
+        assert!(!z.to_next_k_path(1), "subtree");
+        assert_eq!(z.path(), &[2], "subtree");
+        assert!(z.to_next_val(), "subtree");
+        assert_eq!(z.path(), &[2, 2, 1, 2, 3, 2, 3], "subtree");
+    }
+
+    // Focus state after moving through a nonexistent path.
+
+    #[test]
+    fn read_zipper_descend_first_byte_then_ascend_from_missing_path() {
+        let cases: &[(&str, &[&[u8]], &[u8], u8)] = &[
+            (
+                "before the first key",
+                &[&b"b"[..], &b"c"[..]],
+                b"a",
+                b'b',
+            ),
+            (
+                "after the last key",
+                &[&b"ab"[..], &b"wxyz"[..]],
+                b"z",
+                b'a',
+            ),
+        ];
+
+        for (name, paths, missing_path, expected_byte) in cases {
+            let m: PathMap<()> = paths.iter().copied().collect();
+            let mut z = m.read_zipper();
+            z.descend_to(missing_path);
+            assert!(!z.path_exists(), "{name}");
+            assert_eq!(z.descend_first_byte(), None, "{name}");
+            assert!(z.ascend_byte(), "{name}");
+            assert_eq!(z.descend_first_byte(), Some(*expected_byte), "{name}");
+        }
+    }
+
+    #[test]
+    fn read_zipper_ascend_until_branch_from_missing_path_below_zipper_root() {
+        let m: PathMap<()> = [
+            &[1u8, 12, 4, 5, 4][..],
+            &[13, 9, 5, 15, 5, 0, 11, 14, 13, 3, 12, 0, 4],
+            &[15, 3, 14, 15, 0, 8, 7],
+        ]
+        .into_iter()
+        .collect();
+        let mut z = m.read_zipper_at_path(&[1, 12, 4, 5, 4]);
+        z.descend_to(&[12, 12]);
+        z.descend_to(&[173, 37, 23]);
+        assert_eq!(z.descend_first_byte(), None);
+        assert_eq!(z.ascend_until_branch(), 5);
+        assert!(z.at_root());
+    }
+
+    #[test]
+    fn read_zipper_to_next_step_after_missing_path() {
+        let m: PathMap<()> = [&[0u8][..], &[7], &[14, 5]].into_iter().collect();
+        let mut z = m.read_zipper_at_path(&[14, 5]);
+        z.descend_to_byte(11);
+        z.descend_to_byte(13);
+        assert_eq!(z.descend_first_byte(), None);
+        assert!(z.ascend_byte());
+        assert!(!z.to_next_step());
+    }
+
+    #[test]
+    fn read_zipper_to_next_val_does_not_escape_zipper_root_after_missing_path() {
+        let m: PathMap<()> = [&[7u8, 167, 36, 166, 110][..]].into_iter().collect();
+        let mut z = m.read_zipper_at_path(&[7, 167, 36, 166, 110]);
+        z.descend_to(&[45, 47, 220]);
+        assert_eq!(z.descend_first_byte(), None);
+        assert_eq!(z.ascend(1), 1);
+        assert!(!z.to_next_val());
+    }
+
+    #[test]
+    fn read_zipper_to_next_sibling_after_missing_path_below_leaf() {
+        let m: PathMap<()> = [&[10u8][..], &[20], &[30]].into_iter().collect();
+        let mut z = m.read_zipper();
+        z.descend_to(&[10, 99]);
+        assert_eq!(z.descend_first_byte(), None);
+        assert!(z.ascend_byte());
+        assert_eq!(z.path(), &[10]);
+        assert_eq!(z.to_next_sibling_byte(), Some(20));
+    }
+
+    #[test]
+    fn read_zipper_ascend_multiple_bytes_from_missing_path() {
+        let m: PathMap<()> = [
+            &[24u8][..],
+            &[49, 69],
+            &[54],
+            &[73, 209, 145, 207],
+            &[124],
+        ]
+        .into_iter()
+        .collect();
+        let mut z = m.read_zipper();
+        z.move_to_path(&[133, 52, 64, 90]);
+        assert_eq!(z.to_next_sibling_byte(), None);
+        assert_eq!(z.ascend(2), 2);
+        assert_eq!(z.path(), &[133, 52]);
+    }
+
+    // Sibling iteration must stay within a zipper rooted at a path and handle
+    // the first child of dense nodes.
+
+    #[test]
+    fn read_zipper_sibling_moves_do_not_escape_zipper_root() {
+        let m: PathMap<()> = [&[4u8][..], &[5]].into_iter().collect();
+        let mut z = m.read_zipper_at_path(&[4]);
+        assert_eq!(z.to_next_sibling_byte(), None);
+        let m: PathMap<()> = [&[14u8][..], &[15]].into_iter().collect();
+        let mut z = m.read_zipper_at_path(&[15]);
+        assert_eq!(z.to_prev_sibling_byte(), None);
+    }
+
+    #[test]
+    fn read_zipper_to_prev_sibling_at_first_dense_child() {
+        let m: PathMap<()> = [
+            &[0u8, 0, 2][..],
+            &[0, 1],
+            &[1],
+            &[1, 2],
+            &[2],
+            &[2, 0, 1],
+            &[2, 2, 1],
+            &[2, 2, 2],
+        ]
+        .into_iter()
+        .collect();
+        let mut z = m.read_zipper();
+        assert!(z.descend_first_k_path(1));
+        assert_eq!(z.to_prev_sibling_byte(), None);
+    }
+
     /// Tests iteration behavior of to_next_val implementations, comparing the default impl
     /// against the native imple, and a third run that interleaves calls to each
     #[test]
