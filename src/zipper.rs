@@ -2396,6 +2396,7 @@ pub(crate) mod read_zipper_core {
         /// See [ReadZipperCore::get_val] for explanation as to why this is unsafe
         pub(crate) unsafe fn to_next_get_val(&mut self) -> Option<&'a V> {
             timed_span!(ToNextGetValue, COUNTERS);
+            debug_assert_iter_token_layout();
             self.prepare_buffers();
             loop {
                 if self.focus_iter_token == NODE_ITER_INVALID {
@@ -2403,7 +2404,7 @@ pub(crate) mod read_zipper_core {
                     self.focus_iter_token = cur_tok;
                 }
 
-                let (new_tok, key_bytes, child_node, value) = if self.focus_iter_token != NODE_ITER_FINISHED {
+                let (new_tok, key_bytes, child_node, value) = if self.focus_iter_token < TOKEN_LAST {
                     self.focus_node.next_items(self.focus_iter_token, false)
                 } else {
                     (NODE_ITER_FINISHED, &[][..] as &[u8], None, None)
@@ -2586,6 +2587,7 @@ pub(crate) mod read_zipper_core {
         /// Internal method that implements both `k_path...` methods above
         #[inline]
         fn k_path_internal(&mut self, k: usize, base_idx: usize, mut continue_from_focus: bool) -> bool {
+            debug_assert_iter_token_layout();
             if self.focus_iter_token == NODE_ITER_INVALID {
                 self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
             }
