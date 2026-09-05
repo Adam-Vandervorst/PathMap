@@ -218,7 +218,7 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///
     /// [`TOKEN_LAST`] is always the last valid path in a node, although not every node is
     /// guaranteed to have a `TOKEN_LAST`.  [`NODE_ITER_INVALID`] and [`NODE_ITER_FINISHED`] are
-    /// control sentinels and never describe paths.
+    /// control sentinels and never describe paths; this method must not return either sentinel.
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken;
 
     /// Returns the token for the focus reached by ascending `byte_count` bytes within this node.
