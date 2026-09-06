@@ -2604,7 +2604,13 @@ pub(crate) mod read_zipper_core {
         /// Internal method that implements both `k_path...` methods above
         #[inline]
         fn k_path_internal(&mut self, k: usize, base_idx: usize, mut continue_from_focus: bool) -> bool {
+            // Minimum number of bytes beyond the requested path length at which we avoid
+            // copying the excess into prefix_buf. For shorter overshoots, copying the full
+            // node key and truncating it is cheaper; benchmarks put the crossover near 12.
+            const MIN_EXCESS_TO_AVOID_COPY: usize = 12;
+
             debug_assert_iter_token_layout();
+            let target_idx = base_idx + k;
             loop {
                 if self.focus_iter_token == NODE_ITER_INVALID {
                     self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
@@ -2612,12 +2618,12 @@ pub(crate) mod read_zipper_core {
                 }
                 debug_assert_ne!(self.focus_iter_token, NODE_ITER_INVALID);
                 debug_assert_ne!(self.focus_iter_token, NODE_ITER_FINISHED);
-                debug_assert!(self.prefix_buf.len() <= base_idx+k);
+                debug_assert!(self.prefix_buf.len() <= target_idx);
                 debug_assert!(self.prefix_buf.len() >= base_idx);
+                let key_start = self.node_key_start();
                 let (new_tok, key_bytes, child_node, _value) = self.focus_node.next_items(self.focus_iter_token, continue_from_focus);
                 continue_from_focus = false;
                 if new_tok != NODE_ITER_FINISHED {
-                    let key_start = self.node_key_start();
                     if key_start < base_idx {
                         let base_key_len = base_idx - key_start;
                         if base_key_len > key_bytes.len() || &key_bytes[..base_key_len] != &self.prefix_buf[key_start..base_idx] {
@@ -2626,26 +2632,32 @@ pub(crate) mod read_zipper_core {
                         }
                     }
                     self.focus_iter_token = new_tok;
-                    let key_start = self.node_key_start();
                     self.prefix_buf.truncate(key_start);
-                    self.prefix_buf.extend(key_bytes);
-                    if self.prefix_buf.len() <= k+base_idx {
-                        match child_node {
-                            None => {},
-                            Some(rec) => {
-                                self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
-                                *self.focus_node = rec.as_tagged();
-                                self.focus_iter_token = self.focus_node.new_iter_token();
-                            },
+                    let remaining = target_idx - key_start;
+                    if key_bytes.len() > remaining {
+                        let excess = key_bytes.len() - remaining;
+                        if excess >= MIN_EXCESS_TO_AVOID_COPY {
+                            let key_prefix = &key_bytes[..remaining];
+                            self.prefix_buf.extend(key_prefix);
+                        } else {
+                            self.prefix_buf.extend(key_bytes);
+                            self.prefix_buf.truncate(target_idx);
                         }
-                    } else {
-                        let prefix_len = k + base_idx - key_start;
-                        self.prefix_buf.truncate(k+base_idx);
-                        self.focus_iter_token = self.focus_node.ascend_iter_token(new_tok, key_bytes.len() - prefix_len);
+                        self.focus_iter_token = self.focus_node.ascend_iter_token(new_tok, excess);
+                        return true
                     }
-                    if self.prefix_buf.len() == k+base_idx { return true; }
+                    self.prefix_buf.extend(key_bytes);
+                    match child_node {
+                        None => {},
+                        Some(rec) => {
+                            self.ancestors.push((*self.focus_node.clone(), new_tok, self.prefix_buf.len()));
+                            *self.focus_node = rec.as_tagged();
+                            self.focus_iter_token = self.focus_node.new_iter_token();
+                        },
+                    }
+                    if self.prefix_buf.len() == target_idx { return true; }
                 } else {
-                    if self.node_key_start() <= base_idx {
+                    if key_start <= base_idx {
                         let excess = self.prefix_buf.len() - base_idx;
                         self.prefix_buf.truncate(base_idx);
                         if excess > 0 {
@@ -2666,43 +2678,6 @@ pub(crate) mod read_zipper_core {
                 }
             }
         }
-
-        // //GOAT, ALTERNATIVE IMPLEMENTATION.  Performance is roughly equal between the two, but the other
-        // //   implementation was chosen because it initializes the iter_token in preparation for subsequent iteration
-        // pub fn descend_first_byte(&mut self) -> bool {
-        //     self.prepare_buffers();
-        //     debug_assert!(self.is_regularized());
-        //     match self.focus_node.first_child_from_key(self.node_key()) {
-        //         (Some(prefix), Some(child_node)) => {
-        //             match prefix.len() {
-        //                 0 => {
-        //                     panic!(); //GOAT, I don't think we will hit this
-        //                     //If we're at the root of the new node, descend to the first child
-        //                     self.descend_first_byte()
-        //                 },
-        //                 1 => {
-        //                     //Step to a new node
-        //                     self.prefix_buf.push(prefix[0]);
-        //                     self.ancestors.push((self.focus_node.clone(), self.focus_iter_token, self.prefix_buf.len()));
-        //                     self.focus_iter_token = self.focus_node.new_iter_token();
-        //                     self.focus_node = child_node.as_tagged();
-        //                     true
-        //                 },
-        //                 _ => {
-        //                     //Stay within the same node, and just grow the path
-        //                     self.prefix_buf.push(prefix[0]);
-        //                     true
-        //                 }
-        //             }
-        //         },
-        //         (Some(prefix), None) => {
-        //             //Stay within the same node
-        //             self.prefix_buf.push(prefix[0]);
-        //             true
-        //         },
-        //         (None, _) => false
-        //     }
-        // }
 
         /// Internal method that implements [Self::is_val], but so it can be inlined elsewhere
         #[inline]
