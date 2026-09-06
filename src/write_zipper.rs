@@ -6163,9 +6163,14 @@ mod tests {
     /// and valid nodes throughout
     #[test]
     fn write_zipper_dangling_children_algebra_randomized() {
+        #[cfg(miri)]
+        const CASE_COUNT: usize = 2;
+        #[cfg(not(miri))]
+        const CASE_COUNT: usize = 600;
+
         use rand::prelude::*;
         let mut rng = StdRng::from_seed([11; 32]);
-        for _ in 0..600 {
+        for _ in 0..CASE_COUNT {
             let alphabet = rng.random_range(2..6u8);
             let gen_map = |rng: &mut StdRng| {
                 let mut keys: Vec<Vec<u8>> = (0..rng.random_range(1..12)).map(|_| {
