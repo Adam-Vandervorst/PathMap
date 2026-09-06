@@ -1253,7 +1253,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         // println!("{} {bit_i} {mask_i}", n == bit_i);
         if n == bit_i { // outside of word
             loop {
-                if next { mask_i += 1 } else { mask_i -= 1 };
+                if next {
+                    mask_i += 1;
+                } else {
+                    if mask_i == 0 { return (None, None) }
+                    mask_i -= 1;
+                }
                 if !(mask_i < 4) { return (None, None) }
                 if self.mask.0[mask_i] == 0 { continue }
                 n = self.mask.0[mask_i].trailing_zeros() as u8; break;
