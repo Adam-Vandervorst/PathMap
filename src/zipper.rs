@@ -669,18 +669,29 @@ pub trait ZipperIteration: ZipperMoving {
     /// if no further locations exist.  If this method returns `false` then the zipper will be ascended `k`
     /// steps to the common root.  (The focus position when [descend_first_k_path](ZipperIteration::descend_first_k_path) was called)
     ///
+    /// If `k` exceeds the current depth this method returns `false` and resets the zipper's focus to the root.
+    ///
     /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to the paths
     /// below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
     fn to_next_k_path(&mut self, k: usize) -> bool {
-        let base_idx = if self.path().len() >= k {
-            self.path().len() - k
+        let depth = self.path().len();
+        let base_idx = if depth < k {
+            return k_path_depth_exceeded(self)
         } else {
-            return false
+            depth - k
         };
         k_path_default_internal(self, k, base_idx)
     }
+}
+
+/// Handles an out-of-range `to_next_k_path` request without bloating its hot path.
+#[cold]
+#[inline(never)]
+fn k_path_depth_exceeded<Z: ZipperMoving + ?Sized>(z: &mut Z) -> bool {
+    z.reset();
+    false
 }
 
 /// The default implementation of both [ZipperIteration::to_next_k_path] and [ZipperIteration::descend_first_k_path]
@@ -2159,10 +2170,11 @@ pub(crate) mod read_zipper_core {
         }
         fn to_next_k_path(&mut self, k: usize) -> bool {
             timed_span!(ToNextKPath, COUNTERS);
-            let base_idx = if self.path_len() >= k {
-                self.prefix_buf.len() - k
+            let path_len = self.path_len();
+            let base_idx = if path_len < k {
+                return k_path_depth_exceeded(self)
             } else {
-                self.origin_path.len()
+                self.prefix_buf.len() - k
             };
             //De-regularize the zipper
             debug_assert!(self.is_regularized());
