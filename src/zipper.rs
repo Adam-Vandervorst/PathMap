@@ -1972,10 +1972,10 @@ pub(crate) mod read_zipper_core {
             match self.ancestors.pop() {
                 Some((node, _tok, _prefix_len)) => {
                     *self.focus_node = node;
-                    self.focus_iter_token = NODE_ITER_INVALID;
                 },
                 None => {}
             }
+            self.focus_iter_token = NODE_ITER_INVALID;
             self.prefix_buf.truncate(self.origin_path.len());
         }
 
