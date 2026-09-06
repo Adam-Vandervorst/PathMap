@@ -3033,10 +3033,11 @@ pub(crate) mod read_zipper_core {
             //Note: we may be able to eke out a win using the guarantees provided by TOKEN_LAST,
             // however all experiements so far have been worse
             let obs_floor = self.origin_path.len();
-            if self.focus_iter_token == NODE_ITER_INVALID {
-                self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
-            }
             loop {
+                if self.focus_iter_token == NODE_ITER_INVALID {
+                    self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
+                    continue_from_focus = true;
+                }
                 debug_assert_ne!(self.focus_iter_token, NODE_ITER_INVALID);
                 debug_assert_ne!(self.focus_iter_token, NODE_ITER_FINISHED);
                 debug_assert!(self.prefix_buf.len() <= base_idx+k);
