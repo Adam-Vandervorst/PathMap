@@ -2110,9 +2110,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                             key_len_1,
                         )
                     };
-                    //When the focus is at the end of slot 0, slot 1 may be a descendant rather than
-                    //the next sibling.  `after_focus` must skip that whole subtrie
-                    if after_focus && unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                    // "after or below" slot0 has to mean below in this case because slot0 key is a prefix of
+                    //  the slot1 key.  And if we're below slot0 and not below slot1, we shouldn't skip slot 1.
+                    if after_focus
+                        && !node_iter_token_is_nonexistent(token)
+                        && unsafe { key0.get_unchecked(0) == key1.get_unchecked(0) }
+                    {
                         debug_assert_eq!(key0.len(), 1);
                         debug_assert_eq!(offset, 1);
                         return (NODE_ITER_FINISHED, &[], None, None)

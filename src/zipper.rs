@@ -6345,12 +6345,23 @@ mod tests {
         let m: PathMap<()> = [&b"a"[..], b"abcd"].into_iter().collect();
         let mut z = m.read_zipper();
         z.descend_to(b"aa");
-        assert_eq!(z.to_next_sibling_byte(), Some(b'b'));   // fad58f4: None
+        assert_eq!(z.to_next_sibling_byte(), Some(b'b'));
         assert_eq!(z.path(), b"ab");
+
+        let mut z = m.read_zipper();
+        z.descend_to(b"aaa");
+        assert_eq!(z.to_next_sibling_byte(), None);
+        assert_eq!(z.path(), b"aaa");
+
         let mut z = m.read_zipper();
         z.descend_to(b"aa");
-        assert!(z.to_next_k_path(1));                       // fad58f4: false
+        assert!(z.to_next_k_path(1));
         assert_eq!(z.path(), b"ab");
+
+        let mut z = m.read_zipper();
+        z.descend_to(b"aaa");
+        assert!(!z.to_next_k_path(1));
+        assert_eq!(z.path(), b"aa");
     }
 
     #[test]
