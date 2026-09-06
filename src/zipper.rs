@@ -2593,10 +2593,11 @@ pub(crate) mod read_zipper_core {
         #[inline]
         fn k_path_internal(&mut self, k: usize, base_idx: usize, mut continue_from_focus: bool) -> bool {
             debug_assert_iter_token_layout();
-            if self.focus_iter_token == NODE_ITER_INVALID {
-                self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
-            }
             loop {
+                if self.focus_iter_token == NODE_ITER_INVALID {
+                    self.focus_iter_token = self.focus_node.iter_token_for_path(self.node_key());
+                    continue_from_focus = true;
+                }
                 debug_assert_ne!(self.focus_iter_token, NODE_ITER_INVALID);
                 debug_assert_ne!(self.focus_iter_token, NODE_ITER_FINISHED);
                 debug_assert!(self.prefix_buf.len() <= base_idx+k);
