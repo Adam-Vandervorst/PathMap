@@ -1972,8 +1972,8 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     // * the value and child at the same one-byte path, `TOKEN_LAST` is its sole canonical token and
     // * `key_end_0` is never produced.  The final path in every nonempty LineListNode likewise uses
     // * `TOKEN_LAST`.  A token in the middle of a key represents that exact prefix,
-    // * and `next_items` returns the containing item.  Passing `after_focus` skips that containing item
-    // * when the focus is partial, which lets k-path iteration continue without another node dispatch.
+    // * and `next_items` returns the containing item.  Passing `after_focus` skips items at or below that
+    // * focus, which lets k-path iteration continue without another node dispatch.
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
     #[inline(always)]
     fn new_iter_token(&self) -> IterToken {
@@ -2110,6 +2110,13 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                             key_len_1,
                         )
                     };
+                    //When the focus is at the end of slot 0, slot 1 may be a descendant rather than
+                    //the next sibling.  `after_focus` must skip that whole subtrie
+                    if after_focus && unsafe{ key0.get_unchecked(0) == key1.get_unchecked(0) } {
+                        debug_assert_eq!(key0.len(), 1);
+                        debug_assert_eq!(offset, 1);
+                        return (NODE_ITER_FINISHED, &[], None, None)
+                    }
                     let (child, value) = if header & (1 << 12) != 0 {
                         (Some(unsafe { self.child_in_slot::<1>() }), None)
                     } else {
@@ -3245,6 +3252,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_line_list_next_items_after_focus_skips_descendant_item() {
+        let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        node.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        node.node_set_val(b"abcd", 1).unwrap_or_else(|_| panic!());
+        assert!(validate_node(&node));
+
+        let focus = node.iter_token_for_path(b"a");
+        let (next, key, child, value) = node.next_items(focus, true);
+        assert_eq!(next, NODE_ITER_FINISHED);
+        assert!(key.is_empty());
+        assert!(child.is_none());
+        assert!(value.is_none());
+
+        //Ordinary iteration still sees the descendant item.
+        let (_, key, child, value) = node.next_items(focus, false);
+        assert_eq!(key, b"abcd");
+        assert!(child.is_none());
+        assert_eq!(value, Some(&1));
     }
 
     #[test]
