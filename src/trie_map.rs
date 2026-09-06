@@ -589,8 +589,12 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         };
         let mut result = MerkleizeResult::default();
         let mut memo = gxhash::HashMap::default();
-        let (hash, new_root) = merkleize_impl(&mut result, &mut memo, root, self.root_val());
-        result.hash = hash;
+        let (node_hash, new_root) = merkleize_impl(&mut result, &mut memo, root);
+        use std::hash::Hash;
+        let mut hasher = gxhash::GxHasher::with_seed(0);
+        self.root_val().hash(&mut hasher);
+        node_hash.hash(&mut hasher);
+        result.hash = hasher.finish_u128();
         if let Some(new_root) = new_root {
             *self.root.get_mut() = Some(new_root);
         }
