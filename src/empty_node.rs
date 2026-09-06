@@ -66,7 +66,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
         if key.len() == 0 {
             0
         } else {
-            NODE_TOKEN_NONEXISTENT_BIT
+            TOKEN_AFTER_LAST
         }
     }
     fn ascend_iter_token(&self, _token: IterToken, _byte_count: usize) -> IterToken {
