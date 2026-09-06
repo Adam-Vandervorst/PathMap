@@ -1950,6 +1950,9 @@ pub(crate) mod read_zipper_core {
         fn ascend(&mut self, mut steps: usize) -> bool {
             timed_span!(Ascend, COUNTERS);
             debug_assert!(self.is_regularized());
+            if self.at_root() {
+                return false;
+            }
             while steps > 0 {
                 if self.excess_key_len() == 0 {
                     match self.ancestors.pop() {
@@ -1977,6 +1980,9 @@ pub(crate) mod read_zipper_core {
         fn ascend_byte(&mut self) -> bool {
             timed_span!(AscendByte, COUNTERS);
             debug_assert!(self.is_regularized());
+            if self.at_root() {
+                return false;
+            }
             if self.excess_key_len() == 0 {
                 match self.ancestors.pop() {
                     Some((node, iter_tok, _prefix_offset)) => {
@@ -5676,7 +5682,7 @@ mod tests {
         let mut m = PathMap::<u64>::new(); m.set_val_at(&[0u8,0,2], 1); m.create_path(&[0u8,3]);
         let mut z = m.read_zipper_at_path(&[0u8,3]);
         z.descend_to(&[1u8]);
-        assert_eq!(z.descend_first_byte(), None);
+        assert!(!z.descend_first_byte());
         assert!(z.ascend_byte());         // fad58f4: panic at empty_node.rs:68 (unreachable!)
         assert!(z.at_root());
     }
@@ -5686,7 +5692,7 @@ mod tests {
         let m: PathMap<()> = [&b"a"[..], b"abcd"].into_iter().collect();
         let mut z = m.read_zipper();
         z.descend_to(b"aa");
-        assert_eq!(z.to_next_sibling_byte(), Some(b'b'));   // fad58f4: None
+        assert!(z.to_next_sibling_byte());                  // fad58f4: None
         assert_eq!(z.path(), b"ab");
         let mut z = m.read_zipper();
         z.descend_to(b"aa");
@@ -5701,7 +5707,8 @@ mod tests {
         assert!(z.to_next_val());
         assert!(!z.to_next_k_path(2));
         assert_eq!(z.path(), &[0,0,0,0,0]);
-        assert_eq!(z.descend_first_byte(), Some(0));        // fad58f4: None
+        assert!(z.descend_first_byte());                    // fad58f4: None
+        assert_eq!(z.path(), &[0,0,0,0,0,0]);
         let mut z = m.read_zipper();
         assert!(z.to_next_val());
         assert!(!z.to_next_k_path(2));
@@ -5716,11 +5723,27 @@ mod tests {
         assert!(z.to_next_val());
         assert!(!z.to_next_val());
         assert!(z.at_root());
-        assert_eq!(z.descend_first_byte(), Some(3));        // fad58f4: None
+        assert!(z.descend_first_byte());                    // fad58f4: None
+        assert_eq!(z.path(), &[3]);
         let mut z = m.read_zipper_at_path(&[1,2]);
         assert!(z.to_next_val());
         assert!(!z.to_next_val());
         assert!(z.to_next_step());                          // fad58f4: false
         assert_eq!(z.path(), &[3]);
+    }
+
+    #[test]
+    fn read_zipper_prev_sibling_cases() {
+        let m: PathMap<()> = [&[10u8][..], &[20], &[70]].into_iter().collect();   // dense node
+        let mut z = m.read_zipper(); z.descend_to(&[70]);
+        assert!(z.to_prev_sibling_byte());                  // fad58f4 and master: Some(10)
+        assert_eq!(z.path(), &[20]);
+        let mut z = m.read_zipper(); z.descend_to(&[60]);   // nonexistent byte
+        assert!(z.to_prev_sibling_byte());                  // fad58f4 debug: assert in bit_sibling
+        assert_eq!(z.path(), &[20]);
+        let m: PathMap<()> = [&[10u8,1][..], &[200,1]].into_iter().collect();     // line-list node
+        let mut z = m.read_zipper(); z.descend_to(&[100]);
+        assert!(z.to_prev_sibling_byte());                  // fad58f4 and master: None
+        assert_eq!(z.path(), &[10]);
     }
 }
