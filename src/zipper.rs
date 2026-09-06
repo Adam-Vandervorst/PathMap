@@ -1866,6 +1866,9 @@ pub(crate) mod read_zipper_core {
 
         fn to_next_sibling_byte(&mut self) -> bool {
             timed_span!(ToNextSiblingByte, COUNTERS);
+            if self.at_root() {
+                return false;
+            }
             self.prepare_buffers();
             if self.prefix_buf.len() == 0 {
                 return false
@@ -2529,6 +2532,9 @@ pub(crate) mod read_zipper_core {
         /// Internal implementation of `to_next_sibling_byte` / `to_prev_sibling_byte`.
         #[inline]
         fn to_sibling(&mut self, next: bool) -> bool {
+            if self.at_root() {
+                return false;
+            }
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
             if self.node_key().len() != 0 {
