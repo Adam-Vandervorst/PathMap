@@ -19,7 +19,7 @@
 use arrayvec::ArrayVec;
 use fast_slice_utils::find_prefix_overlap;
 use crate::utils::{BitMask, ByteMask};
-use crate::zipper::{Zipper, ZipperMoving, ZipperPath, PathObserver, ZipperIteration, ZipperValues};
+use crate::zipper::{Zipper, ZipperMoving, ZipperPath, PathObserver, ZipperIteration, ZipperValues, ZipperValuesAt};
 
 /// Zipper that traverses a virtual trie formed by fusing the tries of two other zippers
 pub struct OverlayZipper<AV, BV, OutV, AZipper, BZipper, Mapping>
@@ -102,6 +102,15 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperValues<OutV>
     fn val(&self) -> Option<&OutV> {
         (self.mapping)(self.a.val(), self.b.val())
     }
+}
+
+impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperValuesAt<OutV>
+    for OverlayZipper<AV, BV, OutV, AZipper, BZipper, Mapping>
+    where
+        AZipper: ZipperValuesAt<AV>,
+        BZipper: ZipperValuesAt<BV>,
+        Mapping: for<'a> Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>,
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&OutV> {
         (self.mapping)(self.a.val_at(&path), self.b.val_at(&path))
     }
@@ -425,6 +434,23 @@ mod tests {
         Mapping
     >;
     zipper_moving_tests::zipper_moving_tests!(overlay_zipper,
+        |keys: &[&[u8]]| {
+            let cutoff = keys.len() / 3 * 2;
+            // eprintln!("keys={:?}", &keys);
+            eprintln!("a_keys={:?}\nb_keys={:?}", &keys[..cutoff], &keys[cutoff..]);
+            let a = keys[..cutoff].into_iter().map(|k| (k, ())).collect::<PathMap<()>>();
+            let b = keys[cutoff..].into_iter().map(|k| (k, ())).collect::<PathMap<()>>();
+            (a, b)
+        },
+        |trie: &mut (PathMap<()>, PathMap<()>), path: &[u8]| -> OZ<'_, ()> {
+            OverlayZipper::new(
+                trie.0.read_zipper_at_path(path),
+                trie.1.read_zipper_at_path(path),
+            )
+        }
+    );
+
+    zipper_moving_tests::zipper_val_at_tests!(overlay_zipper,
         |keys: &[&[u8]]| {
             let cutoff = keys.len() / 3 * 2;
             // eprintln!("keys={:?}", &keys);

@@ -94,6 +94,7 @@ use crate::{
         ZipperConcrete, ZipperReadOnlyConditionalValues, TrieRef
     },
 };
+
 use crate::gxhash::{GxHasher, HashMap, HashMapExt};
 
 /// The identifier of a node (branch node or line node)
@@ -2796,6 +2797,11 @@ where Storage: AsRef<[u8]>
     fn val(&self) -> Option<&()> {
         self.get_value().map(|_x| &())
     }
+}
+
+impl<'tree, Storage> ZipperValuesAt<()> for ACTZipper<'tree, Storage, ()>
+where Storage: AsRef<[u8]>
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&()> {
         self.get_value_at(path.as_ref()).map(|_x| &())
     }
@@ -2808,6 +2814,11 @@ where Storage: AsRef<[u8]>
         //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
         self.get_val()
     }
+}
+
+impl<'tree, Storage> ZipperValuesAt<u64> for ACTZipper<'tree, Storage, u64>
+where Storage: AsRef<[u8]>
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&u64> {
         //GOAT, see soundness discussion in ZipperReadOnlyValues impl below
         self.get_val_at(path)
@@ -3319,6 +3330,16 @@ mod tests {
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,
+        |keys: &[&[u8]]| {
+            let btm = keys.into_iter().map(|k| (k, ())).collect::<PathMap<()>>();
+            ArenaCompactTree::from_zipper(btm.read_zipper(), |&_v| 0)
+        },
+        |trie: &mut ArenaCompactTree<Vec<u8>>, path: &[u8]| -> ACTZipper<'_, Vec<u8>, ()> {
+            trie.read_zipper_at_path(path)
+        }
+    );
+
+    zipper_moving_tests::zipper_val_at_tests!(arena_compact_zipper,
         |keys: &[&[u8]]| {
             let btm = keys.into_iter().map(|k| (k, ())).collect::<PathMap<()>>();
             ArenaCompactTree::from_zipper(btm.read_zipper(), |&_v| 0)

@@ -62,17 +62,27 @@ pub trait ZipperValues<V> {
     /// will provide a longer-lived reference to the value.
     fn val(&self) -> Option<&V>;
 
-    /// Returns a refernce to the value at `path`, relative to the zipper's focus, or `None` if there is no value
-    ///
-    /// If you have a zipper type that implements [ZipperReadOnlyValues] then [ZipperReadOnlyValues::get_val_at]
-    /// will provide a longer-lived reference to the value.
-    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V>;
-
     /// Deprecated alias for [ZipperValues::val]
     #[deprecated] //GOAT-old-names
     fn value(&self) -> Option<&V> {
         self.val()
     }
+}
+
+/// Provides random access to values below the zipper's current focus.
+///
+/// Unlike [ZipperValues::val], this capability requires the zipper to be able
+/// to return a stable reference to a value at an arbitrary relative path.
+/// Computed or virtual zippers may therefore implement [ZipperValues] without
+/// implementing this trait.
+pub trait ZipperValuesAt<V>: ZipperValues<V> {
+    /// Returns a reference to the value at `path`, relative to the zipper's
+    /// focus, or `None` if there is no value.
+    ///
+    /// If you have a zipper type that implements [ZipperReadOnlyValues] then
+    /// [ZipperReadOnlyValues::get_val_at] will provide a longer-lived reference
+    /// to the value.
+    fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V>;
 }
 
 /// Method to fork a read zipper from the parent zipper
@@ -842,7 +852,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> OpaqueAbstractNodeRef<'a, V, A> {
 pub struct OpaqueTrieNodeRef<'trie, V: Clone + Send + Sync, A: Allocator>(pub(crate) &'trie TrieNodeODRc<V, A>);
 
 /// Similar to [ZipperSubtries], but with the stronger guarantee that subtrie access will be constant-time and won't fail
-pub trait ZipperInfallibleSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValues<V> + Zipper {
+pub trait ZipperInfallibleSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValuesAt<V> + Zipper {
     /// Returns a new [PathMap] containing everything below the zipper's focus
     fn make_map(&self) -> PathMap<V, A>;
 
@@ -1224,6 +1234,8 @@ macro_rules! zipper_impl_lens {
     };
     (ZipperValues $s: ident => $e:expr) => {
         fn val(&$s) -> Option<&V> { $e.val() }
+    };
+    (ZipperValuesAt $s: ident => $e:expr) => {
         fn val_at<K: AsRef<[u8]>>(&$s, path: K) -> Option<&V> { $e.val_at(path) }
     };
     (ZipperForking $s: ident => $e:expr) => {
@@ -1306,6 +1318,7 @@ impl <Z : ZipperMoving> ZipperMoving for Box<Z> { zipper_impl_lens!(ZipperMoving
 impl <Z : ZipperPath> ZipperPath for Box<Z> { zipper_impl_lens!(ZipperPath self => (**self)); }
 impl <Z : ZipperIteration> ZipperIteration for Box<Z> { zipper_impl_lens!(ZipperIteration self => (**self)); }
 impl <V, Z : ZipperValues<V>> ZipperValues<V> for Box<Z> { zipper_impl_lens!(ZipperValues self => (**self)); }
+impl <V, Z : ZipperValuesAt<V>> ZipperValuesAt<V> for Box<Z> { zipper_impl_lens!(ZipperValuesAt self => (**self)); }
 impl <V, Z : ZipperForking<V>> ZipperForking<V> for Box<Z> { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Self: 'a; zipper_impl_lens!(ZipperForking self => (**self)); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperSubtries<V, A>> ZipperSubtries<V, A> for Box<Z> { zipper_impl_lens!(ZipperSubtries self => (**self)); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperInfallibleSubtries<V, A>> ZipperInfallibleSubtries<V, A> for Box<Z> { zipper_impl_lens!(ZipperInfallibleSubtries self => (**self)); }
@@ -1324,6 +1337,7 @@ impl <Z : ZipperMoving> ZipperMoving for &mut Z { zipper_impl_lens!(ZipperMoving
 impl <Z : ZipperPath> ZipperPath for &mut Z { zipper_impl_lens!(ZipperPath self => (**self)); }
 impl <Z : ZipperIteration> ZipperIteration for &mut Z { zipper_impl_lens!(ZipperIteration self => (**self)); }
 impl <V, Z : ZipperValues<V>> ZipperValues<V> for &mut Z { zipper_impl_lens!(ZipperValues self => (**self)); }
+impl <V, Z : ZipperValuesAt<V>> ZipperValuesAt<V> for &mut Z { zipper_impl_lens!(ZipperValuesAt self => (**self)); }
 impl <V, Z : ZipperForking<V>> ZipperForking<V> for &mut Z { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Self: 'a; zipper_impl_lens!(ZipperForking self => (**self)); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperSubtries<V, A>> ZipperSubtries<V, A> for &mut Z { zipper_impl_lens!(ZipperSubtries self => (**self)); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperInfallibleSubtries<V, A>> ZipperInfallibleSubtries<V, A> for &mut Z { zipper_impl_lens!(ZipperInfallibleSubtries self => (**self)); }
@@ -1376,6 +1390,7 @@ impl<V: Clone + Send + Sync, A: Allocator> Drop for ReadZipperTracked<'_, '_, V,
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for ReadZipperTracked<'_, '_, V, A> { zipper_impl_lens!(Zipper self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for ReadZipperTracked<'_, '_, V, A>{ zipper_impl_lens!(ZipperValues self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for ReadZipperTracked<'_, '_, V, A>{ zipper_impl_lens!(ZipperValuesAt self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for ReadZipperTracked<'_, '_, V, A> { zipper_impl_lens!(ZipperSubtries self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperTracked<'_, '_, V, A> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperMoving for ReadZipperTracked<'trie, '_, V, A> { zipper_impl_lens!(ZipperMoving self => self.z); }
@@ -1465,6 +1480,7 @@ pub struct ReadZipperUntracked<'a, 'path, V: Clone + Send + Sync, A: Allocator =
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Zipper for ReadZipperUntracked<'_, '_, V, A> { zipper_impl_lens!(Zipper self => self.z); }
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for ReadZipperUntracked<'_, '_, V, A> { zipper_impl_lens!(ZipperValues self => self.z); }
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for ReadZipperUntracked<'_, '_, V, A> { zipper_impl_lens!(ZipperValuesAt self => self.z); }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ReadZipperUntracked<'trie, '_, V, A> { zipper_impl_lens!(ZipperPathBuffer self => self.z); }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperIteration for ReadZipperUntracked<'trie, '_, V, A> { zipper_impl_lens!(ZipperIteration self => self.z); }
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperReadOnlyConditionalIteration<'trie, V> for ReadZipperUntracked<'trie, '_, V, A> { }
@@ -1641,6 +1657,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for ReadZipperOwned<V, A> {
     fn val(&self) -> Option<&V> { unsafe{ self.z.get_val() } }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for ReadZipperOwned<V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> { unsafe{ self.z.get_val_at(path) } }
 }
 
@@ -1879,6 +1898,9 @@ pub(crate) mod read_zipper_core {
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for ReadZipperCore<'_, '_, V, A> {
         fn val(&self) -> Option<&V> { unsafe{ self.get_val() } }
+    }
+
+    impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for ReadZipperCore<'_, '_, V, A> {
         fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> { unsafe{ self.get_val_at(path) } }
     }
 
@@ -3691,7 +3713,17 @@ pub(crate) mod zipper_moving_tests {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_BYTES_ITER_TEST5_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_byte_iter_test5)
                 }
+            }
+        }
+    }
+    pub(crate) use zipper_moving_tests;
 
+    /// `$ident` is a unique identifier for the zipper, so the generated tests don't collide
+    /// `$read_keys` is a function that will create a store containing all paths, from which a zipper can be created
+    /// `$make_z` is a function that will create a zipper from a slice of paths
+    macro_rules! zipper_val_at_tests {
+        ($z_name:ident, $read_keys:expr, $make_z:expr)=>{
+            paste::paste! {
                 #[test]
                 fn [<$z_name _zipper_val_at_test>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_VAL_AT_TEST_KEYS);
@@ -3708,7 +3740,7 @@ pub(crate) mod zipper_moving_tests {
             }
         }
     }
-    pub(crate) use zipper_moving_tests;
+    pub(crate) use zipper_val_at_tests;
 
     /// Internal method to provide a lifetime bound on the macro arguments to the test macro
     pub fn run_test<'a, T: 'a + ZipperMoving, Store>(
@@ -4410,7 +4442,7 @@ pub(crate) mod zipper_moving_tests {
         b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i",
     ];
 
-    pub fn zipper_val_at_test<Z: ZipperMoving + ZipperValues<()>>(mut zipper: Z) {
+    pub fn zipper_val_at_test<Z: ZipperMoving + ZipperValuesAt<()>>(mut zipper: Z) {
         assert_eq!(zipper.val_at(b""), None);
         assert_eq!(zipper.val_at(b"roman"), Some(&()));
         assert_eq!(zipper.val_at(b"romane"), Some(&()));
@@ -4453,7 +4485,7 @@ pub(crate) mod zipper_moving_tests {
         key
     }
 
-    pub fn zipper_val_at_long_path_test<Z: ZipperMoving + ZipperValues<()>>(mut zipper: Z) {
+    pub fn zipper_val_at_long_path_test<Z: ZipperMoving + ZipperValuesAt<()>>(mut zipper: Z) {
         let long_key = zipper_val_at_long_path_test_key();
         let relative_long_suffix = &long_key[3..];
         let almost_full_suffix = &relative_long_suffix[..relative_long_suffix.len()-1];
@@ -5186,6 +5218,16 @@ mod tests {
             btm.read_zipper_at_path(path)
     });
 
+    super::zipper_moving_tests::zipper_val_at_tests!(read_zipper,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> ReadZipperUntracked<()> {
+            btm.read_zipper_at_path(path)
+    });
+
     super::zipper_iteration_tests::zipper_iteration_tests!(read_zipper,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
@@ -5197,6 +5239,16 @@ mod tests {
     });
 
     super::zipper_moving_tests::zipper_moving_tests!(read_zipper_owned,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> ReadZipperOwned<()> {
+            core::mem::take(btm).into_read_zipper(path)
+    });
+
+    super::zipper_moving_tests::zipper_val_at_tests!(read_zipper_owned,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
             keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
