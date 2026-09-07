@@ -266,6 +266,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefBo
     fn val(&self) -> Option<&V> {
         self.get_val()
     }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRefBorrowed<'_, V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         self.get_val_at(path)
     }
@@ -646,6 +649,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefOw
             None
         }
     }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRefOwned<V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         if self.is_valid() {
             TrieRefBorrowed::new_with_key_and_path_in(
@@ -844,6 +850,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRef<'
             TrieRef::Owned(trie_ref) => trie_ref.val(),
         }
     }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRef<'_, V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.val_at(path),
@@ -1138,7 +1147,7 @@ mod tests {
 
     #[test]
     fn trie_ref_val_at_test() {
-        fn assert_val_at<T: ZipperValues<i32>>(trie_ref: T) {
+        fn assert_val_at<T: ZipperValuesAt<i32>>(trie_ref: T) {
             assert_eq!(trie_ref.val(), None);
             assert_eq!(trie_ref.val_at(b"root:a:new_a"), Some(&10));
             assert_eq!(trie_ref.val_at(b"root:a:nested:deep"), Some(&11));
