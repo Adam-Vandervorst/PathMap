@@ -2444,6 +2444,7 @@ pub(crate) mod read_zipper_core {
                         let unmodifiable_subkey = &self.prefix_buf[key_start..origin_path_len];
                         if unmodifiable_len > key_bytes.len() || &key_bytes[..unmodifiable_len] != unmodifiable_subkey {
                             self.prefix_buf.truncate(origin_path_len);
+                            self.focus_iter_token = NODE_ITER_INVALID;
                             return None
                         }
                     }
