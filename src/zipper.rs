@@ -2870,6 +2870,7 @@ pub(crate) mod read_zipper_core {
                         if unmodifiable_len > key_bytes.len() || &key_bytes[..unmodifiable_len] != unmodifiable_subkey {
                             obs.ascend(self.prefix_buf.len() - origin_path_len);
                             self.prefix_buf.truncate(origin_path_len);
+                            self.focus_iter_token = NODE_ITER_INVALID;
                             return None
                         }
                     }
