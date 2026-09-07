@@ -495,6 +495,22 @@ impl core::ops::BitAndAssign for ByteMask {
     }
 }
 
+impl core::ops::BitXor for ByteMask {
+    type Output = ByteMask;
+    #[inline]
+    fn bitxor(self, rhs: Self) -> ByteMask {
+        self.xor(&rhs)
+    }
+}
+
+impl core::ops::Not for ByteMask {
+    type Output = ByteMask;
+    #[inline]
+    fn not(self) -> ByteMask {
+        BitMask::not(&self)
+    }
+}
+
 impl Lattice for ByteMask {
     #[inline]
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
