@@ -1245,31 +1245,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             return (None, None)
         }
         let k = key[0];
-        let mut mask_i = ((k & 0b11000000) >> 6) as usize;
-        let bit_i = k & 0b00111111;
-        // println!("k {k}");
-
-        let mut n = bit_sibling(bit_i, self.mask.0[mask_i], !next);
-        // println!("{} {bit_i} {mask_i}", n == bit_i);
-        if n == bit_i { // outside of word
-            loop {
-                if next {
-                    mask_i += 1;
-                } else {
-                    if mask_i == 0 { return (None, None) }
-                    mask_i -= 1;
-                }
-                if !(mask_i < 4) { return (None, None) }
-                if self.mask.0[mask_i] == 0 { continue }
-                n = self.mask.0[mask_i].trailing_zeros() as u8; break;
-            }
-        }
-
-        // println!("{} {bit_i} {mask_i}", n == bit_i);
-        // println!("{:?}", parent.items().map(|(k, _)| k).collect::<Vec<_>>());
-        let sibling_key_char = n | ((mask_i << 6) as u8);
-        // println!("candidate {}", sk);
-        debug_assert!(self.mask.test_bit(sibling_key_char));
+        let sibling_key_char = if next {
+            self.mask.next_bit(k)
+        } else {
+            self.mask.prev_bit(k)
+        };
+        let Some(sibling_key_char) = sibling_key_char else {
+            return (None, None)
+        };
         let cf = unsafe{ self.get_unchecked(sibling_key_char) };
         (Some(sibling_key_char), cf.rec().map(|node| node.as_tagged()))
     }
@@ -1620,25 +1603,6 @@ where
     }
 
     TrieNodeODRc::new_in(ByteNode::new_with_fields_in(new_mask, new_values, dst_node.alloc.clone()), dst_node.alloc.clone())
-}
-
-/// returns the position of the next/previous active bit in x
-/// if there is no next/previous bit, returns the argument position
-/// assumes that pos is active in x
-pub(crate) fn bit_sibling(pos: u8, x: u64, next: bool) -> u8 {
-    debug_assert_ne!((1u64 << pos) & x, 0);
-    if next {
-        if pos == 0 { return 0 } // resolves overflow in shift
-        let succ = !0u64 >> (64 - pos);
-        let m = x & succ;
-        if m == 0u64 { pos }
-        else { (63 - m.leading_zeros()) as u8 }
-    } else {
-        let prec = !(!0u64 >> (63 - pos));
-        let m = x & prec;
-        if m == 0u64 { pos }
-        else { m.trailing_zeros() as u8 }
-    }
 }
 
 pub trait CoFree: Clone + Default + Send + Sync {
@@ -2448,28 +2412,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             }
         }
     }
-}
-
-#[test]
-fn bit_siblings() {
-    let x = 0b0000000000000000000000000000000000000100001001100000000000000010u64;
-    let i = 0b0000000000000000000000000000000000000000000001000000000000000000u64;
-    let p = 0b0000000000000000000000000000000000000000001000000000000000000000u64;
-    let n = 0b0000000000000000000000000000000000000000000000100000000000000000u64;
-    let f = 0b0000000000000000000000000000000000000100000000000000000000000000u64;
-    let l = 0b0000000000000000000000000000000000000000000000000000000000000010u64;
-    let bit_i = 18;
-    let bit_i_onehot = 1u64 << bit_i;
-    assert_eq!(i, bit_i_onehot);
-    assert_ne!(bit_i_onehot & x, 0);
-    assert_eq!(p, 1u64 << bit_sibling(bit_i, x, false));
-    assert_eq!(n, 1u64 << bit_sibling(bit_i, x, true));
-    assert_eq!(f, 1u64 << bit_sibling(f.trailing_zeros() as u8, x, false));
-    assert_eq!(l, 1u64 << bit_sibling(l.trailing_zeros() as u8, x, true));
-    assert_eq!(0, bit_sibling(0, 1, false));
-    assert_eq!(0, bit_sibling(0, 1, true));
-    assert_eq!(63, bit_sibling(63, 1u64 << 63, false));
-    assert_eq!(63, bit_sibling(63, 1u64 << 63, true));
 }
 
 #[test]

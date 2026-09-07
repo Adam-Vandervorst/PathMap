@@ -2476,26 +2476,29 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 }
             },
             false => {
-                if starts_with(key1, key) && starts_with(key0, common_key) {
-                    let key0_last_byte = match key0.get(last_key_byte_idx) {
-                        Some(byte) => byte,
-                        None => return (None, None)
-                    };
-                    if key0_last_byte != key.last().unwrap() {
-                        let sib_node = if key0.len() == key.len() && self.is_child_ptr::<0>() {
-                            let sib_node = unsafe{ self.child_in_slot::<0>().as_tagged() };
-                            debug_assert!({ sib_node.as_list().map(|sib_node| validate_node(sib_node)); true});
-                            Some(sib_node)
-                        } else {
-                            None
-                        };
-                        (Some(*key0_last_byte), sib_node)
-                    } else {
-                        (None, None)
-                    }
-                } else {
-                    (None, None)
-                }
+                let key_byte = |candidate: &[u8]| {
+                    candidate.get(last_key_byte_idx).copied().filter(|byte| {
+                        candidate[..last_key_byte_idx] == common_key[..]
+                            && *byte < key[last_key_byte_idx]
+                    })
+                };
+                let (sibling_byte, slot) = match key_byte(key1) {
+                    Some(byte) => (byte, 1),
+                    None => match key_byte(key0) {
+                        Some(byte) => (byte, 0),
+                        None => return (None, None),
+                    },
+                };
+                let sib_node = match slot {
+                    0 if key0.len() == key.len() && self.is_child_ptr::<0>() => {
+                        Some(unsafe { self.child_in_slot::<0>().as_tagged() })
+                    },
+                    1 if key1.len() == key.len() && self.is_child_ptr::<1>() => {
+                        Some(unsafe { self.child_in_slot::<1>().as_tagged() })
+                    },
+                    _ => None,
+                };
+                (Some(sibling_byte), sib_node)
             }
         }
     }
