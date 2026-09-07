@@ -227,6 +227,7 @@ impl ByteMask {
 
     /// Returns the bit in the mask corresponding to the next highest bit above `byte`, or `None`
     /// if `byte` was at or above the highest set bit in the mask
+    #[inline]
     pub fn next_bit(&self, byte: u8) -> Option<u8> {
         if byte == 255 {
             return None
@@ -269,6 +270,7 @@ impl ByteMask {
 
     /// Returns the bit in the mask corresponding to the previous bit below `byte`, or `None`
     /// if `byte` was at or below the lowest set bit in the mask
+    #[inline]
     pub fn prev_bit(&self, byte: u8) -> Option<u8> {
         if byte == 0 {
             return None
@@ -903,6 +905,38 @@ fn next_bit_test2() {
     assert_eq!(Some(97), test_mask.next_bit(39));
     assert_eq!(Some(117), test_mask.next_bit(97));
     assert_eq!(None, test_mask.next_bit(117));
+}
+
+#[test]
+fn bit_siblings_test() {
+    let x = 0b0000000000000000000000000000000000000100001001100000000000000010u64;
+    let i = 0b0000000000000000000000000000000000000000000001000000000000000000u64;
+    let p = 0b0000000000000000000000000000000000000000001000000000000000000000u64;
+    let n = 0b0000000000000000000000000000000000000000000000100000000000000000u64;
+    let f = 0b0000000000000000000000000000000000000100000000000000000000000000u64;
+    let l = 0b0000000000000000000000000000000000000000000000000000000000000010u64;
+    let mask = ByteMask::from([x, 0, 0, 0]);
+    let bit_i = i.trailing_zeros() as u8;
+    assert_eq!(i, 1u64 << bit_i);
+    assert_ne!(i & x, 0);
+
+    // Existing-child lookup within one mask word, including both ends.
+    assert_eq!(mask.prev_bit(bit_i), Some(n.trailing_zeros() as u8));
+    assert_eq!(mask.next_bit(bit_i), Some(p.trailing_zeros() as u8));
+    assert_eq!(mask.prev_bit(l.trailing_zeros() as u8), None);
+    assert_eq!(mask.next_bit(f.trailing_zeros() as u8), None);
+
+    // Missing-focus lookup and sibling lookup across every mask-word boundary.
+    let mut mask = ByteMask::EMPTY;
+    for byte in [10, 20, 70, 130, 200] {
+        mask.set_bit(byte);
+    }
+    assert_eq!(mask.prev_bit(64), Some(20));
+    assert_eq!(mask.next_bit(63), Some(70));
+    assert_eq!(mask.prev_bit(130), Some(70));
+    assert_eq!(mask.next_bit(70), Some(130));
+    assert_eq!(mask.prev_bit(200), Some(130));
+    assert_eq!(mask.next_bit(130), Some(200));
 }
 
 #[test]
