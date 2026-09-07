@@ -313,10 +313,32 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     // ------ IterToken format for ByteNode ------
-    // Iter tokens pack the next byte position to inspect with the corresponding index into `values`.
-    // The low 9 bits store one more than the last returned byte, or 0 before iteration starts.  The
-    // upper bits store the index of the next CoFree in `values`, avoiding a `mask.index_of` recompute
-    // on every item.  `iter_token_for_path` computes the values index once for the requested path.
+    //
+    // Exact-focus and ordinary iteration tokens use the following layout:
+    //
+    //    63         62         61                18                     9                     0
+    //     +----------+----------+-----------------+---------------------+---------------------+
+    //     | special  | non-exist| always zero     | values_idx (9 bits) | next_byte (9 bits)  |
+    //     +----------+----------+-----------------+---------------------+---------------------+
+    //
+    // Bits 61 through 18 are always zero. The two high bits are shared by every IterToken:
+    //
+    // * `special` (bit 63) is set on the global values `TOKEN_LAST`, `TOKEN_AFTER_LAST`,
+    //   `NODE_ITER_INVALID`, and `NODE_ITER_FINISHED`. ByteNode does not produce `TOKEN_LAST` or
+    //   `TOKEN_AFTER_LAST`; its node-specific encodings always leave this bit clear.
+    // * `non-existent` (bit 62) marks a lower-bound cursor for a nonexistent path. Exact-focus and
+    //   node-produced iteration tokens leave it clear. Globally it also distinguishes
+    //   `TOKEN_AFTER_LAST` from `TOKEN_LAST`.
+    //
+    // `next_byte` is the first byte the next scan may return: zero before iteration begins, or
+    // one greater than the last returned byte. `values_idx` is the corresponding index in `values`.
+    // Keeping both fields avoids recalculating `mask.index_of` for every item. Both range from
+    // 0 through 256, inclusive.
+    //
+    // `iter_token_for_path` sets the shared bit 62, `NODE_TOKEN_NONEXISTENT_BIT`, when the key is
+    // not an exact one-byte path in this node. The low 18 bits still carry the lower-bound cursor;
+    // `next_items` clears the marker before decoding it. Node-produced iteration tokens always
+    // leave both reserved bits clear. Global special tokens do not use this layout.
     const ITER_TOKEN_BYTE_BITS: u64 = 9;
     const ITER_TOKEN_BYTE_MASK: IterToken = (1 << Self::ITER_TOKEN_BYTE_BITS) - 1;
 
@@ -990,19 +1012,36 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
-        if key.len() != 1 {
-            self.new_iter_token()
+        if key.len() == 0 {
+            return self.new_iter_token()
+        }
+        let key_byte = unsafe{ *key.get_unchecked(0) };
+        let mut values_idx = self.mask.index_of(key_byte);
+        let has_bit = self.mask.test_bit(key_byte);
+        if has_bit {
+            values_idx += 1;
+        }
+        let token = Self::iter_token(key_byte as u16 + 1, values_idx as u16);
+        if key.len() == 1 && has_bit {
+            token
         } else {
-            let key_byte = unsafe{ *key.get_unchecked(0) };
-            let mut values_idx = self.mask.index_of(key_byte);
-            if self.mask.test_bit(key_byte) {
-                values_idx += 1;
-            }
-            Self::iter_token(key_byte as u16 + 1, values_idx as u16)
+            token | NODE_TOKEN_NONEXISTENT_BIT
         }
     }
     #[inline(always)]
-    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+    fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
+        debug_assert_ne!(token, NODE_ITER_INVALID, "cannot ascend an invalid iteration token");
+        debug_assert_eq!(byte_count, 1);
+        self.new_iter_token()
+    }
+    #[inline(always)]
+    fn next_items(&self, token: IterToken, _after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+        debug_assert_ne!(token, NODE_ITER_INVALID, "cannot continue an invalid iteration token");
+        debug_assert_ne!(token, NODE_ITER_FINISHED, "cannot continue a finished iteration token");
+        debug_assert_iter_token_layout();
+        debug_assert_eq!(TOKEN_LAST & Self::ITER_TOKEN_BYTE_MASK, Self::ITER_TOKEN_BYTE_MASK,
+            "TOKEN_LAST must decode beyond the final ByteNode byte");
+        let token = token & !NODE_TOKEN_NONEXISTENT_BIT;
         let Some((k, values_idx)) = self.next_iter_item_from(token) else {
             return (NODE_ITER_FINISHED, &[], None, None);
         };
@@ -1206,26 +1245,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             return (None, None)
         }
         let k = key[0];
-        let mut mask_i = ((k & 0b11000000) >> 6) as usize;
-        let bit_i = k & 0b00111111;
-        // println!("k {k}");
-
-        let mut n = bit_sibling(bit_i, self.mask.0[mask_i], !next);
-        // println!("{} {bit_i} {mask_i}", n == bit_i);
-        if n == bit_i { // outside of word
-            loop {
-                if next { mask_i += 1 } else { mask_i -= 1 };
-                if !(mask_i < 4) { return (None, None) }
-                if self.mask.0[mask_i] == 0 { continue }
-                n = self.mask.0[mask_i].trailing_zeros() as u8; break;
-            }
-        }
-
-        // println!("{} {bit_i} {mask_i}", n == bit_i);
-        // println!("{:?}", parent.items().map(|(k, _)| k).collect::<Vec<_>>());
-        let sibling_key_char = n | ((mask_i << 6) as u8);
-        // println!("candidate {}", sk);
-        debug_assert!(self.mask.test_bit(sibling_key_char));
+        let sibling_key_char = if next {
+            self.mask.next_bit(k)
+        } else {
+            self.mask.prev_bit(k)
+        };
+        let Some(sibling_key_char) = sibling_key_char else {
+            return (None, None)
+        };
         let cf = unsafe{ self.get_unchecked(sibling_key_char) };
         (Some(sibling_key_char), cf.rec().map(|node| node.as_tagged()))
     }
@@ -1576,25 +1603,6 @@ where
     }
 
     TrieNodeODRc::new_in(ByteNode::new_with_fields_in(new_mask, new_values, dst_node.alloc.clone()), dst_node.alloc.clone())
-}
-
-/// returns the position of the next/previous active bit in x
-/// if there is no next/previous bit, returns the argument position
-/// assumes that pos is active in x
-pub(crate) fn bit_sibling(pos: u8, x: u64, next: bool) -> u8 {
-    debug_assert_ne!((1u64 << pos) & x, 0);
-    if next {
-        if pos == 0 { return 0 } // resolves overflow in shift
-        let succ = !0u64 >> (64 - pos);
-        let m = x & succ;
-        if m == 0u64 { pos }
-        else { (63 - m.leading_zeros()) as u8 }
-    } else {
-        let prec = !(!0u64 >> (63 - pos));
-        let m = x & prec;
-        if m == 0u64 { pos }
-        else { m.trailing_zeros() as u8 }
-    }
 }
 
 pub trait CoFree: Clone + Default + Send + Sync {
@@ -2407,28 +2415,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 }
 
 #[test]
-fn bit_siblings() {
-    let x = 0b0000000000000000000000000000000000000100001001100000000000000010u64;
-    let i = 0b0000000000000000000000000000000000000000000001000000000000000000u64;
-    let p = 0b0000000000000000000000000000000000000000001000000000000000000000u64;
-    let n = 0b0000000000000000000000000000000000000000000000100000000000000000u64;
-    let f = 0b0000000000000000000000000000000000000100000000000000000000000000u64;
-    let l = 0b0000000000000000000000000000000000000000000000000000000000000010u64;
-    let bit_i = 18;
-    let bit_i_onehot = 1u64 << bit_i;
-    assert_eq!(i, bit_i_onehot);
-    assert_ne!(bit_i_onehot & x, 0);
-    assert_eq!(p, 1u64 << bit_sibling(bit_i, x, false));
-    assert_eq!(n, 1u64 << bit_sibling(bit_i, x, true));
-    assert_eq!(f, 1u64 << bit_sibling(f.trailing_zeros() as u8, x, false));
-    assert_eq!(l, 1u64 << bit_sibling(l.trailing_zeros() as u8, x, true));
-    assert_eq!(0, bit_sibling(0, 1, false));
-    assert_eq!(0, bit_sibling(0, 1, true));
-    assert_eq!(63, bit_sibling(63, 1u64 << 63, false));
-    assert_eq!(63, bit_sibling(63, 1u64 << 63, true));
-}
-
-#[test]
 fn byte_node_iter_token_crosses_mask_word_boundaries() {
     let mut node = DenseByteNode::new_in(crate::alloc::global_alloc());
     for byte in [0, 63, 64, 127, 128, 191, 192, 255] {
@@ -2438,7 +2424,7 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     let mut token = node.new_iter_token();
     let mut visited = Vec::new();
     while token != NODE_ITER_FINISHED {
-        let (next_token, path, _child, value) = node.next_items(token);
+        let (next_token, path, _child, value) = node.next_items(token, false);
         token = next_token;
         if token != NODE_ITER_FINISHED {
             assert_eq!(path.len(), 1);
@@ -2448,10 +2434,17 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     }
     assert_eq!(visited, [0, 63, 64, 127, 128, 191, 192, 255]);
 
+    assert_eq!(node.iter_token_for_path(&[]), node.new_iter_token());
+    assert!(!node_iter_token_is_nonexistent(node.iter_token_for_path(&[127])));
+    assert_eq!(
+        node.iter_token_for_path(&[127, 0]),
+        node.iter_token_for_path(&[127]) | NODE_TOKEN_NONEXISTENT_BIT,
+    );
+
     let mut token = node.iter_token_for_path(&[127]);
     let mut visited_after_127 = Vec::new();
     while token != NODE_ITER_FINISHED {
-        let (next_token, path, _child, value) = node.next_items(token);
+        let (next_token, path, _child, value) = node.next_items(token, false);
         token = next_token;
         if token != NODE_ITER_FINISHED {
             assert_eq!(Some(&path[0]), value);
@@ -2460,10 +2453,12 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
     }
     assert_eq!(visited_after_127, [128, 191, 192, 255]);
 
-    let mut token = node.iter_token_for_path(&[65]);
+    let token = node.iter_token_for_path(&[65]);
+    assert!(node_iter_token_is_nonexistent(token));
+    let mut token = token;
     let mut visited_after_missing_65 = Vec::new();
     while token != NODE_ITER_FINISHED {
-        let (next_token, path, _child, value) = node.next_items(token);
+        let (next_token, path, _child, value) = node.next_items(token, false);
         token = next_token;
         if token != NODE_ITER_FINISHED {
             assert_eq!(Some(&path[0]), value);
@@ -2471,6 +2466,16 @@ fn byte_node_iter_token_crosses_mask_word_boundaries() {
         }
     }
     assert_eq!(visited_after_missing_65, [127, 128, 191, 192, 255]);
+
+    for exhausted_token in [TOKEN_LAST, TOKEN_AFTER_LAST] {
+        for after_focus in [false, true] {
+            let (token, path, child, value) = node.next_items(exhausted_token, after_focus);
+            assert_eq!(token, NODE_ITER_FINISHED);
+            assert!(path.is_empty());
+            assert!(child.is_none());
+            assert!(value.is_none());
+        }
+    }
 
 }
 
