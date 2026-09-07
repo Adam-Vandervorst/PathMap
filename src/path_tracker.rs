@@ -1,9 +1,7 @@
 use crate::{
     utils::ByteMask,
     zipper::{
-        PathObserver, Zipper, ZipperAbsolutePath, ZipperMoving, ZipperIteration,
-        ZipperPath, ZipperPathBuffer, ZipperValues,
-        ZipperReadOnlyValues, ZipperReadOnlyConditionalValues,
+        PathObserver, Zipper, ZipperAbsolutePath, ZipperIteration, ZipperMoving, ZipperPath, ZipperPathBuffer, ZipperReadOnlyConditionalValues, ZipperReadOnlyValues, ZipperValues, ZipperValuesAt
     },
 };
 
@@ -185,6 +183,9 @@ impl<Z: ZipperMoving> ZipperAbsolutePath for PathTracker<Z> {
 
 impl<Z: ZipperValues<V>, V> ZipperValues<V> for PathTracker<Z> {
     fn val(&self) -> Option<&V> { self.zipper.val() }
+}
+
+impl<Z: ZipperValuesAt<V>, V> ZipperValuesAt<V> for PathTracker<Z> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> { self.zipper.val_at(path) }
 }
 

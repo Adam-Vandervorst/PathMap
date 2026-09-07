@@ -254,6 +254,12 @@ impl<'prefix, Z, V> ZipperValues<V> for PrefixZipper<'prefix, Z>
         }
         self.source.val()
     }
+}
+
+impl<'prefix, Z, V> ZipperValuesAt<V> for PrefixZipper<'prefix, Z>
+    where
+        Z: ZipperValuesAt<V>
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         let path = self.adjust_lookup_path(path.as_ref())?;
         self.source.val_at(path)
@@ -759,6 +765,7 @@ mod tests {
     use crate::zipper::ZipperPath;
     use crate::zipper::ZipperReadOnlyValues;
     use crate::zipper::ZipperValues;
+    use crate::zipper::ZipperValuesAt;
 
     //The whole prefix is the root prefix, so these run the shared suites against a `PrefixZipper`
     //whose focus begins in the source

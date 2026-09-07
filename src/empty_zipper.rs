@@ -90,6 +90,9 @@ impl ZipperIteration for EmptyZipper {
 
 impl<V> ZipperValues<V> for EmptyZipper {
     fn val(&self) -> Option<&V> { None }
+}
+
+impl<V> ZipperValuesAt<V> for EmptyZipper {
     fn val_at<K: AsRef<[u8]>>(&self, _path: K) -> Option<&V> { None }
 }
 
