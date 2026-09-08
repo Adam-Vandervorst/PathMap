@@ -2980,8 +2980,8 @@ mod tests {
 
         //What the map holds, according to everything except iteration
         assert_eq!(map.val_count(), 1);
-        assert_eq!(map.get_val_at(b"a"), None);
-        assert_eq!(map.get_val_at(b"ax"), Some(&1));
+        assert_eq!(map.val_at(b"a"), None);
+        assert_eq!(map.val_at(b"ax"), Some(&1));
 
         let mut visited = vec![];
         let mut z = map.read_zipper();
@@ -3021,8 +3021,8 @@ mod tests {
         }
 
         assert_eq!(map.val_count(), 2);
-        assert_eq!(map.get_val_at(b"aaa"), Some(&9));
-        assert_eq!(map.get_val_at(b"aaax"), Some(&1));
+        assert_eq!(map.val_at(b"aaa"), Some(&9));
+        assert_eq!(map.val_at(b"aaax"), Some(&1));
 
         let mut visited = vec![];
         let mut z = map.read_zipper();
@@ -3129,10 +3129,10 @@ mod tests {
     fn write_zipper_get_val_or_set_test() {
         let mut map = PathMap::<u64>::new();
         map.write_zipper_at_path(b"Drenths").get_val_or_set_mut(42);
-        assert_eq!(map.get_val_at(b"Drenths"), Some(&42));
+        assert_eq!(map.val_at(b"Drenths"), Some(&42));
 
         *map.write_zipper_at_path(b"Drenths").get_val_or_set_mut(42) = 24;
-        assert_eq!(map.get_val_at(b"Drenths"), Some(&24));
+        assert_eq!(map.val_at(b"Drenths"), Some(&24));
 
         let mut zipper = map.write_zipper_at_path(b"Drenths");
         *zipper.get_val_or_set_mut(42) = 0;
@@ -3140,10 +3140,10 @@ mod tests {
         drop(zipper);
 
         map.write_zipper().get_val_or_set_mut(42);
-        assert_eq!(map.get_val_at([]), Some(&42));
+        assert_eq!(map.val_at([]), Some(&42));
 
         *map.write_zipper().get_val_or_set_mut(42) = 24;
-        assert_eq!(map.get_val_at([]), Some(&24));
+        assert_eq!(map.val_at([]), Some(&24));
 
         let mut zipper = map.write_zipper();
         *zipper.get_val_or_set_mut(42) = 0;
@@ -3185,10 +3185,10 @@ mod tests {
         for i in 0..N {
             in_path.truncate(3);
             in_path.extend(i.to_be_bytes());
-            assert_eq!(map.get_val_at(&in_path), Some(&i));
+            assert_eq!(map.val_at(&in_path), Some(&i));
             out_path.truncate(4);
             out_path.extend(i.to_be_bytes());
-            assert_eq!(map.get_val_at(&out_path), Some(&(i * 65536)));
+            assert_eq!(map.val_at(&out_path), Some(&(i * 65536)));
         }
     }
 
@@ -3206,29 +3206,29 @@ mod tests {
         drop(wz);
 
         //Test that the original keys were left alone, above the graft point
-        assert_eq!(a.get_val_at(b"arrow").unwrap(), &0);
-        assert_eq!(a.get_val_at(b"bow").unwrap(), &1);
-        assert_eq!(a.get_val_at(b"cannon").unwrap(), &2);
+        assert_eq!(a.val_at(b"arrow").unwrap(), &0);
+        assert_eq!(a.val_at(b"bow").unwrap(), &1);
+        assert_eq!(a.val_at(b"cannon").unwrap(), &2);
 
         //Test that the pruned keys are gone
-        assert_eq!(a.get_val_at(b"roman"), None);
-        assert_eq!(a.get_val_at(b"romulus"), None);
-        assert_eq!(a.get_val_at(b"rom'i"), None);
+        assert_eq!(a.val_at(b"roman"), None);
+        assert_eq!(a.val_at(b"romulus"), None);
+        assert_eq!(a.val_at(b"rom'i"), None);
 
         //More keys after but above the graft point weren't harmed
-        assert_eq!(a.get_val_at(b"rubens").unwrap(), &7);
-        assert_eq!(a.get_val_at(b"ruber").unwrap(), &8);
-        assert_eq!(a.get_val_at(b"rubicundus").unwrap(), &10);
+        assert_eq!(a.val_at(b"rubens").unwrap(), &7);
+        assert_eq!(a.val_at(b"ruber").unwrap(), &8);
+        assert_eq!(a.val_at(b"rubicundus").unwrap(), &10);
 
         //And test that the new keys were grafted into place
-        assert_eq!(a.get_val_at(b"road").unwrap(), &1000);
-        assert_eq!(a.get_val_at(b"rod").unwrap(), &1001);
-        assert_eq!(a.get_val_at(b"roll").unwrap(), &1002);
-        assert_eq!(a.get_val_at(b"roof").unwrap(), &1003);
-        assert_eq!(a.get_val_at(b"room").unwrap(), &1004);
-        assert_eq!(a.get_val_at(b"root").unwrap(), &1005);
-        assert_eq!(a.get_val_at(b"rough").unwrap(), &1006);
-        assert_eq!(a.get_val_at(b"round").unwrap(), &1007);
+        assert_eq!(a.val_at(b"road").unwrap(), &1000);
+        assert_eq!(a.val_at(b"rod").unwrap(), &1001);
+        assert_eq!(a.val_at(b"roll").unwrap(), &1002);
+        assert_eq!(a.val_at(b"roof").unwrap(), &1003);
+        assert_eq!(a.val_at(b"room").unwrap(), &1004);
+        assert_eq!(a.val_at(b"root").unwrap(), &1005);
+        assert_eq!(a.val_at(b"rough").unwrap(), &1006);
+        assert_eq!(a.val_at(b"round").unwrap(), &1007);
     }
 
     /// Tests to make sure graft doesn't create aliasing by accident 
@@ -3246,8 +3246,8 @@ mod tests {
         wz.graft(&rz);
         drop(wz);
 
-        assert_eq!(dst.get_val_at(b"one:two:val"), Some(&()));
-        assert_eq!(src.get_val_at(b"one:two:junk"), None);
+        assert_eq!(dst.val_at(b"one:two:val"), Some(&()));
+        assert_eq!(src.val_at(b"one:two:junk"), None);
 
         let zh = dst.zipper_head();
         let mut wz = zh.write_zipper_at_exclusive_path(b"one:").unwrap();
@@ -3256,8 +3256,8 @@ mod tests {
         drop(wz);
         drop(zh);
 
-        assert_eq!(dst.get_val_at(b"one:two:junk"), Some(&()));
-        assert_eq!(src.get_val_at(b"one:two:junk"), None);
+        assert_eq!(dst.val_at(b"one:two:junk"), Some(&()));
+        assert_eq!(src.val_at(b"one:two:junk"), None);
     }
 
     #[test]
@@ -3278,29 +3278,29 @@ mod tests {
 
         //Test that the original keys were left alone, above the graft point
         assert_eq!(a.val_count(), 20);
-        assert_eq!(a.get_val_at(b"arrow").unwrap(), &0);
-        assert_eq!(a.get_val_at(b"bow").unwrap(), &1);
-        assert_eq!(a.get_val_at(b"cannon").unwrap(), &2);
+        assert_eq!(a.val_at(b"arrow").unwrap(), &0);
+        assert_eq!(a.val_at(b"bow").unwrap(), &1);
+        assert_eq!(a.val_at(b"cannon").unwrap(), &2);
 
         //Test that the blended downstream keys are still there
-        assert_eq!(a.get_val_at(b"roman").unwrap(), &3);
-        assert_eq!(a.get_val_at(b"romulus").unwrap(), &6);
-        assert_eq!(a.get_val_at(b"rom'i").unwrap(), &11);
+        assert_eq!(a.val_at(b"roman").unwrap(), &3);
+        assert_eq!(a.val_at(b"romulus").unwrap(), &6);
+        assert_eq!(a.val_at(b"rom'i").unwrap(), &11);
 
         //More keys after but above the graft point weren't harmed
-        assert_eq!(a.get_val_at(b"rubens").unwrap(), &7);
-        assert_eq!(a.get_val_at(b"ruber").unwrap(), &8);
-        assert_eq!(a.get_val_at(b"rubicundus").unwrap(), &10);
+        assert_eq!(a.val_at(b"rubens").unwrap(), &7);
+        assert_eq!(a.val_at(b"ruber").unwrap(), &8);
+        assert_eq!(a.val_at(b"rubicundus").unwrap(), &10);
 
         //And test that the new keys were grafted into place
-        assert_eq!(a.get_val_at(b"road").unwrap(), &1000);
-        assert_eq!(a.get_val_at(b"rod").unwrap(), &1001);
-        assert_eq!(a.get_val_at(b"roll").unwrap(), &1002);
-        assert_eq!(a.get_val_at(b"roof").unwrap(), &1003);
-        assert_eq!(a.get_val_at(b"room").unwrap(), &1004);
-        assert_eq!(a.get_val_at(b"root").unwrap(), &1005);
-        assert_eq!(a.get_val_at(b"rough").unwrap(), &1006);
-        assert_eq!(a.get_val_at(b"round").unwrap(), &1007);
+        assert_eq!(a.val_at(b"road").unwrap(), &1000);
+        assert_eq!(a.val_at(b"rod").unwrap(), &1001);
+        assert_eq!(a.val_at(b"roll").unwrap(), &1002);
+        assert_eq!(a.val_at(b"roof").unwrap(), &1003);
+        assert_eq!(a.val_at(b"room").unwrap(), &1004);
+        assert_eq!(a.val_at(b"root").unwrap(), &1005);
+        assert_eq!(a.val_at(b"rough").unwrap(), &1006);
+        assert_eq!(a.val_at(b"round").unwrap(), &1007);
     }
 
     /// Tests how `join_into` handles dangling path arguments (no values, just path structure)
@@ -3321,8 +3321,8 @@ mod tests {
         drop(zh);
 
         // Verify both dangling paths exist but no values
-        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm.get_val_at(&[1, 255, 0]), None);
+        assert_eq!(btm.val_at(&[0, 255, 0]), None);
+        assert_eq!(btm.val_at(&[1, 255, 0]), None);
 
         // Test 2: join_into to move some dangling paths
         let mut btm2: PathMap<()> = PathMap::new();
@@ -3344,10 +3344,10 @@ mod tests {
         assert_eq!(btm2.path_exists_at(&[0, 255, 0]), true);
         assert_eq!(btm2.path_exists_at(&[0, 255, 1]), true);
         assert_eq!(btm2.path_exists_at(&[0, 200, 5]), true);
-        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm2.get_val_at(&[0, 255, 1]), None);
-        assert_eq!(btm2.get_val_at(&[0, 200, 5]), None);
-        assert_eq!(btm2.get_val_at(&[1, 255, 0]), None);
+        assert_eq!(btm2.val_at(&[0, 255, 0]), None);
+        assert_eq!(btm2.val_at(&[0, 255, 1]), None);
+        assert_eq!(btm2.val_at(&[0, 200, 5]), None);
+        assert_eq!(btm2.val_at(&[1, 255, 0]), None);
         let rz = btm2.read_zipper();
         assert_eq!(rz.child_count(), 2); // Should have both [0] and [1] branches
     }
@@ -3360,23 +3360,23 @@ mod tests {
         assert_eq!(map.val_count(), 20);
 
         assert_eq!(map.val_count(), 20);
-        assert_eq!(map.get_val_at(b"a:arrow").unwrap(), &0);
-        assert_eq!(map.get_val_at(b"a:bow").unwrap(), &1);
-        assert_eq!(map.get_val_at(b"a:cannon").unwrap(), &2);
-        assert_eq!(map.get_val_at(b"a:roman").unwrap(), &3);
-        assert_eq!(map.get_val_at(b"a:romulus").unwrap(), &6);
-        assert_eq!(map.get_val_at(b"a:rom'i").unwrap(), &11);
-        assert_eq!(map.get_val_at(b"a:rubens").unwrap(), &7);
-        assert_eq!(map.get_val_at(b"a:ruber").unwrap(), &8);
-        assert_eq!(map.get_val_at(b"a:rubicundus").unwrap(), &10);
-        assert_eq!(map.get_val_at(b"b:road").unwrap(), &12);
-        assert_eq!(map.get_val_at(b"b:rod").unwrap(), &13);
-        assert_eq!(map.get_val_at(b"b:roll").unwrap(), &14);
-        assert_eq!(map.get_val_at(b"b:roof").unwrap(), &15);
-        assert_eq!(map.get_val_at(b"b:room").unwrap(), &16);
-        assert_eq!(map.get_val_at(b"b:root").unwrap(), &17);
-        assert_eq!(map.get_val_at(b"b:rough").unwrap(), &18);
-        assert_eq!(map.get_val_at(b"b:round").unwrap(), &19);
+        assert_eq!(map.val_at(b"a:arrow").unwrap(), &0);
+        assert_eq!(map.val_at(b"a:bow").unwrap(), &1);
+        assert_eq!(map.val_at(b"a:cannon").unwrap(), &2);
+        assert_eq!(map.val_at(b"a:roman").unwrap(), &3);
+        assert_eq!(map.val_at(b"a:romulus").unwrap(), &6);
+        assert_eq!(map.val_at(b"a:rom'i").unwrap(), &11);
+        assert_eq!(map.val_at(b"a:rubens").unwrap(), &7);
+        assert_eq!(map.val_at(b"a:ruber").unwrap(), &8);
+        assert_eq!(map.val_at(b"a:rubicundus").unwrap(), &10);
+        assert_eq!(map.val_at(b"b:road").unwrap(), &12);
+        assert_eq!(map.val_at(b"b:rod").unwrap(), &13);
+        assert_eq!(map.val_at(b"b:roll").unwrap(), &14);
+        assert_eq!(map.val_at(b"b:roof").unwrap(), &15);
+        assert_eq!(map.val_at(b"b:room").unwrap(), &16);
+        assert_eq!(map.val_at(b"b:root").unwrap(), &17);
+        assert_eq!(map.val_at(b"b:rough").unwrap(), &18);
+        assert_eq!(map.val_at(b"b:round").unwrap(), &19);
 
         let head = map.zipper_head();
         let mut a = head.write_zipper_at_exclusive_path(b"a:").unwrap();
@@ -3394,26 +3394,26 @@ mod tests {
 
         //Test the keys are where we expect them to be, and not where they should not be
         assert_eq!(map.val_count(), 20);
-        assert_eq!(map.get_val_at(b"a:arrow").unwrap(), &0);
-        assert_eq!(map.get_val_at(b"a:bow").unwrap(), &1);
-        assert_eq!(map.get_val_at(b"a:cannon").unwrap(), &2);
-        assert_eq!(map.get_val_at(b"a:roman").unwrap(), &3);
-        assert_eq!(map.get_val_at(b"a:romulus").unwrap(), &6);
-        assert_eq!(map.get_val_at(b"a:rom'i").unwrap(), &11);
-        assert_eq!(map.get_val_at(b"a:rubens").unwrap(), &7);
-        assert_eq!(map.get_val_at(b"a:ruber").unwrap(), &8);
-        assert_eq!(map.get_val_at(b"a:rubicundus").unwrap(), &10);
-        assert_eq!(map.get_val_at(b"a:road").unwrap(), &12);
-        assert_eq!(map.get_val_at(b"a:rod").unwrap(), &13);
-        assert_eq!(map.get_val_at(b"a:roll").unwrap(), &14);
-        assert_eq!(map.get_val_at(b"a:roof").unwrap(), &15);
-        assert_eq!(map.get_val_at(b"a:room").unwrap(), &16);
-        assert_eq!(map.get_val_at(b"a:root").unwrap(), &17);
-        assert_eq!(map.get_val_at(b"a:rough").unwrap(), &18);
-        assert_eq!(map.get_val_at(b"a:round").unwrap(), &19);
+        assert_eq!(map.val_at(b"a:arrow").unwrap(), &0);
+        assert_eq!(map.val_at(b"a:bow").unwrap(), &1);
+        assert_eq!(map.val_at(b"a:cannon").unwrap(), &2);
+        assert_eq!(map.val_at(b"a:roman").unwrap(), &3);
+        assert_eq!(map.val_at(b"a:romulus").unwrap(), &6);
+        assert_eq!(map.val_at(b"a:rom'i").unwrap(), &11);
+        assert_eq!(map.val_at(b"a:rubens").unwrap(), &7);
+        assert_eq!(map.val_at(b"a:ruber").unwrap(), &8);
+        assert_eq!(map.val_at(b"a:rubicundus").unwrap(), &10);
+        assert_eq!(map.val_at(b"a:road").unwrap(), &12);
+        assert_eq!(map.val_at(b"a:rod").unwrap(), &13);
+        assert_eq!(map.val_at(b"a:roll").unwrap(), &14);
+        assert_eq!(map.val_at(b"a:roof").unwrap(), &15);
+        assert_eq!(map.val_at(b"a:room").unwrap(), &16);
+        assert_eq!(map.val_at(b"a:root").unwrap(), &17);
+        assert_eq!(map.val_at(b"a:rough").unwrap(), &18);
+        assert_eq!(map.val_at(b"a:round").unwrap(), &19);
 
-        assert_eq!(map.get_val_at(b"b:road"), None);
-        assert_eq!(map.get_val_at(b"b:round"), None);
+        assert_eq!(map.val_at(b"b:road"), None);
+        assert_eq!(map.val_at(b"b:round"), None);
     }
 
     /// Tests how `join_into_take` handles dangling path arguments with prune parameter
@@ -3438,8 +3438,8 @@ mod tests {
         assert_eq!(btm.path_exists_at(&[1]), false);
         assert_eq!(btm.path_exists_at(&[0, 255, 0]), true);
         assert_eq!(btm.path_exists_at(&[0, 255, 1]), true);
-        assert_eq!(btm.get_val_at(&[0, 255, 0]), None);
-        assert_eq!(btm.get_val_at(&[0, 255, 1]), None);
+        assert_eq!(btm.val_at(&[0, 255, 0]), None);
+        assert_eq!(btm.val_at(&[0, 255, 1]), None);
         let rz = btm.read_zipper();
         assert_eq!(rz.child_count(), 1);
         assert_eq!(rz.child_mask(), ByteMask::from(0));
@@ -3461,7 +3461,7 @@ mod tests {
         assert_eq!(btm2.path_exists_at(&[1, 255, 0]), false);
         assert_eq!(btm2.path_exists_at(&[1, 255]), true);
         assert_eq!(btm2.path_exists_at(&[0, 255, 0]), true);
-        assert_eq!(btm2.get_val_at(&[0, 255, 0]), None);
+        assert_eq!(btm2.val_at(&[0, 255, 0]), None);
         let rz = btm2.read_zipper();
         assert_eq!(rz.child_count(), 2);
         assert_eq!(rz.child_mask(), ByteMask::from_iter([0, 1]));
@@ -3767,7 +3767,7 @@ mod tests {
             wz.descend_to(b"a");
             assert_eq!(wz.subtract_into(&rz, true), AlgebraicStatus::Identity);
             drop(wz);
-            assert!(map.get_val_at(b"a").is_some());
+            assert!(map.val_at(b"a").is_some());
         }
 
         // Case 2: Dangling Path - Value (Same Path)
@@ -3832,7 +3832,7 @@ mod tests {
             let rz = sub.read_zipper();
             assert_eq!(wz.subtract_into(&rz, true), AlgebraicStatus::Identity);
             drop(wz);
-            assert!(map.get_val_at(b"e/sub").is_some());
+            assert!(map.val_at(b"e/sub").is_some());
         }
     }
 
@@ -4010,17 +4010,17 @@ mod tests {
         drop(wz);
 
         //Test that the original keys were left alone, above the graft point
-        assert_eq!(map.get_val_at(b"arrow").unwrap(), &0);
-        assert_eq!(map.get_val_at(b"bow").unwrap(), &1);
-        assert_eq!(map.get_val_at(b"cannon").unwrap(), &2);
-        assert_eq!(map.get_val_at(b"rom'i").unwrap(), &11);
+        assert_eq!(map.val_at(b"arrow").unwrap(), &0);
+        assert_eq!(map.val_at(b"bow").unwrap(), &1);
+        assert_eq!(map.val_at(b"cannon").unwrap(), &2);
+        assert_eq!(map.val_at(b"rom'i").unwrap(), &11);
 
         //Test that the value is ok
-        assert_eq!(map.get_val_at(b"roman").unwrap(), &3);
+        assert_eq!(map.val_at(b"roman").unwrap(), &3);
 
         //Test that the pruned keys are gone
-        assert_eq!(map.get_val_at(b"romane"), None);
-        assert_eq!(map.get_val_at(b"romanus"), None);
+        assert_eq!(map.val_at(b"romane"), None);
+        assert_eq!(map.val_at(b"romanus"), None);
 
         let mut wz = map.write_zipper();
         wz.descend_to(b"ro");
@@ -4079,7 +4079,7 @@ mod tests {
         let mut map = PathMap::<u64>::new();
         map.set_val_at(key, 42);
         for i in 0..key.len() {
-            assert_eq!(map.get_val_at(&key[i..]), Some(&42));
+            assert_eq!(map.val_at(&key[i..]), Some(&42));
             let mut wz = map.write_zipper();
             wz.join_k_path_into(1, true);
         }
@@ -4098,9 +4098,9 @@ mod tests {
             b"123456789012345678901234567890123456789012345opqrs", ];
         let mut map: PathMap<u64> = keys.iter().enumerate().map(|(i, k)| (k, i as u64)).collect();
         for i in 0..keys[0].len() {
-            assert_eq!(map.get_val_at(&keys[0][i..]), Some(&0));
+            assert_eq!(map.val_at(&keys[0][i..]), Some(&0));
             if i < 45 {
-                assert_eq!(map.get_val_at(&keys[9][i..]), Some(&9));
+                assert_eq!(map.val_at(&keys[9][i..]), Some(&9));
             }
             if i > 10 {
                 assert_eq!(map.val_count(), 11-(i/5));
@@ -4121,8 +4121,8 @@ mod tests {
         wz.join_k_path_into(3, true);
         drop(wz);
 
-        assert_eq!(map.get_val_at(&vec![1, 2, 42, 237, 3, 1, 173, 165, 3, 16, 200, 213, 4, 0, 166, 47, 81, 4, 0, 167, 216, 181, 4, 6, 125, 178, 225, 4, 6, 142, 119, 117, 4, 64, 232, 214, 129, 4, 65, 128, 13, 13, 4, 65, 144]), Some(&0));
-        assert_eq!(map.get_val_at(&vec![1, 2, 13, 183]), Some(&1));
+        assert_eq!(map.val_at(&vec![1, 2, 42, 237, 3, 1, 173, 165, 3, 16, 200, 213, 4, 0, 166, 47, 81, 4, 0, 167, 216, 181, 4, 6, 125, 178, 225, 4, 6, 142, 119, 117, 4, 64, 232, 214, 129, 4, 65, 128, 13, 13, 4, 65, 144]), Some(&0));
+        assert_eq!(map.val_at(&vec![1, 2, 13, 183]), Some(&1));
         assert_eq!(map.val_count(), 2);
 
         let mut map: PathMap<u64> = keys.iter().enumerate().map(|(i, k)| (k, i as u64)).collect();
@@ -4130,7 +4130,7 @@ mod tests {
         wz.join_k_path_into(27, true);
         drop(wz);
 
-        assert_eq!(map.get_val_at(&vec![1, 178, 225, 4, 6, 142, 119, 117, 4, 64, 232, 214, 129, 4, 65, 128, 13, 13, 4, 65, 144]), Some(&0));
+        assert_eq!(map.val_at(&vec![1, 178, 225, 4, 6, 142, 119, 117, 4, 64, 232, 214, 129, 4, 65, 128, 13, 13, 4, 65, 144]), Some(&0));
         assert_eq!(map.val_count(), 1);
     }
 
@@ -4254,8 +4254,8 @@ mod tests {
             (b"2ac".as_slice(), 2),
         ].into_iter().collect();
         assert!(map.write_zipper().join_k_path_into(1, true));
-        assert_eq!(map.get_val_at(b"ab"), Some(&1));
-        assert_eq!(map.get_val_at(b"ac"), Some(&2));
+        assert_eq!(map.val_at(b"ab"), Some(&1));
+        assert_eq!(map.val_at(b"ac"), Some(&2));
     }
 
     #[test]
@@ -4510,7 +4510,7 @@ mod tests {
         drop(wz);
 
         assert_eq!(map.val_count(), 1);
-        assert_eq!(map.get_val_at(b"123.Bandit"), Some(&2));
+        assert_eq!(map.val_at(b"123.Bandit"), Some(&2));
 
         //Test where we *do* exactly bottom-out the zipper
         let mut map: PathMap<u64> = keys.iter().enumerate().map(|(i, k)| (k, i as u64)).collect();
@@ -4521,7 +4521,7 @@ mod tests {
         drop(wz);
 
         assert_eq!(map.val_count(), 1);
-        assert_eq!(map.get_val_at(b"123:Bandit"), Some(&2));
+        assert_eq!(map.val_at(b"123:Bandit"), Some(&2));
 
         //Now test where we crash into the bottom of the zipper
         let mut map: PathMap<u64> = keys.iter().enumerate().map(|(i, k)| (k, i as u64)).collect();
@@ -4532,7 +4532,7 @@ mod tests {
         drop(wz);
 
         assert_eq!(map.val_count(), 1);
-        assert_eq!(map.get_val_at(b"123:Bandit"), Some(&2));
+        assert_eq!(map.val_at(b"123:Bandit"), Some(&2));
     }
 
     #[test]
@@ -5531,13 +5531,13 @@ mod tests {
         drop(wz);
 
         // After grafting with remove_unset=true, only 'a' and 'c' branches should exist
-        assert_eq!(map.get_val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(map.get_val_at(b"root:c:new_c"), Some(&30));
-        assert_eq!(map.get_val_at(b"root:a:x"), None);
-        assert_eq!(map.get_val_at(b"root:a:y"), None);
-        assert_eq!(map.get_val_at(b"root:b:x"), None);
-        assert_eq!(map.get_val_at(b"root:b:y"), None);
-        assert_eq!(map.get_val_at(b"root:d:x"), None);
+        assert_eq!(map.val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(map.val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(map.val_at(b"root:a:x"), None);
+        assert_eq!(map.val_at(b"root:a:y"), None);
+        assert_eq!(map.val_at(b"root:b:x"), None);
+        assert_eq!(map.val_at(b"root:b:y"), None);
+        assert_eq!(map.val_at(b"root:d:x"), None);
 
         // Test 2: Graft child maps with remove_unset = false
         let mut map2: PathMap<i32> = PathMap::new();
@@ -5556,10 +5556,10 @@ mod tests {
         drop(wz2);
 
         // After grafting with remove_unset=false, 'a' and 'c' should remain, 'b' should be replaced
-        assert_eq!(map2.get_val_at(b"root:a:old"), Some(&100));
-        assert_eq!(map2.get_val_at(b"root:b:old"), None);
-        assert_eq!(map2.get_val_at(b"root:b:new_b"), Some(&222));
-        assert_eq!(map2.get_val_at(b"root:c:old"), Some(&300));
+        assert_eq!(map2.val_at(b"root:a:old"), Some(&100));
+        assert_eq!(map2.val_at(b"root:b:old"), None);
+        assert_eq!(map2.val_at(b"root:b:new_b"), Some(&222));
+        assert_eq!(map2.val_at(b"root:c:old"), Some(&300));
 
         // Test 3: Graft multiple child maps
         let mut map3: PathMap<i32> = PathMap::new();
@@ -5580,9 +5580,9 @@ mod tests {
         wz3.graft_child_maps(child_mask3, maps3, true);
         drop(wz3);
 
-        assert_eq!(map3.get_val_at(b"x:data"), Some(&111));
-        assert_eq!(map3.get_val_at(b"y:info"), Some(&222));
-        assert_eq!(map3.get_val_at(b"z:stuff"), Some(&333));
+        assert_eq!(map3.val_at(b"x:data"), Some(&111));
+        assert_eq!(map3.val_at(b"y:info"), Some(&222));
+        assert_eq!(map3.val_at(b"z:stuff"), Some(&333));
         assert_eq!(map3.val_count(), 3);
 
         // Test 4: Empty mask should result in all branches removed when remove_unset=true
@@ -5597,8 +5597,8 @@ mod tests {
         wz4.graft_child_maps(empty_mask, empty_maps, true);
         drop(wz4);
 
-        assert_eq!(map4.get_val_at(b"root:a"), None);
-        assert_eq!(map4.get_val_at(b"root:b"), None);
+        assert_eq!(map4.val_at(b"root:a"), None);
+        assert_eq!(map4.val_at(b"root:b"), None);
     }
 
     #[test]
@@ -5628,11 +5628,11 @@ mod tests {
         drop(wz1);
 
         // Only 'a' branch should exist, 'b' and 'c' should be removed
-        assert_eq!(map1.get_val_at(b"root:a:new_a"), Some(&100));
-        assert_eq!(map1.get_val_at(b"root:a:nested:deep"), Some(&101));
-        assert_eq!(map1.get_val_at(b"root:a:old1"), None);
-        assert_eq!(map1.get_val_at(b"root:b:old2"), None);
-        assert_eq!(map1.get_val_at(b"root:c:old3"), None);
+        assert_eq!(map1.val_at(b"root:a:new_a"), Some(&100));
+        assert_eq!(map1.val_at(b"root:a:nested:deep"), Some(&101));
+        assert_eq!(map1.val_at(b"root:a:old1"), None);
+        assert_eq!(map1.val_at(b"root:b:old2"), None);
+        assert_eq!(map1.val_at(b"root:c:old3"), None);
 
         // Path 2: map_count < 2 (specifically 1) && remove_unset == false
         // This tests the slow path with a single child being grafted but other children preserved
@@ -5652,10 +5652,10 @@ mod tests {
         drop(wz2);
 
         // 'y' should be replaced, 'x' and 'z' should be preserved
-        assert_eq!(map2.get_val_at(b"root:x:old_x"), Some(&10));
-        assert_eq!(map2.get_val_at(b"root:y:old_y"), None);
-        assert_eq!(map2.get_val_at(b"root:y:new_y"), Some(&200));
-        assert_eq!(map2.get_val_at(b"root:z:old_z"), Some(&30));
+        assert_eq!(map2.val_at(b"root:x:old_x"), Some(&10));
+        assert_eq!(map2.val_at(b"root:y:old_y"), None);
+        assert_eq!(map2.val_at(b"root:y:new_y"), Some(&200));
+        assert_eq!(map2.val_at(b"root:z:old_z"), Some(&30));
 
         // Path 3: map_count > 2 (specifically 3) && remove_unset == true
         // This tests the FAST PATH optimized implementation that builds a new ByteNode directly
@@ -5683,12 +5683,12 @@ mod tests {
         drop(wz3);
 
         // Only 'a', 'c', and 'e' branches should exist, 'b' and 'd' should be removed
-        assert_eq!(map3.get_val_at(b"root:a:new_a"), Some(&300));
-        assert_eq!(map3.get_val_at(b"root:c:new_c"), Some(&301));
-        assert_eq!(map3.get_val_at(b"root:e:new_e"), Some(&302));
-        assert_eq!(map3.get_val_at(b"root:a:old"), None);
-        assert_eq!(map3.get_val_at(b"root:b:old"), None);
-        assert_eq!(map3.get_val_at(b"root:d:old"), None);
+        assert_eq!(map3.val_at(b"root:a:new_a"), Some(&300));
+        assert_eq!(map3.val_at(b"root:c:new_c"), Some(&301));
+        assert_eq!(map3.val_at(b"root:e:new_e"), Some(&302));
+        assert_eq!(map3.val_at(b"root:a:old"), None);
+        assert_eq!(map3.val_at(b"root:b:old"), None);
+        assert_eq!(map3.val_at(b"root:d:old"), None);
         assert_eq!(map3.val_count(), 3);
 
         // Path 4: map_count > 2 (specifically 4) && remove_unset == false
@@ -5720,15 +5720,15 @@ mod tests {
         drop(wz4);
 
         // 'p', 'q', 'r', 's' should be replaced, 't' should be preserved
-        assert_eq!(map4.get_val_at(b"root:p:old_p"), None);
-        assert_eq!(map4.get_val_at(b"root:p:new_p"), Some(&400));
-        assert_eq!(map4.get_val_at(b"root:q:old_q"), None);
-        assert_eq!(map4.get_val_at(b"root:q:new_q"), Some(&401));
-        assert_eq!(map4.get_val_at(b"root:r:old_r"), None);
-        assert_eq!(map4.get_val_at(b"root:r:new_r"), Some(&402));
-        assert_eq!(map4.get_val_at(b"root:s:old_s"), None);
-        assert_eq!(map4.get_val_at(b"root:s:new_s"), Some(&403));
-        assert_eq!(map4.get_val_at(b"root:t:old_t"), Some(&44));  // 't' preserved
+        assert_eq!(map4.val_at(b"root:p:old_p"), None);
+        assert_eq!(map4.val_at(b"root:p:new_p"), Some(&400));
+        assert_eq!(map4.val_at(b"root:q:old_q"), None);
+        assert_eq!(map4.val_at(b"root:q:new_q"), Some(&401));
+        assert_eq!(map4.val_at(b"root:r:old_r"), None);
+        assert_eq!(map4.val_at(b"root:r:new_r"), Some(&402));
+        assert_eq!(map4.val_at(b"root:s:old_s"), None);
+        assert_eq!(map4.val_at(b"root:s:new_s"), Some(&403));
+        assert_eq!(map4.val_at(b"root:t:old_t"), Some(&44));  // 't' preserved
     }
 
     #[test]
@@ -5761,16 +5761,16 @@ mod tests {
         drop(wz1);
         drop(rz1);
 
-        assert_eq!(dst1.get_val_at(b"root:"), Some(&900));
-        assert_eq!(dst1.get_val_at(b"root:a:old_a"), None);
-        assert_eq!(dst1.get_val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(dst1.get_val_at(b"root:a:nested:deep"), Some(&11));
-        assert_eq!(dst1.get_val_at(b"root:b:old_b"), None);
-        assert_eq!(dst1.get_val_at(b"root:c:old_c"), None);
-        assert_eq!(dst1.get_val_at(b"root:c:new_c"), Some(&30));
-        assert_eq!(dst1.get_val_at(b"root:d:old_d"), Some(&4));
-        assert_eq!(dst1.get_val_at(b"root:z:old_z"), Some(&26));
-        assert_eq!(dst1.get_val_at(b"root:e:unmasked"), None);
+        assert_eq!(dst1.val_at(b"root:"), Some(&900));
+        assert_eq!(dst1.val_at(b"root:a:old_a"), None);
+        assert_eq!(dst1.val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst1.val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst1.val_at(b"root:b:old_b"), None);
+        assert_eq!(dst1.val_at(b"root:c:old_c"), None);
+        assert_eq!(dst1.val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst1.val_at(b"root:d:old_d"), Some(&4));
+        assert_eq!(dst1.val_at(b"root:z:old_z"), Some(&26));
+        assert_eq!(dst1.val_at(b"root:e:unmasked"), None);
 
         // Case 2: `remove_unset=true` removes unmasked siblings in addition to grafting masked branches.
         let mut dst2: PathMap<i32> = PathMap::new();
@@ -5789,15 +5789,15 @@ mod tests {
         drop(wz2);
         drop(rz2);
 
-        assert_eq!(dst2.get_val_at(b"root:"), Some(&901));
-        assert_eq!(dst2.get_val_at(b"root:a:old_a"), None);
-        assert_eq!(dst2.get_val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(dst2.get_val_at(b"root:a:nested:deep"), Some(&11));
-        assert_eq!(dst2.get_val_at(b"root:b:old_b"), None);
-        assert_eq!(dst2.get_val_at(b"root:c:old_c"), None);
-        assert_eq!(dst2.get_val_at(b"root:c:new_c"), Some(&30));
-        assert_eq!(dst2.get_val_at(b"root:d:old_d"), None);
-        assert_eq!(dst2.get_val_at(b"root:z:old_z"), None);
+        assert_eq!(dst2.val_at(b"root:"), Some(&901));
+        assert_eq!(dst2.val_at(b"root:a:old_a"), None);
+        assert_eq!(dst2.val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst2.val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst2.val_at(b"root:b:old_b"), None);
+        assert_eq!(dst2.val_at(b"root:c:old_c"), None);
+        assert_eq!(dst2.val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst2.val_at(b"root:d:old_d"), None);
+        assert_eq!(dst2.val_at(b"root:z:old_z"), None);
         assert_eq!(dst2.val_count(), 4);
 
         // Case 3: a masked child missing in `src` must not create a new dangling branch when `self` also lacks that child.
@@ -5816,11 +5816,11 @@ mod tests {
         let rz3 = dst3.read_zipper_at_path(b"root:b");
         assert_eq!(rz3.path_exists(), false);
         drop(rz3);
-        assert_eq!(dst3.get_val_at(b"root:"), Some(&902));
-        assert_eq!(dst3.get_val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(dst3.get_val_at(b"root:a:nested:deep"), Some(&11));
-        assert_eq!(dst3.get_val_at(b"root:b"), None);
-        assert_eq!(dst3.get_val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst3.val_at(b"root:"), Some(&902));
+        assert_eq!(dst3.val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst3.val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst3.val_at(b"root:b"), None);
+        assert_eq!(dst3.val_at(b"root:c:new_c"), Some(&30));
         assert_eq!(dst3.val_count(), 4);
     }
 
@@ -5853,15 +5853,15 @@ mod tests {
         let rz = dst.read_zipper_at_path(b"root:");
         assert_eq!(rz.path_exists(), true);
         drop(rz);
-        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
-        assert_eq!(dst.get_val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:a:nested:deep"), Some(&11));
-        assert_eq!(dst.get_val_at(b"root:b:old_b"), None);
-        assert_eq!(dst.get_val_at(b"root:c:old_c"), None);
-        assert_eq!(dst.get_val_at(b"root:c:new_c"), Some(&30));
-        assert_eq!(dst.get_val_at(b"root:d:old_d"), None);
-        assert_eq!(dst.get_val_at(b"root:z:old_z"), None);
-        assert_eq!(dst.get_val_at(b"root:e:unmasked"), Some(&50));
+        assert_eq!(dst.val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst.val_at(b"root:a:nested:deep"), Some(&11));
+        assert_eq!(dst.val_at(b"root:b:old_b"), None);
+        assert_eq!(dst.val_at(b"root:c:old_c"), None);
+        assert_eq!(dst.val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst.val_at(b"root:d:old_d"), None);
+        assert_eq!(dst.val_at(b"root:z:old_z"), None);
+        assert_eq!(dst.val_at(b"root:e:unmasked"), Some(&50));
     }
 
     #[test]
@@ -5887,14 +5887,14 @@ mod tests {
         wz.graft_masked_branches(&rz, child_mask, false);
         drop(wz);
 
-        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
-        assert_eq!(dst.get_val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:b:old_b"), None);
-        assert_eq!(dst.get_val_at(b"root:c:old_c"), None);
-        assert_eq!(dst.get_val_at(b"root:c:new_c"), Some(&30));
-        assert_eq!(dst.get_val_at(b"root:d:old_d"), None);
-        assert_eq!(dst.get_val_at(b"root:d:new_d"), Some(&40));
-        assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
+        assert_eq!(dst.val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst.val_at(b"root:b:old_b"), None);
+        assert_eq!(dst.val_at(b"root:c:old_c"), None);
+        assert_eq!(dst.val_at(b"root:c:new_c"), Some(&30));
+        assert_eq!(dst.val_at(b"root:d:old_d"), None);
+        assert_eq!(dst.val_at(b"root:d:new_d"), Some(&40));
+        assert_eq!(dst.val_at(b"root:z:old_z"), Some(&26));
     }
 
     #[test]
@@ -5911,8 +5911,8 @@ mod tests {
         wz.graft_masked_branches(&rz, ByteMask::EMPTY, true);
         drop(wz);
 
-        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
-        assert_eq!(dst.get_val_at(b"root:b:old_b"), None);
+        assert_eq!(dst.val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.val_at(b"root:b:old_b"), None);
         let rz = dst.read_zipper_at_path(b"root:");
         assert_eq!(rz.child_count(), 0);
     }
@@ -5932,9 +5932,9 @@ mod tests {
         wz.graft_masked_branches(&rz, ByteMask::from(b'a'), false);
         drop(wz);
 
-        assert_eq!(dst.get_val_at(b"root:a:old_a"), None);
-        assert_eq!(dst.get_val_at(b"root:a:new_a"), Some(&10));
-        assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
+        assert_eq!(dst.val_at(b"root:a:old_a"), None);
+        assert_eq!(dst.val_at(b"root:a:new_a"), Some(&10));
+        assert_eq!(dst.val_at(b"root:z:old_z"), Some(&26));
     }
 
     /// Focussed on child values associated with the branches
@@ -5962,16 +5962,16 @@ mod tests {
         wz.graft_masked_branches(&rz, child_mask, false);
         drop(wz);
 
-        assert_eq!(dst.get_val_at(b"abcdefg"), Some(&0));
-        assert_eq!(dst.get_val_at(b"hijklmnop"), Some(&1));
-        assert_eq!(dst.get_val_at(b"qrstuwvxyz"), Some(&2));
-        assert_eq!(dst.get_val_at(b"0"), Some(&3));
-        assert_eq!(dst.get_val_at(b"1"), Some(&4));
-        assert_eq!(dst.get_val_at(b"2"), Some(&5));
-        assert_eq!(dst.get_val_at(b"3"), Some(&6));
-        assert_eq!(dst.get_val_at(b"4"), Some(&7));
-        assert_eq!(dst.get_val_at(b"5"), Some(&8));
-        assert_eq!(dst.get_val_at(b"6789"), Some(&9));
+        assert_eq!(dst.val_at(b"abcdefg"), Some(&0));
+        assert_eq!(dst.val_at(b"hijklmnop"), Some(&1));
+        assert_eq!(dst.val_at(b"qrstuwvxyz"), Some(&2));
+        assert_eq!(dst.val_at(b"0"), Some(&3));
+        assert_eq!(dst.val_at(b"1"), Some(&4));
+        assert_eq!(dst.val_at(b"2"), Some(&5));
+        assert_eq!(dst.val_at(b"3"), Some(&6));
+        assert_eq!(dst.val_at(b"4"), Some(&7));
+        assert_eq!(dst.val_at(b"5"), Some(&8));
+        assert_eq!(dst.val_at(b"6789"), Some(&9));
     }
 
     #[derive(Debug, PartialEq)]

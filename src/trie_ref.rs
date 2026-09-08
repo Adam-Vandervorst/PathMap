@@ -1140,7 +1140,7 @@ mod tests {
         wz.remove_val(true);
         drop(wz);
         drop(zh);
-        assert_eq!(map.get_val_at(b"path"), None);
+        assert_eq!(map.val_at(b"path"), None);
 
         assert_eq!(tr.val(), Some(&42));
     }
@@ -1186,25 +1186,25 @@ mod tests {
             dst.write_zipper_at_path(b"root:r").graft_src_at(&src_ref, b"branch:mid");
             dst.write_zipper_at_path(b"root:s").graft_src_at(&src_ref, b"missing");
 
-            assert_eq!(dst.get_val_at(b"root:p:old_p"), None);
-            assert_eq!(dst.get_val_at(b"root:p:new_a"), Some(&10));
-            assert_eq!(dst.get_val_at(b"root:p:nested:deep"), Some(&11));
-            assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), None);
-            assert_eq!(dst.get_val_at(b"root:p:c:new_c"), None);
+            assert_eq!(dst.val_at(b"root:p:old_p"), None);
+            assert_eq!(dst.val_at(b"root:p:new_a"), Some(&10));
+            assert_eq!(dst.val_at(b"root:p:nested:deep"), Some(&11));
+            assert_eq!(dst.val_at(b"root:p:branch:mid:leaf"), None);
+            assert_eq!(dst.val_at(b"root:p:c:new_c"), None);
 
-            assert_eq!(dst.get_val_at(b"root:q:old_q"), None);
-            assert_eq!(dst.get_val_at(b"root:q:deep"), Some(&11));
-            assert_eq!(dst.get_val_at(b"root:q:new_a"), None);
+            assert_eq!(dst.val_at(b"root:q:old_q"), None);
+            assert_eq!(dst.val_at(b"root:q:deep"), Some(&11));
+            assert_eq!(dst.val_at(b"root:q:new_a"), None);
 
-            assert_eq!(dst.get_val_at(b"root:r:old_r"), None);
-            assert_eq!(dst.get_val_at(b"root:r:leaf"), Some(&40));
-            assert_eq!(dst.get_val_at(b"root:r:deep"), None);
+            assert_eq!(dst.val_at(b"root:r:old_r"), None);
+            assert_eq!(dst.val_at(b"root:r:leaf"), Some(&40));
+            assert_eq!(dst.val_at(b"root:r:deep"), None);
 
-            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
-            assert_eq!(dst.get_val_at(b"root:s"), None);
-            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
+            assert_eq!(dst.val_at(b"root:s:old_s"), None);
+            assert_eq!(dst.val_at(b"root:s"), None);
+            assert_eq!(dst.val_at(b"root:s:old_s"), None);
 
-            assert_eq!(dst.get_val_at(b"root:t:old_t"), Some(&5));
+            assert_eq!(dst.val_at(b"root:t:old_t"), Some(&5));
         }
 
         let mut borrowed_src = PathMap::<i32>::new();
