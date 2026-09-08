@@ -197,7 +197,8 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///
     /// The iter token is a node-local cursor.  It must represent any position within a node type, and
     /// should involve a minimum of computation to advance to the next position, but it does not need to
-    /// encode an arbitrary path through the trie.
+    /// encode an arbitrary path through the trie.  For a given node, every representable existing path
+    /// has one canonical token; implementations must not produce two different tokens for the same path.
     ///
     /// To the more general question of whether 64 bits will be enough for any possible future node
     /// structure, currently MAX_NODE_KEY_BYTES is limited to 48, but there is no limit on the branching
@@ -208,19 +209,51 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// with a reasonable time and memory-fetch overhead.
     fn new_iter_token(&self) -> IterToken;
 
-    /// Generates an iter token that can be passed to [Self::next_items] to continue iteration from the
-    /// specified path
+    /// Returns an iter token representing `key` within this node.
+    ///
+    /// A token with [`NODE_TOKEN_NONEXISTENT_BIT`] clear describes an exact existing in-node path.
+    /// A token with the bit set describes a nonexistent path below or after the corresponding
+    /// token with the bit cleared.  This relationship also applies to the special pair
+    /// [`TOKEN_LAST`] and [`TOKEN_AFTER_LAST`].
+    ///
+    /// [`TOKEN_LAST`] is always the last valid path in a node, although not every node is
+    /// guaranteed to have a `TOKEN_LAST`.  [`NODE_ITER_INVALID`] and [`NODE_ITER_FINISHED`] are
+    /// control sentinels and never describe paths; this method must not return either sentinel.
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken;
 
-    /// Steps to the next existing path within the node, in a depth-first order
+    /// Returns the token for the focus reached by ascending `byte_count` bytes within this node.
+    ///
+    /// `token` must be a valid token with the [`NODE_TOKEN_NONEXISTENT_BIT`] clear , and `byte_count` must
+    /// be a non-zero in-node ascent which does not pass the node root.  Implementations must represent
+    /// every result permitted by those preconditions.  They may panic when any precondition is violated.
+    fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken;
+
+    /// Steps to the next existing path within the node, in a depth-first order.
+    ///
+    /// `token` must not be [`NODE_ITER_INVALID`] or [`NODE_ITER_FINISHED`].
+    ///
+    /// `token` may have [`NODE_TOKEN_NONEXISTENT_BIT`] set. In that case, it is a lower-bound
+    /// cursor and this method must treat it as the corresponding unflagged token. Returned tokens
+    /// which describe existing paths must have the bit clear.
+    ///
+    /// [`TOKEN_LAST`] is a canonical existing-path token for nodes which use it.  If `TOKEN_LAST`
+    /// is passed to this method, the result is guaranteed to be
+    /// `(`[`NODE_ITER_FINISHED`]`, &[], None, None)`.  [`TOKEN_AFTER_LAST`] has the same iteration
+    /// result and represents a nonexistent path after that final path.
+    ///
+    /// When `after_focus` is true, steps to the first item strictly after (and not below) the
+    /// focus represented by `token`.
     ///
     /// Returns `(next_token, path, child_node, value)`
-    /// - `next_token` is the value to pass to a subsequent call of this method.  Returns
-    ///   [NODE_ITER_FINISHED] when there are no more sub-paths
-    /// - `path` is relative to the start of `node`
-    /// - `child_node` an onward node link, of `None`
-    /// - `value` that exists at the path, or `None`
-    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
+    /// - On success, `next_token` is the canonical token for the existing path returned by this call.
+    ///   It is also the continuation token to pass to the subsequent call.
+    /// - `path` is the path represented by a successful `next_token`, relative to the start of this
+    ///   node. `child_node` and `value` are the items stored at that path.
+    /// - When there are no more paths, the result must be
+    ///   `(`[`NODE_ITER_FINISHED`]`, &[], None, None)`. No item is returned in that call. In
+    ///   particular, the final item is returned by the preceding call with an existing-path token;
+    ///   a subsequent call using that token reports exhaustion.
+    fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
 
     /// Returns the total number of leaves contained within the whole subtree defined by the node
     /// GOAT, this should be deprecated
@@ -372,14 +405,78 @@ pub trait TrieNodeDowncast<V: Clone + Send + Sync, A: Allocator> {
     fn convert_to_cell_node(&mut self) -> TrieNodeODRc<V, A>;
 }
 
-/// Node-local cursor used by the trie-node iteration interface
+/// Node-specific encoding representing a position within the node
 pub type IterToken = u64;
 
-/// Special sentinel token value indicating iteration of a node has not been initialized
-pub const NODE_ITER_INVALID: IterToken = IterToken::MAX;
+/// Reserved high bit marking a token with a special, non-node-specific meaning.
+///
+/// Bit 63 is reserved across every node token.  When set, the complete token value identifies one
+/// of the global meanings [`TOKEN_LAST`], [`TOKEN_AFTER_LAST`], [`NODE_ITER_INVALID`], or
+/// [`NODE_ITER_FINISHED`].  Node-specific token encodings must leave this bit clear.
+pub const NODE_TOKEN_SPECIAL_BIT: IterToken = 1 << (IterToken::BITS - 1);
 
-/// Special sentinel token value indicating iteration of a node has concluded
+/// Reserved flag returned by [`TrieNode::iter_token_for_path`] for a nonexistent path.
+///
+/// Bit 62 is reserved across every node token.  The ordinary meaning is:
+/// clear = token represents a path that exists within the node
+/// set = token represents a path *below or after* the the path represented by the corresponding
+///    token with this bit clear.
+///
+/// Setting it on [`TOKEN_LAST`] produces the global [`TOKEN_AFTER_LAST`] token.  This bit has no
+/// singular meaning in the control sentinels [`NODE_ITER_INVALID`] and [`NODE_ITER_FINISHED`].
+pub const NODE_TOKEN_NONEXISTENT_BIT: IterToken = 1 << (IterToken::BITS - 2);
+
+/// Canonical token for the last valid path in a node which supports this special token.
+///
+/// Not every node is guaranteed to have a `TOKEN_LAST`.  If it is passed to
+/// [`TrieNode::next_items`], the result is guaranteed to be
+/// `(`[`NODE_ITER_FINISHED`]`, &[], None, None)`.
+pub const TOKEN_LAST: IterToken = IterToken::MAX & !NODE_TOKEN_NONEXISTENT_BIT;
+
+/// The nonexistent-path companion to [`TOKEN_LAST`], representing a focus after the node's last
+/// valid path.
+pub const TOKEN_AFTER_LAST: IterToken = TOKEN_LAST | NODE_TOKEN_NONEXISTENT_BIT;
+
+/// Special sentinel token value indicating an unknown or invalid location.
+pub const NODE_ITER_INVALID: IterToken = NODE_TOKEN_SPECIAL_BIT;
+
+/// Special sentinel token value indicating iteration of a node has concluded.  Returned from some iteration
+/// functions, but should not be passed as an input to any functions accepting an input token
 pub const NODE_ITER_FINISHED: IterToken = IterToken::MAX - 1;
+
+/// Checks the relationships on which generic and node-specific token handling relies.
+#[inline(always)]
+pub(crate) const fn debug_assert_iter_token_layout() {
+    debug_assert!(TOKEN_LAST & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(TOKEN_LAST & NODE_TOKEN_NONEXISTENT_BIT == 0);
+    debug_assert!(TOKEN_LAST & !(NODE_TOKEN_SPECIAL_BIT | NODE_TOKEN_NONEXISTENT_BIT)
+        == NODE_TOKEN_NONEXISTENT_BIT - 1);
+    debug_assert!(TOKEN_AFTER_LAST == TOKEN_LAST | NODE_TOKEN_NONEXISTENT_BIT);
+    debug_assert!(TOKEN_AFTER_LAST == IterToken::MAX);
+    debug_assert!(NODE_ITER_FINISHED == IterToken::MAX - 1);
+    debug_assert!(NODE_ITER_INVALID == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(TOKEN_AFTER_LAST & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(NODE_ITER_INVALID & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(NODE_ITER_FINISHED & NODE_TOKEN_SPECIAL_BIT == NODE_TOKEN_SPECIAL_BIT);
+    debug_assert!(TOKEN_LAST != NODE_ITER_INVALID);
+    debug_assert!(TOKEN_LAST != NODE_ITER_FINISHED);
+    debug_assert!(TOKEN_AFTER_LAST != NODE_ITER_INVALID);
+    debug_assert!(TOKEN_AFTER_LAST != NODE_ITER_FINISHED);
+    debug_assert!(NODE_ITER_INVALID != NODE_ITER_FINISHED);
+    debug_assert!(NODE_ITER_INVALID < TOKEN_LAST);
+    debug_assert!(TOKEN_LAST < NODE_ITER_FINISHED);
+    debug_assert!(NODE_ITER_FINISHED < TOKEN_AFTER_LAST);
+}
+
+/// Returns whether `token` represents a nonexistent path within the node.
+///
+/// Must not be called with [`NODE_ITER_FINISHED`], or [`NODE_ITER_INVALID`].
+#[inline(always)]
+pub const fn node_iter_token_is_nonexistent(token: IterToken) -> bool {
+    debug_assert!(token != NODE_ITER_FINISHED);
+    debug_assert!(token != NODE_ITER_INVALID);
+    token & NODE_TOKEN_NONEXISTENT_BIT != 0
+}
 
 /// Internal.  A pointer to an onward link or a value contained within a node
 pub(crate) enum PayloadRef<'a, V: Clone + Send + Sync, A: Allocator> {
@@ -1250,15 +1347,28 @@ mod tagged_node_ref {
             }
         }
         #[inline(always)]
-        pub fn next_items(&self, token: IterToken) -> (IterToken, &'a[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+        pub fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
             match self {
-                Self::DenseByteNode(node) => node.next_items(token),
-                Self::LineListNode(node) => node.next_items(token),
+                Self::DenseByteNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::LineListNode(node) => node.ascend_iter_token(token, byte_count),
                 #[cfg(feature = "bridge_nodes")]
-                Self::BridgeNode(node) => node.next_items(token),
-                Self::CellByteNode(node) => node.next_items(token),
-                Self::TinyRefNode(node) => node.next_items(token),
-                Self::EmptyNode => <EmptyNode as TrieNode<V, A>>::next_items(&EMPTY_NODE, token),
+                Self::BridgeNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::CellByteNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::TinyRefNode(node) => node.ascend_iter_token(token, byte_count),
+                Self::EmptyNode => <EmptyNode as TrieNode<V, A>>::ascend_iter_token(&EMPTY_NODE, token, byte_count),
+            }
+        }
+
+        #[inline(always)]
+        pub fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &'a[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+            match self {
+                Self::DenseByteNode(node) => node.next_items(token, after_focus),
+                Self::LineListNode(node) => node.next_items(token, after_focus),
+                #[cfg(feature = "bridge_nodes")]
+                Self::BridgeNode(node) => node.next_items(token, after_focus),
+                Self::CellByteNode(node) => node.next_items(token, after_focus),
+                Self::TinyRefNode(node) => node.next_items(token, after_focus),
+                Self::EmptyNode => <EmptyNode as TrieNode<V, A>>::next_items(&EMPTY_NODE, token, after_focus),
             }
         }
 
@@ -1887,14 +1997,26 @@ mod tagged_node_ref {
             }
         }
         #[inline]
-        pub fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
+        pub fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
+            let (ptr, tag) = self.ptr.get_raw_parts();
+            match tag {
+                EMPTY_NODE_TAG => <EmptyNode as TrieNode<V, A>>::ascend_iter_token(&EMPTY_NODE, token, byte_count),
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.ascend_iter_token(token, byte_count),
+                _ => unsafe{ unreachable_unchecked() }
+            }
+        }
+        #[inline]
+        pub fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&'a TrieNodeODRc<V, A>>, Option<&'a V>) {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => (NODE_ITER_FINISHED, &[], None, None),
-                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.next_items(token),
-                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.next_items(token),
-                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.next_items(token),
-                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.next_items(token),
+                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.next_items(token, after_focus),
+                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.next_items(token, after_focus),
+                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.next_items(token, after_focus),
+                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.next_items(token, after_focus),
                 _ => unsafe{ unreachable_unchecked() }
             }
         }

@@ -274,7 +274,7 @@ impl <'a, V : Clone + Send + Sync> PathMapCursor<'a, V> {
             match self.btnis.last_mut() {
                 None => { return None }
                 Some((node, token, key_start)) => {
-                    let (new_token, key_bytes, rec, value) = node.next_items(*token);
+                    let (new_token, key_bytes, rec, value) = node.next_items(*token, false);
 
                     if new_token == NODE_ITER_FINISHED {
                         self.btnis.pop();
@@ -303,5 +303,3 @@ impl <'a, V : Clone + Send + Sync> PathMapCursor<'a, V> {
         }
     }
 }
-
-
