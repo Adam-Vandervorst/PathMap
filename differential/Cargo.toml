@@ -1,0 +1,9 @@
+[package]
+name = "differential"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Rust side of the differential fuzzing harness for pathmap's zipper API; the Lean model in ../lean is the oracle"
+
+[dependencies]
+pathmap = { path = "..", features = ["arena_compact"] }

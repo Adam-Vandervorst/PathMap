@@ -266,6 +266,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefBo
     fn val(&self) -> Option<&V> {
         self.get_val()
     }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRefBorrowed<'_, V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         self.get_val_at(path)
     }
@@ -646,6 +649,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRefOw
             None
         }
     }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRefOwned<V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         if self.is_valid() {
             TrieRefBorrowed::new_with_key_and_path_in(
@@ -844,6 +850,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValues<V> for TrieRef<'
             TrieRef::Owned(trie_ref) => trie_ref.val(),
         }
     }
+}
+
+impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRef<'_, V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.val_at(path),
@@ -1131,14 +1140,14 @@ mod tests {
         wz.remove_val(true);
         drop(wz);
         drop(zh);
-        assert_eq!(map.get_val_at(b"path"), None);
+        assert_eq!(map.val_at(b"path"), None);
 
         assert_eq!(tr.val(), Some(&42));
     }
 
     #[test]
     fn trie_ref_val_at_test() {
-        fn assert_val_at<T: ZipperValues<i32>>(trie_ref: T) {
+        fn assert_val_at<T: ZipperValuesAt<i32>>(trie_ref: T) {
             assert_eq!(trie_ref.val(), None);
             assert_eq!(trie_ref.val_at(b"root:a:new_a"), Some(&10));
             assert_eq!(trie_ref.val_at(b"root:a:nested:deep"), Some(&11));
@@ -1177,25 +1186,25 @@ mod tests {
             dst.write_zipper_at_path(b"root:r").graft_src_at(&src_ref, b"branch:mid");
             dst.write_zipper_at_path(b"root:s").graft_src_at(&src_ref, b"missing");
 
-            assert_eq!(dst.get_val_at(b"root:p:old_p"), None);
-            assert_eq!(dst.get_val_at(b"root:p:new_a"), Some(&10));
-            assert_eq!(dst.get_val_at(b"root:p:nested:deep"), Some(&11));
-            assert_eq!(dst.get_val_at(b"root:p:branch:mid:leaf"), None);
-            assert_eq!(dst.get_val_at(b"root:p:c:new_c"), None);
+            assert_eq!(dst.val_at(b"root:p:old_p"), None);
+            assert_eq!(dst.val_at(b"root:p:new_a"), Some(&10));
+            assert_eq!(dst.val_at(b"root:p:nested:deep"), Some(&11));
+            assert_eq!(dst.val_at(b"root:p:branch:mid:leaf"), None);
+            assert_eq!(dst.val_at(b"root:p:c:new_c"), None);
 
-            assert_eq!(dst.get_val_at(b"root:q:old_q"), None);
-            assert_eq!(dst.get_val_at(b"root:q:deep"), Some(&11));
-            assert_eq!(dst.get_val_at(b"root:q:new_a"), None);
+            assert_eq!(dst.val_at(b"root:q:old_q"), None);
+            assert_eq!(dst.val_at(b"root:q:deep"), Some(&11));
+            assert_eq!(dst.val_at(b"root:q:new_a"), None);
 
-            assert_eq!(dst.get_val_at(b"root:r:old_r"), None);
-            assert_eq!(dst.get_val_at(b"root:r:leaf"), Some(&40));
-            assert_eq!(dst.get_val_at(b"root:r:deep"), None);
+            assert_eq!(dst.val_at(b"root:r:old_r"), None);
+            assert_eq!(dst.val_at(b"root:r:leaf"), Some(&40));
+            assert_eq!(dst.val_at(b"root:r:deep"), None);
 
-            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
-            assert_eq!(dst.get_val_at(b"root:s"), None);
-            assert_eq!(dst.get_val_at(b"root:s:old_s"), None);
+            assert_eq!(dst.val_at(b"root:s:old_s"), None);
+            assert_eq!(dst.val_at(b"root:s"), None);
+            assert_eq!(dst.val_at(b"root:s:old_s"), None);
 
-            assert_eq!(dst.get_val_at(b"root:t:old_t"), Some(&5));
+            assert_eq!(dst.val_at(b"root:t:old_t"), Some(&5));
         }
 
         let mut borrowed_src = PathMap::<i32>::new();

@@ -254,6 +254,7 @@ pub(crate) fn record_make_unique(cloned: bool) {
 mod tests {
     use super::{cow_counters, reset_cow_counters};
     use crate::PathMap;
+    use crate::zipper::ZipperValuesAt;
 
     #[test]
     fn cow_counters_split_unshared_and_shared_writes() {
@@ -274,8 +275,8 @@ mod tests {
         let shared = cow_counters();
         assert!(shared.cow_clones >= 1, "writing an aliased trie must record at least one clone");
         assert!(shared.cow_clones <= shared.make_unique_calls);
-        assert_eq!(shared_handle.get_val_at(b"romane"), Some(&0), "the aliased handle is unaffected");
-        assert_eq!(shared_handle.get_val_at(b"romanes"), None);
+        assert_eq!(shared_handle.val_at(b"romane"), Some(&0), "the aliased handle is unaffected");
+        assert_eq!(shared_handle.val_at(b"romanes"), None);
 
         // After the aliasing handle is gone, fresh writes stop cloning.
         drop(shared_handle);
