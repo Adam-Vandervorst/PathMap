@@ -1379,7 +1379,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             self.root_val.as_ref().and_then(|val| unsafe{&**val}.as_ref())
         }
     }
-    /// See [ZipperValues::val_at]
+    /// See [ZipperValuesAt::val_at]
     pub fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         TrieRefBorrowed::new_with_key_and_path_in(
             self.focus_parent(),

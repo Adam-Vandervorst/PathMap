@@ -33,6 +33,7 @@
 [`ZipperReadOnlyValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html
 [`ZipperSubtries`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperSubtries.html
 [`ZipperValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html
+[`ZipperValuesAt`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValuesAt.html
 [`ZipperWriting`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html
 [`ZipperWriting::graft`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.graft
 [`OverlayZipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/struct.OverlayZipper.html
@@ -63,6 +64,7 @@
 [`ZipperReadOnlyValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html
 [`ZipperSubtries`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperSubtries.html
 [`ZipperValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html
+[`ZipperValuesAt`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValuesAt.html
 [`ZipperWriting`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html
 [`Zipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.Zipper.html
 [`ascend_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.ascend_byte
@@ -83,6 +85,8 @@
 [`descend_to`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to
 [`descend_until`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_until
 [`fork_read_zipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperForking.html#tymethod.fork_read_zipper
+[`get_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html#tymethod.get_val
+[`get_val_at`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html#tymethod.get_val_at
 [`get_val_mut`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.get_val_mut
 [`get_val_or_set_mut_with`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.get_val_or_set_mut_with
 [`get_val_or_set_mut`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.get_val_or_set_mut
@@ -131,6 +135,7 @@
 [`to_prev_sibling_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.to_prev_sibling_byte
 [`trie_ref_at_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlySubtries.html#tymethod.trie_ref_at_path
 [`val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html#tymethod.val
+[`val_at`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValuesAt.html#tymethod.val_at
 [`witness`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyConditionalValues.html#tymethod.witness
 [`restrict`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.restrict
 [`Send`]: https://doc.rust-lang.org/std/marker/trait.Send.html
