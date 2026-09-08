@@ -764,7 +764,6 @@ mod tests {
     use crate::zipper::ZipperIteration;
     use crate::zipper::ZipperPath;
     use crate::zipper::ZipperReadOnlyValues;
-    use crate::zipper::ZipperValues;
     use crate::zipper::ZipperValuesAt;
 
     //The whole prefix is the root prefix, so these run the shared suites against a `PrefixZipper`

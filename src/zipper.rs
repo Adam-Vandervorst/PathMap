@@ -82,6 +82,25 @@ pub trait ZipperValuesAt<V>: ZipperValues<V> {
     /// If you have a zipper type that implements [ZipperReadOnlyValues] then
     /// [ZipperReadOnlyValues::get_val_at] will provide a longer-lived reference
     /// to the value.
+    ///
+    /// ```rust
+    /// # extern crate pathmap;
+    /// # use pathmap::{PathMap, zipper::*};
+    /// let mut map = PathMap::new();
+    /// map.insert(b"config/network/port", 8080);
+    /// map.insert(b"config/network/host", 127);
+    ///
+    /// let mut zipper = map.read_zipper();
+    /// zipper.descend_to(b"config/");
+    ///
+    /// // Query descendant values without moving the focus
+    /// assert_eq!(zipper.val_at(b"network/port"), Some(&8080));
+    /// assert_eq!(zipper.val_at(b"network/host"), Some(&127));
+    /// assert_eq!(zipper.val_at(b"missing"), None);
+    ///
+    /// // The focus is still at "config"
+    /// assert_eq!(zipper.path(), b"config/");
+    /// ```
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V>;
 }
 
@@ -734,7 +753,7 @@ pub trait ZipperReadOnlyValues<'a, V>: ZipperValues<V> {
 
     /// Returns a refernce to the value at `path`, relative to the zipper's focus, or `None` if there is no value
     ///
-    /// NOTE: Unlike [ZipperValues::val_at], this method returns a reference with the lifetime of `'a`
+    /// NOTE: Unlike [ZipperValuesAt::val_at], this method returns a reference with the lifetime of `'a`
     /// instead of the temporary lifetime of the method.
     fn get_val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&'a V>;
 
