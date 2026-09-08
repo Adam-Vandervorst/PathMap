@@ -1066,10 +1066,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
         }
         loop {
             self.ascend_within_node();
-            //Normalise *before* deciding we are done, the way `ascend` does.  Returning first
-            //left the zipper at its root still holding a spent node key, and at the root `val()`
-            //and `set_val` read `root_val` -- so the zipper denied its own root value, and
-            //`set_val` unwrapped a `None`.
+            //Normalise *before* deciding we are done, the way `ascend` does.
             if self.key.node_key().len() == 0 {
                 self.ascend_across_nodes();
             }
@@ -1090,10 +1087,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperMoving 
         }
         loop {
             self.ascend_within_node();
-            //Normalise *before* deciding we are done, the way `ascend` does.  Returning first
-            //left the zipper at its root still holding a spent node key, and at the root `val()`
-            //and `set_val` read `root_val` -- so the zipper denied its own root value, and
-            //`set_val` unwrapped a `None`.
+            //Normalise *before* deciding we are done, the way `ascend` does.
             if self.key.node_key().len() == 0 {
                 self.ascend_across_nodes();
             }
@@ -6357,11 +6351,9 @@ mod tests {
         }
     }
 
-    /// `ascend_until` and `ascend_until_branch` checked `at_root()` and returned before
-    /// the step that closes out a spent node key, so a zipper could arrive at its own
-    /// root still holding a key it had ascended past.  At the root `val()` and
-    /// `set_val` read `root_val` rather than the focus node, so the zipper denied its
-    /// own root value and `set_val` unwrapped a `None`.  `ascend` normalises first.
+    /// Verifies that `ascend_until` and `ascend_until_branch` return a write zipper in
+    /// a usable root state: the root value remains readable, replaceable, and removable,
+    /// while values outside the zipper's rooted subtrie remain unchanged.
     #[test]
     fn write_zipper_ascend_until_normalises_at_the_root() {
         let ups: Vec<(&str, fn(&mut WriteZipperUntracked<'_, '_, u64>) -> bool)> = vec![
