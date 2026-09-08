@@ -39,7 +39,7 @@ enum DescendState {
 
 enum DescendStop {
     Value,
-    Branch(u8), // first surviving child
+    Branch,
     Leaf,
     ByteLimit,
 }
@@ -189,7 +189,7 @@ where
     ///
     /// Returns `DescendState::Continue(byte)` only when there is no surviving value and exactly
     /// one surviving child. Otherwise returns the reason traversal must stop.
-    fn current_descend_state(&mut self) -> DescendState {
+    fn current_descend_state<const STOP_ON_BRANCH: bool>(&mut self) -> DescendState {
         if !self.rhs.path_exists() {
             // Once RHS no longer contains the current path, subtraction has no
             // further effect below this point: the virtual subtree is exactly LHS.
@@ -200,8 +200,8 @@ where
             let mask = self.lhs.child_mask();
 
             if let Some(first_byte) = mask.indexed_bit::<true>(0) {
-                if mask.next_bit(first_byte).is_some() {
-                    return DescendState::Stop(DescendStop::Branch(first_byte));
+                if STOP_ON_BRANCH && mask.next_bit(first_byte).is_some() {
+                    return DescendState::Stop(DescendStop::Branch);
                 }
 
                 return DescendState::Continue(first_byte);
@@ -218,8 +218,8 @@ where
 
         match self.first_surviving_child() {
             Some(byte) => {
-                if self.surviving_sibling::<true>(byte).is_some() {
-                    DescendState::Stop(DescendStop::Branch(byte))
+                if STOP_ON_BRANCH && self.surviving_sibling::<true>(byte).is_some() {
+                    DescendState::Stop(DescendStop::Branch)
                 } else {
                     DescendState::Continue(byte)
                 }
@@ -235,7 +235,7 @@ where
     /// exhausted.
     ///
     /// This method does not refresh cached virtual state.
-    fn descend_to_next_stop<P: PathObserver>(
+    fn descend_to_next_stop<const STOP_ON_BRANCH: bool, P: PathObserver>(
         &mut self,
         mut byte: u8,
         obs: &mut P,
@@ -253,7 +253,7 @@ where
                 }
             }
 
-            match self.current_descend_state() {
+            match self.current_descend_state::<STOP_ON_BRANCH>() {
                 DescendState::Continue(next_byte) => {
                     byte = next_byte;
                 }
@@ -274,7 +274,7 @@ where
             if self.child_mask.next_bit(byte).is_some() {
                 return false;
             }
-            let _ = self.descend_to_next_stop(byte, obs, max_bytes);
+            let _ = self.descend_to_next_stop::<true, _>(byte, obs, max_bytes);
             self.refresh();
             true
         } else {
@@ -623,10 +623,17 @@ where
             return count;
         }
 
-        let mut lhs = self.lhs.clone();
-        let mut rhs = self.rhs.clone();
-
-        let count = subtract_val_count::<V, _, _>(&mut lhs, &mut rhs);
+        let count = if !self.path_exists() {
+            0
+        } else if self.child_mask.is_empty_mask() {
+            1
+        } else if !self.rhs.path_exists() {
+            self.lhs.val_count()
+        } else {
+            let mut lhs = self.lhs.clone();
+            let mut rhs = self.rhs.clone();
+            subtract_val_count::<V, _, _>(&mut lhs, &mut rhs)
+        };
 
         self.val_count.set(Some(count));
         count
@@ -1022,22 +1029,22 @@ where
         'search: loop {
             // Search downward, always taking the first child in DFS order.
             while let Some(byte) = next_byte {
-                match self.descend_to_next_stop(byte, obs, None) {
+                match self.descend_to_next_stop::<false, _>(byte, obs, None) {
                     DescendStop::Value => {
                         self.refresh();
                         return true;
-                    }
-                    DescendStop::Branch(first_child) => {
-                        // There is no value at this branch, so DFS continues
-                        // immediately through its first surviving child.
-                        next_byte = Some(first_child);
                     }
                     DescendStop::Leaf => {
                         // No value was found on this path. Continue by searching
                         // for the next sibling while walking back up the tree.
                         next_byte = None;
                     }
-                    DescendStop::ByteLimit => unreachable!(),
+                    // DescendStop::Branch(first_child) => {
+                    //     // There is no value at this branch, so DFS continues
+                    //     // immediately through its first surviving child.
+                    //     next_byte = Some(first_child);
+                    // }
+                    _ => unreachable!(),
                 }
             }
 
