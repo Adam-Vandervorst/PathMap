@@ -3,7 +3,10 @@ use std::{cell::Cell, num::NonZeroUsize};
 use crate::{
     ring::{self, AlgebraicResult, DistributiveLattice, DistributiveLatticeRef},
     utils::{BitMask, ByteMask},
-    zipper::{Zipper, ZipperAbsolutePath, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues},
+    zipper::{
+        PathObserver, Zipper, ZipperAbsolutePath, ZipperIteration, ZipperMoving, ZipperPath,
+        ZipperValues,
+    },
 };
 
 pub struct SubtractZipper<V, A, B> {
@@ -130,15 +133,6 @@ where
     }
 
     fn compute_child_mask(&mut self) -> ByteMask {
-        if !self.lhs.path_exists() {
-            return ByteMask::default();
-        }
-
-        // Nothing below this RHS position can exist either.
-        if !self.rhs.path_exists() {
-            return self.lhs.child_mask();
-        }
-
         let mut out = self.lhs.child_mask();
 
         for byte in (out & self.rhs.child_mask()).iter() {
@@ -168,6 +162,9 @@ where
     /// `cur_byte` is assumed to be a child of the materialized subtraction.
     fn has_surviving_sibling(&mut self, cur_byte: u8) -> bool {
         let mut candidates = self.lhs.child_mask();
+        if candidates.is_empty_mask() {
+            return false;
+        }
 
         if !self.rhs.path_exists() {
             // The whole LHS subtree survives, so any other LHS child is enough.
@@ -238,18 +235,20 @@ where
     /// exhausted.
     ///
     /// This method does not refresh cached virtual state.
-    fn descend_to_next_stop(
+    fn descend_to_next_stop<P: PathObserver>(
         &mut self,
         mut byte: u8,
-        mut remaining: Option<NonZeroUsize>,
+        obs: &mut P,
+        mut limit: Option<NonZeroUsize>,
     ) -> DescendStop {
         loop {
             self.descend_to_byte_raw(byte);
+            obs.descend_to_byte(byte);
 
-            if let Some(left) = remaining {
-                remaining = NonZeroUsize::new(left.get() - 1);
+            if let Some(left) = limit {
+                limit = NonZeroUsize::new(left.get() - 1);
 
-                if remaining.is_none() {
+                if limit.is_none() {
                     return DescendStop::ByteLimit;
                 }
             }
@@ -266,12 +265,16 @@ where
     }
 
     #[inline]
-    fn descend_until(&mut self, max_bytes: Option<NonZeroUsize>) -> bool {
+    fn descend_until<P: PathObserver>(
+        &mut self,
+        obs: &mut P,
+        max_bytes: Option<NonZeroUsize>,
+    ) -> bool {
         if let Some(byte) = self.child_mask.indexed_bit::<true>(0) {
             if self.child_mask.next_bit(byte).is_some() {
                 return false;
             }
-            let _ = self.descend_to_next_stop(byte, max_bytes);
+            let _ = self.descend_to_next_stop(byte, obs, max_bytes);
             self.refresh();
             true
         } else {
@@ -292,7 +295,7 @@ where
             lhs_mask.prev_bit(cur_byte)
         };
 
-        if !self.rhs.path_exists() {
+        if candidate.is_none() || !self.rhs.path_exists() {
             return candidate;
         }
 
@@ -332,11 +335,15 @@ where
     ///
     /// Returns `false` after exhausting the search and leaving the zipper at
     /// `base_idx`.
-    fn advance_to_next_subtree(&mut self, base_idx: usize) -> bool {
+    fn advance_to_next_subtree<P: PathObserver>(&mut self, base_idx: usize, obs: &mut P) -> bool {
+        let mut ascended = 0;
         loop {
             // Reaching the common root means the current DFS subtree has been
             // exhausted and there is no later subtree to visit.
             if self.lhs.depth() == self.lhs_root_depth + base_idx {
+                if ascended != 0 {
+                    obs.ascend(ascended);
+                }
                 return false;
             }
 
@@ -345,11 +352,14 @@ where
             // Move to the parent without refreshing the virtual zipper state.
             // Intermediate nodes are not externally observable during this search.
             self.ascend_byte_raw();
+            ascended += 1;
 
             // Continue DFS from the next surviving sibling, if one exists.
             // surviving_sibling() accounts for branches removed by subtraction.
             if let Some(byte) = self.surviving_sibling::<true>(cur_byte) {
+                obs.ascend(ascended);
                 self.descend_to_byte_raw(byte);
+                obs.descend_to_byte(byte);
                 return true;
             }
 
@@ -364,9 +374,8 @@ where
     /// The zipper may be positioned anywhere below `base_idx` on entry.
     /// Intermediate movement is raw; the virtual state is refreshed only when
     /// a matching path is found.
-    fn seek_k_path(&mut self, base_idx: usize, k: usize) -> bool {
+    fn seek_k_path<P: PathObserver>(&mut self, base_idx: usize, k: usize, obs: &mut P) -> bool {
         let target_idx = base_idx + k;
-
         loop {
             // The first path encountered at the requested depth is the result,
             // since traversal always prefers the first surviving child.
@@ -378,12 +387,13 @@ where
             // possible.
             if let Some(byte) = self.first_surviving_child() {
                 self.descend_to_byte_raw(byte);
+                obs.descend_to_byte(byte);
                 continue;
             }
 
             // This branch ended before reaching the requested depth. Backtrack
             // until another surviving subtree can continue the DFS.
-            if !self.advance_to_next_subtree(base_idx) {
+            if !self.advance_to_next_subtree(base_idx, obs) {
                 return false;
             }
         }
@@ -723,12 +733,7 @@ where
             }
 
             let rhs_gone = !self.rhs.child_mask().test_bit(byte);
-
-            self.descend_to_byte_raw(byte);
-
             if rhs_gone {
-                i += 1;
-
                 // An LHS-only child survives wholesale. From this point downward
                 // A - B is exactly A, so delegate the rest to the native LHS zipper.
                 let descended = self.lhs.descend_to_existing(&k[i..]);
@@ -739,6 +744,7 @@ where
 
             // Both sides contain the child structurally. It belongs to the
             // materialized difference iff something survives below it.
+            self.descend_to_byte_raw(byte);
             if !subtree_has_difference::<V, _, _>(&mut self.lhs, &mut self.rhs) {
                 self.ascend_byte_raw();
                 break;
@@ -843,13 +849,32 @@ where
         true
     }
 
+    #[inline]
     fn descend_until(&mut self) -> bool {
-        self.descend_until(None)
+        self.descend_until(&mut (), None)
     }
 
+    #[inline]
+    fn descend_until_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.descend_until(obs, None)
+    }
+
+    #[inline]
     fn descend_until_max_bytes(&mut self, max_bytes: usize) -> bool {
         match NonZeroUsize::new(max_bytes) {
-            Some(limit) => self.descend_until(Some(limit)),
+            Some(limit) => self.descend_until(&mut (), Some(limit)),
+            None => false,
+        }
+    }
+
+    #[inline]
+    fn descend_until_max_bytes_observed<Obs: PathObserver>(
+        &mut self,
+        max_bytes: usize,
+        obs: &mut Obs,
+    ) -> bool {
+        match NonZeroUsize::new(max_bytes) {
+            Some(limit) => self.descend_until(obs, Some(limit)),
             None => false,
         }
     }
@@ -900,13 +925,16 @@ where
         }
     }
 
-    fn to_next_step(&mut self) -> bool {
+    fn to_next_step_observed<P: PathObserver>(&mut self, obs: &mut P) -> bool {
         // If there is a child, DFS simply descends into the first one.
         if let Some(byte) = self.child_mask.indexed_bit::<true>(0) {
             self.descend_to_byte_raw(byte);
+            obs.descend_to_byte(byte);
             self.refresh();
             return true;
         }
+
+        let mut ascended = 0;
 
         // We are at a leaf. Walk upwards without refreshing intermediate
         // virtual nodes until a surviving next sibling is found.
@@ -916,9 +944,14 @@ where
             };
 
             self.ascend_byte_raw();
+            ascended += 1;
 
             if let Some(byte) = self.surviving_sibling::<true>(cur_byte) {
+                obs.ascend(ascended);
+
                 self.descend_to_byte_raw(byte);
+                obs.descend_to_byte(byte);
+
                 self.refresh();
                 return true;
             }
@@ -927,6 +960,7 @@ where
             // not restore the previous child: DFS is done with that subtree and
             // continues ascending from the parent.
             if self.at_root() {
+                obs.ascend(ascended);
                 self.refresh();
                 return false;
             }
@@ -980,7 +1014,7 @@ where
     A: ZipperMoving + ZipperValues<V> + Clone,
     B: ZipperMoving + ZipperValues<V> + Clone,
 {
-    fn to_next_val(&mut self) -> bool {
+    fn to_next_val_observed<P: PathObserver>(&mut self, obs: &mut P) -> bool {
         // The cache is valid at entry, so use it to select the first child
         // without recomputing the virtual topology.
         let mut next_byte = self.child_mask.indexed_bit::<true>(0);
@@ -988,7 +1022,7 @@ where
         'search: loop {
             // Search downward, always taking the first child in DFS order.
             while let Some(byte) = next_byte {
-                match self.descend_to_next_stop(byte, None) {
+                match self.descend_to_next_stop(byte, obs, None) {
                     DescendStop::Value => {
                         self.refresh();
                         return true;
@@ -1008,6 +1042,7 @@ where
             }
 
             // Walk upwards until the next surviving sibling is found.
+            let mut ascended = 0;
             loop {
                 let Some(cur_byte) = self.focus_byte() else {
                     // We are at the root without having moved, so the cached
@@ -1016,15 +1051,18 @@ where
                 };
 
                 self.ascend_byte_raw();
+                ascended += 1;
 
                 if let Some(byte) = self.surviving_sibling::<true>(cur_byte) {
                     next_byte = Some(byte);
+                    obs.ascend(ascended);
                     continue 'search;
                 }
 
                 // No later subtree exists. The traversal has returned to the
                 // root through raw movement, so rebuild the cached virtual state.
                 if self.at_root() {
+                    obs.ascend(ascended);
                     self.refresh();
                     return false;
                 }
@@ -1032,7 +1070,7 @@ where
         }
     }
 
-    fn descend_first_k_path(&mut self, k: usize) -> bool {
+    fn descend_first_k_path_observed<P: PathObserver>(&mut self, k: usize, obs: &mut P) -> bool {
         if k == 0 {
             return true;
         }
@@ -1043,7 +1081,8 @@ where
 
         let base_idx = self.depth();
         self.descend_to_byte_raw(byte);
-        let found = self.seek_k_path(base_idx, k);
+        obs.descend_to_byte(byte);
+        let found = self.seek_k_path(base_idx, k, obs);
 
         if found {
             self.refresh();
@@ -1053,17 +1092,17 @@ where
         found
     }
 
-    fn to_next_k_path(&mut self, k: usize) -> bool {
+    fn to_next_k_path_observed<P: PathObserver>(&mut self, k: usize, obs: &mut P) -> bool {
         let Some(base_idx) = self.depth().checked_sub(k) else {
             return false;
         };
 
-        if !self.advance_to_next_subtree(base_idx) {
+        if !self.advance_to_next_subtree(base_idx, obs) {
             self.refresh();
             return false;
         }
 
-        let found = self.seek_k_path(base_idx, k);
+        let found = self.seek_k_path(base_idx, k, obs);
 
         // Unlike descend_first_k_path(), failure leaves us at the common root,
         // not at the original focus, so the cached state is stale either way.
