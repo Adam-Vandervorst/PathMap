@@ -193,10 +193,10 @@ mod tests {
         r.set_val_at(b"1", 1);
         r.set_val_at(b"3", 3);
         let l_no_r = l.subtract(&r);
-        assert_eq!(l_no_r.get_val_at(b"0"), Some(&0));
-        assert_eq!(l_no_r.get_val_at(b"1"), None);
-        assert_eq!(l_no_r.get_val_at(b"2"), Some(&2));
-        assert_eq!(l_no_r.get_val_at(b"3"), None);
+        assert_eq!(l_no_r.val_at(b"0"), Some(&0));
+        assert_eq!(l_no_r.val_at(b"1"), None);
+        assert_eq!(l_no_r.val_at(b"2"), Some(&2));
+        assert_eq!(l_no_r.val_at(b"3"), None);
     }
 
     #[test]
@@ -209,9 +209,9 @@ mod tests {
         r.set_val_at(b"hello", true);
         let l_no_r = l.subtract(&r);
 
-        assert_eq!(l_no_r.get_val_at(b"hello"), None);
-        assert_eq!(l_no_r.get_val_at(b"hello world"), Some(&true));
-        assert_eq!(l_no_r.get_val_at(b"hell no we won't go"), Some(&true));
+        assert_eq!(l_no_r.val_at(b"hello"), None);
+        assert_eq!(l_no_r.val_at(b"hello world"), Some(&true));
+        assert_eq!(l_no_r.val_at(b"hell no we won't go"), Some(&true));
     }
 
     #[test]
@@ -227,10 +227,10 @@ mod tests {
         let l_no_r = l.subtract(&r);
 
         assert_eq!(l_no_r.val_count(), 2);
-        assert_eq!(l_no_r.get_val_at(b"alligator"), None);
-        assert_eq!(l_no_r.get_val_at(b"albino"), None);
-        assert_eq!(l_no_r.get_val_at(b"allegedly"), Some(&true));
-        assert_eq!(l_no_r.get_val_at(b"albatross"), Some(&true));
+        assert_eq!(l_no_r.val_at(b"alligator"), None);
+        assert_eq!(l_no_r.val_at(b"albino"), None);
+        assert_eq!(l_no_r.val_at(b"allegedly"), Some(&true));
+        assert_eq!(l_no_r.val_at(b"albatross"), Some(&true));
     }
 
     #[test]
@@ -347,9 +347,9 @@ mod tests {
 
         assert!(joined.path_exists_at([9u8, 40u8, 1u8]));
         assert!(joined.path_exists_at([9u8, 10u8]));
-        assert_eq!(joined.get_val_at([9u8, 10u8]), None);
-        assert_eq!(joined.get_val_at([9u8, 11u8]), Some(&11));
-        assert_eq!(joined.get_val_at([9u8, 12u8, 0u8]), Some(&12));
+        assert_eq!(joined.val_at([9u8, 10u8]), None);
+        assert_eq!(joined.val_at([9u8, 11u8]), Some(&11));
+        assert_eq!(joined.val_at([9u8, 12u8, 0u8]), Some(&12));
 
         let mut rz = joined.read_zipper();
         rz.descend_to([9u8]);
@@ -395,10 +395,10 @@ mod tests {
         let restricted = l.restrict(&r);
 
         assert_eq!(restricted.val_count(), 2);
-        assert_eq!(restricted.get_val_at(b"alligator"), Some(&"alligator"));
-        assert_eq!(restricted.get_val_at(b"albino"), None);
-        assert_eq!(restricted.get_val_at(b"allegedly"), Some(&"allegedly"));
-        assert_eq!(restricted.get_val_at(b"albatross"), None);
+        assert_eq!(restricted.val_at(b"alligator"), Some(&"alligator"));
+        assert_eq!(restricted.val_at(b"albino"), None);
+        assert_eq!(restricted.val_at(b"allegedly"), Some(&"allegedly"));
+        assert_eq!(restricted.val_at(b"albatross"), None);
     }
 
     /// Tests restrictions on a very dense trie
@@ -419,16 +419,16 @@ mod tests {
         let restricted = map.restrict(&odd_map);
 
         assert_eq!(restricted.val_count(), 10);
-        assert_eq!(restricted.get_val_at([1]), Some(&1));
-        assert_eq!(restricted.get_val_at([3]), Some(&3));
-        assert_eq!(restricted.get_val_at([1, 1]), Some(&5));
-        assert_eq!(restricted.get_val_at([3, 1]), Some(&7));
-        assert_eq!(restricted.get_val_at([1, 2]), Some(&9));
-        assert_eq!(restricted.get_val_at([3, 2]), Some(&11));
-        assert_eq!(restricted.get_val_at([1, 3]), Some(&13));
-        assert_eq!(restricted.get_val_at([3, 3]), Some(&15));
-        assert_eq!(restricted.get_val_at([1, 0, 1]), Some(&17));
-        assert_eq!(restricted.get_val_at([3, 0, 1]), Some(&19));
+        assert_eq!(restricted.val_at([1]), Some(&1));
+        assert_eq!(restricted.val_at([3]), Some(&3));
+        assert_eq!(restricted.val_at([1, 1]), Some(&5));
+        assert_eq!(restricted.val_at([3, 1]), Some(&7));
+        assert_eq!(restricted.val_at([1, 2]), Some(&9));
+        assert_eq!(restricted.val_at([3, 2]), Some(&11));
+        assert_eq!(restricted.val_at([1, 3]), Some(&13));
+        assert_eq!(restricted.val_at([3, 3]), Some(&15));
+        assert_eq!(restricted.val_at([1, 0, 1]), Some(&17));
+        assert_eq!(restricted.val_at([3, 0, 1]), Some(&19));
 
         // Restrict to numbers divisible by 4 (exluding 0; 0 technically isn't divisible by 4)
         let div4_keys = [ vec![0, 0], vec![0, 1], vec![0, 2], vec![0, 3]];
@@ -436,12 +436,12 @@ mod tests {
         let restricted = map.restrict(&div4_map);
 
         assert_eq!(restricted.val_count(), 4);
-        assert_eq!(restricted.get_val_at([0]), None);
-        assert_eq!(restricted.get_val_at([0, 0]), None);
-        assert_eq!(restricted.get_val_at([0, 1]), Some(&4));
-        assert_eq!(restricted.get_val_at([0, 2]), Some(&8));
-        assert_eq!(restricted.get_val_at([0, 3]), Some(&12));
-        assert_eq!(restricted.get_val_at([0, 0, 1]), Some(&16));
+        assert_eq!(restricted.val_at([0]), None);
+        assert_eq!(restricted.val_at([0, 0]), None);
+        assert_eq!(restricted.val_at([0, 1]), Some(&4));
+        assert_eq!(restricted.val_at([0, 2]), Some(&8));
+        assert_eq!(restricted.val_at([0, 3]), Some(&12));
+        assert_eq!(restricted.val_at([0, 0, 1]), Some(&16));
     }
 
     /// Tests restrictions on a fairly sparse trie
@@ -465,8 +465,8 @@ mod tests {
         let restricted = map.restrict(&restrictor_map);
 
         assert_eq!(restricted.val_count(), 4);
-        assert_eq!(restricted.get_val_at("acting"), Some(&1));
-        assert_eq!(restricted.get_val_at("activities"), Some(&4));
+        assert_eq!(restricted.val_at("acting"), Some(&1));
+        assert_eq!(restricted.val_at("activities"), Some(&4));
 
         // Restrict to words beginning with "a"
         let restrictor = [ "a" ];
@@ -474,10 +474,10 @@ mod tests {
         let restricted = map.restrict(&restrictor_map);
 
         assert_eq!(restricted.val_count(), 8);
-        assert_eq!(restricted.get_val_at("a"), Some(&0));
-        assert_eq!(restricted.get_val_at("acting"), Some(&1));
-        assert_eq!(restricted.get_val_at("activities"), Some(&4));
-        assert_eq!(restricted.get_val_at("adapter"), Some(&7));
+        assert_eq!(restricted.val_at("a"), Some(&0));
+        assert_eq!(restricted.val_at("acting"), Some(&1));
+        assert_eq!(restricted.val_at("activities"), Some(&4));
+        assert_eq!(restricted.val_at("adapter"), Some(&7));
     }
 
     /// Tests values that are attached along the paths to other keys, and also tests the absence of keys
@@ -487,31 +487,31 @@ mod tests {
         let mut map = PathMap::<u64>::new();
 
         map.set_val_at(&[0u8], 1);
-        assert_eq!(map.get_val_at(&[0u8]), Some(&1));
-        assert_eq!(map.get_val_at(&[0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8]), Some(&1));
+        assert_eq!(map.val_at(&[0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8]), None);
 
         map.set_val_at(&[0u8, 0u8, 0u8, 0u8], 4);
-        assert_eq!(map.get_val_at(&[0u8]), Some(&1));
-        assert_eq!(map.get_val_at(&[0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8]), Some(&4));
+        assert_eq!(map.val_at(&[0u8]), Some(&1));
+        assert_eq!(map.val_at(&[0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8]), Some(&4));
 
         map.set_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8], 5);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8]), Some(&4));
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8]), Some(&5));
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8]), Some(&4));
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8]), Some(&5));
 
         map.set_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 9);
-        assert_eq!(map.get_val_at(&[0u8]), Some(&1));
-        assert_eq!(map.get_val_at(&[0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8]), Some(&4));
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8]), Some(&5));
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), Some(&9));
-        assert_eq!(map.get_val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8]), Some(&1));
+        assert_eq!(map.val_at(&[0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8]), Some(&4));
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8]), Some(&5));
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), Some(&9));
+        assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
     }
 
     #[test]
@@ -528,14 +528,14 @@ mod tests {
 
         let intersection = left.meet(&right);
         assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true); //Should have had its value removed, but the path should remain
-        assert_eq!(intersection.get_val_at([7u8, 1u8, 0u8]), None);
+        assert_eq!(intersection.val_at([7u8, 1u8, 0u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
 
         //Make sure the result is the same with the opposite operand order
         let intersection = right.meet(&left);
         assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true);
-        assert_eq!(intersection.get_val_at([7u8, 1u8, 0u8]), None);
+        assert_eq!(intersection.val_at([7u8, 1u8, 0u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
 
@@ -549,14 +549,14 @@ mod tests {
 
         let intersection = left.meet(&right);
         assert_eq!(intersection.path_exists_at([7u8, 1u8]), true); //Should have had its value removed, but the path should remain
-        assert_eq!(intersection.get_val_at([7u8, 1u8]), None);
+        assert_eq!(intersection.val_at([7u8, 1u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
 
         //Make sure the result is the same with the opposite operand order
         let intersection = right.meet(&left);
         assert_eq!(intersection.path_exists_at([7u8, 1u8]), true);
-        assert_eq!(intersection.get_val_at([7u8, 1u8]), None);
+        assert_eq!(intersection.val_at([7u8, 1u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
     }
@@ -664,8 +664,8 @@ mod tests {
                 let mut vnr = PathMap::new();
                 for i in 0..n { vnl.set_val_at(prefix_key(&i), i); }
                 // println!("{:?}", vnl.root);
-                for i in 0..n { assert_eq!(vnl.get_val_at(prefix_key(&i)), Some(i).as_ref()); }
-                for i in n..2*n { assert_eq!(vnl.get_val_at(prefix_key(&i)), None); }
+                for i in 0..n { assert_eq!(vnl.val_at(prefix_key(&i)), Some(i).as_ref()); }
+                for i in n..2*n { assert_eq!(vnl.val_at(prefix_key(&i)), None); }
                 let mut c: Vec<u64> = Vec::with_capacity(n as usize);
                 vnl.iter().for_each(|(k, v)| {
                     assert!(*v < n);
@@ -680,7 +680,7 @@ mod tests {
                 let m = vnl.meet(&vnr);
                 let l_no_r = vnl.subtract(&vnr);
 
-                for i in 0..o { assert_eq!(l_no_r.get_val_at(prefix_key(&i)), vnl.get_val_at(prefix_key(&i))); }
+                for i in 0..o { assert_eq!(l_no_r.val_at(prefix_key(&i)), vnl.val_at(prefix_key(&i))); }
                 for i in o..(n+o) { assert!(!l_no_r.contains(prefix_key(&i))); }
 
                 for i in o..n { assert!(vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i))); }
@@ -688,8 +688,8 @@ mod tests {
                 for i in n..(n+o) { assert!(!vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i))); }
                 for i in 0..(2*n) { assert_eq!(j.contains(prefix_key(&i)), (vnl.contains(prefix_key(&i)) || vnr.contains(prefix_key(&i)))); }
                 for i in 0..(2*n) { assert_eq!(m.contains(prefix_key(&i)), (vnl.contains(prefix_key(&i)) && vnr.contains(prefix_key(&i)))); }
-                for i in 0..(n+o) { assert_eq!(j.get_val_at(prefix_key(&i)).map(|v| *v), vnl.get_val_at(prefix_key(&i)).pjoin(&vnr.get_val_at(prefix_key(&i))).into_option([vnl.get_val_at(prefix_key(&i)).cloned(), vnr.get_val_at(prefix_key(&i)).cloned()]).flatten()); }
-                for i in o..n { assert_eq!(m.get_val_at(prefix_key(&i)).map(|v| *v), vnl.get_val_at(prefix_key(&i)).pmeet(&vnr.get_val_at(prefix_key(&i))).into_option([vnl.get_val_at(prefix_key(&i)).cloned(), vnr.get_val_at(prefix_key(&i)).cloned()]).flatten()); }
+                for i in 0..(n+o) { assert_eq!(j.val_at(prefix_key(&i)).map(|v| *v), vnl.val_at(prefix_key(&i)).pjoin(&vnr.val_at(prefix_key(&i))).into_option([vnl.val_at(prefix_key(&i)).cloned(), vnr.val_at(prefix_key(&i)).cloned()]).flatten()); }
+                for i in o..n { assert_eq!(m.val_at(prefix_key(&i)).map(|v| *v), vnl.val_at(prefix_key(&i)).pmeet(&vnr.val_at(prefix_key(&i))).into_option([vnl.val_at(prefix_key(&i)).cloned(), vnr.val_at(prefix_key(&i)).cloned()]).flatten()); }
                 // for i in 0..(2*N) { println!("{} {} {} {}", i, r.contains(i), vnl.contains(i), vnr.contains(i)); } // assert!(r.contains(i));
             }
         }
@@ -706,7 +706,7 @@ mod tests {
             z.descend_to(&key);
             z.set_val(42);
             drop(z);
-            assert_eq!(map.get_val_at(&key), Some(&42));
+            assert_eq!(map.val_at(&key), Some(&42));
         };
 
         test_key_len(1024); //2^10 bytes
