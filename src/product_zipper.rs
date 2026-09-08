@@ -316,6 +316,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
     fn val(&self) -> Option<&V> {
         unsafe{ self.z.get_val() }
     }
+}
+
+impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperValuesAt<V> for ProductZipper<'_, 'trie, V, A> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         unsafe{ self.z.get_val_at(path) }
     }
@@ -571,6 +574,15 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValues<V>
             self.primary.val()
         }
     }
+}
+
+impl<'trie, PrimaryZ, SecondaryZ, V> ZipperValuesAt<V>
+    for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
+    where
+        V: Clone + Send + Sync,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperValuesAt<V>,
+        SecondaryZ: ZipperMoving + ZipperPath + ZipperValuesAt<V>,
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         if let Some(idx) = self.factor_idx(true) {
             self.secondary[idx].val_at(path)
@@ -907,6 +919,7 @@ impl <Z : ZipperMoving> ZipperMoving for OneFactor<Z> { zipper_impl_lens!(Zipper
 impl <Z : ZipperMoving + ZipperPath> ZipperPath for OneFactor<Z> { zipper_impl_lens!(ZipperPath self => self.z); }
 impl <Z : ZipperIteration> ZipperIteration for OneFactor<Z> { zipper_impl_lens!(ZipperIteration self => self.z); }
 impl <V, Z : ZipperValues<V>> ZipperValues<V> for OneFactor<Z> { zipper_impl_lens!(ZipperValues self => self.z); }
+impl <V, Z : ZipperValuesAt<V>> ZipperValuesAt<V> for OneFactor<Z> { zipper_impl_lens!(ZipperValuesAt self => self.z); }
 impl <V, Z : ZipperForking<V>> ZipperForking<V> for OneFactor<Z> { type ReadZipperT<'a> = Z::ReadZipperT<'a> where Z: 'a; zipper_impl_lens!(ZipperForking self => self.z); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperSubtries<V, A>> ZipperSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperSubtries self => self.z); }
 impl <V: Clone + Send + Sync, A: Allocator, Z : ZipperInfallibleSubtries<V, A>> ZipperInfallibleSubtries<V, A> for OneFactor<Z> { zipper_impl_lens!(ZipperInfallibleSubtries self => self.z); }
@@ -1913,6 +1926,16 @@ mod tests {
             ProductZipper::new::<_, TrieRef<()>, _>(btm.read_zipper_at_path(path), [])
     });
 
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(product_zipper,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> _ {
+            ProductZipper::new::<_, TrieRef<()>, _>(btm.read_zipper_at_path(path), [])
+    });
+
     crate::zipper::zipper_iteration_tests::zipper_iteration_tests!(product_zipper,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
@@ -1924,6 +1947,16 @@ mod tests {
     });
 
     crate::zipper::zipper_moving_tests::zipper_moving_tests!(product_zipper_generic,
+        |keys: &[&[u8]]| {
+            let mut btm = PathMap::new();
+            keys.iter().for_each(|k| { btm.set_val_at(k, ()); });
+            btm
+        },
+        |btm: &mut PathMap<()>, path: &[u8]| -> _ {
+            ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
+    });
+
+    crate::zipper::zipper_moving_tests::zipper_val_at_tests!(product_zipper_generic,
         |keys: &[&[u8]]| {
             let mut btm = PathMap::new();
             keys.iter().for_each(|k| { btm.set_val_at(k, ()); });

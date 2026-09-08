@@ -1,0 +1,205 @@
+# Mutation set for lean/mutate.py.
+#
+# Each entry names a file, a unique snippet to replace, and the replacement.
+# The snippet must occur exactly once in the file, so a mutant is unambiguous.
+#
+# These are chosen to be semantically meaningful and to sit in code the harness
+# actually covers -- a mutation in unreachable code measures nothing.  They are
+# grouped by which part of the specification ought to catch them.
+
+# --- ZipperMoving: movement and its reported distances --------------------
+[[mutant]]
+name = "descend_to_existing_forgets_to_ascend"
+file = "src/zipper.rs"
+find = """    fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
+        let k = k.as_ref();
+        let mut i = 0;
+        while i < k.len() {
+            self.descend_to_byte(k[i]);
+            if !self.path_exists() {
+                self.ascend_byte();
+                return i
+            }"""
+replace = """    fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
+        let k = k.as_ref();
+        let mut i = 0;
+        while i < k.len() {
+            self.descend_to_byte(k[i]);
+            if !self.path_exists() {
+                return i
+            }"""
+
+[[mutant]]
+name = "descend_to_val_reports_one_short"
+file = "src/zipper.rs"
+find = """            i += 1;
+            if self.is_val() {
+                return i
+            }"""
+replace = """            i += 1;
+            if self.is_val() {
+                return i - 1
+            }"""
+
+[[mutant]]
+name = "ascend_reports_requested_not_actual"
+file = "src/zipper.rs"
+find = """                        None => {
+                            debug_assert!(self.is_regularized());
+                            return steps - remaining;
+                        }"""
+replace = """                        None => {
+                            debug_assert!(self.is_regularized());
+                            return steps;
+                        }"""
+
+[[mutant]]
+name = "ascend_until_stops_on_branch_only"
+file = "src/zipper.rs"
+find = """                ascended += self.ascend_within_node();
+                if self.child_count() > 1 || self.is_val() || self.at_root() {
+                    return ascended;
+                }"""
+replace = """                ascended += self.ascend_within_node();
+                if self.child_count() > 1 || self.at_root() {
+                    return ascended;
+                }"""
+
+[[mutant]]
+name = "descend_until_runs_past_values"
+file = "src/zipper.rs"
+find = """            if let Some(byte) = self.descend_first_byte() {
+                obs.descend_to_byte(byte);
+            }
+            if self.is_val() {
+                break;
+            }"""
+replace = """            if let Some(byte) = self.descend_first_byte() {
+                obs.descend_to_byte(byte);
+            }"""
+
+[[mutant]]
+name = "descend_last_byte_picks_first"
+file = "src/zipper.rs"
+find = """        let cc = self.child_count();
+        if cc == 0 { None }
+        else { self.descend_indexed_byte( cc- 1) }"""
+replace = """        let cc = self.child_count();
+        if cc == 0 { None }
+        else { self.descend_indexed_byte(0) }"""
+
+# --- ByteMask: the child-mask primitives ----------------------------------
+[[mutant]]
+name = "bytemask_next_bit_includes_self"
+file = "src/utils/mod.rs"
+find = """        if byte == 255 {
+            return None
+        }
+        let byte = byte + 1;"""
+replace = """        if byte == 255 {
+            return None
+        }
+        let byte = byte;"""
+
+[[mutant]]
+name = "bytemask_indexed_bit_off_by_one"
+file = "src/utils/mod.rs"
+find = """    pub fn indexed_bit<const FORWARD: bool>(&self, idx: usize) -> Option<u8> {"""
+replace = """    pub fn indexed_bit<const FORWARD: bool>(&self, idx: usize) -> Option<u8> {
+        let idx = idx + 1;"""
+
+# --- ZipperWriting: values and pruning ------------------------------------
+[[mutant]]
+name = "prune_path_reports_min_not_max"
+file = "src/write_zipper.rs"
+find = "            node_pruned_bytes.max(trie_pruned_bytes)"
+replace = "            node_pruned_bytes.min(trie_pruned_bytes)"
+
+[[mutant]]
+name = "remove_val_always_prunes"
+file = "src/write_zipper.rs"
+find = """        if let Some(result) = focus_node.node_remove_val(self.key.node_key(), prune) {
+            if prune {
+                self.prune_path_internal(false);
+            }"""
+replace = """        if let Some(result) = focus_node.node_remove_val(self.key.node_key(), prune) {
+            {
+                self.prune_path_internal(false);
+            }"""
+
+[[mutant]]
+name = "create_path_reports_wrong_flag"
+file = "src/write_zipper.rs"
+find = """            if created_subnode {
+                self.mend_root();
+                self.descend_to_internal();
+            }
+            created_path"""
+replace = """            if created_subnode {
+                self.mend_root();
+                self.descend_to_internal();
+            }
+            !created_path"""
+
+# --- algebra --------------------------------------------------------------
+[[mutant]]
+name = "option_pjoin_prefers_counter"
+file = "src/ring.rs"
+find = """            None => match other {
+                None => { AlgebraicResult::None }
+                Some(_) => { AlgebraicResult::Identity(COUNTER_IDENT) }
+            },
+            Some(l) => match other {
+                None => { AlgebraicResult::Identity(SELF_IDENT) }"""
+replace = """            None => match other {
+                None => { AlgebraicResult::None }
+                Some(_) => { AlgebraicResult::Identity(COUNTER_IDENT) }
+            },
+            Some(l) => match other {
+                None => { AlgebraicResult::None }"""
+
+[[mutant]]
+name = "option_pmeet_keeps_lone_value"
+file = "src/ring.rs"
+find = """    fn pmeet(&self, other: &Option<V>) -> AlgebraicResult<Option<V>> {
+        match self {
+            None => { AlgebraicResult::None }
+            Some(l) => {
+                match other {
+                    None => { AlgebraicResult::None }"""
+replace = """    fn pmeet(&self, other: &Option<V>) -> AlgebraicResult<Option<V>> {
+        match self {
+            None => { AlgebraicResult::None }
+            Some(l) => {
+                match other {
+                    None => { AlgebraicResult::Identity(SELF_IDENT) }"""
+
+[[mutant]]
+name = "u64_psubtract_never_annihilates"
+file = "src/ring.rs"
+find = """    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
+        if self == other { AlgebraicResult::None }
+        else { AlgebraicResult::Element(*self) }
+    }
+}
+
+//GOAT trash
+impl Lattice for u32 {"""
+replace = """    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
+        let _ = other; AlgebraicResult::Element(*self)
+    }
+}
+
+//GOAT trash
+impl Lattice for u32 {"""
+
+# --- status reporting -----------------------------------------------------
+[[mutant]]
+name = "algebraic_status_merge_identity_bias"
+file = "src/ring.rs"
+find = """            Self::Identity => match b {
+                Self::Element => Self::Element,
+                Self::Identity => Self::Identity,"""
+replace = """            Self::Identity => match b {
+                Self::Element => Self::Identity,
+                Self::Identity => Self::Identity,"""

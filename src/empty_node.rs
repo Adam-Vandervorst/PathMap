@@ -61,10 +61,18 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn new_iter_token(&self) -> IterToken {
         0
     }
-    fn iter_token_for_path(&self, _key: &[u8]) -> IterToken {
-        0
+    #[inline]
+    fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
+        if key.len() == 0 {
+            0
+        } else {
+            TOKEN_AFTER_LAST
+        }
     }
-    fn next_items(&self, _token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+    fn ascend_iter_token(&self, _token: IterToken, _byte_count: usize) -> IterToken {
+        unreachable!()
+    }
+    fn next_items(&self, _token: IterToken, _after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
         (NODE_ITER_FINISHED, &[], None, None)
     }
     fn node_val_count(&self, _cache: &mut HashMap<u64, usize>) -> usize {

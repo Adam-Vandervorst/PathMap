@@ -279,7 +279,7 @@ pub fn for_each_deserialized_path<R: std::io::Read, F: FnMut(usize, &[u8]) -> st
 
 #[cfg(test)]
 mod test {
-  use crate::zipper::{ZipperIteration, ZipperValues};
+  use crate::zipper::{ZipperIteration, ZipperValues, ZipperValuesAt};
   use super::*;
 
   #[cfg(not(miri))] // miri really hates the zlib-ng-sys C API
@@ -378,12 +378,12 @@ mod test {
 
             let mut lrz = restored_btm.read_zipper();
             while lrz.to_next_val() {
-              assert_eq!(btm.get_val_at(lrz.path()), Some(lrz.val().unwrap()));
+              assert_eq!(btm.val_at(lrz.path()), Some(lrz.val().unwrap()));
             }
 
             let mut rrz = btm.read_zipper();
             while rrz.to_next_val() {
-              assert_eq!(restored_btm.get_val_at(rrz.path()), Some(rrz.val().unwrap()));
+              assert_eq!(restored_btm.val_at(rrz.path()), Some(rrz.val().unwrap()));
             }
           }
           Err(e) => { println!("de e {}", e) }

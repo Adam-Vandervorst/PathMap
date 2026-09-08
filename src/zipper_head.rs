@@ -509,7 +509,7 @@ mod tests {
             for i in (n * elements_per_thread)..((n + 1) * elements_per_thread) {
                 let mut path = vec![n as u8];
                 path.extend(prefix_key(&(i as u64)));
-                assert_eq!(map.get_val_at(path), Some(&i));
+                assert_eq!(map.val_at(path), Some(&i));
             }
         }
     }
@@ -613,7 +613,7 @@ mod tests {
         zipper.set_val(0);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at(&[0]), Some(&0));
+        assert_eq!(map.val_at(&[0]), Some(&0));
     }
 
     #[test]
@@ -628,7 +628,7 @@ mod tests {
         zipper.set_val(0);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at("test"), Some(&0));
+        assert_eq!(map.val_at("test"), Some(&0));
     }
 
     #[test]
@@ -642,7 +642,7 @@ mod tests {
         zipper.set_val(2);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:2"), Some(&2));
     }
 
     #[test]
@@ -662,8 +662,8 @@ mod tests {
         drop(zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
-        assert_eq!(map.get_val_at("test:3"), Some(&3));
+        assert_eq!(map.val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:3"), Some(&3));
     }
 
     #[test]
@@ -679,7 +679,7 @@ mod tests {
         zipper.set_val(42);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at([3, 193, 49, 42]), Some(&42));
+        assert_eq!(map.val_at([3, 193, 49, 42]), Some(&42));
     }
 
     #[test]
@@ -702,11 +702,11 @@ mod tests {
         drop(zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("test:1"), Some(&1));
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
-        assert_eq!(map.get_val_at("test:3"), Some(&3));
-        assert_eq!(map.get_val_at("test:4"), Some(&4));
-        assert_eq!(map.get_val_at("test:5"), Some(&5));
+        assert_eq!(map.val_at("test:1"), Some(&1));
+        assert_eq!(map.val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:3"), Some(&3));
+        assert_eq!(map.val_at("test:4"), Some(&4));
+        assert_eq!(map.val_at("test:5"), Some(&5));
     }
 
     #[test]
@@ -729,11 +729,11 @@ mod tests {
         drop(zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("test:1"), Some(&1));
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
-        assert_eq!(map.get_val_at("test:3"), Some(&3));
-        assert_eq!(map.get_val_at("test:4"), Some(&4));
-        assert_eq!(map.get_val_at("test:5"), Some(&5));
+        assert_eq!(map.val_at("test:1"), Some(&1));
+        assert_eq!(map.val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:3"), Some(&3));
+        assert_eq!(map.val_at("test:4"), Some(&4));
+        assert_eq!(map.val_at("test:5"), Some(&5));
     }
     /// Tests a zipper head that starts from a path other than the map root 
     #[test]
@@ -753,8 +753,8 @@ mod tests {
         drop(zh);
         drop(wz);
         assert_eq!(map.val_count(), 2);
-        assert_eq!(map.get_val_at(b"start:0000:hello"), Some(&0));
-        assert_eq!(map.get_val_at(b"start:0000:goodbye"), Some(&0));
+        assert_eq!(map.val_at(b"start:0000:hello"), Some(&0));
+        assert_eq!(map.val_at(b"start:0000:goodbye"), Some(&0));
     }
     /// A test for the tracker logic, testing many parallel [WriteZipper]s at once
     #[test]
@@ -791,10 +791,10 @@ mod tests {
         drop(wz);
 
         assert_eq!(map.val_count(), 8);
-        assert_eq!(map.get_val_at("start:0000:hello"), Some(&0));
-        assert_eq!(map.get_val_at("start:0000:goodbye"), Some(&0));
-        assert_eq!(map.get_val_at("start:0003:hello"), Some(&3));
-        assert_eq!(map.get_val_at("start:0003:goodbye"), Some(&3));
+        assert_eq!(map.val_at("start:0000:hello"), Some(&0));
+        assert_eq!(map.val_at("start:0000:goodbye"), Some(&0));
+        assert_eq!(map.val_at("start:0003:hello"), Some(&3));
+        assert_eq!(map.val_at("start:0003:goodbye"), Some(&3));
     }
 
     /// Test more cases in the logic to upgrade nodes before creating zippers
@@ -843,7 +843,7 @@ mod tests {
         drop(wz);
         drop(rz);
         drop(zh);
-        assert_eq!(map.get_val_at([3, 194, 22]), Some(&()));
+        assert_eq!(map.val_at([3, 194, 22]), Some(&()));
 
         //Similar to above case, but for the ReadZipper that uses a cloned path
         let mut map = PathMap::<usize>::new();
@@ -873,7 +873,7 @@ mod tests {
         drop(rz);
         drop(rz2);
         drop(zh);
-        assert_eq!(map.get_val_at([3, 194, 22]), Some(&1005));
+        assert_eq!(map.val_at([3, 194, 22]), Some(&1005));
     }
 
     /// Dance a bunch of readers and writers inside the same zipper head
@@ -1005,7 +1005,7 @@ mod tests {
         wz.remove_val(true);
         drop(wz);
         drop(zh);
-        assert_eq!(map.get_val_at(b"path"), None);
+        assert_eq!(map.val_at(b"path"), None);
     }
 
     /// Test that a ReadZipper pointing at empty root behaves as it should
@@ -1230,13 +1230,13 @@ mod tests {
         //     println!("{} {v}", String::from_utf8_lossy(&k));
         // }
         assert_eq!(map.val_count(), 7);
-        assert_eq!(map.get_val_at(b"a+value").unwrap(), &0);
-        assert_eq!(map.get_val_at(b"a-children-0+value").unwrap(), &7);
-        assert_eq!(map.get_val_at(b"b+value").unwrap(), &1);
-        assert_eq!(map.get_val_at(b"b-children-0+metabolic").unwrap(), &6);
-        assert_eq!(map.get_val_at(b"b-children-0+metadata").unwrap(), &3);
-        assert_eq!(map.get_val_at(b"b-children-0+value").unwrap(), &4);
-        assert_eq!(map.get_val_at(b"b-children-1+value").unwrap(), &5);
+        assert_eq!(map.val_at(b"a+value").unwrap(), &0);
+        assert_eq!(map.val_at(b"a-children-0+value").unwrap(), &7);
+        assert_eq!(map.val_at(b"b+value").unwrap(), &1);
+        assert_eq!(map.val_at(b"b-children-0+metabolic").unwrap(), &6);
+        assert_eq!(map.val_at(b"b-children-0+metadata").unwrap(), &3);
+        assert_eq!(map.val_at(b"b-children-0+value").unwrap(), &4);
+        assert_eq!(map.val_at(b"b-children-1+value").unwrap(), &5);
     }
 
     #[test]
@@ -1283,10 +1283,10 @@ mod tests {
         //     println!("{} {v}", String::from_utf8_lossy(&k));
         // }
         assert_eq!(map.val_count(), 4);
-        assert_eq!(map.get_val_at(b"a0+value").unwrap(), &0);
-        assert_eq!(map.get_val_at(b"a1+value").unwrap(), &1);
-        assert_eq!(map.get_val_at(b"b0+value").unwrap(), &2);
-        assert_eq!(map.get_val_at(b"b1+value").unwrap(), &3);
+        assert_eq!(map.val_at(b"a0+value").unwrap(), &0);
+        assert_eq!(map.val_at(b"a1+value").unwrap(), &1);
+        assert_eq!(map.val_at(b"b0+value").unwrap(), &2);
+        assert_eq!(map.val_at(b"b1+value").unwrap(), &3);
     }
 
     #[test]
@@ -1314,8 +1314,8 @@ mod tests {
         drop(top_zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("0:test:5"), Some(&5));
-        assert_eq!(map.get_val_at("0:test:5:next:1"), Some(&1));
+        assert_eq!(map.val_at("0:test:5"), Some(&5));
+        assert_eq!(map.val_at("0:test:5:next:1"), Some(&1));
     }
     /// Use a [ZipperHeadOwned] to write a bunch of paths into the map, single-threaded
     #[test]
@@ -1349,10 +1349,10 @@ mod tests {
 
         let map = zh.into_map();
         assert_eq!(map.val_count(), 8);
-        assert_eq!(map.get_val_at("start:0000:hello"), Some(&0));
-        assert_eq!(map.get_val_at("start:0000:goodbye"), Some(&0));
-        assert_eq!(map.get_val_at("start:0002:hello"), Some(&2));
-        assert_eq!(map.get_val_at("start:0002:goodbye"), Some(&2));
+        assert_eq!(map.val_at("start:0000:hello"), Some(&0));
+        assert_eq!(map.val_at("start:0000:goodbye"), Some(&0));
+        assert_eq!(map.val_at("start:0002:hello"), Some(&2));
+        assert_eq!(map.val_at("start:0002:goodbye"), Some(&2));
     }
     /// Parallel version of `owned_zipper_head_test1`, but with a lot more elements, pounding on the
     /// ZipperHead from each thread
@@ -1408,8 +1408,8 @@ mod tests {
             hello_path.extend(b":hello");
             let mut goodbye_path = path_base.clone();
             goodbye_path.extend(b":goodbye");
-            assert_eq!(map.get_val_at(hello_path), Some(&i));
-            assert_eq!(map.get_val_at(goodbye_path), Some(&i));
+            assert_eq!(map.val_at(hello_path), Some(&i));
+            assert_eq!(map.val_at(goodbye_path), Some(&i));
         }
     }
     /// Tests the [ZipperHead::cleanup_write_zipper] method
