@@ -39,6 +39,9 @@ pub(crate) const KEY_BYTES_CNT: usize = 42;
 #[cfg(not(feature = "slim_ptrs"))]
 pub(crate) const KEY_BYTES_CNT: usize = 14;
 
+// The combined LineListNode key buffer is shorter than 64 bytes, so its position fits in six bits.
+const ITER_TOKEN_OFFSET_MASK: IterToken = (1 << 6) - 1;
+
 // Only the slim_ptrs layout is asserted. The not(slim_ptrs) TrieNodeODRc has no
 // empty-sentinel representation yet (`new_empty`/`is_empty`/`make_unique`/`==`
 // exist only on the slim variant; the allocator prevents a free sentinel for the
@@ -662,6 +665,22 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         self.val_or_child0 = payload;
         self.header = Self::header0(is_child_ptr, key.len());
     }
+    /// Installs a payload in slot 0 after its key has already been written to `key_bytes`.
+    #[inline]
+    fn set_payload_0_for_existing_key(&mut self, key_len: usize, payload: ValOrChild<V, A>) {
+        debug_assert!(!self.is_used::<0>());
+        debug_assert!(key_len > 0 && key_len <= KEY_BYTES_CNT);
+        match payload {
+            ValOrChild::Child(child) => {
+                self.val_or_child0.child = ManuallyDrop::new(child);
+                self.header = Self::header0(true, key_len);
+            },
+            ValOrChild::Val(val) => {
+                self.val_or_child0.val = ManuallyDrop::new(LocalOrHeap::new(val));
+                self.header = Self::header0(false, key_len);
+            },
+        }
+    }
     #[inline]
     unsafe fn set_payload_1(&mut self, key: &[u8], is_child_ptr: bool, payload: ValOrChildUnion<V, A>) {
         let key_0_used_cnt = self.key_len_0();
@@ -974,8 +993,9 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_0 = unsafe{ self.key_unchecked::<0>() };
         let mut overlap = find_prefix_overlap(key, node_key_0);
         if overlap > 0 {
-            //See if we should totally replace the existing downstream branch
-            if IS_CHILD && self.is_child_ptr::<0>() && overlap == key.len() {
+            // Can we replace the downstream branch ptr?  Or do we need to split the node?
+            if IS_CHILD && overlap == key.len() &&
+                (self.is_child_ptr::<0>() || node_key_0.len() > key.len()) {
                 let _ = self.take_payload::<0>();
                 return self.set_payload_abstract::<IS_CHILD>(key, payload)
             }
@@ -1004,8 +1024,9 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let node_key_1 = unsafe{ self.key_unchecked::<1>() };
         let mut overlap = find_prefix_overlap(key, node_key_1);
         if overlap > 0 {
-            //See if we should totally replace the existing downstream branch
-            if IS_CHILD && self.is_child_ptr::<1>() && overlap == key.len() {
+            //See if we should totally replace the existing downstream branch ptr, or split the node
+            if IS_CHILD && overlap == key.len() &&
+                (self.is_child_ptr::<1>() || node_key_1.len() > key.len()) {
                 let _ = self.take_payload::<1>();
                 return self.set_payload_abstract::<IS_CHILD>(key, payload)
             }
@@ -1057,10 +1078,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         let (key0, key1) = self.get_both_keys();
         let overlap = find_prefix_overlap(key0, key1);
         //Overlap of 1 is legal if and only if ONE OF the following two conditions are true:
-        // A: slot0 contains a value
+        // A: slot0 contains a value AND has a 1-byte key (a value at the shared byte, slot1 continuing below it)
         // B: both slots have a length of 1, and one is a value
         let legal_overlap = overlap == 1 && (
-            !self.is_child_ptr::<0>() ||
+            (!self.is_child_ptr::<0>() && key0.len() == 1) ||
             (!self.is_child_ptr::<1>() && key0.len()==1 && key1.len()==1 ));
 
         //If the overlap is illegal, split the prefix
@@ -1185,8 +1206,10 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                     let restricted_node_result = if onward_key.len() == 0 {
                         self_onward_link.as_tagged().prestrict_dyn(onward_node)
                     } else {
-                        let other_onward_node = onward_node.get_node_at_key(onward_key);
-                        self_onward_link.as_tagged().prestrict_dyn(other_onward_node.as_tagged())
+                        match onward_node.get_node_at_key(onward_key).into_option() {
+                            Some(other_onward_node) => self_onward_link.as_tagged().prestrict_dyn(other_onward_node.as_tagged()),
+                            None => AlgebraicResult::None,
+                        }
                     };
                     restricted_node_result.map(|node| ValOrChildUnion::from(node))
                 } else {
@@ -1534,6 +1557,14 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
         }
     }
 
+    //Two empty nodes (e.g. roots emptied by `remove_branches`) produce no entries at all.  This must be
+    // decided before touching `entries[0]`: reading it would be `assume_init` on uninitialized memory,
+    // and dropping the garbage payload it yields corrupts an arbitrary refcount.
+    if entry_cnt == 0 {
+        debug_assert!(a.node_is_empty() && b.node_is_empty());
+        return Ok(AlgebraicResult::None)
+    }
+
     //Do we have two or fewer paths, that can fit into a new ListNode?
     if entry_cnt <= 2 {
         let mut joined_node = LineListNode::new_in(a.alloc.clone());
@@ -1569,10 +1600,6 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
                     debug_assert!(validate_node(&joined_node));
                     return Ok(AlgebraicResult::Element(joined_node))
                 }
-            },
-            0 => {
-                debug_assert!(a.node_is_empty() && b.node_is_empty());
-                return Ok(AlgebraicResult::None)
             },
             _ => unreachable!()
         }
@@ -1872,8 +1899,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         0
     }
     fn node_set_branch(&mut self, key: &[u8], new_node: TrieNodeODRc<V, A>) -> Result<bool, TrieNodeODRc<V, A>> {
-        self.set_payload_abstract::<true>(key, new_node.into())
-            .map(|(_, created_subnode)| created_subnode)
+        let result = self.set_payload_abstract::<true>(key, new_node.into());
+        debug_assert!(result.is_err() || validate_node(self));
+        result.map(|(_, created_subnode)| created_subnode)
     }
 
     fn node_remove_all_branches(&mut self, key: &[u8], prune: bool) -> bool {
@@ -1915,87 +1943,193 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         !self.is_used::<0>()
     }
 
+    fn debug_validate(&self) -> bool {
+        validate_node(self)
+    }
+
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
-    // * Explanation of the meaning of iter_tokens for ListNode
+    // * Explanation of the meaning of iter_tokens for LineListNode
     // *
-    // * 0 = iteration has not yet begun, so the next call to `next_items` will return the first
-    // *   item(s) within the node.
-    // * 1 = the item in slot0 has already been returned, so the next call to `next_items` will examine
-    // *   slot1.  If slot0 and slot1 have identical keys, iter_tokens==1 will be skipped
-    // * 2 = the item in slot1 has already been returned, so the next call to `next_items` must return
-    // *   NODE_ITER_FINISHED
+    // * Node-specific tokens use the shared reserved bits and a six-bit node-local offset.  Global
+    // * special tokens use their complete value instead of the node-specific fields:
+    // *
+    // *    63          62          61                         6 5              0
+    // *     +-----------+-----------+---------------------------+----------------+
+    // *     | special   | non-exist | always zero               | buffer offset  |
+    // *     +-----------+-----------+---------------------------+----------------+
+    // *
+    // * Bit 63 marks a global special token.  `TOKEN_LAST` uses it for the final valid path in this
+    // * node, and `TOKEN_AFTER_LAST` is its bit-62-marked nonexistent companion.  The control
+    // * sentinels `NODE_ITER_INVALID` and `NODE_ITER_FINISHED` also set bit 63.  Other exact-focus
+    // * and returned item tokens leave both reserved bits clear.  The low six bits are an absolute
+    // * offset in the node's contiguous key buffer:
+    // *
+    // *     0                 key_end_0                         key_end_1
+    // *     |---- slot 0 key ----|---------- slot 1 key -----------|
+    // *
+    // * Token zero represents the node root.  An offset before a key's end represents the prefix at
+    // * that offset; a key's end offset represents its complete path.  If the two physical slots hold
+    // * the value and child at the same one-byte path, `TOKEN_LAST` is its sole canonical token and
+    // * `key_end_0` is never produced.  The final path in every nonempty LineListNode likewise uses
+    // * `TOKEN_LAST`.  A token in the middle of a key represents that exact prefix,
+    // * and `next_items` returns the containing item.  Passing `after_focus` skips items at or below that
+    // * focus, which lets k-path iteration continue without another node dispatch.
     // *==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==**==--==*
     #[inline(always)]
     fn new_iter_token(&self) -> IterToken {
         0
     }
-    /// Explanation of logic: The ListNode contains a sorted list of keys (up to 2 of them), and the
-    /// query `key` argument is a third key.  We want to determine where the `key` arg falls in the sorted
-    /// list.
-    /// - < key0, we want to return (0, &[])
-    /// - >= key0 && < key1, we should return (1, key0)
-    /// - == key1, we should return (2, key1)
-    /// - > key1, (NODE_ITER_FINISHED, &[])
+    /// Maps `key` to its canonical token.  Nonterminal paths use their absolute offset in the key
+    /// buffer; the terminal path uses [`TOKEN_LAST`].  A missing key is marked as a lower-bound
+    /// cursor for the next item at or after it.
     #[inline(always)]
     fn iter_token_for_path(&self, key: &[u8]) -> IterToken {
+        debug_assert_iter_token_layout();
+        debug_assert_eq!(TOKEN_LAST & ITER_TOKEN_OFFSET_MASK, ITER_TOKEN_OFFSET_MASK,
+            "TOKEN_LAST must decode as the maximum LineListNode offset");
         if key.len() == 0 {
             return 0
         }
         let (key0, key1) = self.get_both_keys();
+        let key_end_0 = key0.len() as IterToken;
+        let slot_1_used = self.is_used::<1>();
+        if starts_with(key0, key) {
+            if key.len() < key0.len() {
+                return key.len() as IterToken
+            }
+            return if !slot_1_used || key0 == key1 { TOKEN_LAST } else { key_end_0 }
+        }
         if key < key0 {
-            return 0
+            return NODE_TOKEN_NONEXISTENT_BIT
         }
-        if key < key1 {
-            return 1
+        if slot_1_used && starts_with(key1, key) {
+            return if key.len() == key1.len() {
+                TOKEN_LAST
+            } else {
+                key_end_0 + key.len() as IterToken
+            }
         }
-        if key == key1 {
-            return 2
+        if slot_1_used && key < key1 {
+            return key_end_0 | NODE_TOKEN_NONEXISTENT_BIT
         }
-        NODE_ITER_FINISHED
+        TOKEN_AFTER_LAST
     }
     #[inline(always)]
-    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
-        match token {
-            0 => {
-                if !self.is_used::<0>() {
-                    return (NODE_ITER_FINISHED, &[], None, None)
-                }
-                let (key0, key1) = self.get_both_keys();
-                let mut child = None;
-                let mut value = None;
-                let mut next_token = 1;
-                if self.is_child_ptr::<0>() {
-                    child = Some(unsafe{ self.child_in_slot::<0>() })
-                } else {
-                    value = Some(unsafe{ self.val_in_slot::<0>() })
-                };
-                if key0 == key1 {
-                    if self.is_child_ptr::<1>() {
-                        child = Some(unsafe{ self.child_in_slot::<1>() });
-                    } else {
-                        value = Some(unsafe{ self.val_in_slot::<1>() });
-                    }
-                    next_token = 2;
-                }
-                (next_token, key0, child, value)
-            },
-            1 => {
-                if self.is_used::<1>() {
-                    let mut child = None;
-                    let mut value = None;
-                    let key1 = unsafe{ self.key_unchecked::<1>() };
-                    if self.is_child_ptr::<1>() {
-                        child = Some(unsafe{ self.child_in_slot::<1>() });
-                    } else {
-                        value = Some(unsafe{ self.val_in_slot::<1>() });
-                    }
-                    (2, key1, child, value)
-                } else {
-                    (NODE_ITER_FINISHED, &[], None, None)
-                }
-            },
-            _ => (NODE_ITER_FINISHED, &[], None, None)
+    fn ascend_iter_token(&self, token: IterToken, byte_count: usize) -> IterToken {
+        debug_assert_ne!(token, NODE_ITER_INVALID, "cannot ascend an invalid iteration token");
+        debug_assert_ne!(token, NODE_ITER_FINISHED, "cannot ascend a finished iteration token");
+        debug_assert!(!node_iter_token_is_nonexistent(token),
+            "cannot ascend a nonexistent iteration token");
+        debug_assert!(byte_count > 0, "cannot ascend zero bytes within a node");
+        let key0 = unsafe { self.key_unchecked::<0>() };
+        let key1 = unsafe { self.key_unchecked::<1>() };
+        let key_end_0 = key0.len() as IterToken;
+        let key_end_1 = key_end_0 + key1.len() as IterToken;
+        let offset = if token == TOKEN_LAST {
+            key_end_1
+        } else {
+            debug_assert_eq!(token & !ITER_TOKEN_OFFSET_MASK, 0,
+                "iteration token is not a LineListNode token");
+            token & ITER_TOKEN_OFFSET_MASK
+        };
+        debug_assert!(offset > 0 && offset <= key_end_1,
+            "iteration token does not describe an in-node focus");
+
+        let (key, key_offset, key_start) = if offset <= key_end_0 {
+            (key0, offset, 0)
+        } else {
+            (key1, offset - key_end_0, key_end_0)
+        };
+        let byte_count = byte_count as IterToken;
+        debug_assert!(byte_count <= key_offset, "ascent passes the LineListNode root");
+        let ascended_offset = key_offset - byte_count;
+        if ascended_offset == 0 {
+            return 0
         }
+
+        // A shared prefix has one canonical token: its occurrence in slot 0's key.
+        if key_start > 0 && ascended_offset <= key_end_0 &&
+            key[..ascended_offset as usize] == key0[..ascended_offset as usize]
+        {
+            return ascended_offset
+        }
+        key_start + ascended_offset
+    }
+    #[inline(always)]
+    fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>) {
+        debug_assert_ne!(token, NODE_ITER_INVALID, "cannot continue an invalid iteration token");
+        debug_assert_ne!(token, NODE_ITER_FINISHED, "cannot continue a finished iteration token");
+        debug_assert_iter_token_layout();
+        debug_assert_eq!(TOKEN_LAST & ITER_TOKEN_OFFSET_MASK, ITER_TOKEN_OFFSET_MASK,
+            "TOKEN_LAST must decode as the maximum LineListNode offset");
+        debug_assert!(token == TOKEN_LAST || token == TOKEN_AFTER_LAST
+            || token & !(ITER_TOKEN_OFFSET_MASK | NODE_TOKEN_NONEXISTENT_BIT) == 0,
+            "iteration token is not a LineListNode token");
+        let offset = (token & ITER_TOKEN_OFFSET_MASK) as usize;
+        let header = self.header;
+        let key_end_0 = ((header & 0xfc0) >> 6) as usize;
+        let key_len_1 = (header & 0x3f) as usize;
+        let key_end_1 = key_end_0 + key_len_1;
+
+        if offset >= key_end_1 {
+            return (NODE_ITER_FINISHED, &[], None, None)
+        }
+
+        if header & SLOT_0_USED_MASK != 0 {
+            let key0 = unsafe {
+                core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), key_end_0)
+            };
+            if offset < key_end_0 && !(after_focus && offset > 0) {
+                let (mut child, mut value) = if header & (1 << 13) != 0 {
+                    (Some(unsafe { self.child_in_slot::<0>() }), None)
+                } else {
+                    (None, Some(unsafe { self.val_in_slot::<0>() }))
+                };
+                let same_path = header & SLOT_1_USED_MASK != 0 && key_len_1 == 1 && unsafe {
+                    *key0.get_unchecked(0) == *self.key_bytes.get_unchecked(key_end_0).assume_init_ref()
+                };
+                let next_token = if same_path {
+                    if header & (1 << 12) != 0 {
+                        child = Some(unsafe { self.child_in_slot::<1>() });
+                    } else {
+                        value = Some(unsafe { self.val_in_slot::<1>() });
+                    }
+                    TOKEN_LAST
+                } else if header & SLOT_1_USED_MASK != 0 {
+                    key_end_0 as IterToken
+                } else {
+                    TOKEN_LAST
+                };
+                return (next_token, key0, child, value)
+            }
+            if header & SLOT_1_USED_MASK != 0 {
+                if !(after_focus && offset > key_end_0) {
+                    let key1 = unsafe {
+                        core::slice::from_raw_parts(
+                            self.key_bytes.as_ptr().cast::<u8>().add(key_end_0),
+                            key_len_1,
+                        )
+                    };
+                    // "after or below" slot0 has to mean below in this case because slot0 key is a prefix of
+                    //  the slot1 key.  And if we're below slot0 and not below slot1, we shouldn't skip slot 1.
+                    if after_focus
+                        && !node_iter_token_is_nonexistent(token)
+                        && unsafe { key0.get_unchecked(0) == key1.get_unchecked(0) }
+                    {
+                        debug_assert_eq!(key0.len(), 1);
+                        debug_assert_eq!(offset, 1);
+                        return (NODE_ITER_FINISHED, &[], None, None)
+                    }
+                    let (child, value) = if header & (1 << 12) != 0 {
+                        (Some(unsafe { self.child_in_slot::<1>() }), None)
+                    } else {
+                        (None, Some(unsafe { self.val_in_slot::<1>() }))
+                    };
+                    return (TOKEN_LAST, key1, child, value)
+                }
+            }
+        }
+        (NODE_ITER_FINISHED, &[], None, None)
     }
     #[inline]
     fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
@@ -2342,26 +2476,29 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 }
             },
             false => {
-                if starts_with(key1, key) && starts_with(key0, common_key) {
-                    let key0_last_byte = match key0.get(last_key_byte_idx) {
-                        Some(byte) => byte,
-                        None => return (None, None)
-                    };
-                    if key0_last_byte != key.last().unwrap() {
-                        let sib_node = if key0.len() == key.len() && self.is_child_ptr::<0>() {
-                            let sib_node = unsafe{ self.child_in_slot::<0>().as_tagged() };
-                            debug_assert!({ sib_node.as_list().map(|sib_node| validate_node(sib_node)); true});
-                            Some(sib_node)
-                        } else {
-                            None
-                        };
-                        (Some(*key0_last_byte), sib_node)
-                    } else {
-                        (None, None)
-                    }
-                } else {
-                    (None, None)
-                }
+                let key_byte = |candidate: &[u8]| {
+                    candidate.get(last_key_byte_idx).copied().filter(|byte| {
+                        candidate[..last_key_byte_idx] == common_key[..]
+                            && *byte < key[last_key_byte_idx]
+                    })
+                };
+                let (sibling_byte, slot) = match key_byte(key1) {
+                    Some(byte) => (byte, 1),
+                    None => match key_byte(key0) {
+                        Some(byte) => (byte, 0),
+                        None => return (None, None),
+                    },
+                };
+                let sib_node = match slot {
+                    0 if key0.len() == key.len() && self.is_child_ptr::<0>() => {
+                        Some(unsafe { self.child_in_slot::<0>().as_tagged() })
+                    },
+                    1 if key1.len() == key.len() && self.is_child_ptr::<1>() => {
+                        Some(unsafe { self.child_in_slot::<1>().as_tagged() })
+                    },
+                    _ => None,
+                };
+                (Some(sibling_byte), sib_node)
             }
         }
     }
@@ -2485,7 +2622,11 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self) {
-                    AlgebraicStatus::None => unreachable!(), //Joining a non-empty node with another non-empty node should never produce an empty node
+                    //Both nodes were empty so the join is empty too
+                    AlgebraicStatus::None => {
+                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        AlgebraicResult::None
+                    },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
                     AlgebraicStatus::Element => AlgebraicResult::Element(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
                 }
@@ -2498,7 +2639,11 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self) {
-                    AlgebraicStatus::None => unreachable!(), //Joining a non-empty node with another non-empty node should never produce an empty node
+                    //See the DENSE_BYTE_NODE_TAG arm: two empty nodes join to an empty result
+                    AlgebraicStatus::None => {
+                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        AlgebraicResult::None
+                    },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
                     AlgebraicStatus::Element => AlgebraicResult::Element(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
                 }
@@ -2589,6 +2734,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                     ValOrChild::Child(child) => child,
                     ValOrChild::Val(_) => unreachable!(),
                 };
+                //A dangling child (the empty sentinel) has nothing below the dropped bytes and can't be made mutable
+                if child.is_empty() {
+                    return None
+                }
                 if remaining_bytes > 0 {
                     return child.make_mut().drop_head_dyn(remaining_bytes)
                 } else {
@@ -2606,8 +2755,48 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         let key0_len = key0.len();
         let key1_len = key1.len();
 
-        //If byte_cnt < both key lengths, reuse this node but shorten the keys
-        if byte_cnt < key0_len && byte_cnt < key1_len {
+        //Both keys survive.  Shorten them in-place; if they collide, the two payloads must first
+        //be joined into one.  This is deliberately destructive: unlike `factor_prefix`, it avoids
+        //cloning values or child references just to replace this temporary node.
+        if byte_cnt < key0_len.min(key1_len) {
+            let shortened_key0 = &key0[byte_cnt..];
+            let shortened_key1 = &key1[byte_cnt..];
+            if shortened_key0 == shortened_key1
+                && temp_node.is_child_ptr::<0>() == temp_node.is_child_ptr::<1>() {
+                let new_key_len = shortened_key0.len();
+                unsafe {
+                    let key_bytes = temp_node.key_bytes.as_mut_ptr().cast::<u8>();
+                    core::ptr::copy(key_bytes.add(byte_cnt), key_bytes, new_key_len);
+                }
+
+                //Take slot 1 first: taking slot 0 would shift slot 1 into its place.
+                let payload1 = temp_node.take_payload::<1>().unwrap();
+                let payload0 = temp_node.take_payload::<0>().unwrap();
+                let merged = match (payload0, payload1) {
+                    (ValOrChild::Val(v0), ValOrChild::Val(v1)) => match v0.pjoin(&v1) {
+                        AlgebraicResult::Element(v) => Some(ValOrChild::Val(v)),
+                        AlgebraicResult::Identity(mask) => Some(ValOrChild::Val(if mask & SELF_IDENT > 0 { v0 } else { v1 })),
+                        AlgebraicResult::None => None,
+                    },
+                    (ValOrChild::Child(c0), ValOrChild::Child(c1)) => match c0.pjoin(&c1) {
+                        AlgebraicResult::Element(c) => Some(ValOrChild::Child(c)),
+                        AlgebraicResult::Identity(mask) => Some(ValOrChild::Child(if mask & SELF_IDENT > 0 { c0 } else { c1 })),
+                        AlgebraicResult::None => None,
+                    },
+                    _ => unreachable!(), //Both slots have the same kind; checked above.
+                };
+                return match merged {
+                    Some(payload) => {
+                        temp_node.set_payload_0_for_existing_key(new_key_len, payload);
+                        debug_assert!(validate_node(&temp_node));
+                        Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
+                    },
+                    None => None,
+                }
+            }
+
+            //The shortened keys are distinct, or form the legal value-and-child case.  Preserve
+            //slot order before factoring any now-illegal shared prefix.
             let mut slot0_child = temp_node.is_child_ptr::<0>();
             let mut slot1_child = temp_node.is_child_ptr::<1>();
             let mut new_key0_len = key0_len-byte_cnt;
@@ -2676,6 +2865,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         };
 
         if let ValOrChild::Child(mut child_node) = merged_payload {
+            //A dangling child (the empty sentinel) has nothing below the dropped bytes and can't be made mutable
+            if child_node.is_empty() {
+                return None
+            }
             if chop_bytes == byte_cnt {
                 return Some(child_node)
             } else {
@@ -2811,6 +3004,16 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
+    // If two unequal keys share a prefix but neither is an ancestor of the
+    // other, that prefix must be factored into an onward child.  Otherwise a
+    // virtual focus at the shared prefix spans both slots, while node-at-key
+    // operations can only return one of them.
+    if node.is_used::<1>() && find_prefix_overlap(key0, key1) > 0 &&
+        !starts_with(key0, key1) && !starts_with(key1, key0) {
+        println!("Invalid node - unfactored divergent prefix. {node:?}");
+        panic!()
+    }
+
     //The keys may never have more than one prefix byte in common
     if key0.get(0) == key1.get(0) && key0.get(1) == key1.get(1) && key0.get(1).is_some() {
         println!("Invalid node - duplicated prefix too long. {node:?}");
@@ -2918,6 +3121,232 @@ mod tests {
         let child_node = child_node.as_tagged();
         assert_eq!(bytes_used, 1);
         assert_eq!(child_node.node_get_val("hello".as_bytes()), Some(&24));
+    }
+
+    #[test]
+    fn test_line_list_ascend_iter_token() {
+        #[cfg(debug_assertions)]
+        fn assert_panics(f: impl FnOnce()) {
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err());
+        }
+
+        let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        node.node_set_val(b"abc", 0).unwrap_or_else(|_| panic!());
+        node.node_set_val(b"wxyz", 1).unwrap_or_else(|_| panic!());
+
+        // Slot 0 occupies the first range in the contiguous key buffer.
+        let slot_0_partial = node.iter_token_for_path(b"ab");
+        let slot_0_complete = node.iter_token_for_path(b"abc");
+        assert_eq!(slot_0_partial, 2);
+        assert_eq!(slot_0_complete, 3);
+        assert_eq!(node.ascend_iter_token(slot_0_partial, 1), 1);
+        assert_eq!(node.ascend_iter_token(slot_0_complete, 1), slot_0_partial);
+        assert_eq!(node.ascend_iter_token(slot_0_complete, 3), 0);
+
+        // Slot 1 offsets follow slot 0's bytes in the same buffer.
+        let slot_1_partial = node.iter_token_for_path(b"wxy");
+        let slot_1_complete = node.iter_token_for_path(b"wxyz");
+        assert_eq!(slot_1_partial, 6);
+        assert_eq!(slot_1_complete, TOKEN_LAST);
+        assert_eq!(node.ascend_iter_token(slot_1_partial, 1), 5);
+        assert_eq!(node.ascend_iter_token(slot_1_complete, 1), slot_1_partial);
+        assert_eq!(node.ascend_iter_token(slot_1_complete, 4), 0);
+        assert_eq!(node.next_items(slot_1_complete, false).0, NODE_ITER_FINISHED);
+
+        // Missing paths produce marked lower-bound cursors, never exact-focus tokens.
+        assert_eq!(node.iter_token_for_path(b"`"), NODE_TOKEN_NONEXISTENT_BIT);
+        assert_eq!(
+            node.iter_token_for_path(b"abcd"),
+            3 | NODE_TOKEN_NONEXISTENT_BIT,
+        );
+        assert_eq!(
+            node.iter_token_for_path(b"m"),
+            3 | NODE_TOKEN_NONEXISTENT_BIT,
+        );
+        assert_eq!(
+            node.iter_token_for_path(b"zz"),
+            TOKEN_AFTER_LAST,
+        );
+        assert!(!node_iter_token_is_nonexistent(TOKEN_LAST));
+        assert!(node_iter_token_is_nonexistent(TOKEN_AFTER_LAST));
+
+        // Root, invalid, zero-byte, and over-ascent inputs violate the method's preconditions and
+        // must not be silently converted into a reconstructed cursor in debug builds.
+        #[cfg(debug_assertions)]
+        {
+            assert_panics(|| { node.ascend_iter_token(0, 0); });
+            assert_panics(|| { node.ascend_iter_token(0, 1); });
+            assert_panics(|| { node.ascend_iter_token(slot_0_partial, 3); });
+            assert_panics(|| { node.ascend_iter_token(NODE_ITER_INVALID, 1); });
+            assert_panics(|| { node.ascend_iter_token(NODE_ITER_FINISHED, 1); });
+        }
+
+        // The two slots at the same path share the canonical last-path token.
+        let mut duplicate = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        duplicate.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        let child = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        unsafe {
+            duplicate.set_child_1(b"a", TrieNodeODRc::new_in(child, global_alloc()));
+        }
+        assert!(validate_node(&duplicate));
+        let duplicate_complete = duplicate.iter_token_for_path(b"a");
+        assert_eq!(duplicate_complete, TOKEN_LAST);
+        assert_eq!(duplicate.ascend_iter_token(duplicate_complete, 1), 0);
+        assert_eq!(duplicate.next_items(duplicate_complete, false).0, NODE_ITER_FINISHED);
+
+        let mut single = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        single.node_set_val(b"abc", 0).unwrap_or_else(|_| panic!());
+        let single_complete = single.iter_token_for_path(b"abc");
+        assert_eq!(single_complete, TOKEN_LAST);
+        assert_eq!(single.iter_token_for_path(b"abcd"), TOKEN_AFTER_LAST);
+        assert_eq!(single.ascend_iter_token(single_complete, 1), 2);
+        let (single_next, single_key, _, single_value) = single.next_items(0, false);
+        assert_eq!(single_next, TOKEN_LAST);
+        assert_eq!(single_key, b"abc");
+        assert_eq!(single_value, Some(&0));
+        assert_eq!(single.next_items(single_complete, false).0, NODE_ITER_FINISHED);
+
+        // Ascending from slot 1 canonicalizes a shared path to its slot-0 buffer position.
+        let mut ancestor = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        ancestor.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        ancestor.node_set_val(b"ab", 1).unwrap_or_else(|_| panic!());
+        let descendant = ancestor.iter_token_for_path(b"ab");
+        assert_eq!(ancestor.ascend_iter_token(descendant, 1), ancestor.iter_token_for_path(b"a"));
+    }
+
+    #[test]
+    fn test_line_list_next_items_after_focus_skips_partial_item() {
+        let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        node.node_set_val(b"abc", 0).unwrap_or_else(|_| panic!());
+        node.node_set_val(b"wxyz", 1).unwrap_or_else(|_| panic!());
+
+        let slot_0_partial = node.iter_token_for_path(b"ab");
+        let (next_token, key, _, value) = node.next_items(slot_0_partial, false);
+        assert_eq!(key, b"abc");
+        assert_eq!(value, Some(&0));
+
+        let (next_token_after_focus, key, _, value) = node.next_items(slot_0_partial, true);
+        assert_eq!(key, b"wxyz");
+        assert_eq!(value, Some(&1));
+        assert_eq!(next_token_after_focus, TOKEN_LAST);
+
+        // The ordinary call returned the containing item and its continuation.  Applying the
+        // after-focus operation at that item boundary is therefore the same as ordinary iteration.
+        assert_eq!(node.next_items(next_token, true), node.next_items(next_token, false));
+
+        // Missing focuses before, between, and beyond the items retain their lower bound
+        // for either kind of iteration. Returned item tokens describe existing focuses.
+        for (missing, expected) in [
+            (&b"`"[..], Some((&b"abc"[..], 0))),
+            (&b"abcd"[..], Some((&b"wxyz"[..], 1))),
+            (&b"m"[..], Some((&b"wxyz"[..], 1))),
+            (&b"zz"[..], None),
+        ] {
+            let token = node.iter_token_for_path(missing);
+            assert!(node_iter_token_is_nonexistent(token));
+            for after_focus in [false, true] {
+                let (next, key, child, value) = node.next_items(token, after_focus);
+                assert!(child.is_none());
+                if let Some((expected_key, expected_value)) = expected {
+                    assert_eq!(key, expected_key);
+                    assert_eq!(value, Some(&expected_value));
+                    assert_eq!(next, node.iter_token_for_path(expected_key));
+                } else {
+                    assert_eq!(next, NODE_ITER_FINISHED);
+                    assert!(key.is_empty());
+                    assert!(value.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_line_list_next_items_after_focus_skips_descendant_item() {
+        let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        node.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        node.node_set_val(b"abcd", 1).unwrap_or_else(|_| panic!());
+        assert!(validate_node(&node));
+
+        let focus = node.iter_token_for_path(b"a");
+        let (next, key, child, value) = node.next_items(focus, true);
+        assert_eq!(next, NODE_ITER_FINISHED);
+        assert!(key.is_empty());
+        assert!(child.is_none());
+        assert!(value.is_none());
+
+        //Ordinary iteration still sees the descendant item.
+        let (_, key, child, value) = node.next_items(focus, false);
+        assert_eq!(key, b"abcd");
+        assert!(child.is_none());
+        assert_eq!(value, Some(&1));
+    }
+
+    #[test]
+    fn test_line_list_next_items_uses_canonical_tokens() {
+        let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        node.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        node.node_set_val(b"z", 1).unwrap_or_else(|_| panic!());
+
+        let (token, key, child, value) = node.next_items(node.new_iter_token(), false);
+        assert_eq!(token, 1);
+        assert_eq!(key, b"a");
+        assert!(child.is_none());
+        assert_eq!(value, Some(&0));
+
+        let (token, key, child, value) = node.next_items(token, false);
+        assert_eq!(token, TOKEN_LAST);
+        assert_eq!(key, b"z");
+        assert!(child.is_none());
+        assert_eq!(value, Some(&1));
+
+        let (token, key, child, value) = node.next_items(token, false);
+        assert_eq!(token, NODE_ITER_FINISHED);
+        assert!(key.is_empty());
+        assert!(child.is_none());
+        assert!(value.is_none());
+
+        let mut duplicate = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        duplicate.node_set_val(b"a", 0).unwrap_or_else(|_| panic!());
+        let child_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        unsafe {
+            duplicate.set_child_1(b"a", TrieNodeODRc::new_in(child_node, global_alloc()));
+        }
+        let (token, key, child, value) = duplicate.next_items(duplicate.new_iter_token(), false);
+        assert_eq!(token, TOKEN_LAST);
+        assert_eq!(key, b"a");
+        assert!(child.is_some());
+        assert_eq!(value, Some(&0));
+        assert_eq!(duplicate.iter_token_for_path(key), token);
+
+        for exhausted_token in [TOKEN_LAST, TOKEN_AFTER_LAST] {
+            for after_focus in [false, true] {
+                let (token, key, child, value) = node.next_items(exhausted_token, after_focus);
+                assert_eq!(token, NODE_ITER_FINISHED);
+                assert!(key.is_empty());
+                assert!(child.is_none());
+                assert!(value.is_none());
+            }
+        }
+    }
+
+    /// `node_set_branch` replaces the downstream branch at its key. A value
+    /// stored under a longer compressed key is downstream, not a value at that
+    /// key, and must not survive beside the replacement child.
+    #[test]
+    fn test_line_list_set_branch_replaces_compressed_value_descendant() {
+        let mut node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(node.node_set_val(b"aaa", 1).map_err(|_| ()), Ok((None, false)));
+
+        let mut replacement = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+        assert_eq!(replacement.node_set_val(b"b", 2).map_err(|_| ()), Ok((None, false)));
+        let replacement = TrieNodeODRc::new_in(replacement, global_alloc());
+
+        assert_eq!(node.node_set_branch(b"a", replacement).map_err(|_| ()), Ok(false));
+        assert_eq!(node.node_get_val(b"aaa"), None, "the replaced subtree must not leak its old value");
+        let (used_bytes, child) = node.node_get_child(b"a").unwrap();
+        assert_eq!(used_bytes, 1);
+        assert_eq!(child.as_tagged().node_get_val(b"b"), Some(&2));
+        assert!(validate_node(&node));
     }
 
     /// This tests that a common prefix will be found and the if the node only has an entry in slot_0
@@ -3402,6 +3831,28 @@ mod tests {
         assert_eq!(inner_node.as_tagged().node_get_val(b"anana"), Some(&1));
     }
 
+    /// Test that `drop_head_dyn` can do the right thing when a single node now needs to be
+    /// represented as two
+    #[test]
+    fn test_line_list_get_node_at_shared_prefix_after_drop_head() {
+        let mut source_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+        source_node.node_set_val(b"1ab", 1).unwrap_or_else(|_| panic!());
+        source_node.node_set_val(b"2ac", 2).unwrap_or_else(|_| panic!());
+        let dropped = source_node.drop_head_dyn(1).unwrap();
+
+        // Dropping the distinct leading bytes factors the shared "a" into an onward child.
+        let dropped_ref = dropped.as_tagged();
+        let (consumed, child) = dropped_ref.node_get_child(b"a").unwrap();
+        assert_eq!(consumed, 1);
+        assert_eq!(child.as_tagged().node_get_val(b"b"), Some(&1));
+        assert_eq!(child.as_tagged().node_get_val(b"c"), Some(&2));
+
+        // `get_node_at_key` must expose that same factored child as the focused node.
+        let focus = dropped_ref.get_node_at_key(b"a");
+        assert_eq!(focus.as_tagged().node_get_val(b"b"), Some(&1));
+        assert_eq!(focus.as_tagged().node_get_val(b"c"), Some(&2));
+    }
+
     /// Regression test: a value and the onward child at the same path are kept
     /// in the two slots of one node, both under the same key.  In that shape
     /// `nth_child_from_key` used to look for the child in slot 1 only, and so
@@ -3435,48 +3886,37 @@ mod tests {
         assert_eq!(by_index.child_count(), by_path.child_count());
         assert_eq!(by_index.child_mask(), by_path.child_mask());
     }
+
+    /// Issue #85: `restrict` panicked when a child-link slot was followed into `other` and
+    /// landed on a dangling byte there (in the child mask, no node behind it).
+    #[test]
+    fn restrict_against_dangling_branch() {
+        use crate::PathMap;
+        use crate::zipper::*;
+        fn mk(keys: &[&[u8]]) -> PathMap<()> { let mut m = PathMap::new(); for k in keys { m.set_val_at(k, ()); } m }
+        fn keys(m: &PathMap<()>) -> Vec<String> { m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect() }
+        fn other_dangling_a() -> PathMap<()> {
+            let mut o = mk(&[b"a", b"b", b"c", b"e"]);
+            o.remove_val_at(b"a", false);
+            assert_eq!(keys(&o), ["b", "c", "e"]);
+            o
+        }
+        let m = mk(&[b"ab", b"ac"]);
+        let r = m.restrict(&other_dangling_a());
+        assert_eq!(keys(&r), Vec::<String>::new());
+
+        let mut m = mk(&[b"ab", b"ac"]);
+        let o = other_dangling_a();
+        m.write_zipper().restrict(&o.read_zipper());
+        assert_eq!(keys(&m), Vec::<String>::new());
+
+        let mut m = mk(&[b"dab", b"dac"]);
+        { let mut wz = m.write_zipper(); wz.descend_to(b"d"); wz.restrict(&o.read_zipper()); }
+        assert_eq!(keys(&m), Vec::<String>::new());
+
+        //A path that `other` does validate survives beside one it does not
+        let mut m = mk(&[b"ab", b"ac", b"bx"]);
+        m.write_zipper().restrict(&o.read_zipper());
+        assert_eq!(keys(&m), ["bx"]);
+    }
 }
-
-//GOAT, merge wrappers for lattice impls on primitives
-//
-//GOAT, remove garbage lattice impls
-//
-//GOAT Catamorphism names:  https://github.com/Adam-Vandervorst/PathMap/pull/8#discussion_r2004745719
-//
-//GOAT, document how path existence can't be used to confirm the existence of a value, only the non-existence
-//  and document the meaning of path existence more generally.
-//GOAT, consider exposing an explicit prune method.  Possibly also consider exposing a "create_path" method.
-//  SEE "PATH EXISTS DISCUSSION" below
-//
-//GOAT, consider adding a "prune" flag to methods that might remove values
-//
-
-
-// PATH EXISTS DISCUSSION
-// Ok... Fork 1 is about paths, and specifically what information about values you can get from whether or not a path exists.  In the current code, the *nonexistence* of a path guarantees no value is below that point (how could there be one?) but the *existence* of a path does **not** guarantee a value is.
-// Earlier drafts of PathMap (about 3 months ago) we were upholding that property that all paths led to values.  But I realized this property is impossible to uphold with the a multi write-zipper implementation.
-// Bottom line, with the current set of guarantees, you can't use `path_exists` to conclude that there are zippers above you.  You will have to call `to_next_value` to search downwards.
-// Looking forwards, I think I may add explicit methods like `ascend_prune` that ascends the zipper upwards from an empty leaf, pruning as it goes, and `descend_create` to do the opposite.  (although I'm a little on the fence about how descend_create would actually be useful.)  Maybe it might make sense to implement versions of these methods that don't move the zipper focus.
-// But if we tweak the zipper contract so that paths are explicitly managed, just like values, and document the behavior of every operation with respect to paths, then the existence of a path might become a reliable signal.
-// However, that brings up another question: Do you *want* to be pruning the path each time?  Consider a loop where a zipper is acquired, dropped, acquired, dropped, etc.  If each acquisition means creating the path, and each drop means pruning it, that is a lot of wasted work.  On the other hand, just setting and clearing a value is a lot cheaper.
-// Anyway, let me know your thoughts.
-
-
-//GOAT, steps to moving `val_count` method onto a new "TrieSummary" trait, and removing it from the ZipperMoving trait
-// (and remove the node_val_count method from the TrieNode trait)
-//
-//GOAT - Wait until TrieNode trait is re-jigged to put root values on the node and not the
-// parent, because there is bound to be a lot of edge-case logic to account for root values
-// under the current TrieNode trait contract.  I'd prefer to only write this code once.
-//
-// 1. implement a caching_cata inner loop that uses the TrieNode API instead of the zipper API
-//       a. This means it has no access to the origin_path, and the cata implementation needs
-//          to maintain its own path_buffer
-//       b. It means paths are relative to the node where it is called
-//       c. It borrows the zipper, rather than taking ownership.
-//       d. It works from the focus, rather than from a the root.
-//       e. It can then be implemented on more zipper types that don't support ReadOnlyValues
-//          and ZipperMoving
-// 2. implement a val_count convenience on top of 1.
-
-//GOAT, Paths in caching Cata:  https://github.com/Adam-Vandervorst/PathMap/pull/8#discussion_r2004828957
