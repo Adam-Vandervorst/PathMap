@@ -5,7 +5,10 @@ The crate at HEAD has known divergences from the model, so "zero divergences"
 cannot be the bar.  Instead both commits are run on identical inputs, and an
 input that diverges on HEAD but not on BASE is reported as a GitHub warning
 annotation (the job stays green) or, with FUZZ_STRICT=1, fails the job.  A
-run that does not finish always fails the job.  The harness
+run that does not finish always fails the job.  For the first REPROS newly
+diverging inputs with distinct first-differing operations, the input is
+shrunk with lean/shrink.py and a standalone Rust reproducer is emitted with
+`pathmap_trace --repro` into the summary and $FUZZ_OUT/repro/.  The harness
 (differential/) and the model (lean/) are taken from HEAD for both sides, so
 the only thing that differs is the crate under test in src/.  If BASE cannot
 be built with HEAD's harness, BASE's own harness is tried; if that fails too
@@ -18,6 +21,7 @@ env:  FUZZ_INPUTS        random programs, model vs crate        (default 20000)
       FUZZ_SEED          (default 7)
       FUZZ_JOBS          worker processes                        (default 16)
       FUZZ_STRICT        1 = new divergences fail the job instead of warning (default 0)
+      FUZZ_REPROS        newly diverging inputs to shrink and turn into Rust (default 3)
       FUZZ_OUT           output dir                              (default ./fuzz-out)
       CARGO_TARGET_DIR   parent of the per-side target dirs      (default ./target)
       LAKE_CACHE         optional dir to keep lean's .lake build dirs across runs
@@ -25,7 +29,7 @@ env:  FUZZ_INPUTS        random programs, model vs crate        (default 20000)
 import os, re, shutil, subprocess, sys
 from pathlib import Path
 
-FAIL_RE = re.compile(r'^FAIL (\S+) \[saved [^\]]*\]: (.*)$')
+FAIL_RE = re.compile(r'^FAIL (\S+) \[saved ([^\]]*)\]: (.*)$')
 SUMMARY_RE = re.compile(r'^(\d+)/(\d+) inputs agree \((\d+) hit known bugs, (\d+) new divergences\)')
 
 
@@ -53,6 +57,7 @@ class Fuzz:
         self.target = Path(os.environ.get('CARGO_TARGET_DIR', self.repo / 'target')).resolve()
         self.lake_cache = os.environ.get('LAKE_CACHE')
         self.strict = os.environ.get('FUZZ_STRICT', '0') == '1'
+        self.repros = int(os.environ.get('FUZZ_REPROS', 3))
         self.base_src = self.out / 'src-base'
         self.modes = [('crate', self.inputs, [])]
         if self.act_inputs > 0:
@@ -116,18 +121,62 @@ class Fuzz:
         log('\n'.join(info) if info else tail(outf, 5))
 
     def parse(self, label, side):
-        fails, summary = {}, None
+        """fails: name -> {'path', 'msg', 'detail'}; summary: (agree, total, known, new)."""
+        fails, summary, last = {}, None, None
         p = self.out / f'fuzz-{label}-{side}.txt'
         if p.is_file():
             for line in p.read_text().splitlines():
                 if m := FAIL_RE.match(line):
-                    fails[m.group(1)] = m.group(2)
+                    last = fails[m.group(1)] = {'path': m.group(2), 'msg': m.group(3), 'detail': []}
+                elif line.startswith('  ') and last is not None:
+                    last['detail'].append(line.strip())      # the "lean: ..." / "crate: ..." trace lines
+                else:
+                    last = None
                 if m := SUMMARY_RE.match(line):
                     summary = tuple(map(int, m.groups()))
         return fails, summary
 
+    @staticmethod
+    def kind(f):
+        """What diverged: the first-differing op from the model's trace line, else the message shape."""
+        for d in f['detail']:
+            if d.startswith('lean:'):
+                parts = d.split()
+                if len(parts) > 2:
+                    return parts[2]
+        return re.sub(r'\d+', 'N', f['msg'])
+
+    def repro(self, label, name, f, flags):
+        """Shrink one newly diverging input and emit a Rust reproducer.  Returns markdown."""
+        rdir = self.out / 'repro'
+        rdir.mkdir(exist_ok=True)
+        stem = rdir / f'{label}-{name.replace("#", "_")}'
+        env = dict(os.environ,
+                   PATHMAP_ORACLE=os.environ.get('PATHMAP_ORACLE') or str(self.repo / 'lean' / '.lake' / 'build' / 'bin' / 'pathmap-oracle'),
+                   PATHMAP_TRACE=str(self.target / 'fuzz-head' / 'release' / 'pathmap_trace'),
+                   PATHMAP_ACT_TRACE=str(self.target / 'fuzz-head' / 'release' / 'act_trace'))
+        small = stem.with_suffix('.min.bin')
+        note = ''
+        try:
+            r = subprocess.run([str(self.repo / 'lean' / 'shrink.py'), f['path'], '-o', str(small), *flags],
+                               cwd=self.repo, env=env, capture_output=True, text=True, timeout=600)
+            sizes = next((l for l in r.stdout.splitlines() if ' -> ' in l and 'bytes' in l), None)
+            if r.returncode or not small.is_file():
+                raise RuntimeError((r.stdout + r.stderr).strip().splitlines()[-1:] or ['shrink failed'])
+            note = sizes.split(', written')[0] if sizes else 'shrunk'
+        except (subprocess.TimeoutExpired, RuntimeError) as e:
+            shutil.copy(f['path'], small)
+            note = f'not shrunk ({e}); reproducer is for the full input'
+        r = subprocess.run([env['PATHMAP_TRACE'], '--repro', str(small)], capture_output=True, text=True)
+        code = r.stdout if r.returncode == 0 else f'// pathmap_trace --repro failed:\n// {r.stderr.strip()}'
+        stem.with_suffix('.rs').write_text(code)
+        act_note = ' (act mode: the harness reads map1 through an ArenaCompactTree; the reproducer uses a PathMap read zipper)' if flags else ''
+        log(f'== repro {label} {name}: {self.kind(f)}, {note}\n{code}')
+        return '\n'.join([f'<details><summary><code>{name}</code>: first differs at <code>{self.kind(f)}</code>, {note}{act_note}</summary>', '',
+                           f"{f['msg']}", *[f'    {d}' for d in f['detail']], '', '```rust', code.rstrip(), '```', '', '</details>', ''])
+
     def summarize(self, baseline):
-        """Write summary.md; return (new divergences, unfinished runs)."""
+        """Write summary.md (with reproducers for the first few new divergences); return (new divergences, unfinished runs)."""
         L = [f'# Differential fuzz: head {self.short(self.head_sha)} vs base {self.short(self.base_sha)}', '', '', '']
         if baseline == 'none':
             L += ['**No baseline**: base could not be built with either harness, so only head was run and nothing is gated.', '']
@@ -147,17 +196,28 @@ class Fuzz:
                     L.append(f'| {side} | run did not finish, see fuzz-{label}-{side}.txt | | |')
                     unfinished += 1
             if baseline != 'none' and hs and bs:
-                new = sorted(set(hf) - set(bf))
+                new = sorted(set(hf) - set(bf))          # names are random#NNNNN, so this is input order
                 fixed = sorted(set(bf) - set(hf))
                 L += ['', f'{len(new)} input(s) diverge on head but not on base; {len(fixed)} diverge on base but not on head.']
                 if new:
                     new_total += len(new)
                     log(f'::{"error" if self.strict else "warning"} title=Differential fuzz ({label})::{len(new)} input(s) diverge from the model on head '
-                        f'but not on base, e.g. {new[0]}: {hf[new[0]][:150]}')
+                        f'but not on base, e.g. {new[0]}: {hf[new[0]]["msg"][:150]}')
                     L += ['', '### Newly diverging inputs (head only)', '']
-                    L += [f'- `{name}`: {hf[name][:200]}' for name in new[:50]]
+                    L += [f'- `{name}`: {hf[name]["msg"][:200]} ({self.kind(hf[name])})' for name in new[:50]]
                     if len(new) > 50:
                         L.append(f'- … and {len(new) - 50} more, see fuzz-{label}-head.txt')
+                    picked, seen = [], set()
+                    for name in new:
+                        k = self.kind(hf[name])
+                        if k not in seen:
+                            seen.add(k); picked.append(name)
+                        if len(picked) >= self.repros:
+                            break
+                    if picked:
+                        flags = next(fl for lb, _, fl in self.modes if lb == label)
+                        L += ['', f'### Reproducers: first {len(picked)} distinct kind(s), shrunk', '']
+                        L += [self.repro(label, name, hf[name], flags) for name in picked]
                 if fixed:
                     L += ['', f'<details><summary>{len(fixed)} input(s) fixed on head</summary>', '']
                     L += [f'- `{name}`' for name in fixed[:50]]
@@ -179,6 +239,7 @@ class Fuzz:
         for f in self.out.iterdir():
             if f.suffix in ('.txt', '.log', '.md'):
                 f.unlink()
+        shutil.rmtree(self.out / 'repro', ignore_errors=True)
         self.cleanup()
         try:
             git('worktree', 'add', '--detach', str(self.base_src), self.base_sha, cwd=self.repo)
