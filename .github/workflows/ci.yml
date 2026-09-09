@@ -131,9 +131,13 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          # elan reads lean/lean-toolchain and fetches the pinned Lean on first use
+          # elan (installed once per runner user) reads lean/lean-toolchain and fetches the pinned
+          # Lean when it is missing; resolving the version here makes that happen in this step
           [ -x "$HOME/.elan/bin/elan" ] || curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.elan/bin:$PATH"
+          elan --version
+          (cd lean && lean --version && lake --version)
       - name: resolve base
         id: base
         run: |
