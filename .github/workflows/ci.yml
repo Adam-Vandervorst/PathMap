@@ -95,7 +95,7 @@ jobs:
           mkdir -p "$BENCH_OUT"
           comment() { [ -z "$PR" ] || python3 .github/scripts/pr_comment.py "$PR" "$1" || true; }
           comment "running"
-          if .github/scripts/bench_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}"; then
+          if .github/scripts/bench_ab.py "${{ steps.base.outputs.sha }}" "${{ github.sha }}"; then
             comment "done"
           else
             comment "failed, see the job log"; exit 1
@@ -149,7 +149,7 @@ jobs:
           FUZZ_OUT: ${{ runner.temp }}/fuzz-out
           LAKE_CACHE: /home/gh-runner/cache/lean-lake   # checkout wipes ignored files such as lean/.lake
         run: |
-          .github/scripts/fuzz_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
+          .github/scripts/fuzz_ab.py "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
       - name: summary
         if: always()
         run: |
