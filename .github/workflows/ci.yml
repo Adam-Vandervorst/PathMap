@@ -180,6 +180,9 @@ jobs:
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: write   # for the fuzz comment; read-only on fork PRs, where commenting is skipped
     steps:
       - uses: actions/checkout@v5
         with:
@@ -208,12 +211,23 @@ jobs:
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: fuzz head and base
+        id: fuzz
         env:
           FUZZ_INPUTS: ${{ inputs.fuzz_inputs || '20000' }}
           FUZZ_OUT: ${{ runner.temp }}/fuzz-out
           LAKE_CACHE: /home/gh-runner/cache/lean-lake   # checkout wipes ignored files such as lean/.lake
         run: |
           .github/scripts/fuzz_ab.py "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
+      - name: comment on the PR
+        # One comment per PR for this job (separate from the bench one): verdict, per-mode tables,
+        # newly diverging inputs and their shrunk Rust reproducers.  Skipped when there is no PR;
+        # fails silently on fork PRs, whose token is read-only.
+        if: always() && github.event.pull_request.number
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/pr_comment.py --id fuzz --title "Differential fuzz vs Lean model" \
+            --dir "${{ runner.temp }}/fuzz-out" "${{ github.event.pull_request.number }}" "${{ steps.fuzz.outcome }}" || true
       - name: summary
         if: always()
         run: |

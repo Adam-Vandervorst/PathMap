@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
-"""Create or update the single bench comment on a pull request.
+"""Create or update one job's comment on a pull request.
 
-One comment per pull request, edited in place: a status line, a link to the
-job that produced it, and bench_ab.py's summary.md once it exists.  The
-first call of a run finds the PR's existing bench comment by the hidden marker
-on its first line (so a re-run or a new push reuses it) or creates it, and
-records the id in $BENCH_OUT/comment_id; later calls in the same run go
-straight to that id.  Standard library only.
+One comment per pull request and job id, edited in place: a title with a
+status, a link to the job that produced it, and the job's summary.md once it
+exists.  The first call of a run finds the PR's existing comment by the hidden
+marker on its first line (so a re-run or a new push reuses it) or creates it,
+and records the id in <dir>/comment_id; later calls in the same run go straight
+to that id.  Standard library only.
 
-usage: pr_comment.py <pr-number> <status text>
+usage: pr_comment.py [--id ID] [--title TITLE] [--dir DIR] <pr-number> <status text>
+       --id     comment identity, one per job          (default bench-ab)
+       --title  heading before the status              (default "Bench A/B vs base")
+       --dir    dir holding summary.md, comment_id     (default $BENCH_OUT)
 env:   GITHUB_TOKEN GITHUB_REPOSITORY GITHUB_RUN_ID RUNNER_NAME   (provided by Actions)
-       BENCH_OUT                        dir holding summary.md from bench_ab.py
        GITHUB_SERVER_URL                optional
 """
-import json, os, sys, time, urllib.request
+import argparse, json, os, sys, time, urllib.request
 from pathlib import Path
 
-MARKER = '<!-- pathmap-bench-ab -->'
 LIMIT = 65536            # GitHub's comment body cap
 
-pr, status = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else ''
-out = Path(os.environ['BENCH_OUT'])
+ap = argparse.ArgumentParser()
+ap.add_argument('--id', default='bench-ab')
+ap.add_argument('--title', default='Bench A/B vs base')
+ap.add_argument('--dir', default=os.environ.get('BENCH_OUT'))
+ap.add_argument('pr')
+ap.add_argument('status', nargs='?', default='')
+args = ap.parse_args()
+pr, status = args.pr, args.status
+MARKER = f'<!-- pathmap-{args.id} -->'
+out = Path(args.dir)
 repo = os.environ['GITHUB_REPOSITORY']
 api = f'https://api.github.com/repos/{repo}'
 headers = {'Authorization': f"Bearer {os.environ['GITHUB_TOKEN']}",
@@ -58,9 +67,11 @@ def job_url():
     return url
 
 
-parts = [MARKER, f'### Bench A/B vs base: {status}', '',
+parts = [MARKER, f'### {args.title}: {status}', '',
          f"[job log]({job_url()}) · {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC"]
 summary = read('summary.md')
+if summary.startswith('# '):                 # the comment has its own heading
+    summary = summary.split('\n', 1)[1].lstrip('\n') if '\n' in summary else ''
 if summary:
     head = '\n'.join(parts)
     room = LIMIT - len(head) - 200
