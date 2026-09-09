@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """A/B benchmark of two commits on the same machine.
 
-Builds the bench binaries for BASE and HEAD once each (separate target dirs),
-then runs them for ROUNDS rounds.  Benches run in parallel, each on its own
+Builds the bench binaries for BASE and HEAD once each, both from the same
+worktree path and target dir (checkout base, build, copy the executables
+out; checkout head, build, copy out) so the two sides differ only in the
+change under test: building the sides at different paths or into different
+target dirs changes crate hashes and code layout, which alone moved cases by
+5-25% in an A/A run.  Then runs them for ROUNDS rounds.  Benches run in parallel, each on its own
 core from BENCH_CPUS (the base and head runs of a bench share that core, back
 to back, alternating which side goes first each round).  As soon as both
 sides of a bench have run in a round, its compare table (per-round divan medians averaged over the rounds
@@ -21,9 +25,9 @@ env:  BENCH_ROUNDS       rounds per side                (default 3)
                          (default: one SMT thread per physical core, every other core, at most 16)
       BENCH_OUT          output directory               (default ./bench-out)
       DIVAN_SAMPLE_COUNT sample count for benches that do not set their own (default 40)
-      CARGO_TARGET_DIR   parent of the two per-side target dirs (default ./target)
+      CARGO_TARGET_DIR   parent of the shared bench target dir  (default ./target)
 """
-import json, math, os, re, statistics, subprocess, sys, threading, time, tomllib
+import json, math, os, re, shutil, statistics, subprocess, sys, threading, time, tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
@@ -69,7 +73,7 @@ class Bench:
         self.lock = threading.Lock()   # serialises log/progress output from the workers
         self.out = Path(os.environ.get('BENCH_OUT', self.repo / 'bench-out')).resolve()
         self.target = Path(os.environ.get('CARGO_TARGET_DIR', self.repo / 'target')).resolve()
-        self.base_src = self.out / 'src-base'
+        self.src = self.out / 'src'          # one worktree for both sides
         self.bins = {}
         self.results = {}      # bench -> {'group/case': {'base': ns, 'head': ns, 'pct': float}}
         os.environ.setdefault('DIVAN_SAMPLE_COUNT', '40')
@@ -85,7 +89,7 @@ class Bench:
         return git('rev-parse', '--short', sha, cwd=self.repo)
 
     def cleanup(self):
-        subprocess.run(['git', 'worktree', 'remove', '--force', str(self.base_src)], cwd=self.repo,
+        subprocess.run(['git', 'worktree', 'remove', '--force', str(self.src)], cwd=self.repo,
                        capture_output=True)
 
     def required_features(self, src):
@@ -98,10 +102,13 @@ class Bench:
                 need |= set(b.get('required-features', []))
         return sorted(need & have)
 
-    def build_side(self, side, src):
+    def build_side(self, side, sha):
+        """Check `sha` out in the shared worktree, build, and copy the bench executables to bins/<side>/."""
+        src = self.src
+        git('checkout', '--detach', '-f', sha, cwd=src)
         feats = self.required_features(src)
-        target = self.target / f'ab-{side}'
-        log(f'== building {side} ({self.short(git("rev-parse", "HEAD", cwd=src))}) into {target}'
+        target = self.target / 'ab'
+        log(f'== building {side} ({self.short(sha)}) in {src} into {target}'
             + (f' with features {",".join(feats)}' if feats else ''))
         cmd = ['cargo', 'bench', '--no-run', '--message-format=json', '--target-dir', str(target)]
         for b in self.benches:
@@ -117,11 +124,16 @@ class Bench:
             m = json.loads(line)
             if m.get('reason') == 'compiler-artifact' and m.get('executable') and 'bench' in m['target']['kind']:
                 exes[m['target']['name']] = m['executable']
-        (self.out / f'bins-{side}.txt').write_text(''.join(f'{k} {v}\n' for k, v in exes.items()))
         missing = [b for b in self.benches if b not in exes]
         if missing:
             sys.exit(f'no executable for bench(es) {missing} on {side}')
-        self.bins[side] = exes
+        bindir = self.out / 'bins' / side
+        bindir.mkdir(parents=True, exist_ok=True)
+        self.bins[side] = {}
+        for b in self.benches:
+            shutil.copy2(exes[b], bindir / b)
+            self.bins[side][b] = str(bindir / b)
+        (self.out / f'bins-{side}.txt').write_text(''.join(f'{b} {exes[b]}\n' for b in self.benches))
 
     def run(self, side, bench, rnd, cpu):
         t0 = time.time()
@@ -209,14 +221,15 @@ class Bench:
             if f.suffix in ('.txt', '.log', '.json'):
                 f.unlink()
         self.cleanup()
+        shutil.rmtree(self.out / 'bins', ignore_errors=True)
         try:
-            git('worktree', 'add', '--detach', str(self.base_src), self.base_sha, cwd=self.repo)
+            git('worktree', 'add', '--detach', str(self.src), self.base_sha, cwd=self.repo)
             self.progress(f'plan: {self.rounds} round(s) x base/head x [{" ".join(self.benches)}], '
                           f'{min(len(self.cpus), len(self.benches))} at a time on cpus {",".join(map(str, self.cpus))}')
             self.progress(f'building base {self.short(self.base_sha)}')
-            self.build_side('base', self.base_src)
+            self.build_side('base', self.base_sha)
             self.progress(f'building head {self.short(self.head_sha)}')
-            self.build_side('head', self.repo)
+            self.build_side('head', self.head_sha)
             free = Queue()
             for cpu in self.cpus:
                 free.put(cpu)
