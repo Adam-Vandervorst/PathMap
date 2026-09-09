@@ -222,14 +222,16 @@ jobs:
           .github/scripts/fuzz_ab.py "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
       - name: comment on the PR
         # One comment per PR for this job (separate from the bench one): verdict, per-mode tables,
-        # newly diverging inputs and their shrunk Rust reproducers.  Skipped when there is no PR;
-        # fails silently on fork PRs, whose token is read-only.
+        # newly diverging inputs and their shrunk Rust reproducers.  Created only when there is
+        # something to report; an existing comment is updated by a clean run.  Skipped when there
+        # is no PR; fails silently on fork PRs, whose token is read-only.
         if: always() && github.event.pull_request.number
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 .github/scripts/pr_comment.py --id fuzz --title "Differential fuzz vs Lean model" \
-            --dir "${{ runner.temp }}/fuzz-out" "${{ github.event.pull_request.number }}" "${{ steps.fuzz.outcome }}" || true
+            --dir "${{ runner.temp }}/fuzz-out" --create-only-if "${{ runner.temp }}/fuzz-out/findings" \
+            "${{ github.event.pull_request.number }}" "${{ steps.fuzz.outcome }}" || true
       - name: summary
         if: always()
         run: |
