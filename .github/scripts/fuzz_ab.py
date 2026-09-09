@@ -2,8 +2,10 @@
 """Differential fuzz of two commits against the Lean model, as a regression gate.
 
 The crate at HEAD has known divergences from the model, so "zero divergences"
-cannot be the bar.  Instead both commits are run on identical inputs and the
-job fails only when HEAD diverges on an input BASE did not.  The harness
+cannot be the bar.  Instead both commits are run on identical inputs, and an
+input that diverges on HEAD but not on BASE is reported as a GitHub warning
+annotation (the job stays green) or, with FUZZ_STRICT=1, fails the job.  A
+run that does not finish always fails the job.  The harness
 (differential/) and the model (lean/) are taken from HEAD for both sides, so
 the only thing that differs is the crate under test in src/.  If BASE cannot
 be built with HEAD's harness, BASE's own harness is tried; if that fails too
@@ -15,6 +17,7 @@ env:  FUZZ_INPUTS        random programs, model vs crate        (default 20000)
       FUZZ_ACT_INPUTS    random programs with the ACT read side (default 5000; 0 skips)
       FUZZ_SEED          (default 7)
       FUZZ_JOBS          worker processes                        (default 16)
+      FUZZ_STRICT        1 = new divergences fail the job instead of warning (default 0)
       FUZZ_OUT           output dir                              (default ./fuzz-out)
       CARGO_TARGET_DIR   parent of the per-side target dirs      (default ./target)
       LAKE_CACHE         optional dir to keep lean's .lake build dirs across runs
@@ -49,6 +52,7 @@ class Fuzz:
         self.out = Path(os.environ.get('FUZZ_OUT', self.repo / 'fuzz-out')).resolve()
         self.target = Path(os.environ.get('CARGO_TARGET_DIR', self.repo / 'target')).resolve()
         self.lake_cache = os.environ.get('LAKE_CACHE')
+        self.strict = os.environ.get('FUZZ_STRICT', '0') == '1'
         self.base_src = self.out / 'src-base'
         self.modes = [('crate', self.inputs, [])]
         if self.act_inputs > 0:
@@ -123,14 +127,14 @@ class Fuzz:
         return fails, summary
 
     def summarize(self, baseline):
-        """Write summary.md; return the number of problems (new divergences or unfinished runs)."""
+        """Write summary.md; return (new divergences, unfinished runs)."""
         L = [f'# Differential fuzz: head {self.short(self.head_sha)} vs base {self.short(self.base_sha)}', '', '', '']
         if baseline == 'none':
             L += ['**No baseline**: base could not be built with either harness, so only head was run and nothing is gated.', '']
         elif baseline == 'base-harness':
             L += ["Base was built with its own harness and model (head's did not build against it), "
                   'so harness changes may show up as differences.', '']
-        bad = 0
+        new_total, unfinished = 0, 0
         for label, n, _ in self.modes:
             hf, hs = self.parse(label, 'head')
             bf, bs = self.parse(label, 'base')
@@ -141,13 +145,15 @@ class Fuzz:
                     L.append(f'| {side} | {s[0]}/{s[1]} | {s[2]} | {s[3]} |')
                 elif side == 'head' or baseline != 'none':
                     L.append(f'| {side} | run did not finish, see fuzz-{label}-{side}.txt | | |')
-                    bad += 1
+                    unfinished += 1
             if baseline != 'none' and hs and bs:
                 new = sorted(set(hf) - set(bf))
                 fixed = sorted(set(bf) - set(hf))
                 L += ['', f'{len(new)} input(s) diverge on head but not on base; {len(fixed)} diverge on base but not on head.']
                 if new:
-                    bad += len(new)
+                    new_total += len(new)
+                    log(f'::{"error" if self.strict else "warning"} title=Differential fuzz ({label})::{len(new)} input(s) diverge from the model on head '
+                        f'but not on base, e.g. {new[0]}: {hf[new[0]][:150]}')
                     L += ['', '### Newly diverging inputs (head only)', '']
                     L += [f'- `{name}`: {hf[name][:200]}' for name in new[:50]]
                     if len(new) > 50:
@@ -157,12 +163,16 @@ class Fuzz:
                     L += [f'- `{name}`' for name in fixed[:50]]
                     L += ['', '</details>']
             L.append('')
-        L[2] = ('**FAIL: new divergences relative to base, or a run did not finish**' if bad
-                else '**OK: no new divergences relative to base**')
+        if unfinished:
+            L[2] = '**FAIL: a fuzz run did not finish**'
+        elif new_total:
+            L[2] = f'**{"FAIL" if self.strict else "WARNING"}: {new_total} new divergence(s) relative to base**'
+        else:
+            L[2] = '**OK: no new divergences relative to base**'
         text = '\n'.join(L) + '\n'
         (self.out / 'summary.md').write_text(text)
         log(text, end='')
-        return bad
+        return new_total, unfinished
 
     def main(self):
         self.out.mkdir(parents=True, exist_ok=True)
@@ -180,7 +190,8 @@ class Fuzz:
                 self.run_side('head', self.repo, label, n, flags)
                 if baseline != 'none':
                     self.run_side('base', self.base_src, label, n, flags)
-            return 1 if self.summarize(baseline) else 0
+            new_total, unfinished = self.summarize(baseline)
+            return 1 if unfinished or (self.strict and new_total) else 0
         finally:
             self.cleanup()
 

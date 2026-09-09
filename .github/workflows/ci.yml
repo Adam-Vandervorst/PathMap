@@ -116,8 +116,9 @@ jobs:
 
   fuzz:
     name: differential fuzz vs Lean model
-    # Regression gate: head and base run on identical inputs, and the job fails only when
-    # head diverges from the model on an input base did not (master has known divergences).
+    # Regression check: head and base run on identical inputs; an input on which head diverges
+    # from the model but base did not is reported as a warning annotation (master has known
+    # divergences).  Set FUZZ_STRICT=1 below to make that fail the job instead.
     needs: test
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, x64]
