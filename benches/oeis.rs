@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::usize;
 use pathmap::PathMap;
 use pathmap::zipper::{Zipper, ZipperValues, ZipperMoving, ZipperPath, ZipperWriting, ZipperCreation};
 use num::BigInt;

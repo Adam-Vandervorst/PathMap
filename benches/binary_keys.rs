@@ -56,7 +56,7 @@ fn binary_get(bencher: Bencher, n: u64) {
     //Benchmark the get operation
     bencher.bench_local(|| {
         for i in 0..n {
-            assert_eq!(map.get_val_at(&keys[i as usize]), Some(&i));
+            assert_eq!(map.val_at(&keys[i as usize]), Some(&i));
         }
     });
 }
