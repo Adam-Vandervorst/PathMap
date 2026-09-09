@@ -2677,15 +2677,16 @@ where Storage: AsRef<[u8]>
         }
         while let Some(top_frame) = self.stack.last_mut() {
             let mut nchildren = top_frame.child_count;
-            let mut this_steps = top_frame.node_depth
-                .min(self.path.len() - self.origin_depth);
-            top_frame.node_depth = 0;
-            if self.stack.len() > 1 {
+            // case: partway into the node
+            let remaining = self.path.len() - self.origin_depth;
+            let mut this_steps = top_frame.node_depth.min(remaining);
+            top_frame.node_depth -= this_steps;
+            if self.stack.len() > 1 && remaining > this_steps {
                 self.stack.pop();
                 let prev = self.stack.last().unwrap();
                 self.cur_node = self.tree.get_node(prev.node_id).0;
                 nchildren = prev.child_count;
-                    this_steps += 1;
+                this_steps += 1;
             }
             self.path.truncate(self.path.len() - this_steps);
             // eprintln!("path={:?}", self.path);
@@ -4086,5 +4087,43 @@ mod tests {
         assert_eq!(az.path(), b"b");
         assert!(az.descend_first_k_path(2));
         assert_eq!(az.path(), b"bxy");
+    }
+
+    /// `ascend_until` / `ascend_until_branch` zeroed the top frame's `node_depth` even when the
+    /// ascent stopped short at a zipper root that sits partway into a line node, so the frame
+    /// pointed at the start of the line while the path stayed at the root.  Every descent after
+    /// that read the line from its start and produced bytes that do not exist below the root.
+    #[test]
+    fn act_zipper_ascend_until_at_a_mid_line_root() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(b"", 100);
+        m.insert(b"\x00\x00", 235);
+        m.insert(b"\x01\x03\x02\x02", 71);
+        m.insert(b"\x03\x03", 135);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+        //Rooted two bytes into the line under branch byte 01, so the root is mid-line
+        for root in [&b"\x01\x03\x02"[..], b"\x01\x03"] {
+            let mut az = t.read_zipper_at_path_u64(root);
+            let mut pz = m.read_zipper_at_path(root);
+            //At the root both are no-ops
+            assert_eq!(az.ascend_until_branch(), pz.ascend_until_branch());
+            assert_eq!(az.ascend_until(), pz.ascend_until());
+            assert_eq!(az.descend_first_byte(), pz.descend_first_byte(), "root {root:?}");
+            assert_eq!(az.path(), pz.path());
+            //From below the root, ascending stops at the root and the frame stays consistent
+            assert_eq!(az.descend_until(), pz.descend_until());
+            assert_eq!(az.path(), pz.path());
+            assert!(!az.at_root());
+            assert_eq!(az.ascend_until_branch(), pz.ascend_until_branch());
+            assert_eq!(az.path(), pz.path());
+            assert!(az.at_root());
+            assert_eq!(az.descend_first_byte(), pz.descend_first_byte());
+            assert_eq!(az.path(), pz.path());
+            assert_eq!(az.val(), pz.val());
+            az.reset(); pz.reset();
+            assert!(az.descend_first_k_path(1) == pz.descend_first_k_path(1));
+            assert_eq!(az.path(), pz.path());
+        }
     }
 }
