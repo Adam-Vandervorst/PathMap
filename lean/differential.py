@@ -31,11 +31,13 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORACLE = os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
-TRACE_CANDIDATES = [
+# PATHMAP_TRACE / PATHMAP_ACT_TRACE override the search, for builds that live
+# in another target dir (CI builds two commits side by side).
+TRACE_CANDIDATES = [os.environ.get("PATHMAP_TRACE", "")] + [
     os.path.join(ROOT, "target", "release", "pathmap_trace"),
     os.path.join(ROOT, "target", "debug", "pathmap_trace"),
 ]
-ACT_CANDIDATES = [
+ACT_CANDIDATES = [os.environ.get("PATHMAP_ACT_TRACE", "")] + [
     os.path.join(ROOT, "target", "release", "act_trace"),
     os.path.join(ROOT, "target", "debug", "act_trace"),
 ]
@@ -48,7 +50,7 @@ TIMEOUT = 2.0
 
 def find_trace_bin(act):
     for c in (ACT_CANDIDATES if act else TRACE_CANDIDATES):
-        if os.path.exists(c):
+        if c and os.path.exists(c):
             return c
     if act:
         sys.exit("build the ACT side first: "
