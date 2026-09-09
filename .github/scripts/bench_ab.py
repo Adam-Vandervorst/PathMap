@@ -2,9 +2,10 @@
 """A/B benchmark of two commits on the same machine.
 
 Builds the bench binaries for BASE and HEAD once each (separate target dirs),
-then runs them for ROUNDS rounds, alternating which side goes first and
-pinning every run to one core.  As soon as both sides of a bench have run in
-a round, its compare table (per-round divan medians averaged over the rounds
+then runs them for ROUNDS rounds.  Benches run in parallel, each on its own
+core from BENCH_CPUS (the base and head runs of a bench share that core, back
+to back, alternating which side goes first each round).  As soon as both
+sides of a bench have run in a round, its compare table (per-round divan medians averaged over the rounds
 finished so far, via benches/divan_fmt.py) is printed and saved as
 $BENCH_OUT/cmp-<bench>.txt; $BENCH_OUT/compare.txt, the concatenation, is
 rewritten after every completed round, as are $BENCH_OUT/summary.md (one row
@@ -16,13 +17,16 @@ usage: bench_ab.py <base-sha> <head-sha>
 
 env:  BENCH_ROUNDS       rounds per side                (default 3)
       BENCHES            space separated bench targets  (default: the set used in BENCH_BUGFIXES)
-      BENCH_CPU          core to pin to                 (default 3)
+      BENCH_CPUS         cores to pin to, e.g. "0,2,4-8"; one bench pair runs per core at a time
+                         (default: one SMT thread per physical core, every other core, at most 16)
       BENCH_OUT          output directory               (default ./bench-out)
       DIVAN_SAMPLE_COUNT sample count for benches that do not set their own (default 40)
       CARGO_TARGET_DIR   parent of the two per-side target dirs (default ./target)
 """
-import json, math, os, re, statistics, subprocess, sys, time, tomllib
+import json, math, os, re, statistics, subprocess, sys, threading, time, tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Queue
 
 DEFAULT_BENCHES = 'shakespeare cities sparse_keys binary_keys superdense_keys act_paths zipper_head_owned product_zipper'
 THRESH = 0.05          # a case is listed in the summary when |change| exceeds this
@@ -36,13 +40,33 @@ def git(*args, cwd=None):
     return subprocess.run(['git', *args], cwd=cwd, check=True, text=True, capture_output=True).stdout.strip()
 
 
+def parse_cpus(spec):
+    cpus = []
+    for part in spec.replace(' ', '').split(','):
+        a, _, b = part.partition('-')
+        cpus += list(range(int(a), int(b or a) + 1))
+    return cpus
+
+
+def default_cpus(limit=16):
+    """One SMT thread per physical core, every other core (spreads over the L3 complexes), at most `limit`."""
+    cores = {}
+    for d in sorted(Path('/sys/devices/system/cpu').glob('cpu[0-9]*'), key=lambda d: int(d.name[3:])):
+        core = (d / 'topology' / 'core_id')
+        if core.is_file():
+            cores.setdefault(int(core.read_text()), int(d.name[3:]))
+    first = [cpu for _, cpu in sorted(cores.items())]
+    return (first[::2] or [0])[:limit]
+
+
 class Bench:
     def __init__(self, base, head):
         self.repo = Path.cwd()
         self.base_sha, self.head_sha = base, head
         self.rounds = int(os.environ.get('BENCH_ROUNDS', 3))
         self.benches = os.environ.get('BENCHES', DEFAULT_BENCHES).split()
-        self.cpu = os.environ.get('BENCH_CPU', '3')
+        self.cpus = parse_cpus(os.environ['BENCH_CPUS']) if os.environ.get('BENCH_CPUS') else default_cpus()
+        self.lock = threading.Lock()   # serialises log/progress output from the workers
         self.out = Path(os.environ.get('BENCH_OUT', self.repo / 'bench-out')).resolve()
         self.target = Path(os.environ.get('CARGO_TARGET_DIR', self.repo / 'target')).resolve()
         self.base_src = self.out / 'src-base'
@@ -54,7 +78,7 @@ class Bench:
         self.fmt = divan_fmt
 
     def progress(self, msg):
-        with open(self.out / 'progress.txt', 'a') as f:
+        with self.lock, open(self.out / 'progress.txt', 'a') as f:
             f.write(f'{time.strftime("%H:%M:%S", time.gmtime())} {msg}\n')
 
     def short(self, sha):
@@ -99,12 +123,24 @@ class Bench:
             sys.exit(f'no executable for bench(es) {missing} on {side}')
         self.bins[side] = exes
 
-    def run(self, side, bench, rnd):
+    def run(self, side, bench, rnd, cpu):
         t0 = time.time()
-        with open(self.out / f'{side}-{bench}-r{rnd}.txt', 'w') as out, open(self.out / f'run-{side}.log', 'a') as err:
-            subprocess.run(['taskset', '-c', self.cpu, self.bins[side][bench], '--bench'],
+        with open(self.out / f'{side}-{bench}-r{rnd}.txt', 'w') as out, open(self.out / f'run-{side}-{bench}.log', 'a') as err:
+            subprocess.run(['taskset', '-c', str(cpu), self.bins[side][bench], '--bench'],
                            cwd=self.repo, stdout=out, stderr=err, check=True)
-        self.progress(f'round {rnd}/{self.rounds} {bench} {side} {time.time() - t0:.0f}s')
+        self.progress(f'round {rnd}/{self.rounds} {bench} {side} {time.time() - t0:.0f}s cpu {cpu}')
+
+    def run_pair(self, bench, rnd, free):
+        """Both sides of one bench, back to back on one core taken from the pool, then its compare table."""
+        cpu = free.get()
+        try:
+            for side in (('base', 'head') if rnd % 2 else ('head', 'base')):
+                with self.lock:
+                    log(f'== round {rnd}/{self.rounds} {bench} {side} (cpu {cpu})')
+                self.run(side, bench, rnd, cpu)
+            self.compare_bench(bench, rnd)
+        finally:
+            free.put(cpu)
 
     def compare_bench(self, bench, rounds_so_far):
         """Average each side's rounds so far, compare medians, save and print the table."""
@@ -120,7 +156,8 @@ class Bench:
         text = (f'{bench}  (base {self.short(self.base_sha)}  head {self.short(self.head_sha)}'
                 f'  rounds {rounds_so_far}  median ns)\n{table}\n\n')
         (self.out / f'cmp-{bench}.txt').write_text(text)
-        log(text, end='')
+        with self.lock:
+            log(text, end='')
 
     def compare_rounds(self, rounds_so_far):
         tmp = self.out / 'compare.tmp'
@@ -174,18 +211,19 @@ class Bench:
         self.cleanup()
         try:
             git('worktree', 'add', '--detach', str(self.base_src), self.base_sha, cwd=self.repo)
-            self.progress(f'plan: {self.rounds} round(s) x base/head x [{" ".join(self.benches)}], core {self.cpu}')
+            self.progress(f'plan: {self.rounds} round(s) x base/head x [{" ".join(self.benches)}], '
+                          f'{min(len(self.cpus), len(self.benches))} at a time on cpus {",".join(map(str, self.cpus))}')
             self.progress(f'building base {self.short(self.base_sha)}')
             self.build_side('base', self.base_src)
             self.progress(f'building head {self.short(self.head_sha)}')
             self.build_side('head', self.repo)
+            free = Queue()
+            for cpu in self.cpus:
+                free.put(cpu)
             for rnd in range(1, self.rounds + 1):
-                order = ('base', 'head') if rnd % 2 else ('head', 'base')
-                for bench in self.benches:
-                    for side in order:
-                        log(f'== round {rnd}/{self.rounds} {bench} {side}')
-                        self.run(side, bench, rnd)
-                    self.compare_bench(bench, rnd)
+                with ThreadPoolExecutor(min(len(self.cpus), len(self.benches))) as pool:
+                    for r in pool.map(lambda b: self.run_pair(b, rnd, free), self.benches):
+                        pass                     # re-raises a worker's exception
                 self.compare_rounds(rnd)
                 self.progress(f'round {rnd}/{self.rounds} done, compare.txt refreshed')
             log(f'== final compare over {self.rounds} round(s): {self.out / "compare.txt"}')
