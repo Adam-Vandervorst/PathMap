@@ -6195,6 +6195,11 @@ mod tests {
         assert!(!rz.is_val(), "dangling path {path:?} unexpectedly has a value");
         assert_eq!(rz.child_count(), 0, "dangling path {path:?} unexpectedly has children");
     }
+    fn make_dangling_path_map(paths: &[&[u8]]) -> PathMap<()> {
+        let mut m = PathMap::<()>::new();
+        for path in paths { assert!(m.create_path(path)); }
+        m
+    }
 
     /// Joining into a dense node whose child at that byte is a dangling sentinel
     #[test]
@@ -6379,6 +6384,97 @@ mod tests {
         assert!(m.write_zipper().join_k_path_into(2, false));
         assert_eq!(keys(&m), vec![b"a".to_vec(), b"ab".to_vec(), b"ac".to_vec()]);
         assert_eq!(m.val_count(), 3);
+        assert_valid_trie(m.root());
+    }
+
+    /// Head-dropping is a join of the surviving subtries, so it must preserve dangling paths even
+    /// when they collide.  This deliberately uses no values, keeping the question independent of
+    /// any particular value lattice's treatment of its bottom element.
+    #[test]
+    fn write_zipper_join_k_path_dangling_paths() {
+        //Both paths shorten to "d", so their join is one dangling path at "d".
+        let mut m = make_dangling_path_map(&[b"abcd", b"dddd"]);
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(m.read_zipper().child_count(), 1);
+        assert_dangling_path(&m, b"d");
+        assert_valid_trie(m.root());
+
+        //Dropping the complete paths leaves nothing downstream of the root, so the operation reports
+        //false.  The root focus itself still exists, but it has neither a value nor any children.
+        let mut m = make_dangling_path_map(&[b"abcd", b"dddd"]);
+        let status = m.write_zipper().join_k_path_into(4, false);
+        assert!(!status);
+        assert!(m.is_empty());
+        let rz = m.read_zipper();
+        assert!(rz.path_exists());
+        assert!(!rz.is_val());
+        assert_eq!(rz.child_count(), 0);
+        assert_valid_trie(m.root());
+
+        //Distinct suffixes must both survive the join.
+        let mut m = make_dangling_path_map(&[b"abcd", b"efgh"]);
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(m.read_zipper().child_count(), 2);
+        assert_dangling_path(&m, b"d");
+        assert_dangling_path(&m, b"h");
+        assert_valid_trie(m.root());
+    }
+
+    /// Colliding values must honor every possible `Lattice::pjoin` outcome, rather than merely
+    /// deduplicating the unit values used by the basic issue #84 reproducer.
+    #[test]
+    fn write_zipper_join_k_path_colliding_values_follow_lattice() {
+        //A newly-created lattice element replaces both physical value slots.
+        for prune in [false, true] {
+            let mut m = PathMap::<LatticeProbe>::new();
+            m.set_val_at(b"aaaa", LatticeProbe(ProbeState::Original));
+            m.set_val_at(b"acaa", LatticeProbe(ProbeState::Original));
+            assert!(m.write_zipper().join_k_path_into(3, prune));
+            assert_eq!(m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"a".to_vec()]);
+            assert_eq!(m.val_at(b"a"), Some(&LatticeProbe(ProbeState::Joined)));
+            assert_eq!(m.val_count(), 1);
+            assert_valid_trie(m.root());
+        }
+
+        //A counter-identity result must retain the right-hand value, not whichever slot is easiest to keep.
+        let mut m = PathMap::<bool>::new();
+        m.set_val_at(b"aaaa", false);
+        m.set_val_at(b"acaa", true);
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(m.val_at(b"a"), Some(&true));
+        assert_eq!(m.val_count(), 1);
+        assert_valid_trie(m.root());
+
+        //`Option::None` is a present lattice-bottom value, not the absence of a value from the trie.
+        let mut m = PathMap::<Option<()>>::new();
+        m.set_val_at(b"aaaa", None);
+        m.set_val_at(b"acaa", None);
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"a".to_vec()]);
+        assert_eq!(m.val_at(b"a"), Some(&None));
+        assert_eq!(m.val_count(), 1);
+        assert_valid_trie(m.root());
+    }
+
+    /// Ordinary map and zipper joins use the LineList `merge_guts` path rather than `drop_head_dyn`.
+    /// A stored `Option::None` remains a present value when equal keys collide there too.
+    #[test]
+    fn join_colliding_option_values_retains_present_bottom() {
+        let mut left = PathMap::<Option<()>>::new();
+        left.set_val_at(b"a", None);
+        let mut right = PathMap::<Option<()>>::new();
+        right.set_val_at(b"a", None);
+
+        let joined = left.join(&right);
+        assert_eq!(joined.val_at(b"a"), Some(&None));
+        assert_eq!(joined.val_count(), 1);
+        assert_valid_trie(joined.root());
+
+        let status = left.write_zipper().join_into(&right.read_zipper());
+        assert_eq!(status, AlgebraicStatus::Identity);
+        assert_eq!(left.val_at(b"a"), Some(&None));
+        assert_eq!(left.val_count(), 1);
+        assert_valid_trie(left.root());
     }
 
     /// An emptied root (`remove_branches` at the root always leaves a LineListNode) joined with an empty

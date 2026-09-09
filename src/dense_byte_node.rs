@@ -1857,7 +1857,11 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         };
         let val_status = match self.val_mut() {
             Some(self_val) => match other_val {
-                Some(other_val) => self_val.join_into(other_val),
+                Some(other_val) => {
+                    let status = self_val.join_into(other_val);
+                    debug_assert!(!status.is_none(), "Lattice::join_into returned None for a join");
+                    status
+                },
                 None => AlgebraicStatus::Identity,
             },
             None => match other_val {
