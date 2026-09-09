@@ -503,6 +503,13 @@ impl core::ops::BitXor for ByteMask {
     }
 }
 
+impl core::ops::BitXorAssign for ByteMask {
+    #[inline]
+    fn bitxor_assign(&mut self, rhs: Self) {
+        *self = self.xor(&rhs)
+    }
+}
+
 impl core::ops::Not for ByteMask {
     type Output = ByteMask;
     #[inline]

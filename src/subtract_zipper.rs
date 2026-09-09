@@ -21,6 +21,11 @@ pub struct SubtractZipper<V, A, B> {
     child_mask: ByteMask,
     val: CachedVal<V>,
     val_count: Cell<Option<usize>>,
+
+    // Results of shared-child subtree probes performed at the current focus
+    // since the last logical movement or refresh.
+    checked_common: ByteMask,
+    surviving_common: ByteMask,
 }
 
 enum CachedVal<V> {
@@ -59,33 +64,39 @@ where
             child_mask: ByteMask::default(),
             val: CachedVal::None,
             val_count: Cell::new(None),
+            checked_common: ByteMask::EMPTY,
+            surviving_common: ByteMask::EMPTY,
         };
 
         this.refresh();
         this
     }
 
+    #[inline(always)]
+    fn invalidate_child_probes(&mut self) {
+        self.checked_common = ByteMask::EMPTY;
+        self.surviving_common = ByteMask::EMPTY;
+    }
+
     /// Rebuilds the cached virtual state for the current backing-zipper focus.
     ///
-    /// This recomputes the value and child topology of the materialized
-    /// subtraction `lhs - rhs` and invalidates the cached value count.
+    /// Previously computed shared-child probes are reused while rebuilding the
+    /// child mask. The probe cache is discarded afterwards.
     fn refresh(&mut self) {
         self.val_count.set(None);
 
         if !self.lhs.path_exists() {
-            self.child_mask = ByteMask::default();
+            self.child_mask = ByteMask::EMPTY;
             self.val = CachedVal::None;
-            return;
-        }
-
-        if !self.rhs.path_exists() {
+        } else if !self.rhs.path_exists() {
             self.child_mask = self.lhs.child_mask();
             self.val = CachedVal::Lhs;
-            return;
+        } else {
+            self.val = self.compute_val();
+            self.child_mask = self.compute_child_mask();
         }
 
-        self.val = self.compute_val();
-        self.child_mask = self.compute_child_mask();
+        self.invalidate_child_probes();
     }
 
     /// Descends both backing zippers by one byte without refreshing the cached
@@ -95,6 +106,7 @@ where
     /// `val` are stale until `refresh()` is called or the movement is undone.
     #[inline]
     fn descend_to_byte_raw(&mut self, byte: u8) {
+        self.invalidate_child_probes();
         self.lhs.descend_to_byte(byte);
         self.rhs.descend_to_byte(byte);
     }
@@ -111,11 +123,14 @@ where
             "SubtractZipper attempted to ascend above its root"
         );
 
-        let lhs = self.lhs.ascend_byte();
-        let rhs = self.rhs.ascend_byte();
+        let lhs_ascended = self.lhs.ascend_byte();
+        let rhs_ascended = self.rhs.ascend_byte();
 
-        debug_assert_eq!(lhs, rhs);
-        lhs
+        debug_assert_eq!(lhs_ascended, rhs_ascended);
+
+        self.invalidate_child_probes();
+
+        lhs_ascended
     }
 
     /// Returns whether the child `at` contains anything in the materialized
@@ -124,21 +139,51 @@ where
     /// Both backing zippers are temporarily descended into the child and restored
     /// to their original focus before this method returns.
     #[inline]
-    fn subtree_survives(&mut self, at: u8) -> bool {
-        self.descend_to_byte_raw(at);
+    fn subtree_survives_uncached(&mut self, at: u8) -> bool {
+        // This is a temporary probe, not a logical focus change, so bypass the
+        // raw movement helpers in order to preserve the current-focus probe cache.
+        self.lhs.descend_to_byte(at);
+        self.rhs.descend_to_byte(at);
+
         let survives = subtree_has_difference::<V, _, _>(&mut self.lhs, &mut self.rhs);
-        self.ascend_byte_raw();
+
+        let lhs_ascended = self.lhs.ascend_byte();
+        let rhs_ascended = self.rhs.ascend_byte();
+
+        debug_assert!(lhs_ascended);
+        debug_assert!(rhs_ascended);
+
+        survives
+    }
+
+    #[inline]
+    fn subtree_survives(&mut self, at: u8) -> bool {
+        let survives = self.subtree_survives_uncached(at);
+
+        self.checked_common.set_bit(at);
+        if survives {
+            self.surviving_common.set_bit(at);
+        }
 
         survives
     }
 
     fn compute_child_mask(&mut self) -> ByteMask {
-        let mut out = self.lhs.child_mask();
+        let lhs_mask = self.lhs.child_mask();
+        let common = lhs_mask & self.rhs.child_mask();
 
-        for byte in (out & self.rhs.child_mask()).iter() {
-            // Both tries contain this branch. Look below it to determine
-            // whether anything survives.
-            if !self.subtree_survives(byte) {
+        let mut out = lhs_mask;
+        // Remove shared children already known not to survive.
+        // checked_common ^ surviving_common is exactly the set of checked children
+        // known not to survive. All of them are present in lhs_mask, so XOR removes them.
+        out ^= self.checked_common ^ self.surviving_common;
+
+        // Since checked_common ⊆ common, XOR gives exactly the unchecked children.
+        let unchecked = common ^ self.checked_common;
+        // Only probe shared children whose subtraction subtree has not already
+        // been inspected at this focus.
+        for byte in unchecked.iter() {
+            if !self.subtree_survives_uncached(byte) {
                 out.clear_bit(byte);
             }
         }
@@ -610,7 +655,11 @@ where
 
     #[inline]
     fn focus_byte(&self) -> Option<u8> {
-        self.lhs.focus_byte()
+        if self.depth() == 0 {
+            None
+        } else {
+            self.lhs.focus_byte()
+        }
     }
 
     // #[inline]
