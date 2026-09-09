@@ -26,7 +26,7 @@ env:  FUZZ_INPUTS        random programs, model vs crate        (default 20000)
       CARGO_TARGET_DIR   parent of the per-side target dirs      (default ./target)
       LAKE_CACHE         optional dir to keep lean's .lake build dirs across runs
 """
-import os, re, shutil, subprocess, sys
+import os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 FAIL_RE = re.compile(r'^FAIL (\S+) \[saved ([^\]]*)\]: (.*)$')
@@ -83,11 +83,13 @@ class Fuzz:
                                ('build', ['cargo', 'build', '--release', '-p', 'differential',
                                           '--target-dir', str(self.target / f'fuzz-{side}')], src)):
             logf = self.out / f'{name}-{side}.log'
+            t0 = time.time()
             with open(logf, 'w') as f:
                 p = subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT)
             if p.returncode:
                 log(f'{name} for {side} failed:\n{tail(logf)}')
                 return False
+            log(f'   {" ".join(cmd[:2])} for {side}: ok in {time.time() - t0:.0f}s (log: {logf.name})')
         return True
 
     def prepare_base(self):
