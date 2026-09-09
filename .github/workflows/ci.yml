@@ -89,10 +89,12 @@ jobs:
           [ -n "$BENCHES" ] || unset BENCHES
           mkdir -p "$BENCH_OUT"
           comment() { [ -z "$PR" ] || python3 .github/scripts/pr_comment.py "$PR" "$1" || true; }
-          .github/scripts/bench_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}" & bench=$!
-          # refresh the PR comment once a minute while the bench runs: progress + the compare table of finished rounds
-          while kill -0 $bench 2>/dev/null; do comment "running"; sleep 60; done
-          if wait $bench; then comment "done"; else comment "failed, see run log"; exit 1; fi
+          comment "running"
+          if .github/scripts/bench_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}"; then
+            comment "done"
+          else
+            comment "failed, see the job log"; exit 1
+          fi
       - name: summary
         if: always()
         run: |
