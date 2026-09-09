@@ -224,7 +224,6 @@ pub trait ZipperMoving: Zipper {
         while i < k.len() {
             self.descend_to_byte(k[i]);
             if !self.path_exists() {
-                self.ascend_byte();
                 return i
             }
             i += 1
