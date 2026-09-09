@@ -2,7 +2,7 @@
 """Create or update the single bench comment on a pull request.
 
 One comment per pull request, edited in place: a status line, a link to the
-job that produced it, and bench_ab.sh's compare table once it exists.  The
+job that produced it, and bench_ab.py's summary.md once it exists.  The
 first call of a run finds the PR's existing bench comment by the hidden marker
 on its first line (so a re-run or a new push reuses it) or creates it, and
 records the id in $BENCH_OUT/comment_id; later calls in the same run go
@@ -10,7 +10,7 @@ straight to that id.  Standard library only.
 
 usage: pr_comment.py <pr-number> <status text>
 env:   GITHUB_TOKEN GITHUB_REPOSITORY GITHUB_RUN_ID RUNNER_NAME   (provided by Actions)
-       BENCH_OUT                        dir holding compare.txt from bench_ab.sh
+       BENCH_OUT                        dir holding summary.md from bench_ab.py
        GITHUB_SERVER_URL                optional
 """
 import json, os, sys, time, urllib.request
@@ -60,13 +60,13 @@ def job_url():
 
 parts = [MARKER, f'### Bench A/B vs base: {status}', '',
          f"[job log]({job_url()}) · {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC"]
-compare = read('compare.txt')
-if compare:
+summary = read('summary.md')
+if summary:
     head = '\n'.join(parts)
     room = LIMIT - len(head) - 200
-    if len(compare) > room:
-        compare = compare[:room] + '\n… truncated; the full table is in the bench-out artifact\n'
-    parts += ['', '```', compare.rstrip(), '```']
+    if len(summary) > room:
+        summary = summary[:room] + '\n\n… truncated; see the bench-out artifact\n'
+    parts += ['', summary.rstrip()]
 body = '\n'.join(parts)
 
 id_file = out / 'comment_id'

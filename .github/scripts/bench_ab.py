@@ -7,8 +7,10 @@ pinning every run to one core.  As soon as both sides of a bench have run in
 a round, its compare table (per-round divan medians averaged over the rounds
 finished so far, via benches/divan_fmt.py) is printed and saved as
 $BENCH_OUT/cmp-<bench>.txt; $BENCH_OUT/compare.txt, the concatenation, is
-rewritten after every completed round.  Progress lines go to
-$BENCH_OUT/progress.txt.  pr_comment.py posts compare.txt to the PR.
+rewritten after every completed round, as are $BENCH_OUT/summary.md (one row
+per bench plus the cases that moved more than THRESH, which is what
+pr_comment.py posts to the PR) and summary.json.  Progress lines go to
+$BENCH_OUT/progress.txt.
 
 usage: bench_ab.py <base-sha> <head-sha>
 
@@ -19,10 +21,11 @@ env:  BENCH_ROUNDS       rounds per side                (default 3)
       DIVAN_SAMPLE_COUNT sample count for benches that do not set their own (default 40)
       CARGO_TARGET_DIR   parent of the two per-side target dirs (default ./target)
 """
-import json, os, re, subprocess, sys, time, tomllib
+import json, math, os, re, statistics, subprocess, sys, time, tomllib
 from pathlib import Path
 
 DEFAULT_BENCHES = 'shakespeare cities sparse_keys binary_keys superdense_keys act_paths zipper_head_owned product_zipper'
+THRESH = 0.05          # a case is listed in the summary when |change| exceeds this
 
 
 def log(*a, **kw):
@@ -44,6 +47,7 @@ class Bench:
         self.target = Path(os.environ.get('CARGO_TARGET_DIR', self.repo / 'target')).resolve()
         self.base_src = self.out / 'src-base'
         self.bins = {}
+        self.results = {}      # bench -> {'group/case': {'base': ns, 'head': ns, 'pct': float}}
         os.environ.setdefault('DIVAN_SAMPLE_COUNT', '40')
         sys.path.insert(0, str(self.repo / 'benches'))
         import divan_fmt
@@ -110,17 +114,57 @@ class Bench:
             data = [self.fmt.parse_divan_output(f.read_text()) for f in files]
             avg[side] = self.fmt.average_fields(data)
             (self.out / f'{side}-{bench}-avg.txt').write_text(self.fmt.render_divan_table(avg[side]) + '\n')
-        table = self.fmt.render_divan_table(self.fmt.compare_fields(avg['base'], avg['head'], 'median_ns'))
-        table = re.sub(r'\x1b\[[0-9;]*m', '', table)
+        cmp = self.fmt.compare_fields(avg['base'], avg['head'], 'median_ns')
+        self.results[bench] = {f'{g}/{c}': {'base': r['base'], 'head': r['other'], 'pct': r['pct']} for (g, c), r in cmp.items()}
+        table = re.sub(r'\x1b\[[0-9;]*m', '', self.fmt.render_divan_table(cmp))
         text = (f'{bench}  (base {self.short(self.base_sha)}  head {self.short(self.head_sha)}'
                 f'  rounds {rounds_so_far}  median ns)\n{table}\n\n')
         (self.out / f'cmp-{bench}.txt').write_text(text)
         log(text, end='')
 
-    def compare_rounds(self):
+    def compare_rounds(self, rounds_so_far):
         tmp = self.out / 'compare.tmp'
         tmp.write_text(''.join((self.out / f'cmp-{b}.txt').read_text() for b in self.benches))
         tmp.rename(self.out / 'compare.txt')
+        (self.out / 'summary.json').write_text(json.dumps(
+            {'base': self.short(self.base_sha), 'head': self.short(self.head_sha), 'rounds': rounds_so_far,
+             'benches': self.results}))
+        (self.out / 'summary.md').write_text(self.render_summary(rounds_so_far))
+
+    def render_summary(self, rounds_so_far):
+        """One row per bench, then the cases beyond THRESH, collapsed."""
+        def pct(v):
+            return f'{v:+.1%}'
+        L = [f'base {self.short(self.base_sha)} → head {self.short(self.head_sha)}, {rounds_so_far} round(s), '
+             f'median of each run averaged; negative is faster', '',
+             '| bench | cases | geomean | largest gain | largest loss | >5% faster | >5% slower |',
+             '|---|---:|---:|---|---|---:|---:|']
+        movers = []
+        for b in self.benches:
+            cases = self.results.get(b, {})
+            if not cases:
+                L.append(f'| {b} | 0 | | | | | |')
+                continue
+            ratios = [r['head'] / r['base'] for r in cases.values() if r['base']]
+            geo = math.exp(statistics.fmean(map(math.log, ratios))) - 1 if ratios else 0.0
+            lo = min(cases.items(), key=lambda kv: kv[1]['pct'])
+            hi = max(cases.items(), key=lambda kv: kv[1]['pct'])
+            faster = sum(r['pct'] < -THRESH for r in cases.values())
+            slower = sum(r['pct'] > THRESH for r in cases.values())
+            L.append(f'| {b} | {len(cases)} | {pct(geo)} | {pct(lo[1]["pct"])} `{lo[0]}` | {pct(hi[1]["pct"])} `{hi[0]}` '
+                     f'| {faster} | {slower} |')
+            movers += [(b, name, r) for name, r in cases.items() if abs(r['pct']) > THRESH]
+        movers.sort(key=lambda m: -abs(m[2]['pct']))
+        if movers:
+            L += ['', f'<details><summary>{len(movers)} case(s) moved more than {THRESH:.0%}</summary>', '',
+                  '| bench | case | base | head | change |', '|---|---|---:|---:|---:|']
+            L += [f'| {b} | `{name}` | {self.fmt.format_ns(r["base"])} | {self.fmt.format_ns(r["head"])} | {pct(r["pct"])} |'
+                  for b, name, r in movers[:60]]
+            if len(movers) > 60:
+                L.append(f'| | … and {len(movers) - 60} more, see compare.txt in the bench-out artifact | | | |')
+            L += ['', '</details>']
+        L += ['', 'Full tables per bench are in the job log and the bench-out artifact.']
+        return '\n'.join(L) + '\n'
 
     def main(self):
         self.out.mkdir(parents=True, exist_ok=True)
@@ -142,7 +186,7 @@ class Bench:
                         log(f'== round {rnd}/{self.rounds} {bench} {side}')
                         self.run(side, bench, rnd)
                     self.compare_bench(bench, rnd)
-                self.compare_rounds()
+                self.compare_rounds(rnd)
                 self.progress(f'round {rnd}/{self.rounds} done, compare.txt refreshed')
             log(f'== final compare over {self.rounds} round(s): {self.out / "compare.txt"}')
         finally:
