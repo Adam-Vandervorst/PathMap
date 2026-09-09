@@ -103,16 +103,15 @@ jobs:
       - name: summary
         if: always()
         run: |
-          out="${{ runner.temp }}/bench-out"
-          if [ -s "$out/compare.txt" ]; then
-            { echo '```'; cat "$out/compare.txt"; echo '```'; } > "$out/compare.md"
-            cat "$out/compare.md" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          f="${{ runner.temp }}/bench-out/summary.md"
+          [ -s "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: bench-out
-          path: ${{ runner.temp }}/bench-out/*.txt
+          path: |
+            ${{ runner.temp }}/bench-out/*.txt
+            ${{ runner.temp }}/bench-out/summary.*
           if-no-files-found: ignore
 
   fuzz:
