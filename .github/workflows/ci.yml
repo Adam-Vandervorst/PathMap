@@ -105,7 +105,7 @@ jobs:
         run: |
           f="${{ runner.temp }}/bench-out/summary.md"
           [ -s "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || true
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-out
@@ -154,7 +154,7 @@ jobs:
         run: |
           f="${{ runner.temp }}/fuzz-out/summary.md"
           [ -s "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || true
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: fuzz-out
