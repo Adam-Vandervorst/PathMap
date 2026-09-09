@@ -38,7 +38,7 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -65,7 +65,7 @@ jobs:
       contents: read
       pull-requests: write   # for the progress comment; read-only on fork PRs, where commenting is skipped
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: toolchain
@@ -108,7 +108,7 @@ jobs:
             { echo '```'; cat "$out/compare.txt"; echo '```'; } > "$out/compare.md"
             cat "$out/compare.md" >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: bench-out
@@ -124,7 +124,7 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: toolchains
@@ -155,7 +155,7 @@ jobs:
         run: |
           f="${{ runner.temp }}/fuzz-out/summary.md"
           [ -s "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: fuzz-out
