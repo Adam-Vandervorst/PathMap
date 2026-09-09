@@ -12,6 +12,9 @@ on:
       rounds:
         description: bench rounds per side
         default: "3"
+      fuzz_inputs:
+        description: random programs for the differential fuzzer
+        default: "20000"
       benches:
         description: space separated bench targets (empty = default set)
         default: ""
@@ -110,4 +113,54 @@ jobs:
         with:
           name: bench-out
           path: ${{ runner.temp }}/bench-out/*.txt
+          if-no-files-found: ignore
+
+  fuzz:
+    name: differential fuzz vs Lean model
+    # Regression gate: head and base run on identical inputs, and the job fails only when
+    # head diverges from the model on an input base did not (master has known divergences).
+    needs: test
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          # elan reads lean/lean-toolchain and fetches the pinned Lean on first use
+          [ -x "$HOME/.elan/bin/elan" ] || curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none --no-modify-path
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: resolve base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            sha=${{ github.event.pull_request.base.sha }}
+          else
+            sha=$(git rev-parse "origin/${{ inputs.base }}" 2>/dev/null || git rev-parse "${{ inputs.base }}")
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: fuzz head and base
+        env:
+          FUZZ_INPUTS: ${{ inputs.fuzz_inputs || '20000' }}
+          FUZZ_OUT: ${{ runner.temp }}/fuzz-out
+          LAKE_CACHE: /home/gh-runner/cache/lean-lake   # checkout wipes ignored files such as lean/.lake
+        run: |
+          .github/scripts/fuzz_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
+      - name: summary
+        if: always()
+        run: |
+          f="${{ runner.temp }}/fuzz-out/summary.md"
+          [ -s "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-out
+          path: |
+            ${{ runner.temp }}/fuzz-out/*.txt
+            ${{ runner.temp }}/fuzz-out/*.md
+            ${{ runner.temp }}/fuzz-out/fails-*
           if-no-files-found: ignore

@@ -175,7 +175,7 @@ pub fn dump<Z: ZipperMoving + ZipperPath + ZipperValues<u64>>(z: &mut Z) -> Stri
 /// Keeping this behind a trait means there is still exactly one operation table,
 /// so the two front ends cannot drift apart.
 pub trait ReadSource:
-    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath + ZipperIteration
+    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration
 {
     /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk).
     fn dump_fork(&self) -> String;
