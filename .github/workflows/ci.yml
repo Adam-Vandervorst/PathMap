@@ -122,6 +122,55 @@ jobs:
             ${{ runner.temp }}/bench-out/summary.*
           if-no-files-found: ignore
 
+  lean:
+    name: Lean model, proofs and checks
+    # `lake build` type-checks the theorems in lean/PathMapModel/Spec.lean and evaluates every
+    # `#guard` (the metamorphic laws over the fixture battery and the regression fixtures), so
+    # a broken law or fixture fails the build.  Lean only warns on `sorry`, so that is checked
+    # for separately.
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: toolchain
+        # elan is installed per runner user on first use and fetches the Lean pinned by lean/lean-toolchain
+        run: |
+          [ -x "$HOME/.elan/bin/elan" ] || curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none --no-modify-path
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.elan/bin:$PATH"
+          (cd lean && lean --version && lake --version)
+      - name: build the model, check proofs and guards
+        run: |
+          # checkout wipes ignored files, so keep lake's build dir in the persistent cache
+          mkdir -p /home/gh-runner/cache/lean-lake/proofs
+          ln -sfn /home/gh-runner/cache/lean-lake/proofs lean/.lake
+          cd lean
+          lake build 2>&1 | tee ../lake.log
+          test "${PIPESTATUS[0]}" -eq 0
+      - name: no sorry, no unexpected axioms
+        run: |
+          if grep -n 'declaration uses .sorry.' lake.log; then
+            echo "::error::a declaration uses sorry"; exit 1
+          fi
+          if grep -rn "\bsorry\b\|^axiom " lean/PathMapModel lean/Main.lean; then
+            echo "::error::sorry or axiom in the model sources"; exit 1
+          fi
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "### Lean model"
+            echo
+            echo "| file | theorems | guards |"
+            echo "|---|---:|---:|"
+            for f in lean/PathMapModel/*.lean; do
+              t=$(grep -c '^theorem\|^lemma' "$f" || true); g=$(grep -c '#guard' "$f" || true)
+              [ "$t$g" = "00" ] || echo "| $(basename "$f") | $t | $g |"
+            done
+            echo
+            echo "$(grep -c 'declaration uses' lake.log || true) declaration(s) use sorry; $(grep -c '^warning' lake.log || true) warning(s) from lake build."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   fuzz:
     name: differential fuzz vs Lean model
     # Regression check: head and base run on identical inputs; an input on which head diverges
