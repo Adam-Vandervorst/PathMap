@@ -1,0 +1,249 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: base ref to benchmark against
+        default: master
+      rounds:
+        description: bench rounds per side
+        default: "3"
+      fuzz_inputs:
+        description: random programs for the differential fuzzer
+        default: "20000"
+      benches:
+        description: space separated bench targets (empty = default set)
+        default: ""
+
+permissions:
+  contents: read
+
+# One workflow run per PR / branch; a new push cancels the one in progress.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  # Persistent across jobs on the runner (outside its _work dir), so builds are incremental.
+  CARGO_TARGET_DIR: /home/gh-runner/cache/target
+
+jobs:
+  test:
+    name: tests
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - name: toolchain
+        # rustup is installed per runner user on first use
+        run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version && cargo --version
+      - name: build
+        run: cargo build --release --all-targets
+      - name: unit + integration tests
+        run: cargo test --release
+      - name: tests with arena_compact + random
+        run: cargo test --release --features arena_compact,random
+      - name: doc tests + docs
+        run: cargo doc --no-deps
+
+  bench:
+    name: bench A/B vs base
+    # Runs last, after the tests and the fuzz gate pass (skipped when either fails), on PRs
+    # and manual runs only; a push to master has nothing to compare against.
+    needs: [test, fuzz]
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64, bench]
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      pull-requests: write   # for the progress comment; read-only on fork PRs, where commenting is skipped
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: toolchain
+        # rustup is installed per runner user on first use
+        run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: resolve base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            sha=${{ github.event.pull_request.base.sha }}
+          else
+            sha=$(git rev-parse "origin/${{ inputs.base }}" 2>/dev/null || git rev-parse "${{ inputs.base }}")
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: A/B bench
+        env:
+          BENCH_ROUNDS: ${{ inputs.rounds || '3' }}
+          BENCHES: ${{ inputs.benches }}
+          BENCH_OUT: ${{ runner.temp }}/bench-out
+          GITHUB_TOKEN: ${{ github.token }}
+          # Only same-repo PRs get a writable token; on fork PRs the comment calls fail and are ignored.
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # an empty BENCHES must fall through to the script's default set
+          [ -n "$BENCHES" ] || unset BENCHES
+          mkdir -p "$BENCH_OUT"
+          comment() { [ -z "$PR" ] || python3 .github/scripts/pr_comment.py "$PR" "$1" || true; }
+          comment "running"
+          if .github/scripts/bench_ab.py "${{ steps.base.outputs.sha }}" "${{ github.sha }}"; then
+            comment "done"
+          else
+            comment "failed, see the job log"; exit 1
+          fi
+      - name: summary
+        if: always()
+        run: |
+          f="${{ runner.temp }}/bench-out/summary.md"
+          [ -s "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-out
+          path: |
+            ${{ runner.temp }}/bench-out/*.txt
+            ${{ runner.temp }}/bench-out/summary.*
+          if-no-files-found: ignore
+
+  lean:
+    name: Lean model, proofs and checks
+    # `lake build` type-checks the theorems in lean/PathMapModel/Spec.lean and evaluates every
+    # `#guard` (the metamorphic laws over the fixture battery and the regression fixtures), so
+    # a broken law or fixture fails the build.  Lean only warns on `sorry`, so that is checked
+    # for separately.
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: toolchain
+        # elan is installed per runner user on first use and fetches the Lean pinned by lean/lean-toolchain
+        run: |
+          [ -x "$HOME/.elan/bin/elan" ] || curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none --no-modify-path
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.elan/bin:$PATH"
+          (cd lean && lean --version && lake --version)
+      - name: build the model, check proofs and guards
+        run: |
+          # checkout wipes ignored files, so keep lake's build dir in the persistent cache
+          mkdir -p /home/gh-runner/cache/lean-lake/proofs
+          ln -sfn /home/gh-runner/cache/lean-lake/proofs lean/.lake
+          cd lean
+          lake build 2>&1 | tee ../lake.log
+          test "${PIPESTATUS[0]}" -eq 0
+      - name: no sorry, no unexpected axioms
+        run: |
+          if grep -n 'declaration uses .sorry.' lake.log; then
+            echo "::error::a declaration uses sorry"; exit 1
+          fi
+          if grep -rn "\bsorry\b\|^axiom " lean/PathMapModel lean/Main.lean; then
+            echo "::error::sorry or axiom in the model sources"; exit 1
+          fi
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "### Lean model"
+            echo
+            echo "| file | theorems | guards |"
+            echo "|---|---:|---:|"
+            for f in lean/PathMapModel/*.lean; do
+              t=$(grep -c '^theorem\|^lemma' "$f" || true); g=$(grep -c '#guard' "$f" || true)
+              [ "$t$g" = "00" ] || echo "| $(basename "$f") | $t | $g |"
+            done
+            echo
+            echo "$(grep -c 'declaration uses' lake.log || true) declaration(s) use sorry; $(grep -c '^warning' lake.log || true) warning(s) from lake build."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  fuzz:
+    name: differential fuzz vs Lean model
+    # Regression check: head and base run on identical inputs; an input on which head diverges
+    # from the model but base did not is reported as a warning annotation (master has known
+    # divergences).  Set FUZZ_STRICT=1 below to make that fail the job instead.
+    # Ordered after the tests but not gated on them: findings are warnings, and a PR whose
+    # tests fail is exactly one whose divergences are worth seeing.
+    needs: test
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') }}
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: write   # for the fuzz comment; read-only on fork PRs, where commenting is skipped
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: toolchains
+        # Everything is installed per runner user on first use: rustup and elan into $HOME,
+        # then the Rust toolchain and the Lean pinned by lean/lean-toolchain.
+        run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          [ -x "$HOME/.elan/bin/elan" ] || curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none --no-modify-path
+          export PATH="$HOME/.cargo/bin:$HOME/.elan/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version && cargo --version
+          elan --version
+          (cd lean && lean --version && lake --version)   # fetches the pinned Lean when it is missing
+      - name: resolve base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            sha=${{ github.event.pull_request.base.sha }}
+          else
+            sha=$(git rev-parse "origin/${{ inputs.base }}" 2>/dev/null || git rev-parse "${{ inputs.base }}")
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: fuzz head and base
+        id: fuzz
+        env:
+          FUZZ_INPUTS: ${{ inputs.fuzz_inputs || '20000' }}
+          FUZZ_OUT: ${{ runner.temp }}/fuzz-out
+          LAKE_CACHE: /home/gh-runner/cache/lean-lake   # checkout wipes ignored files such as lean/.lake
+        run: |
+          .github/scripts/fuzz_ab.py "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
+      - name: comment on the PR
+        # One comment per PR for this job (separate from the bench one): verdict, per-mode tables,
+        # newly diverging inputs and their shrunk Rust reproducers.  Created only when there is
+        # something to report; an existing comment is updated by a clean run.  Skipped when there
+        # is no PR; fails silently on fork PRs, whose token is read-only.
+        if: always() && github.event.pull_request.number
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/pr_comment.py --id fuzz --title "Differential fuzz vs Lean model" \
+            --dir "${{ runner.temp }}/fuzz-out" --create-only-if "${{ runner.temp }}/fuzz-out/findings" \
+            "${{ github.event.pull_request.number }}" "${{ steps.fuzz.outcome }}" || true
+      - name: summary
+        if: always()
+        run: |
+          f="${{ runner.temp }}/fuzz-out/summary.md"
+          [ -s "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-out
+          path: |
+            ${{ runner.temp }}/fuzz-out/*.txt
+            ${{ runner.temp }}/fuzz-out/*.md
+            ${{ runner.temp }}/fuzz-out/fails-*
+            ${{ runner.temp }}/fuzz-out/repro
+          if-no-files-found: ignore
