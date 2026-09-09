@@ -6095,16 +6095,16 @@ mod tests {
         let status = { let mut wz = empty.write_zipper(); wz.join_into(&rz) };
         assert_eq!(status, AlgebraicStatus::Element);
         assert_eq!(empty.val_count(), 2);
-        assert_eq!(empty.get_val_at(&[0u8, 0, 0]), Some(&7));
-        assert_eq!(empty.get_val_at(&[0u8, 1]), Some(&8));
+        assert_eq!(empty.val_at(&[0u8, 0, 0]), Some(&7));
+        assert_eq!(empty.val_at(&[0u8, 1]), Some(&8));
 
         let mut dangling = PathMap::<u64>::new();
         dangling.create_path(&[3u8]);
         let status = { let mut wz = dangling.write_zipper_at_path(&[3u8]); wz.join_into(&rz) };
         assert_eq!(status, AlgebraicStatus::Element);
         assert_eq!(dangling.val_count(), 2);
-        assert_eq!(dangling.get_val_at(&[3u8, 0, 0, 0]), Some(&7));
-        assert_eq!(dangling.get_val_at(&[3u8, 0, 1]), Some(&8));
+        assert_eq!(dangling.val_at(&[3u8, 0, 0, 0]), Some(&7));
+        assert_eq!(dangling.val_at(&[3u8, 0, 1]), Some(&8));
     }
 
     /// Verifies that `ascend_until` and `ascend_until_branch` return a write zipper in
@@ -6185,55 +6185,74 @@ mod tests {
     }
     fn lln_with_dangling_child() -> PathMap<()> { with_dangling_c(&[b"d"]) }
     fn dense_with_dangling_child() -> PathMap<()> { with_dangling_c(&[b"d", b"e", b"f"]) }
+    fn unit_keys(m: &PathMap<()>) -> Vec<Vec<u8>> {
+        m.iter().map(|(k, _)| k).collect()
+    }
+    fn assert_dangling_path(m: &PathMap<()>, path: &[u8]) {
+        let mut rz = m.read_zipper();
+        rz.descend_to(path);
+        assert!(rz.path_exists(), "dangling path {path:?} was pruned");
+        assert!(!rz.is_val(), "dangling path {path:?} unexpectedly has a value");
+        assert_eq!(rz.child_count(), 0, "dangling path {path:?} unexpectedly has children");
+    }
 
     /// Joining into a dense node whose child at that byte is a dangling sentinel
     #[test]
     fn write_zipper_join_into_dangling_dense_child() {
         let mut other = PathMap::<()>::new(); other.set_val_at(b"ca", ());
         let joined = dense_with_dangling_child().join(&other);
-        assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"ca".to_vec(), b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
+        let expected = vec![b"ca".to_vec(), b"d".to_vec(), b"e".to_vec(), b"f".to_vec()];
+        assert_eq!(unit_keys(&joined), expected);
         assert_valid_trie(joined.root());
 
         let mut m = dense_with_dangling_child();
         m.write_zipper().join_into(&other.read_zipper());
-        assert_eq!(m.iter().count(), 4);
+        assert_eq!(unit_keys(&m), expected);
         assert_valid_trie(m.root());
 
         //Symmetric: the dangling child arrives from the *other* operand
         let mut dense = PathMap::<()>::new();
         for k in [b"ca".as_slice(), b"d", b"e", b"f"] { dense.set_val_at(k, ()); }
         let joined = dense.join(&lln_with_dangling_child());
+        assert_eq!(unit_keys(&joined), expected);
         assert_eq!(joined.iter().count(), 4);
+        assert_valid_trie(joined.root());
         dense.write_zipper().join_into(&lln_with_dangling_child().read_zipper());
+        assert_eq!(unit_keys(&dense), expected);
         assert_eq!(dense.iter().count(), 4);
         assert_valid_trie(dense.root());
+    }
+
+    fn assert_drop_head_case(source: PathMap<()>, expected: &[&[u8]]) {
+        let expected: Vec<Vec<u8>> = expected.iter().map(|key| key.to_vec()).collect();
+        let expected_status = !expected.is_empty();
+
+        let mut without_pruning = source.clone();
+        assert_eq!(without_pruning.write_zipper().join_k_path_into(1, false), expected_status);
+        assert_eq!(unit_keys(&without_pruning), expected, "join_k_path_into(prune = false)");
+        assert_valid_trie(without_pruning.root());
+
+        let mut with_pruning = source;
+        assert_eq!(with_pruning.write_zipper().join_k_path_into(1, true), expected_status);
+        assert_eq!(unit_keys(&with_pruning), expected, "join_k_path_into(prune = true)");
+        assert_valid_trie(with_pruning.root());
     }
 
     /// Dropping head bytes over a dangling sentinel child, in both node types.  (Values that sit within
     /// the dropped bytes are discarded by `join_k_path_into`; only the downstream subtries are joined.)
     #[test]
-    #[allow(deprecated)]
     fn write_zipper_drop_head_over_dangling_child() {
-        let keys = |m: &PathMap<()>| m.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>();
+        //Both operations skip a dangling child while retaining downstream values.
+        assert_drop_head_case(with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]), &[b"x", b"y", b"z"]); // DenseByteNode
+        assert_drop_head_case(with_dangling_c(&[b"dx"]), &[b"x"]); // LineListNode
 
-        let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]); // dense parent
-        assert!(m.write_zipper().join_k_path_into(1, false));
-        assert_eq!(keys(&m), vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]);
-        assert_valid_trie(m.root());
+        //Issue #82's exact node shapes: all ordinary values lie within the removed head byte, so the
+        //empty merge result must clear the branch instead of being handed to graft_internal.
+        assert_drop_head_case(dense_with_dangling_child(), &[]);
+        assert_drop_head_case(lln_with_dangling_child(), &[]);
 
-        let mut m = with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]);
-        assert!(m.write_zipper().drop_head(1));
-        assert_eq!(keys(&m), vec![b"x".to_vec(), b"y".to_vec(), b"z".to_vec()]);
-
-        let mut m = with_dangling_c(&[b"dx"]); // LineListNode parent
-        assert!(m.write_zipper().join_k_path_into(1, false));
-        assert_eq!(keys(&m), vec![b"x".to_vec()]);
-        assert_valid_trie(m.root());
-
-        //Only a dangling path below the focus: the branch is cleared, nothing is grafted
-        let mut m = with_dangling_c(&[]);
-        assert!(!m.write_zipper().join_k_path_into(1, false));
-        assert_eq!(m.iter().count(), 0);
+        //A root with no visible values and only the dangling path exercises the minimal empty result.
+        assert_drop_head_case(with_dangling_c(&[]), &[]);
     }
 
     /// Randomized: no-prune removals sprinkle dangling sentinels through random tries; join must be
@@ -6278,6 +6297,7 @@ mod tests {
             let mut a2 = a.clone();
             a2.write_zipper().join_into(&b.read_zipper());
             assert_eq!(keys(&a2), expected, "join_into");
+            assert_valid_trie(a2.root());
 
             let k = rng.random_range(1..=2usize);
             // values within the dropped bytes are discarded; only keys longer than k survive
@@ -6319,10 +6339,14 @@ mod tests {
             m
         };
         let joined = dangling_c().join(&dangling_c());
-        assert_eq!(joined.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(), vec![b"d".to_vec(), b"e".to_vec(), b"f".to_vec()]);
+        let expected = vec![b"d".to_vec(), b"e".to_vec(), b"f".to_vec()];
+        assert_eq!(unit_keys(&joined), expected);
+        assert_dangling_path(&joined, b"c");
         assert_valid_trie(joined.root());
         let mut a = dangling_c();
         a.write_zipper().join_into(&dangling_c().read_zipper());
+        assert_eq!(unit_keys(&a), expected);
+        assert_dangling_path(&a, b"c");
         assert_eq!(a.iter().count(), 3);
         assert_valid_trie(a.root());
     }
