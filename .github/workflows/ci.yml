@@ -176,8 +176,10 @@ jobs:
     # Regression check: head and base run on identical inputs; an input on which head diverges
     # from the model but base did not is reported as a warning annotation (master has known
     # divergences).  Set FUZZ_STRICT=1 below to make that fail the job instead.
+    # Ordered after the tests but not gated on them: findings are warnings, and a PR whose
+    # tests fail is exactly one whose divergences are worth seeing.
     needs: test
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') }}
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 90
     permissions:
