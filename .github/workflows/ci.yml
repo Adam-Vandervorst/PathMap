@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 300
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: write   # for the progress comment; read-only on fork PRs, where commenting is skipped
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,10 +81,18 @@ jobs:
           BENCH_ROUNDS: ${{ inputs.rounds || '3' }}
           BENCHES: ${{ inputs.benches }}
           BENCH_OUT: ${{ runner.temp }}/bench-out
+          GITHUB_TOKEN: ${{ github.token }}
+          # Only same-repo PRs get a writable token; on fork PRs the comment calls fail and are ignored.
+          PR: ${{ github.event.pull_request.number }}
         run: |
           # an empty BENCHES must fall through to the script's default set
           [ -n "$BENCHES" ] || unset BENCHES
-          .github/scripts/bench_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
+          mkdir -p "$BENCH_OUT"
+          comment() { [ -z "$PR" ] || python3 .github/scripts/pr_comment.py "$PR" "$1" || true; }
+          .github/scripts/bench_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}" & bench=$!
+          # refresh the PR comment once a minute while the bench runs: progress + the compare table of finished rounds
+          while kill -0 $bench 2>/dev/null; do comment "running"; sleep 60; done
+          if wait $bench; then comment "done"; else comment "failed, see run log"; exit 1; fi
       - name: summary
         if: always()
         run: |
@@ -99,11 +107,3 @@ jobs:
           name: bench-out
           path: ${{ runner.temp }}/bench-out/*.txt
           if-no-files-found: ignore
-      - name: comment on PR
-        # The token is read-only for PRs from forks, so only comment on same-repo PRs.
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        continue-on-error: true
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: bench
-          path: ${{ runner.temp }}/bench-out/compare.md
