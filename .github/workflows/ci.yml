@@ -40,7 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: toolchain
+        # rustup is installed per runner user on first use
         run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustc --version && cargo --version
@@ -69,7 +73,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: toolchain
+        # rustup is installed per runner user on first use
         run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
           rustup toolchain install stable --profile minimal
           rustup default stable
       - name: resolve base
@@ -128,16 +136,19 @@ jobs:
         with:
           fetch-depth: 0
       - name: toolchains
+        # Everything is installed per runner user on first use: rustup and elan into $HOME,
+        # then the Rust toolchain and the Lean pinned by lean/lean-toolchain.
         run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          [ -x "$HOME/.elan/bin/elan" ] || curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none --no-modify-path
+          export PATH="$HOME/.cargo/bin:$HOME/.elan/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           rustup toolchain install stable --profile minimal
           rustup default stable
-          # elan (installed once per runner user) reads lean/lean-toolchain and fetches the pinned
-          # Lean when it is missing; resolving the version here makes that happen in this step
-          [ -x "$HOME/.elan/bin/elan" ] || curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none --no-modify-path
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.elan/bin:$PATH"
+          rustc --version && cargo --version
           elan --version
-          (cd lean && lean --version && lake --version)
+          (cd lean && lean --version && lake --version)   # fetches the pinned Lean when it is missing
       - name: resolve base
         id: base
         run: |
