@@ -31,6 +31,7 @@ from pathlib import Path
 
 FAIL_RE = re.compile(r'^FAIL (\S+) \[saved ([^\]]*)\]: (.*)$')
 SUMMARY_RE = re.compile(r'^(\d+)/(\d+) inputs agree \((\d+) hit known bugs, (\d+) new divergences\)')
+KNOWN_RE = re.compile(r'^  known x(\d+): (.*)$')
 
 
 def log(*a, **kw):
@@ -123,8 +124,8 @@ class Fuzz:
         log('\n'.join(info) if info else tail(outf, 5))
 
     def parse(self, label, side):
-        """fails: name -> {'path', 'msg', 'detail'}; summary: (agree, total, known, new)."""
-        fails, summary, last = {}, None, None
+        """fails: name -> {'path', 'msg', 'detail'}; summary: (agree, total, known, new); known: class -> count."""
+        fails, summary, last, known = {}, None, None, {}
         p = self.out / f'fuzz-{label}-{side}.txt'
         if p.is_file():
             for line in p.read_text().splitlines():
@@ -136,7 +137,9 @@ class Fuzz:
                     last = None
                 if m := SUMMARY_RE.match(line):
                     summary = tuple(map(int, m.groups()))
-        return fails, summary
+                if m := KNOWN_RE.match(line):
+                    known[m.group(2)] = int(m.group(1))
+        return fails, summary, known
 
     @staticmethod
     def kind(f):
@@ -189,9 +192,11 @@ class Fuzz:
                   'so harness changes may show up as differences.', '']
         new_total, unfinished = 0, 0
         for label, n, _ in self.modes:
-            hf, hs = self.parse(label, 'head')
-            bf, bs = self.parse(label, 'base')
+            hf, hs, hk = self.parse(label, 'head')
+            bf, bs, bk = self.parse(label, 'base')
             L += [f'## {label}: {n} inputs, seed {self.seed}', '',
+                  'agree = model and crate match; known = the divergence matches a classified bug in '
+                  'differential.py; new = it matches none.  Only the new set is compared input by input below.', '',
                   '| side | agree | known | new divergences |', '|---|---:|---:|---:|']
             for side, s in (('head', hs), ('base', bs)):
                 if s:
@@ -203,6 +208,13 @@ class Fuzz:
                 new = sorted(set(hf) - set(bf))          # names are random#NNNNN, so this is input order
                 fixed = sorted(set(bf) - set(hf))
                 L += ['', f'{len(new)} input(s) diverge on head but not on base; {len(fixed)} diverge on base but not on head.']
+                changed = sorted(((bk.get(k, 0), hk.get(k, 0), k) for k in set(bk) | set(hk) if bk.get(k, 0) != hk.get(k, 0)),
+                                 key=lambda t: -abs(t[0] - t[1]))
+                if changed:
+                    L += ['', '### Known-class hits that changed', '', '| known class | base | head |', '|---|---:|---:|']
+                    L += [f'| {k[:100]} | {b} | {h} |' for b, h, k in changed[:10]]
+                    if len(changed) > 10:
+                        L.append(f'| … {len(changed) - 10} more | | |')
                 if new:
                     new_total += len(new)
                     log(f'::{"error" if self.strict else "warning"} title=Differential fuzz ({label})::{len(new)} input(s) diverge from the model on head '
