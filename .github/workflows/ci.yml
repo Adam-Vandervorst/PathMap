@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: base ref to benchmark against
+        default: master
+      rounds:
+        description: bench rounds per side
+        default: "3"
+      benches:
+        description: space separated bench targets (empty = default set)
+        default: ""
+
+permissions:
+  contents: read
+
+# One workflow run per PR / branch; a new push cancels the one in progress.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  # Persistent across jobs on the runner (outside its _work dir), so builds are incremental.
+  CARGO_TARGET_DIR: /home/gh-runner/cache/target
+
+jobs:
+  test:
+    name: tests
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version && cargo --version
+      - name: build
+        run: cargo build --release --all-targets
+      - name: unit + integration tests
+        run: cargo test --release
+      - name: tests with arena_compact + random
+        run: cargo test --release --features arena_compact,random
+      - name: doc tests + docs
+        run: cargo doc --no-deps
+
+  bench:
+    name: bench A/B vs base
+    # PRs and manual runs only; a push to master has nothing to compare against.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64, bench]
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: resolve base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            sha=${{ github.event.pull_request.base.sha }}
+          else
+            sha=$(git rev-parse "origin/${{ inputs.base }}" 2>/dev/null || git rev-parse "${{ inputs.base }}")
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: A/B bench
+        env:
+          BENCH_ROUNDS: ${{ inputs.rounds || '3' }}
+          BENCHES: ${{ inputs.benches }}
+          BENCH_OUT: ${{ runner.temp }}/bench-out
+        run: |
+          # an empty BENCHES must fall through to the script's default set
+          [ -n "$BENCHES" ] || unset BENCHES
+          .github/scripts/bench_ab.sh "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
+      - name: summary
+        if: always()
+        run: |
+          out="${{ runner.temp }}/bench-out"
+          if [ -s "$out/compare.txt" ]; then
+            { echo '```'; cat "$out/compare.txt"; echo '```'; } > "$out/compare.md"
+            cat "$out/compare.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-out
+          path: ${{ runner.temp }}/bench-out/*.txt
+          if-no-files-found: ignore
+      - name: comment on PR
+        # The token is read-only for PRs from forks, so only comment on same-repo PRs.
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: bench
+          path: ${{ runner.temp }}/bench-out/compare.md
