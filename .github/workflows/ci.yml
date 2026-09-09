@@ -55,9 +55,9 @@ jobs:
 
   bench:
     name: bench A/B vs base
-    # Runs after the tests pass (skipped when they fail), on PRs and manual runs only;
-    # a push to master has nothing to compare against.
-    needs: test
+    # Runs last, after the tests and the fuzz gate pass (skipped when either fails), on PRs
+    # and manual runs only; a push to master has nothing to compare against.
+    needs: [test, fuzz]
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, x64, bench]
     timeout-minutes: 300
