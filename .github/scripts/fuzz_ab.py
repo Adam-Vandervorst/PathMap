@@ -144,6 +144,8 @@ class Fuzz:
         for d in f['detail']:
             if d.startswith('lean:'):
                 parts = d.split()
+                if len(parts) > 1 and parts[1].startswith(('MAP', 'ROOT')):
+                    return f'{parts[1]} (final state)'
                 if len(parts) > 2:
                     return parts[2]
         return re.sub(r'\d+', 'N', f['msg'])
@@ -205,17 +207,16 @@ class Fuzz:
                     new_total += len(new)
                     log(f'::{"error" if self.strict else "warning"} title=Differential fuzz ({label})::{len(new)} input(s) diverge from the model on head '
                         f'but not on base, e.g. {new[0]}: {hf[new[0]]["msg"][:150]}')
-                    L += ['', '### Newly diverging inputs (head only)', '']
-                    L += [f'- `{name}`: {hf[name]["msg"][:200]} ({self.kind(hf[name])})' for name in new[:50]]
-                    if len(new) > 50:
-                        L.append(f'- … and {len(new) - 50} more, see fuzz-{label}-head.txt')
-                    picked, seen = [], set()
+                    kinds = {}                                # first-differing op -> [input names], input order
                     for name in new:
-                        k = self.kind(hf[name])
-                        if k not in seen:
-                            seen.add(k); picked.append(name)
-                        if len(picked) >= self.repros:
-                            break
+                        kinds.setdefault(self.kind(hf[name]), []).append(name)
+                    L += ['', f'### Newly diverging inputs (head only): {len(new)} input(s), {len(kinds)} kind(s)', '',
+                          '| first differs at | inputs | first example |', '|---|---:|---|']
+                    for k, names in list(kinds.items())[:10]:
+                        L.append(f'| `{k}` | {len(names)} | `{names[0]}`: {hf[names[0]]["msg"][:80]} |')
+                    if len(kinds) > 10:
+                        L.append(f'| … {len(kinds) - 10} more kind(s) | | see fuzz-{label}-head.txt |')
+                    picked = [names[0] for names in kinds.values()][:self.repros]
                     if picked:
                         flags = next(fl for lb, _, fl in self.modes if lb == label)
                         L += ['', f'### Reproducers: first {len(picked)} distinct kind(s), shrunk', '']
