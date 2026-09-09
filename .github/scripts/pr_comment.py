@@ -12,6 +12,8 @@ usage: pr_comment.py [--id ID] [--title TITLE] [--dir DIR] <pr-number> <status t
        --id     comment identity, one per job          (default bench-ab)
        --title  heading before the status              (default "Bench A/B vs base")
        --dir    dir holding summary.md, comment_id     (default $BENCH_OUT)
+       --create-only-if FILE  create the comment only when FILE exists; an existing comment is
+                              always updated (so a clean run clears earlier findings)
 env:   GITHUB_TOKEN GITHUB_REPOSITORY GITHUB_RUN_ID RUNNER_NAME   (provided by Actions)
        GITHUB_SERVER_URL                optional
 """
@@ -24,6 +26,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--id', default='bench-ab')
 ap.add_argument('--title', default='Bench A/B vs base')
 ap.add_argument('--dir', default=os.environ.get('BENCH_OUT'))
+ap.add_argument('--create-only-if')
 ap.add_argument('pr')
 ap.add_argument('status', nargs='?', default='')
 args = ap.parse_args()
@@ -88,6 +91,9 @@ else:
     found = [c['id'] for c in call('GET', f'{api}/issues/{pr}/comments?per_page=100') if c['body'].startswith(MARKER)]
     cid = found[0] if found else None
     how = 'reused' if found else 'created'
+if cid is None and args.create_only_if and not Path(args.create_only_if).exists():
+    print(f'no comment yet and {args.create_only_if} is absent: nothing to report')
+    sys.exit(0)
 if cid is None:
     cid = call('POST', f'{api}/issues/{pr}/comments', {'body': body})['id']
 else:

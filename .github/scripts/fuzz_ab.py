@@ -234,6 +234,10 @@ class Fuzz:
             L[2] = '**OK: no new divergences relative to base**'
         text = '\n'.join(L) + '\n'
         (self.out / 'summary.md').write_text(text)
+        findings = self.out / 'findings'                  # exists only when there is something to report
+        findings.unlink(missing_ok=True)
+        if new_total or unfinished:
+            findings.write_text(f'{new_total} new divergences, {unfinished} unfinished runs\n')
         log(text, end='')
         return new_total, unfinished
 
