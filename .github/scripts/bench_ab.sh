@@ -15,9 +15,11 @@
 #       DIVAN_SAMPLE_COUNT sample count for benches that do not set their own (default 40)
 #       CARGO_TARGET_DIR   parent of the two per-side target dirs (default ./target)
 #
-# Progress is appended to $BENCH_OUT/progress.txt after every run, and
-# $BENCH_OUT/compare.txt is rewritten after every completed round, so a watcher
-# (see pr_comment.sh) can show partial results while the script runs.
+# As soon as both sides of a bench have run in a round, its compare table
+# (averaged over the rounds finished so far) is printed and saved as
+# $BENCH_OUT/cmp-<bench>.txt; $BENCH_OUT/compare.txt, the concatenation, is
+# rewritten after every completed round.  Progress lines go to
+# $BENCH_OUT/progress.txt.  pr_comment.py posts compare.txt to the PR.
 set -euo pipefail
 
 BASE_SHA=${1:?usage: bench_ab.sh <base-sha> <head-sha>}
@@ -37,20 +39,26 @@ rm -f "$OUT"/*.txt "$OUT"/*.log "$OUT"/*.json
 progress() { echo "$(date -u +%H:%M:%S) $*" >> "$OUT/progress.txt"; }
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
 
-# compare_rounds <n> : average the rounds finished so far per bench and side, then compare; writes $OUT/compare.txt
+# compare_bench <bench> <rounds-so-far> : average each side over the rounds run so far and
+# compare; writes $OUT/cmp-<bench>.txt and prints it
+compare_bench() {
+    local b=$1
+    for side in base head; do
+        python3 "$repo/benches/bench_avg_files.py" "$OUT/$side-$b-r"*.txt -o "$OUT/$side-$b-avg.txt"
+    done
+    {
+        echo "$b  (base $(git rev-parse --short "$BASE_SHA")  head $(git rev-parse --short "$HEAD_SHA")  rounds $2  median ns)"
+        python3 "$repo/benches/bench_cmp.py" --base "$OUT/base-$b-avg.txt" --other "$OUT/head-$b-avg.txt" | strip_ansi
+        echo
+    } > "$OUT/cmp-$b.txt"
+    cat "$OUT/cmp-$b.txt"
+}
+
+# compare_rounds : concatenate the per-bench tables into $OUT/compare.txt
 compare_rounds() {
     local tmp=$OUT/compare.tmp
     : > "$tmp"
-    for b in $BENCHES; do
-        for side in base head; do
-            python3 "$repo/benches/bench_avg_files.py" "$OUT/$side-$b-r"*.txt -o "$OUT/$side-$b-avg.txt"
-        done
-        {
-            echo "$b  (base $(git rev-parse --short "$BASE_SHA")  head $(git rev-parse --short "$HEAD_SHA")  rounds $1  median ns)"
-            python3 "$repo/benches/bench_cmp.py" --base "$OUT/base-$b-avg.txt" --other "$OUT/head-$b-avg.txt" | strip_ansi
-            echo
-        } >> "$tmp"
-    done
+    for b in $BENCHES; do cat "$OUT/cmp-$b.txt" >> "$tmp"; done
     mv "$tmp" "$OUT/compare.txt"
 }
 
@@ -114,9 +122,10 @@ for ((r = 1; r <= ROUNDS; r++)); do
                 > "$OUT/$side-$b-r$r.txt" 2>> "$OUT/run-$side.log"
             progress "round $r/$ROUNDS $b $side $((SECONDS - t0))s"
         done
+        compare_bench "$b" "$r"
     done
-    compare_rounds "$r"
+    compare_rounds
     progress "round $r/$ROUNDS done, compare.txt refreshed"
 done
 
-cat "$OUT/compare.txt"
+echo "== final compare over $ROUNDS round(s): $OUT/compare.txt"
