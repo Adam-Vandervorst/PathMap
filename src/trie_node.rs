@@ -378,13 +378,13 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
 
     /// Allows for the implementation of the Lattice trait on different node implementations, and
     /// the logic to promote nodes to other node types
-    fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice;
+    fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: Lattice;
 
     /// Allows for the implementation of the DistributiveLattice algebraic operations
-    fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice;
+    fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: DistributiveLattice;
 
     /// Allows for the implementation of the Quantale algebraic operations
-    fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>>;
+    fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>>;
 
     /// Returns a clone of the node in its own Rc
     fn clone_self(&self) -> TrieNodeODRc<V, A>;
@@ -642,7 +642,7 @@ impl<V: Clone + Send + Sync, A: Allocator> ValOrChildUnion<V, A> {
 // was observed.  Therefore the the ~20% slowdown is simply the higher overheads of this generic function.
 //
 //The next port of call for optimization is probably to remove the recursion
-pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, MergeF>(self_payloads: &[(&[u8], PayloadRef<V, A>)], other: TaggedNodeRef<V, A>, merge_f: MergeF) -> AlgebraicResult<TrieNodeODRc<V, A>>
+pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, MergeF>(self_payloads: &[(&[u8], PayloadRef<V, A>)], other: TaggedNodeRef<V, A>, merge_f: MergeF) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>>
     where
     MergeF: FnOnce(&mut [Option<ValOrChild<V, A>>]) -> TrieNodeODRc<V, A>,
     V: Clone + Send + Sync + Lattice
@@ -668,15 +668,15 @@ pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, Merge
     }
 
     if is_none {
-        return AlgebraicResult::None
+        return None
     }
     if !is_exhaustive {
         combined_mask &= !COUNTER_IDENT;
     }
     if combined_mask > 0 {
-        return AlgebraicResult::Identity(combined_mask)
+        return Some(AlgebraicResult::Identity(combined_mask))
     }
-    AlgebraicResult::Element(merge_f(&mut result_payloads[..]))
+    Some(AlgebraicResult::Element(merge_f(&mut result_payloads[..])))
 }
 
 pub(crate) fn node_count_branches_recursive<V: Clone + Send + Sync, A: Allocator>(node: TaggedNodeRef<V, A>, key: &[u8]) -> usize {
@@ -1524,9 +1524,9 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+        pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: Lattice {
             if self.shared_node_id() == other.shared_node_id() {
-                return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
+                return Some(AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
             }
             match self {
                 Self::DenseByteNode(node) => node.pmeet_dyn(other),
@@ -1537,26 +1537,26 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+        pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: DistributiveLattice {
             if self.shared_node_id() == other.shared_node_id() {
-                return AlgebraicResult::None;
+                return None;
             }
             match self {
                 Self::DenseByteNode(node) => node.psubtract_dyn(other),
                 Self::LineListNode(node) => node.psubtract_dyn(other),
                 Self::CellByteNode(node) => node.psubtract_dyn(other),
                 Self::TinyRefNode(node) => node.psubtract_dyn(other),
-                Self::EmptyNode => AlgebraicResult::None,
+                Self::EmptyNode => None,
             }
         }
 
-        pub fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
+        pub fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> {
             match self {
                 Self::DenseByteNode(node) => node.prestrict_dyn(other),
                 Self::LineListNode(node) => node.prestrict_dyn(other),
                 Self::CellByteNode(node) => node.prestrict_dyn(other),
                 Self::TinyRefNode(node) => node.prestrict_dyn(other),
-                Self::EmptyNode => AlgebraicResult::None,
+                Self::EmptyNode => None,
             }
         }
 
@@ -2186,13 +2186,13 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+        pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: Lattice {
             if self.ptr == other.ptr {
                 return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
             }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
-                EMPTY_NODE_TAG => AlgebraicResult::None,
+                EMPTY_NODE_TAG => None,
                 DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.pmeet_dyn(other),
                 LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.pmeet_dyn(other),
                 CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.pmeet_dyn(other),
@@ -2201,13 +2201,13 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+        pub fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: DistributiveLattice {
             if self.ptr == other.ptr {
-                return AlgebraicResult::None;
+                return None;
             }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
-                EMPTY_NODE_TAG => AlgebraicResult::None,
+                EMPTY_NODE_TAG => None,
                 DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.psubtract_dyn(other),
                 LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.psubtract_dyn(other),
                 CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.psubtract_dyn(other),
@@ -2216,10 +2216,10 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
+        pub fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
-                EMPTY_NODE_TAG => AlgebraicResult::None,
+                EMPTY_NODE_TAG => None,
                 DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.prestrict_dyn(other),
                 LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.prestrict_dyn(other),
                 CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.prestrict_dyn(other),
@@ -3265,7 +3265,7 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
             //     (false, false) => node.pjoin_dyn(other_node),
             //     (false, true) => AlgebraicResult::Identity(SELF_IDENT),
             //     (true, false) => AlgebraicResult::Identity(COUNTER_IDENT),
-            //     (true, true) => AlgebraicResult::None,
+            //     (true, true) => None,
             // }
         }
     }
@@ -3274,7 +3274,7 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
         //Joining into an empty node means replacement, exactly as `EmptyNode::join_into_dyn` says,
         // and joining an empty node into anything is the identity.
         if node.as_tagged().node_is_empty() {
-            return if self.is_empty() { AlgebraicStatus::None } else { AlgebraicStatus::Identity }
+            return AlgebraicStatus::Identity
         }
         if self.is_empty() {
             *self = node;
@@ -3290,9 +3290,9 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
         status
     }
     #[inline]
-    pub fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
+    pub fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         if self.ptr_eq(other) {
-            AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
+            Some(AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT))
         } else {
             self.as_tagged().pmeet_dyn(other.as_tagged())
         }
@@ -3301,9 +3301,9 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
 
 //See above, pseudo-impl for [DistributiveLattice] trait
 impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
-    pub fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+    pub fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         if self.ptr_eq(other) {
-            AlgebraicResult::None
+            None
         } else {
             self.as_tagged().psubtract_dyn(other.as_tagged())
         }
@@ -3311,7 +3311,7 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V,
 }
 
 impl <V: Clone + Send + Sync, A: Allocator> Quantale for TrieNodeODRc<V, A> {
-    fn prestrict(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
+    fn prestrict(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized {
         self.as_tagged().prestrict_dyn(other.as_tagged())
     }
 }
@@ -3320,7 +3320,7 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> Lattice for Option<TrieNode
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
         match self {
             None => match other {
-                None => { AlgebraicResult::None }
+                None => { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) }
                 Some(_) => { AlgebraicResult::Identity(COUNTER_IDENT) }
             },
             Some(l) => match other {
@@ -3343,13 +3343,13 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> Lattice for Option<TrieNode
     //         }
     //     }
     // }
-    fn pmeet(&self, other: &Option<TrieNodeODRc<V, A>>) -> AlgebraicResult<Option<TrieNodeODRc<V, A>>> {
+    fn pmeet(&self, other: &Option<TrieNodeODRc<V, A>>) -> Option<AlgebraicResult<Option<TrieNodeODRc<V, A>>>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(l) => {
                 match other {
-                    None => { AlgebraicResult::None }
-                    Some(r) => l.pmeet(r).map(|result| Some(result))
+                    None => None,
+                    Some(r) => l.pmeet(r).map(|result| result.map(Some))
                 }
             }
         }
@@ -3361,7 +3361,7 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> LatticeRef for Option<&Trie
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self::T> {
         match self {
             None => match other {
-                None => { AlgebraicResult::None }
+                None => { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) }
                 Some(_) => { AlgebraicResult::Identity(COUNTER_IDENT) }
             },
             Some(l) => match other {
@@ -3370,13 +3370,13 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> LatticeRef for Option<&Trie
             }
         }
     }
-    fn pmeet(&self, other: &Option<&TrieNodeODRc<V, A>>) -> AlgebraicResult<Option<TrieNodeODRc<V, A>>> {
+    fn pmeet(&self, other: &Option<&TrieNodeODRc<V, A>>) -> Option<AlgebraicResult<Option<TrieNodeODRc<V, A>>>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(l) => {
                 match other {
-                    None => { AlgebraicResult::None }
-                    Some(r) => l.pmeet(r).map(|result| Some(result))
+                    None => None,
+                    Some(r) => l.pmeet(r).map(|result| result.map(Some))
                 }
             }
         }
@@ -3384,13 +3384,13 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> LatticeRef for Option<&Trie
 }
 
 impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLattice for Option<TrieNodeODRc<V, A>> {
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(s) => {
                 match other {
-                    None => { AlgebraicResult::Identity(SELF_IDENT) }
-                    Some(o) => { s.psubtract(o).map(|v| Some(v)) }
+                    None => Some(AlgebraicResult::Identity(SELF_IDENT)),
+                    Some(o) => s.psubtract(o).map(|result| result.map(Some))
                 }
             }
         }
@@ -3399,13 +3399,13 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLat
 
 impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> DistributiveLatticeRef for Option<&TrieNodeODRc<V, A>> {
     type T = Option<TrieNodeODRc<V, A>>;
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self::T> {
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self::T>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(s) => {
                 match other {
-                    None => { AlgebraicResult::Identity(SELF_IDENT) }
-                    Some(o) => { s.psubtract(o).map(|v| Some(v)) }
+                    None => Some(AlgebraicResult::Identity(SELF_IDENT)),
+                    Some(o) => s.psubtract(o).map(|result| result.map(Some))
                 }
             }
         }

@@ -89,11 +89,21 @@ pub fn show_status_opt(s: Option<AlgebraicStatus>) -> String {
     }
 }
 
+/// Render a possibly unsupported operation whose algebraic result may itself
+/// be absent. The outer `None` means the source cannot perform the operation;
+/// the inner `None` is the operation's annihilating result.
+pub fn show_partial_status(s: Option<Option<AlgebraicStatus>>) -> String {
+    match s {
+        None => "skip".to_string(),
+        Some(None) => "None".to_string(),
+        Some(Some(s)) => show_status(s).to_string(),
+    }
+}
+
 pub fn show_status(s: AlgebraicStatus) -> &'static str {
     match s {
         AlgebraicStatus::Element => "Element",
         AlgebraicStatus::Identity => "Identity",
-        AlgebraicStatus::None => "None",
     }
 }
 
@@ -175,7 +185,13 @@ pub fn dump<Z: ZipperMoving + ZipperPath + ZipperValues<u64>>(z: &mut Z) -> Stri
 /// Keeping this behind a trait means there is still exactly one operation table,
 /// so the two front ends cannot drift apart.
 pub trait ReadSource:
-    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath + ZipperIteration
+    Zipper
+    + ZipperMoving
+    + ZipperPath
+    + ZipperValues<u64>
+    + ZipperValuesAt<u64>
+    + ZipperAbsolutePath
+    + ZipperIteration
 {
     /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk).
     fn dump_fork(&self) -> String;
@@ -199,13 +215,13 @@ pub trait ReadSource:
     #[allow(dead_code)]
     fn do_graft_child_maps<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
     /// `meet_2` needs two sources; the second is this zipper moved to `path`.
-    fn do_meet_2<W: ZipperWriting<u64>>(&self, _wz: &mut W, _path: &[u8]) -> Option<AlgebraicStatus> { None }
+    fn do_meet_2<W: ZipperWriting<u64>>(&self, _wz: &mut W, _path: &[u8]) -> Option<Option<AlgebraicStatus>> { None }
     fn do_graft_src_at<W: ZipperWriting<u64>>(&self, _wz: &mut W, _p: &[u8]) -> bool { false }
     fn do_join_into<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> Option<AlgebraicStatus> { None }
     fn do_join_map_into<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> Option<AlgebraicStatus> { None }
-    fn do_meet_into<W: ZipperWriting<u64>>(&self, _wz: &mut W, _prune: bool) -> Option<AlgebraicStatus> { None }
-    fn do_subtract_into<W: ZipperWriting<u64>>(&self, _wz: &mut W, _prune: bool) -> Option<AlgebraicStatus> { None }
-    fn do_restrict<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> Option<AlgebraicStatus> { None }
+    fn do_meet_into<W: ZipperWriting<u64>>(&self, _wz: &mut W, _prune: bool) -> Option<Option<AlgebraicStatus>> { None }
+    fn do_subtract_into<W: ZipperWriting<u64>>(&self, _wz: &mut W, _prune: bool) -> Option<Option<AlgebraicStatus>> { None }
+    fn do_restrict<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> Option<Option<AlgebraicStatus>> { None }
     fn do_restricting<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> Option<bool> { None }
 }
 
@@ -250,7 +266,7 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
         wz.graft_child_maps(m, maps, ru);
         true
     }
-    fn do_meet_2<W: ZipperWriting<u64>>(&self, wz: &mut W, path: &[u8]) -> Option<AlgebraicStatus> {
+    fn do_meet_2<W: ZipperWriting<u64>>(&self, wz: &mut W, path: &[u8]) -> Option<Option<AlgebraicStatus>> {
         let mut b = self.clone();
         b.descend_to(path);
         Some(wz.meet_2(self, &b))
@@ -265,13 +281,13 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     fn do_join_map_into<W: ZipperWriting<u64>>(&self, wz: &mut W) -> Option<AlgebraicStatus> {
         Some(wz.join_map_into(self.make_map()))
     }
-    fn do_meet_into<W: ZipperWriting<u64>>(&self, wz: &mut W, prune: bool) -> Option<AlgebraicStatus> {
+    fn do_meet_into<W: ZipperWriting<u64>>(&self, wz: &mut W, prune: bool) -> Option<Option<AlgebraicStatus>> {
         Some(wz.meet_into(self, prune))
     }
-    fn do_subtract_into<W: ZipperWriting<u64>>(&self, wz: &mut W, prune: bool) -> Option<AlgebraicStatus> {
+    fn do_subtract_into<W: ZipperWriting<u64>>(&self, wz: &mut W, prune: bool) -> Option<Option<AlgebraicStatus>> {
         Some(wz.subtract_into(self, prune))
     }
-    fn do_restrict<W: ZipperWriting<u64>>(&self, wz: &mut W) -> Option<AlgebraicStatus> {
+    fn do_restrict<W: ZipperWriting<u64>>(&self, wz: &mut W) -> Option<Option<AlgebraicStatus>> {
         Some(wz.restrict(self))
     }
     fn do_restricting<W: ZipperWriting<u64>>(&self, wz: &mut W) -> Option<bool> {
@@ -718,13 +734,13 @@ pub fn run_ops<R: ReadSource>(
                 }
                 38 => {
                     let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, no_prune)))
+                    ("meet_into", show_partial_status((*rz).do_meet_into(&mut wz, no_prune)))
                 }
                 39 => {
                     let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
                     (
                         "subtract_into",
-                        show_status_opt((*rz).do_subtract_into(&mut wz, no_prune)),
+                        show_partial_status((*rz).do_subtract_into(&mut wz, no_prune)),
                     )
                 }
                 40 => {
@@ -733,7 +749,7 @@ pub fn run_ops<R: ReadSource>(
                     let s = if leaky && st.is_some() {
                         "?".to_string()
                     } else {
-                        show_status_opt(st)
+                        show_partial_status(st)
                     };
                     ("restrict", s)
                 }
@@ -903,7 +919,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 55 => {
                     let p = get!(d.path(6));
-                    ("meet_2", show_status_opt((*rz).do_meet_2(&mut wz, &p)))
+                    ("meet_2", show_partial_status((*rz).do_meet_2(&mut wz, &p)))
                 }
                 47 => {
                     let t = get!(d.modn(2));

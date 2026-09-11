@@ -299,15 +299,15 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
     }
     fn join_into_dyn(&mut self, _other: TrieNodeODRc<V, A>) -> (AlgebraicStatus, Result<(), TrieNodeODRc<V, A>>) where V: Lattice { unreachable!() }
     fn drop_head_dyn(&mut self, _byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice { unreachable!() }
-    fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+    fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: Lattice {
         //TODO, is this worth bespoke code to save some cycles?
         self.into_full().unwrap().pmeet_dyn(other)
     }
-    fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+    fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> where V: DistributiveLattice {
         //TODO, is this worth bespoke code to save some cycles?
         self.into_full().unwrap().psubtract_dyn(other)
     }
-    fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
+    fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> Option<AlgebraicResult<TrieNodeODRc<V, A>>> {
         //TODO, is this worth bespoke code to save some cycles?
         self.into_full().unwrap().prestrict_dyn(other)
     }

@@ -503,15 +503,15 @@ impl Lattice for ByteMask {
         self.0.pjoin(&other.0).map(|mask| Self(mask))
     }
     #[inline]
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
-        self.0.pmeet(&other.0).map(|mask| Self(mask))
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
+        self.0.pmeet(&other.0).map(|result| result.map(Self))
     }
 }
 
 impl DistributiveLattice for ByteMask {
     #[inline]
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
-        self.0.psubtract(&other.0).map(|mask| Self(mask))
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized {
+        self.0.psubtract(&other.0).map(|result| result.map(Self))
     }
 }
 
@@ -792,27 +792,24 @@ impl Lattice for [u64; 4] {
         bitmask_algebraic_result(result, self, other)
     }
     #[inline]
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         let result = [self[0] & other[0], self[1] & other[1], self[2] & other[2], self[3] & other[3]];
-        bitmask_algebraic_result(result, self, other)
+        Some(bitmask_algebraic_result(result, self, other))
     }
 }
 
 //GOAT, This should be generalized to bit sets of other widths
 impl DistributiveLattice for [u64; 4] {
     #[inline]
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized {
         let result = [self[0] & !other[0], self[1] & !other[1], self[2] & !other[2], self[3] & !other[3]];
-        bitmask_algebraic_result(result, self, other)
+        Some(bitmask_algebraic_result(result, self, other))
     }
 }
 
 /// Internal function to compose AlgebraicResult after algebraic operation
 #[inline]
 fn bitmask_algebraic_result(result: [u64; 4], self_mask: &[u64; 4], other_mask: &[u64; 4]) -> AlgebraicResult<[u64; 4]> {
-    if result.is_empty() {
-        return AlgebraicResult::None
-    }
     let mut mask = 0;
     if result == *self_mask {
         mask  = SELF_IDENT;

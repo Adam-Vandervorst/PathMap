@@ -24,15 +24,13 @@ impl Lattice for FAddMul {
         if self.0.is_zero() { return AlgebraicResult::Identity(1) }
         if other.0.is_zero() { return AlgebraicResult::Identity(2) }
         let s = self.0 + other.0;
-        // make sparse if the dense sides had opposite signs and nearly cancelled out
-        if self.0 * other.0 < 0f32 && s.abs() < 1e-9 { return AlgebraicResult::None }
         AlgebraicResult::Element(FAddMul(s))
     }
 
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized {
         let s = self.0*other.0;
-        if s.abs() < 1e-9 { return AlgebraicResult::None }
-        AlgebraicResult::Element(FAddMul(s))
+        if s.abs() < 1e-9 { return None }
+        Some(AlgebraicResult::Element(FAddMul(s)))
     }
 }
 

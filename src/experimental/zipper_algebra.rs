@@ -132,7 +132,7 @@ impl<Z, V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAlgebraExt<V, A> for
 /// When both tries contain a value at the same key, they are merged using the [`Lattice`]
 /// operation [`Lattice::pjoin`]. The result is interpreted as follows:
 ///
-/// - [`AlgebraicResult::None`] → no value is written,
+/// - [`None`] → no value is written,
 /// - [`AlgebraicResult::Identity`] → one of the inputs is reused (based on identity mask),
 /// - [`AlgebraicResult::Element`] → the computed value is written.
 ///
@@ -199,7 +199,7 @@ where
 /// When both tries contain a value at the same key, they are merged using the [`Lattice`]
 /// operation [`Lattice::pmeet`]. The result is interpreted as follows:
 ///
-/// - [`AlgebraicResult::None`] → no value is written,
+/// - [`None`] → no value is written,
 /// - [`AlgebraicResult::Identity`] → one of the inputs is reused (based on identity mask),
 /// - [`AlgebraicResult::Element`] → the computed value is written.
 ///
@@ -275,7 +275,7 @@ where
 /// - If both tries contain a value at the same key, they are comined using the [`DistributiveLattice`]
 ///   operation [`DistributiveLattice::psubtract`]. The result is interpreted as follows:
 ///
-///   - [`AlgebraicResult::None`] → no value is written,
+///   - [`None`] → no value is written,
 ///   - [`AlgebraicResult::Identity`] → only lhs is preserved (based on identity mask),
 ///   - [`AlgebraicResult::Element`] → the computed value is written.
 ///
@@ -2565,7 +2565,6 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Join {
         if let Some(ref lv) = l {
             if let Some(ref rv) = r {
                 match lv.pjoin(rv) {
-                    AlgebraicResult::None => None,
                     AlgebraicResult::Identity(mask) => {
                         if mask & SELF_IDENT != 0 {
                             l
@@ -2670,15 +2669,15 @@ impl<V: Lattice + Clone> ValuePolicy<V> for Meet {
 #[inline]
 fn meet_impl<'a, V: Lattice + Clone>(a: Cow<'a, V>, b: Cow<'a, V>) -> Option<Cow<'a, V>> {
     match a.pmeet(&b) {
-        AlgebraicResult::None => None,
-        AlgebraicResult::Identity(mask) => {
+        None => None,
+        Some(AlgebraicResult::Identity(mask)) => {
             if mask & SELF_IDENT != 0 {
                 Some(a)
             } else {
                 Some(b)
             }
         }
-        AlgebraicResult::Element(v) => Some(Cow::Owned(v)),
+        Some(AlgebraicResult::Element(v)) => Some(Cow::Owned(v)),
     }
 }
 
@@ -2752,15 +2751,15 @@ fn subtract_impl<'a, V: DistributiveLattice + Clone>(
     b: Cow<'a, V>,
 ) -> Option<Cow<'a, V>> {
     match a.psubtract(&b) {
-        AlgebraicResult::None => None,
-        AlgebraicResult::Identity(mask) => {
+        None => None,
+        Some(AlgebraicResult::Identity(mask)) => {
             if mask & SELF_IDENT != 0 {
                 Some(a)
             } else {
                 None
             }
         }
-        AlgebraicResult::Element(v) => Some(Cow::Owned(v)),
+        Some(AlgebraicResult::Element(v)) => Some(Cow::Owned(v)),
     }
 }
 
@@ -2799,16 +2798,15 @@ impl<V: Lattice + DistributiveLattice + Clone> ValuePolicy<V> for SymDiff {
             (None, x) | (x, None) => x,
 
             (Some(a), Some(b)) => match a.pjoin(&b) {
-                AlgebraicResult::None => None,
                 AlgebraicResult::Identity(join) => match a.pmeet(&b) {
-                    AlgebraicResult::None => {
+                    None => {
                         if join & SELF_IDENT != 0 {
                             Some(a)
                         } else {
                             Some(b)
                         }
                     }
-                    AlgebraicResult::Identity(meet) => {
+                    Some(AlgebraicResult::Identity(meet)) => {
                         if join == meet {
                             None
                         } else if join & SELF_IDENT != 0 {
@@ -2817,7 +2815,7 @@ impl<V: Lattice + DistributiveLattice + Clone> ValuePolicy<V> for SymDiff {
                             subtract_impl(b, a)
                         }
                     }
-                    AlgebraicResult::Element(meet) => {
+                    Some(AlgebraicResult::Element(meet)) => {
                         if join & SELF_IDENT != 0 {
                             subtract_impl(a, Cow::Owned(meet))
                         } else {
@@ -2826,15 +2824,15 @@ impl<V: Lattice + DistributiveLattice + Clone> ValuePolicy<V> for SymDiff {
                     }
                 },
                 AlgebraicResult::Element(join) => match a.pmeet(&b) {
-                    AlgebraicResult::None => Some(Cow::Owned(join)),
-                    AlgebraicResult::Identity(meet) => {
+                    None => Some(Cow::Owned(join)),
+                    Some(AlgebraicResult::Identity(meet)) => {
                         if meet & SELF_IDENT != 0 {
                             subtract_impl(Cow::Owned(join), a)
                         } else {
                             subtract_impl(Cow::Owned(join), b)
                         }
                     }
-                    AlgebraicResult::Element(meet) => {
+                    Some(AlgebraicResult::Element(meet)) => {
                         subtract_impl(Cow::Owned(join), Cow::Owned(meet))
                     }
                 },

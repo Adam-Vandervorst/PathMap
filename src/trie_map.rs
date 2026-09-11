@@ -4,7 +4,7 @@ use crate::morphisms::{new_map_from_ana_in, TrieBuilder};
 use crate::trie_node::*;
 use crate::zipper::*;
 use crate::merkleization::{MerkleizeResult, merkleize_impl};
-use crate::ring::{AlgebraicResult, AlgebraicStatus, COUNTER_IDENT, SELF_IDENT, Lattice, LatticeRef, DistributiveLattice, DistributiveLatticeRef, Quantale};
+use crate::ring::{AlgebraicResult, AlgebraicStatus, COUNTER_IDENT, SELF_IDENT, Lattice, LatticeRef, DistributiveLattice, DistributiveLatticeRef, Quantale, merge_optional_results};
 
 use crate::gxhash;
 
@@ -516,7 +516,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         result_into_map(self.pjoin(other), self, other, self.alloc.clone())
     }
 
-    /// Returns a new `PathMap` containing the intersection of the paths in `self` and the paths in `other`
+    /// Returns a new `PathMap` containing the intersection of the paths in
+    /// `self` and `other`.
+    ///
+    /// A disjoint intersection is represented by an empty `PathMap`.
     pub fn meet(&self, other: &Self) -> Self where V: Lattice {
         result_into_map(self.pmeet(other), self, other, self.alloc.clone())
     }
@@ -537,9 +540,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
             Self::new_in(self.alloc.clone())
         } else {
             match self_root.unwrap().as_tagged().prestrict_dyn(other_root.unwrap().as_tagged()) {
-                AlgebraicResult::Element(new_root) => Self::new_with_root_in(Some(new_root), None, self.alloc.clone()),
-                AlgebraicResult::None => Self::new_in(self.alloc.clone()),
-                AlgebraicResult::Identity(mask) => {
+                Some(AlgebraicResult::Element(new_root)) => Self::new_with_root_in(Some(new_root), None, self.alloc.clone()),
+                None => Self::new_in(self.alloc.clone()),
+                Some(AlgebraicResult::Identity(mask)) => {
                     debug_assert_eq!(mask, SELF_IDENT);
                     Self::new_with_root_in(Some(self.root().cloned().unwrap()), None, self.alloc.clone())
                 }
@@ -547,26 +550,29 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         }
     }
 
-    /// Returns a new `PathMap` containing the contents from `self` minus the contents of `other`
+    /// Returns a new `PathMap` containing the contents from `self` minus the
+    /// contents of `other`.
+    ///
+    /// If subtraction removes everything, this returns an empty `PathMap`.
     pub fn subtract(&self, other: &Self) -> Self
         where V: DistributiveLattice
     {
         let subtracted_root_val = match self.root_val().psubtract(&other.root_val()) {
-            AlgebraicResult::Element(new_val) => new_val,
-            AlgebraicResult::Identity(mask) => {
+            Some(AlgebraicResult::Element(new_val)) => new_val,
+            Some(AlgebraicResult::Identity(mask)) => {
                 debug_assert_eq!(mask, SELF_IDENT);
                 self.root_val().cloned()
             },
-            AlgebraicResult::None => None,
+            None => None,
         };
 
         let subtracted_root_node = match self.root().psubtract(&other.root()) {
-            AlgebraicResult::Element(subtracted_node) => subtracted_node,
-            AlgebraicResult::Identity(mask) => {
+            Some(AlgebraicResult::Element(subtracted_node)) => subtracted_node,
+            Some(AlgebraicResult::Identity(mask)) => {
                 debug_assert_eq!(mask, SELF_IDENT);
                 self.root().cloned()
             },
-            AlgebraicResult::None => None,
+            None => None,
         };
 
         Self::new_with_root_in(subtracted_root_node, subtracted_root_val, self.alloc.clone())
@@ -690,11 +696,11 @@ impl<V: Clone + Send + Sync + Unpin + 'static, A: Allocator + 'static> std::iter
 }
 
 /// Internal function to convert an [AlgebraicResult] (partial lattice result) into a `PathMap`
-fn result_into_map<V: Clone + Send + Sync + Unpin, A: Allocator>(result: AlgebraicResult<PathMap<V, A>>, self_map: &PathMap<V, A>, other_map: &PathMap<V, A>, result_region: A) -> PathMap<V, A> {
-    match result {
-        AlgebraicResult::Element(new_map) => new_map,
-        AlgebraicResult::None => PathMap::new_in(result_region),
-        AlgebraicResult::Identity(mask) => {
+fn result_into_map<V: Clone + Send + Sync + Unpin, A: Allocator, R: Into<Option<AlgebraicResult<PathMap<V, A>>>>>(result: R, self_map: &PathMap<V, A>, other_map: &PathMap<V, A>, result_region: A) -> PathMap<V, A> {
+    match result.into() {
+        Some(AlgebraicResult::Element(new_map)) => new_map,
+        None => PathMap::new_in(result_region),
+        Some(AlgebraicResult::Identity(mask)) => {
             if mask & SELF_IDENT > 0 {
                 self_map.clone()
             } else {
@@ -736,20 +742,16 @@ impl<V: Clone + Lattice + Send + Sync + Unpin, A: Allocator> Lattice for PathMap
             }
             status
         } else {
-            if self.is_empty() {
-                AlgebraicStatus::None
-            } else {
-                AlgebraicStatus::Identity
-            }
+            AlgebraicStatus::Identity
         };
 
         let root_val_status = self.root_val_mut().join_into(other_root_val);
-        root_node_status.merge(root_val_status, true, true)
+        root_node_status.merge(root_val_status)
     }
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         let meet_node = self.root().pmeet(&other.root());
         let meet_root_val = self.root_val().pmeet(&other.root_val());
-        meet_node.merge(meet_root_val, |which_arg| {
+        merge_optional_results(meet_node, meet_root_val, |which_arg| {
             match which_arg {
                 0 => Some(self.root().cloned()),
                 1 => Some(other.root().cloned()),
@@ -768,10 +770,10 @@ impl<V: Clone + Lattice + Send + Sync + Unpin, A: Allocator> Lattice for PathMap
 }
 
 impl<V: Clone + Send + Sync + Unpin + DistributiveLattice, A: Allocator> DistributiveLattice for PathMap<V, A> {
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         let subtract_node = self.root().psubtract(&other.root());
         let subtract_root_val = self.root_val().psubtract(&other.root_val());
-        subtract_node.merge(subtract_root_val, |which_arg| {
+        merge_optional_results(subtract_node, subtract_root_val, |which_arg| {
             match which_arg {
                 0 => Some(self.root().cloned()),
                 1 => Some(other.root().cloned()),
@@ -790,26 +792,26 @@ impl<V: Clone + Send + Sync + Unpin + DistributiveLattice, A: Allocator> Distrib
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Quantale for PathMap<V, A> {
-    fn prestrict(&self, other: &Self) -> AlgebraicResult<Self> {
+    fn prestrict(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         if other.root_val().is_some() {
-            return AlgebraicResult::Identity(SELF_IDENT)
+            return Some(AlgebraicResult::Identity(SELF_IDENT))
         }
         match (self.root(), other.root()) {
             (Some(self_root), Some(other_root)) => {
                 match self_root.prestrict(other_root) {
-                    AlgebraicResult::Element(new_root) => AlgebraicResult::Element(Self::new_with_root_in(Some(new_root), None, self.alloc.clone())),
-                    AlgebraicResult::Identity(mask) => {
+                    Some(AlgebraicResult::Element(new_root)) => Some(AlgebraicResult::Element(Self::new_with_root_in(Some(new_root), None, self.alloc.clone()))),
+                    Some(AlgebraicResult::Identity(mask)) => {
                         debug_assert_eq!(mask, SELF_IDENT);
                         if self.root_val().is_some() {
-                            AlgebraicResult::Element(Self::new_with_root_in(Some(self_root.clone()), None, self.alloc.clone()))
+                            Some(AlgebraicResult::Element(Self::new_with_root_in(Some(self_root.clone()), None, self.alloc.clone())))
                         } else {
-                            AlgebraicResult::Identity(SELF_IDENT)
+                            Some(AlgebraicResult::Identity(SELF_IDENT))
                         }
                     },
-                    AlgebraicResult::None => AlgebraicResult::None,
+                    None => None,
                 }
             },
-            _ => AlgebraicResult::None,
+            _ => None,
         }
     }
 }
@@ -1222,20 +1224,20 @@ mod tests {
         assert!(joined_result.is_identity());
 
         //pmeet
-        let meet_result = map_a.pmeet(&map_a);
+        let meet_result = map_a.pmeet(&map_a).unwrap();
         assert!(meet_result.is_identity());
 
         let meet_result = map_a.pmeet(&map_b);
         assert!(meet_result.is_none());
 
-        let meet_result = map_a.pmeet(&map_c);
+        let meet_result = map_a.pmeet(&map_c).unwrap();
         assert!(meet_result.is_element());
         let meet = meet_result.unwrap([&map_a, &map_c]);
         assert_eq!(meet.val_at([]), None);
         assert_eq!(meet.val_at("AA"), Some(&()));
         assert_eq!(meet.val_at("BB"), None);
 
-        let meet_result = map_a.pmeet(&map_d);
+        let meet_result = map_a.pmeet(&map_d).unwrap();
         assert!(meet_result.is_element());
         let meet = meet_result.unwrap([&map_a, &map_d]);
         assert_eq!(meet.val_at([]), Some(&()));
@@ -1245,16 +1247,16 @@ mod tests {
         let subtract_result = map_a.psubtract(&map_a);
         assert!(subtract_result.is_none());
 
-        let subtract_result = map_a.psubtract(&map_b);
+        let subtract_result = map_a.psubtract(&map_b).unwrap();
         assert!(subtract_result.is_identity());
 
-        let subtract_result = map_a.psubtract(&map_c);
+        let subtract_result = map_a.psubtract(&map_c).unwrap();
         assert!(subtract_result.is_element());
         let subtract = subtract_result.unwrap([&map_a, &map_c]);
         assert_eq!(subtract.val_at([]), Some(&()));
         assert_eq!(subtract.val_at("AA"), None);
 
-        let subtract_result = map_a.psubtract(&map_d);
+        let subtract_result = map_a.psubtract(&map_d).unwrap();
         assert!(subtract_result.is_element());
         let subtract = subtract_result.unwrap([&map_a, &map_d]);
         assert_eq!(subtract.val_at([]), None);
@@ -1264,13 +1266,13 @@ mod tests {
         let restrict_result = map_a.prestrict(&map_b);
         assert!(restrict_result.is_none());
 
-        let restrict_result = map_a.prestrict(&map_c);
+        let restrict_result = map_a.prestrict(&map_c).unwrap();
         assert!(restrict_result.is_element());
         let restrict = restrict_result.unwrap([&map_a, &map_c]);
         assert_eq!(restrict.val_at([]), None);
         assert_eq!(restrict.val_at("AA"), Some(&()));
 
-        let restrict_result = map_a.prestrict(&map_d);
+        let restrict_result = map_a.prestrict(&map_d).unwrap();
         assert!(restrict_result.is_identity());
     }
 

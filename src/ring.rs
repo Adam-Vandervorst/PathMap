@@ -2,12 +2,12 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-/// The result of an algebraic operation on elements in a partial lattice
+/// Describes how an algebraic operation produced an element.
 ///
-/// NOTE: For some operations, it is conceptually valid for both `Identity` and `None` results to be
-/// simultaneously appropriate, for example `None.pmeet(Some)`. In these situations, `None` should take precedence
-/// over `Identity`, but either of the results can be considered correct so your code must behave correctly in
-/// either case.
+/// Operations that may produce no element in the represented carrier, such as
+/// meet and subtract, return `Option<AlgebraicResult<_>>`. `None` represents
+/// that absence; every `AlgebraicResult` describes a retained element that
+/// actually exists.
 ///
 /// NOTE 2: The following conditions for the Identity bitmask must be respected or the implementation may panic or
 /// produce logically invalid results.
@@ -19,11 +19,8 @@ use std::hash::Hash;
 /// - The inverse of the above does not hold.  E.g. if multiple bits are not set, it may **not** be assumed that 
 ///     the arguments are not identities of each other.
 /// - Non-commutative operations, such as [DistributiveLattice::psubtract], must never set bits beyond bit 0 ([SELF_IDENT])
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlgebraicResult<V> {
-    /// A result indicating the input values perfectly annhilate and the output should be removed and discarded
-    #[default]
-    None,
     /// A result indicating the output element is identical to the input element(s) identified by the bit mask
     ///
     /// NOTE: The constants [SELF_IDENT] and [COUNTER_IDENT] can be used as conveniences when specifying the bitmask.
@@ -39,11 +36,6 @@ pub const SELF_IDENT: u64 = 0x1;
 pub const COUNTER_IDENT: u64 = 0x2;
 
 impl<V> AlgebraicResult<V> {
-    /// Returns `true` is `self` is [AlgebraicResult::None], otherwise returns `false`
-    #[inline]
-    pub fn is_none(&self) -> bool {
-        matches!(self, AlgebraicResult::None)
-    }
     /// Returns `true` is `self` is [AlgebraicResult::Identity], otherwise returns `false`
     #[inline]
     pub fn is_identity(&self) -> bool {
@@ -58,7 +50,6 @@ impl<V> AlgebraicResult<V> {
     #[inline]
     pub fn identity_mask(&self) -> Option<u64> {
         match self {
-            Self::None => None,
             Self::Identity(mask) => Some(*mask),
             Self::Element(_) => None,
         }
@@ -70,7 +61,6 @@ impl<V> AlgebraicResult<V> {
     #[inline]
     pub fn invert_identity(self) -> Self {
         match self {
-            Self::None => AlgebraicResult::None,
             Self::Identity(mask) => {
                 let new_mask = ((mask & SELF_IDENT) << 1) | ((mask & COUNTER_IDENT) >> 1);
                 AlgebraicResult::Identity(new_mask)
@@ -85,7 +75,6 @@ impl<V> AlgebraicResult<V> {
         where F: FnOnce(V) -> U,
     {
         match self {
-            Self::None => AlgebraicResult::None,
             Self::Identity(mask) => AlgebraicResult::Identity(mask),
             Self::Element(v) => AlgebraicResult::Element(f(v)),
         }
@@ -95,7 +84,6 @@ impl<V> AlgebraicResult<V> {
     pub fn as_ref(&self) -> AlgebraicResult<&V> {
         match *self {
             Self::Element(ref v) => AlgebraicResult::Element(v),
-            Self::None => AlgebraicResult::None,
             Self::Identity(mask) => AlgebraicResult::Identity(mask),
         }
     }
@@ -109,7 +97,6 @@ impl<V> AlgebraicResult<V> {
     {
         match self {
             Self::Element(v) => Some(v),
-            Self::None => None,
             Self::Identity(mask) => ident_f(mask.trailing_zeros() as usize),
         }
     }
@@ -121,7 +108,6 @@ impl<V> AlgebraicResult<V> {
     {
         match self {
             Self::Element(v) => Some(v),
-            Self::None => None,
             Self::Identity(mask) => {
                 let idents = idents.as_ref();
                 Some(idents[mask.trailing_zeros() as usize].borrow().clone())
@@ -129,44 +115,37 @@ impl<V> AlgebraicResult<V> {
         }
     }
 
-    /// Returns the contained `Element` value or an identity value from the `idents` table.  Panics if `self`
-    /// is [AlgebraicResult::None]
+    /// Returns the contained `Element` value or an identity value from the `idents` table.
     #[inline]
     pub fn unwrap<I: AsRef<[VRef]>, VRef: std::borrow::Borrow<V>>(self, idents: I) -> V
         where V: Clone
     {
         match self {
             Self::Element(v) => v,
-            Self::None => panic!(),
             Self::Identity(mask) => {
                 let idents = idents.as_ref();
                 idents[mask.trailing_zeros() as usize].borrow().clone()
             },
         }
     }
-    /// Returns the contained `Element` value or runs one of the provided closures
-    ///
-    /// This is the most straightforward way to turn a partial lattice result into a complete lattice element
+    /// Returns the contained `Element` value or obtains the identified argument from `ident_f`.
     #[inline]
-    pub fn unwrap_or_else<IdentF, NoneF>(self, ident_f: IdentF, none_f: NoneF) -> V
+    pub fn unwrap_or_else<IdentF>(self, ident_f: IdentF) -> V
         where
         IdentF: FnOnce(usize) -> V,
-        NoneF: FnOnce() -> V
     {
         match self {
             Self::Element(v) => v,
-            Self::None => none_f(),
             Self::Identity(mask) => ident_f(mask.trailing_zeros() as usize),
         }
     }
-    /// Returns the contained `Element` value or one of the provided default values
+    /// Returns the contained `Element` value or one of the provided identity values.
     #[inline]
-    pub fn unwrap_or<I: AsRef<[VRef]>, VRef: std::borrow::Borrow<V>>(self, idents: I, none: V) -> V
+    pub fn unwrap_or<I: AsRef<[VRef]>, VRef: std::borrow::Borrow<V>>(self, idents: I) -> V
         where V: Clone
     {
         match self {
             Self::Element(v) => v,
-            Self::None => none,
             Self::Identity(mask) => {
                 let idents = idents.as_ref();
                 idents[mask.trailing_zeros() as usize].borrow().clone()
@@ -220,32 +199,8 @@ impl<V> AlgebraicResult<V> {
         BIdent: FnOnce(usize) -> Option<BV>,
     {
         match self {
-            Self::None => {
-                match b {
-                    AlgebraicResult::None => AlgebraicResult::None,
-                    AlgebraicResult::Element(b_v) => merge_f(None, Some(b_v)),
-                    AlgebraicResult::Identity(b_mask) => {
-                        let self_ident = self_idents(0);
-                        if self_ident.is_none() {
-                            AlgebraicResult::Identity(b_mask)
-                        } else {
-                            let b_v = b_idents(b_mask.trailing_zeros() as usize);
-                            merge_f(None, b_v)
-                        }
-                    },
-                }
-            },
             Self::Identity(self_mask) => {
                 match b {
-                    AlgebraicResult::None => {
-                        let b_ident = b_idents(0);
-                        if b_ident.is_none() {
-                            AlgebraicResult::Identity(self_mask)
-                        } else {
-                            let self_v = self_idents(self_mask.trailing_zeros() as usize);
-                            merge_f(self_v, None)
-                        }
-                    },
                     AlgebraicResult::Element(b_v) => {
                         let self_v = self_idents(self_mask.trailing_zeros() as usize);
                         merge_f(self_v, Some(b_v))
@@ -264,7 +219,6 @@ impl<V> AlgebraicResult<V> {
             },
             Self::Element(self_v) => {
                 match b {
-                    AlgebraicResult::None => merge_f(Some(self_v), None),
                     AlgebraicResult::Element(b_v) => merge_f(Some(self_v), Some(b_v)),
                     AlgebraicResult::Identity(b_mask) => {
                         let b_v = b_idents(b_mask.trailing_zeros() as usize);
@@ -280,7 +234,6 @@ impl<V> AlgebraicResult<V> {
         where F: FnOnce() -> V
     {
         match status {
-            AlgebraicStatus::None => Self::None,
             AlgebraicStatus::Identity => Self::Identity(SELF_IDENT),
             AlgebraicStatus::Element => Self::Element(element_f())
         }
@@ -289,7 +242,6 @@ impl<V> AlgebraicResult<V> {
     #[inline]
     pub fn status(&self) -> AlgebraicStatus {
         match self {
-            AlgebraicResult::None => AlgebraicStatus::None,
             AlgebraicResult::Element(_) => AlgebraicStatus::Element,
             AlgebraicResult::Identity(mask) => {
                 if mask & SELF_IDENT > 0 {
@@ -302,39 +254,102 @@ impl<V> AlgebraicResult<V> {
     }
 }
 
+/// Merges results from two independently optional parts of a compound value.
+///
+/// This is the partial-operation counterpart to [`AlgebraicResult::merge`] and
+/// is useful when implementing `pmeet` or `psubtract` for a struct with
+/// multiple independently-computed fields. The identity callbacks materialize
+/// a field from the indicated whole-operation argument when that field's result
+/// is an identity.
+#[inline]
+pub fn merge_optional_results<AV, BV, U, MergeF, AIdent, BIdent>(
+    a: Option<AlgebraicResult<AV>>,
+    b: Option<AlgebraicResult<BV>>,
+    a_idents: AIdent,
+    b_idents: BIdent,
+    merge_f: MergeF,
+) -> Option<AlgebraicResult<U>>
+where
+    MergeF: FnOnce(Option<AV>, Option<BV>) -> AlgebraicResult<U>,
+    AIdent: FnOnce(usize) -> Option<AV>,
+    BIdent: FnOnce(usize) -> Option<BV>,
+{
+    match a {
+        None => match b {
+            None => None,
+            Some(AlgebraicResult::Element(b_v)) => Some(merge_f(None, Some(b_v))),
+            Some(AlgebraicResult::Identity(b_mask)) => {
+                if a_idents(0).is_none() {
+                    Some(AlgebraicResult::Identity(b_mask))
+                } else {
+                    Some(merge_f(None, b_idents(b_mask.trailing_zeros() as usize)))
+                }
+            }
+        },
+        Some(AlgebraicResult::Identity(a_mask)) => match b {
+            None => {
+                if b_idents(0).is_none() {
+                    Some(AlgebraicResult::Identity(a_mask))
+                } else {
+                    Some(merge_f(a_idents(a_mask.trailing_zeros() as usize), None))
+                }
+            }
+            Some(AlgebraicResult::Element(b_v)) => {
+                Some(merge_f(a_idents(a_mask.trailing_zeros() as usize), Some(b_v)))
+            }
+            Some(AlgebraicResult::Identity(b_mask)) => {
+                let combined_mask = a_mask & b_mask;
+                if combined_mask > 0 {
+                    Some(AlgebraicResult::Identity(combined_mask))
+                } else {
+                    Some(merge_f(
+                        a_idents(a_mask.trailing_zeros() as usize),
+                        b_idents(b_mask.trailing_zeros() as usize),
+                    ))
+                }
+            }
+        },
+        Some(AlgebraicResult::Element(a_v)) => match b {
+            None => Some(merge_f(Some(a_v), None)),
+            Some(AlgebraicResult::Element(b_v)) => Some(merge_f(Some(a_v), Some(b_v))),
+            Some(AlgebraicResult::Identity(b_mask)) => {
+                Some(merge_f(Some(a_v), b_idents(b_mask.trailing_zeros() as usize)))
+            }
+        },
+    }
+}
+
 impl<V> AlgebraicResult<Option<V>> {
-    /// Flattens a nested `Option<V>` inside an `AlgebraicResult<V>`, converting `AlgebraicResult::Element(None)`
-    /// into `AlgebraicResult::None`
+    /// Moves optionality outside the algebraic result. `Element(None)` becomes
+    /// `None`; identity results remain present because their value must be
+    /// obtained from the identified argument.
     #[inline]
-    pub fn flatten(self) -> AlgebraicResult<V> {
+    pub fn flatten(self) -> Option<AlgebraicResult<V>> {
         match self {
             Self::Element(v) => {
                 match v {
-                    Some(v) => AlgebraicResult::Element(v),
-                    None => AlgebraicResult::None
+                    Some(v) => Some(AlgebraicResult::Element(v)),
+                    None => None
                 }
             },
-            Self::None => AlgebraicResult::None,
-            Self::Identity(mask) => AlgebraicResult::Identity(mask),
+            Self::Identity(mask) => Some(AlgebraicResult::Identity(mask)),
         }
     }
 }
 
 /// Status result that is returned from an in-place algebraic operation (a method that takes `&mut self`)
 ///
-/// NOTE: `AlgebraicStatus` values are ordered, with `Element` being the lowest value and `None` being the
-/// highest.  Higher values make stronger guarantees about the results of the operation, but a lower values
+/// NOTE: `AlgebraicStatus` values are ordered, with `Element` lower than `Identity`.
+/// Higher values make stronger guarantees about the results of the operation, but lower values
 /// are still correct and your code must behave appropriately.
-///
-/// For example, for example `Empty.join(Empty)` would result in Empty, but also leave the original value
-/// unmodified, therefore both `Identity` and `None` are conceptually valid in that case.
 ///
 /// In general, `AlgebraicStatus` return values are a valid signal for loop termination, but should not be
 /// strictly relied upon for other kinds of branching.  For example, `Element` might be returned by
 /// [ZipperWriting::join](crate::zipper::ZipperWriting::join) instead of `Identity` if the internal representation was changed by the method,
 /// however the next call to `join` ought to return `Identity` if nothing new is added.
 ///
-/// This type mirrors [AlgebraicResult]
+/// Operations that may remove the result entirely return
+/// `Option<AlgebraicStatus>`; absence is not an `AlgebraicStatus`.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AlgebraicStatus {
     /// A result indicating `self` contains the operation's output
@@ -342,16 +357,9 @@ pub enum AlgebraicStatus {
     Element,
     /// A result indicating `self` was unmodified by the operation
     Identity,
-    /// A result indicating `self` was completely annhilated and is now empty
-    None,
 }
 
 impl AlgebraicStatus {
-    /// Returns `true` if the status is [AlgebraicStatus::None], otherwise returns `false`
-    #[inline]
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
-    }
     /// Returns `true` if the status is [AlgebraicStatus::Identity], otherwise returns `false`
     #[inline]
     pub fn is_identity(&self) -> bool {
@@ -364,53 +372,66 @@ impl AlgebraicStatus {
     }
     /// Merges two `AlgebraicStatus` values into one.  Useful when composing the status from operations on individual fields
     ///
-    /// The `self_none` and `b_none` args indicate whether the `self` and `b` args, respectively, correspond to `None`
-    /// values prior to the operation.  Pass `true` if the existing values were already `none` or `false` if they
-    /// were made `None` by the operation.  For operations that cannot convert a non-`None` value to `None`,
-    /// (such as join) it is safe to pass (`true`, `true`) regardless of the actual original values.
-    ///
     /// See [AlgebraicResult::merge].
     #[inline]
-    pub fn merge(self, b: Self, self_none: bool, b_none: bool) -> AlgebraicStatus {
+    pub fn merge(self, b: Self) -> AlgebraicStatus {
         match self {
-            Self::None => match b {
-                Self::None => Self::None,
-                Self::Element => Self::Element,
-                Self::Identity => if self_none {
-                    Self::Identity
-                } else {
-                    Self::Element
-                },
-            },
             Self::Identity => match b {
                 Self::Element => Self::Element,
                 Self::Identity => Self::Identity,
-                Self::None => if b_none {
-                    Self::Identity
-                } else {
-                    Self::Element
-                },
             },
             Self::Element => Self::Element
         }
     }
 }
 
-impl<V> From<FatAlgebraicResult<V>> for AlgebraicResult<V> {
+/// Combines statuses from two independently optional parts of a compound value.
+#[inline]
+pub(crate) fn merge_optional_statuses(
+    a: Option<AlgebraicStatus>,
+    b: Option<AlgebraicStatus>,
+    a_was_none: bool,
+    b_was_none: bool,
+) -> Option<AlgebraicStatus> {
+    match a {
+        None => match b {
+            None => None,
+            Some(AlgebraicStatus::Element) => Some(AlgebraicStatus::Element),
+            Some(AlgebraicStatus::Identity) => Some(if a_was_none {
+                AlgebraicStatus::Identity
+            } else {
+                AlgebraicStatus::Element
+            }),
+        },
+        Some(AlgebraicStatus::Identity) => match b {
+            Some(AlgebraicStatus::Element) => Some(AlgebraicStatus::Element),
+            Some(AlgebraicStatus::Identity) => Some(AlgebraicStatus::Identity),
+            None => Some(if b_was_none {
+                AlgebraicStatus::Identity
+            } else {
+                AlgebraicStatus::Element
+            }),
+        },
+        Some(AlgebraicStatus::Element) => Some(AlgebraicStatus::Element),
+    }
+}
+
+impl<V> From<FatAlgebraicResult<V>> for Option<AlgebraicResult<V>> {
     #[inline]
     fn from(src: FatAlgebraicResult<V>) -> Self {
         if src.identity_mask > 0 {
-            AlgebraicResult::Identity(src.identity_mask)
+            Some(AlgebraicResult::Identity(src.identity_mask))
         } else {
             match src.element {
-                Some(element) => AlgebraicResult::Element(element),
-                None => AlgebraicResult::None
+                Some(element) => Some(AlgebraicResult::Element(element)),
+                None => None
             }
         }
     }
 }
 
-/// Internal result type that can be down-converted to an [AlgebraicResult], but carries additional information
+/// Internal result type that can be down-converted to an
+/// `Option<AlgebraicResult<_>>`, but carries additional information.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) struct FatAlgebraicResult<V> {
     /// An identity mask that maps to the [AlgebraicResult::Identity] value, or 0 if the result is not an identity
@@ -428,13 +449,13 @@ impl<V> FatAlgebraicResult<V> {
     /// Converts an [AlgebraicResult] into a `FatAlgebraicResult`, assuming the source `result` was the
     /// output of a binary operation (two arguments).
     #[inline]
-    pub(crate) fn from_binary_op_result(result: AlgebraicResult<V>, a: &V, b: &V) -> Self
+    pub(crate) fn from_binary_op_result(result: Option<AlgebraicResult<V>>, a: &V, b: &V) -> Self
         where V: Clone
     {
         match result {
-            AlgebraicResult::None => FatAlgebraicResult::none(),
-            AlgebraicResult::Element(v) => FatAlgebraicResult::element(v),
-            AlgebraicResult::Identity(mask) => {
+            None => FatAlgebraicResult::none(),
+            Some(AlgebraicResult::Element(v)) => FatAlgebraicResult::element(v),
+            Some(AlgebraicResult::Identity(mask)) => {
                 debug_assert!(mask <= (SELF_IDENT | COUNTER_IDENT));
                 if mask & SELF_IDENT > 0 {
                     FatAlgebraicResult::new(mask, Some(a.clone()))
@@ -472,7 +493,7 @@ impl<V> FatAlgebraicResult<V> {
     //     where F: FnOnce(Option<V>, Option<V>) -> AlgebraicResult<U>,
     // {
     //     if self.element.is_none() && other.element.is_none() {
-    //         return AlgebraicResult::None
+    //         return None
     //     }
     //     let combined_mask = self.identity_mask & other.identity_mask;
     //     if combined_mask > 0 {
@@ -489,7 +510,7 @@ impl<V> FatAlgebraicResult<V> {
     //             Self::new(self.identity_mask, None)
     //         },
     //         Some(self_element) => match self_element.pmeet(arg) {
-    //             AlgebraicResult::None => Self::none(),
+    //             None => Self::none(),
     //             AlgebraicResult::Element(e) => Self::element(e),
     //             AlgebraicResult::Identity(mask) => {
     //                 if mask & SELF_IDENT > 0 {
@@ -511,7 +532,6 @@ impl<V> FatAlgebraicResult<V> {
                 Self::new(self.identity_mask | 1 << arg_idx, Some(arg.clone()))
             },
             Some(self_element) => match self_element.pjoin(&arg) {
-                AlgebraicResult::None => Self::none(),
                 AlgebraicResult::Element(e) => Self::element(e),
                 AlgebraicResult::Identity(mask) => {
                     if mask & SELF_IDENT > 0 {
@@ -536,46 +556,49 @@ pub trait Lattice {
     /// If `IDEMPOTENT = true` the implementor is asserting that:
     /// `pjoin(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
     /// `join_into(self) -> AlgebraicStatus::Identity`,
-    /// `pmeet(self) -> AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)`,
+    /// `pmeet(self) -> Some(AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT))`,
     ///
     /// WARNING! This constant is currently informational only.  The node-level and zipper
     /// algebra implementations do not yet consult it, so changing it has no effect
     /// on their behavior.  It is planned for gating implementation shortcuts in the future
     const IDEMPOTENT: bool = true;
 
-    /// Implements the union operation between two instances of a type in a partial lattice, resulting in
-    /// the creation of a new result instance
+    /// Computes the join (least upper bound) of two elements.
     ///
-    /// A join must be an upper bound of both inputs.  Because both arguments are existing elements,
-    /// returning [AlgebraicResult::None] from this method is a breach of the `Lattice` contract.  In
-    /// particular, an element that represents the lattice bottom is still an element; it must be returned
-    /// as an `Element` or `Identity`, not confused with the absence of an output element.
+    /// This operation is total. An implementation whose join can fall outside
+    /// its represented carrier must instead lift that carrier into a type that
+    /// can represent the result (for example, `Option<T>`).
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
 
     /// Implements the union operation between two instances of a type, consuming the `other` input operand,
     /// and modifying `self` to become the joined type
     ///
-    /// Returning [AlgebraicStatus::None] is a breach of the `Lattice` contract; see [Lattice::pjoin].
     fn join_into(&mut self, other: Self) -> AlgebraicStatus where Self: Sized {
         let result = self.pjoin(&other);
-        debug_assert!(!result.is_none(), "Lattice::pjoin returned None for a join");
-        //NOTE: pedantically, the `default_f` ought to assign the `&mut s` to `Self::bottom()`, however there is
-        // no way for a join to get to an empty result except by starting with an empty result, so leaving the
-        // arg alone is functionally the same.
-        in_place_default_impl(result, self, other, |_s| {}, |e| e)
+        in_place_default_impl(result, self, other, |e| e)
     }
 
-    /// Implements the intersection operation between two instances of a type in a partial lattice
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
+    /// Computes the meet (greatest lower bound) of two elements.
+    ///
+    /// Returns `None` when the operands annihilate and no element remains.
+    /// Otherwise, the inner result describes whether the output is identical
+    /// to an operand or newly constructed. Thus optionality describes whether
+    /// a result exists, while `AlgebraicResult` describes how an existing result
+    /// relates to its inputs.
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized;
 
     //GOAT, we want a meet_into, that has the same semantics as join_into, e.g. mutating in-place.  I
     // don't think there is any benefit to consuming `other`, however, so we can still take `other: &Self`
 
+    /// Joins every element in `xs`.
+    ///
+    /// The outer `None` means that `xs` itself was empty; individual joins are
+    /// total and always produce an `AlgebraicResult`.
     //GOAT, this should be temporarily deprecated until we work out the correct function prototype
-    fn join_all<S: AsRef<Self>, Args: AsRef<[S]>>(xs: Args) -> AlgebraicResult<Self> where Self: Sized + Clone {
+    fn join_all<S: AsRef<Self>, Args: AsRef<[S]>>(xs: Args) -> Option<AlgebraicResult<Self>> where Self: Sized + Clone {
         let mut iter = xs.as_ref().into_iter().enumerate();
         let mut result = match iter.next() {
-            None => return AlgebraicResult::None,
+            None => return None,
             Some((_, first)) => FatAlgebraicResult::new(SELF_IDENT, Some(first.as_ref().clone())),
         };
         for (i, next) in iter {
@@ -586,16 +609,11 @@ pub trait Lattice {
 }
 
 /// Internal function to implement the default behavior of `join_into`, `meet_into`, etc. in terms of `pjoin`, `pmeet`, etc.
-fn in_place_default_impl<SelfT, OtherT, ConvertF, DefaultF>(result: AlgebraicResult<SelfT>, self_ref: &mut SelfT, other: OtherT, default_f: DefaultF, convert_f: ConvertF) -> AlgebraicStatus
+fn in_place_default_impl<SelfT, OtherT, ConvertF>(result: AlgebraicResult<SelfT>, self_ref: &mut SelfT, other: OtherT, convert_f: ConvertF) -> AlgebraicStatus
     where
-    DefaultF: FnOnce(&mut SelfT),
     ConvertF: Fn(OtherT) -> SelfT
 {
     match result {
-        AlgebraicResult::None => {
-            default_f(self_ref);
-            AlgebraicStatus::None
-        },
         AlgebraicResult::Element(v) => {
             *self_ref = v;
             AlgebraicStatus::Element
@@ -616,7 +634,9 @@ fn in_place_default_impl<SelfT, OtherT, ConvertF, DefaultF>(result: AlgebraicRes
 pub trait LatticeRef {
     type T;
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self::T>;
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self::T>;
+    /// Computes the meet of the referenced values, returning `None` when no
+    /// result element remains.
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self::T>>;
 }
 
 /// Implements subtract behavior for a type
@@ -625,15 +645,20 @@ pub trait DistributiveLattice {
     /// evaluating algebraic operations on shared subtries.
     ///
     /// If `IDEMPOTENT = true` the implementor is asserting that:
-    /// `psubtract(self) -> AlgebraicResult::None`,
+    /// `psubtract(self) -> None`,
     ///
     /// WARNING! This constant is currently informational only.  The node-level and zipper
     /// algebra implementations do not yet consult it, so changing it has no effect
     /// on their behavior.  It is planned for gating implementation shortcuts in the future
     const IDEMPOTENT: bool = true;
 
-    /// Implements the partial subtract operation
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
+    /// Subtracts `other` from `self`.
+    ///
+    /// Returns `None` when subtraction completely annihilates `self`.
+    /// Otherwise, the inner result describes the remaining element and how it
+    /// relates to the input. This keeps absence orthogonal to the
+    /// identity-versus-new-element distinction.
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized;
 
     //GOAT, We want a psubtract_from (subtract_into??) that operates on a `&mut self`
 }
@@ -643,9 +668,9 @@ pub trait DistributiveLatticeRef {
     /// The type that is referenced
     type T;
 
-    /// Implements the partial subtract operation on the referenced values, resulting in the potential
-    /// creation of a new value
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self::T>;
+    /// Subtracts the referenced `other` value from `self`, returning `None`
+    /// when no result element remains.
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self::T>>;
 }
 
 // =-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-=
@@ -659,7 +684,7 @@ pub trait DistributiveLatticeRef {
 /// from restrict, and what performance we are willing to trade to get them
 pub(crate) trait Quantale {
     /// TODO: Document this (currently internal-only)
-    fn prestrict(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized;
+    fn prestrict(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized;
 }
 
 /// An internal mirror of the [Lattice] trait, where the `self` and `other` types don't need to be
@@ -668,11 +693,9 @@ pub(crate) trait HeteroLattice<OtherT> {
     fn pjoin(&self, other: &OtherT) -> AlgebraicResult<Self> where Self: Sized;
     fn join_into(&mut self, other: OtherT) -> AlgebraicStatus where Self: Sized {
         let result = self.pjoin(&other);
-        debug_assert!(!result.is_none(), "pjoin returned None for a join");
-        //NOTE: See comment on [Lattice::join_into] default impl, regarding using `Self::bottom` for `default_f`
-        in_place_default_impl(result, self, other, |_s| {}, |e| Self::convert(e))
+        in_place_default_impl(result, self, other, |e| Self::convert(e))
     }
-    fn pmeet(&self, other: &OtherT) -> AlgebraicResult<Self> where Self: Sized;
+    fn pmeet(&self, other: &OtherT) -> Option<AlgebraicResult<Self>> where Self: Sized;
     // fn join_all(xs: &[&Self]) -> Self where Self: Sized; //HeteroLattice will entirely disappear with the policy refactor, so it's not worth worying about this anymore
     fn convert(other: OtherT) -> Self;
 }
@@ -680,12 +703,12 @@ pub(crate) trait HeteroLattice<OtherT> {
 /// An internal mirror of the [DistributiveLattice] trait, where the `self` and `other` types
 /// don't need to be exactly the same type, to facilitate blanket impls
 pub(crate) trait HeteroDistributiveLattice<OtherT> {
-    fn psubtract(&self, other: &OtherT) -> AlgebraicResult<Self> where Self: Sized;
+    fn psubtract(&self, other: &OtherT) -> Option<AlgebraicResult<Self>> where Self: Sized;
 }
 
 /// Internal mirror for [Quantale] See discussion on [HeteroLattice].
 pub(crate) trait HeteroQuantale<OtherT> {
-    fn prestrict(&self, other: &OtherT) -> AlgebraicResult<Self> where Self: Sized;
+    fn prestrict(&self, other: &OtherT) -> Option<AlgebraicResult<Self>> where Self: Sized;
 }
 
 // =-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-=
@@ -704,11 +727,7 @@ impl<V: Lattice + Clone> Lattice for Option<V> {
             },
             Some(l) => match other {
                 None => { AlgebraicResult::Identity(SELF_IDENT) }
-                Some(r) => {
-                    let result = l.pjoin(r);
-                    debug_assert!(!result.is_none(), "Lattice::pjoin returned None for a join");
-                    result.map(|result| Some(result))
-                }
+                Some(r) => l.pjoin(r).map(Some)
             }
         }
     }
@@ -723,21 +742,17 @@ impl<V: Lattice + Clone> Lattice for Option<V> {
             } }
             Some(l) => match other {
                 None => AlgebraicStatus::Identity,
-                Some(r) => {
-                    let status = l.join_into(r);
-                    debug_assert!(!status.is_none(), "Lattice::join_into returned None for a join");
-                    status
-                }
+                Some(r) => l.join_into(r)
             }
         }
     }
-    fn pmeet(&self, other: &Option<V>) -> AlgebraicResult<Option<V>> {
+    fn pmeet(&self, other: &Option<V>) -> Option<AlgebraicResult<Option<V>>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(l) => {
                 match other {
-                    None => { AlgebraicResult::None }
-                    Some(r) => l.pmeet(r).map(|result| Some(result))
+                    None => None,
+                    Some(r) => l.pmeet(r).map(|result| result.map(Some))
                 }
             }
         }
@@ -745,13 +760,13 @@ impl<V: Lattice + Clone> Lattice for Option<V> {
 }
 
 impl<V: DistributiveLattice + Clone> DistributiveLattice for Option<V> {
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(s) => {
                 match other {
-                    None => { AlgebraicResult::Identity(SELF_IDENT) }
-                    Some(o) => { s.psubtract(o).map(|v| Some(v)) }
+                    None => Some(AlgebraicResult::Identity(SELF_IDENT)),
+                    Some(o) => s.psubtract(o).map(|result| result.map(Some))
                 }
             }
         }
@@ -769,13 +784,13 @@ fn option_join_test() {
 
 #[test]
 fn option_subtract_test() {
-    assert_eq!(Some(()).psubtract(&Some(())), AlgebraicResult::None);
-    assert_eq!(Some(()).psubtract(&None), AlgebraicResult::Identity(SELF_IDENT));
-    assert_eq!(Some(Some(())).psubtract(&Some(Some(()))), AlgebraicResult::None);
-    assert_eq!(Some(Some(())).psubtract(&None), AlgebraicResult::Identity(SELF_IDENT));
-    assert_eq!(Some(Some(())).psubtract(&Some(None)), AlgebraicResult::Identity(SELF_IDENT));
-    assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(None))), AlgebraicResult::Identity(SELF_IDENT));
-    assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(Some(())))), AlgebraicResult::None);
+    assert_eq!(Some(()).psubtract(&Some(())), None);
+    assert_eq!(Some(()).psubtract(&None), Some(AlgebraicResult::Identity(SELF_IDENT)));
+    assert_eq!(Some(Some(())).psubtract(&Some(Some(()))), None);
+    assert_eq!(Some(Some(())).psubtract(&None), Some(AlgebraicResult::Identity(SELF_IDENT)));
+    assert_eq!(Some(Some(())).psubtract(&Some(None)), Some(AlgebraicResult::Identity(SELF_IDENT)));
+    assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(None))), Some(AlgebraicResult::Identity(SELF_IDENT)));
+    assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(Some(())))), None);
 }
 
 // =-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-=
@@ -786,7 +801,7 @@ impl<V: Lattice + Clone> LatticeRef for Option<&V> {
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self::T> {
         match self {
             None => { match other {
-                None => { AlgebraicResult::None }
+                None => { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) }
                 Some(_) => { AlgebraicResult::Identity(COUNTER_IDENT) }
             } }
             Some(l) => match other {
@@ -795,13 +810,13 @@ impl<V: Lattice + Clone> LatticeRef for Option<&V> {
             }
         }
     }
-    fn pmeet(&self, other: &Option<&V>) -> AlgebraicResult<Option<V>> {
+    fn pmeet(&self, other: &Option<&V>) -> Option<AlgebraicResult<Option<V>>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(l) => {
                 match other {
-                    None => { AlgebraicResult::None }
-                    Some(r) => l.pmeet(r).map(|result| Some(result))
+                    None => None,
+                    Some(r) => l.pmeet(r).map(|result| result.map(Some))
                 }
             }
         }
@@ -810,13 +825,13 @@ impl<V: Lattice + Clone> LatticeRef for Option<&V> {
 
 impl<V: DistributiveLattice + Clone> DistributiveLatticeRef for Option<&V> {
     type T = Option<V>;
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self::T> {
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self::T>> {
         match self {
-            None => { AlgebraicResult::None }
+            None => None,
             Some(s) => {
                 match other {
-                    None => { AlgebraicResult::Identity(SELF_IDENT) }
-                    Some(o) => { s.psubtract(o).map(|v| Some(v)) }
+                    None => Some(AlgebraicResult::Identity(SELF_IDENT)),
+                    Some(o) => s.psubtract(o).map(|result| result.map(Some))
                 }
             }
         }
@@ -830,14 +845,14 @@ impl <V: Lattice> Lattice for Box<V> {
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
         self.as_ref().pjoin(other.as_ref()).map(|result| Box::new(result))
     }
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
-        self.as_ref().pmeet(other.as_ref()).map(|result| Box::new(result))
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
+        self.as_ref().pmeet(other.as_ref()).map(|result| result.map(Box::new))
     }
 }
 
 impl<V: DistributiveLattice> DistributiveLattice for Box<V> {
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
-        self.as_ref().psubtract(other.as_ref()).map(|result| Box::new(result))
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
+        self.as_ref().psubtract(other.as_ref()).map(|result| result.map(Box::new))
     }
 }
 
@@ -849,14 +864,14 @@ impl <V: Lattice> LatticeRef for &V {
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self::T> {
         (**self).pjoin(other)
     }
-    fn pmeet(&self, other: &Self) -> AlgebraicResult<Self::T> {
+    fn pmeet(&self, other: &Self) -> Option<AlgebraicResult<Self::T>> {
         (**self).pmeet(other)
     }
 }
 
 impl<V: DistributiveLattice> DistributiveLatticeRef for &V {
     type T = V;
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self::T> {
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self::T>> {
         (**self).psubtract(other)
     }
 }
@@ -865,60 +880,60 @@ impl<V: DistributiveLattice> DistributiveLatticeRef for &V {
 // =-*  `()`, aka unit                                                                                *-=
 
 impl DistributiveLattice for () {
-    fn psubtract(&self, _other: &Self) -> AlgebraicResult<Self> where Self: Sized {
-        AlgebraicResult::None
+    fn psubtract(&self, _other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized {
+        None
     }
 }
 
 impl Lattice for () {
     fn pjoin(&self, _other: &Self) -> AlgebraicResult<Self> { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) }
-    fn pmeet(&self, _other: &Self) -> AlgebraicResult<Self> { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) }
+    fn pmeet(&self, _other: &Self) -> Option<AlgebraicResult<Self>> { Some(AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)) }
 }
 
 //GOAT trash
 impl Lattice for usize {
     fn pjoin(&self, _other: &usize) -> AlgebraicResult<usize> { AlgebraicResult::Identity(SELF_IDENT) }
-    fn pmeet(&self, _other: &usize) -> AlgebraicResult<usize> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pmeet(&self, _other: &usize) -> Option<AlgebraicResult<usize>> { Some(AlgebraicResult::Identity(SELF_IDENT)) }
 }
 
 //GOAT trash
 impl Lattice for u64 {
     fn pjoin(&self, _other: &u64) -> AlgebraicResult<u64> { AlgebraicResult::Identity(SELF_IDENT) }
-    fn pmeet(&self, _other: &u64) -> AlgebraicResult<u64> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pmeet(&self, _other: &u64) -> Option<AlgebraicResult<u64>> { Some(AlgebraicResult::Identity(SELF_IDENT)) }
 }
 
 //GOAT trash
 impl DistributiveLattice for u64 {
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
-        if self == other { AlgebraicResult::None }
-        else { AlgebraicResult::Element(*self) }
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> where Self: Sized {
+        if self == other { None }
+        else { Some(AlgebraicResult::Element(*self)) }
     }
 }
 
 //GOAT trash
 impl Lattice for u32 {
     fn pjoin(&self, _other: &u32) -> AlgebraicResult<u32> { AlgebraicResult::Identity(SELF_IDENT) }
-    fn pmeet(&self, _other: &u32) -> AlgebraicResult<u32> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pmeet(&self, _other: &u32) -> Option<AlgebraicResult<u32>> { Some(AlgebraicResult::Identity(SELF_IDENT)) }
 }
 
 //GOAT trash
 impl Lattice for u16 {
     fn pjoin(&self, _other: &u16) -> AlgebraicResult<u16> { AlgebraicResult::Identity(SELF_IDENT) }
-    fn pmeet(&self, _other: &u16) -> AlgebraicResult<u16> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pmeet(&self, _other: &u16) -> Option<AlgebraicResult<u16>> { Some(AlgebraicResult::Identity(SELF_IDENT)) }
 }
 
 //GOAT trash
 impl DistributiveLattice for u16 {
-    fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
-        if self == other { AlgebraicResult::None }
-        else { AlgebraicResult::Element(*self) }
+    fn psubtract(&self, other: &Self) -> Option<AlgebraicResult<Self>> {
+        if self == other { None }
+        else { Some(AlgebraicResult::Element(*self)) }
     }
 }
 
 //GOAT trash
 impl Lattice for u8 {
     fn pjoin(&self, _other: &u8) -> AlgebraicResult<u8> { AlgebraicResult::Identity(SELF_IDENT) }
-    fn pmeet(&self, _other: &u8) -> AlgebraicResult<u8> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pmeet(&self, _other: &u8) -> Option<AlgebraicResult<u8>> { Some(AlgebraicResult::Identity(SELF_IDENT)) }
 }
 
 // =-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-=
@@ -927,11 +942,11 @@ impl Lattice for u8 {
 // and therefore fewer meanings for a `bool`.
 
 impl DistributiveLattice for bool {
-    fn psubtract(&self, other: &bool) -> AlgebraicResult<Self> {
+    fn psubtract(&self, other: &bool) -> Option<AlgebraicResult<Self>> {
         if *self == *other {
-            AlgebraicResult::None
+            None
         } else {
-            AlgebraicResult::Identity(SELF_IDENT)
+            Some(AlgebraicResult::Identity(SELF_IDENT))
         }
     }
 }
@@ -944,11 +959,11 @@ impl Lattice for bool {
             AlgebraicResult::Identity(SELF_IDENT)
         }
     }
-    fn pmeet(&self, other: &bool) -> AlgebraicResult<bool> {
+    fn pmeet(&self, other: &bool) -> Option<AlgebraicResult<bool>> {
         if *self && !*other {
-            AlgebraicResult::Identity(COUNTER_IDENT) //result is false
+            Some(AlgebraicResult::Identity(COUNTER_IDENT)) //result is false
         } else {
-            AlgebraicResult::Identity(SELF_IDENT)
+            Some(AlgebraicResult::Identity(SELF_IDENT))
         }
     }
 }
@@ -1037,7 +1052,7 @@ macro_rules! set_lattice {
                 }
                 $crate::ring::set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self_len, other_len)
             }
-            fn pmeet(&self, other: &Self) -> $crate::ring::AlgebraicResult<Self> {
+            fn pmeet(&self, other: &Self) -> Option<$crate::ring::AlgebraicResult<Self>> {
                 let mut result = <Self as $crate::ring::SetLattice>::with_capacity(0);
                 let mut is_ident = true;
                 let mut is_counter_ident = true;
@@ -1059,7 +1074,11 @@ macro_rules! set_lattice {
                 if switch {
                     core::mem::swap(&mut is_ident, &mut is_counter_ident);
                 }
-                $crate::ring::set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self.len(), other.len())
+                if $crate::ring::SetLattice::is_empty(&result) {
+                    None
+                } else {
+                    Some($crate::ring::set_lattice_integrate_into_result(result, is_ident, is_counter_ident, self.len(), other.len()))
+                }
             }
         }
     }
@@ -1068,26 +1087,26 @@ macro_rules! set_lattice {
 /// Internal function to integrate an `AlgebraicResult` from an element in a set into the set's own overall result
 #[inline]
 #[doc(hidden)]
-pub fn set_lattice_update_ident_flags_with_result<S: SetLattice>(
+pub fn set_lattice_update_ident_flags_with_result<S: SetLattice, R: Into<Option<AlgebraicResult<S::V>>>>(
     result_set: &mut S,
-    result: AlgebraicResult<S::V>,
+    result: R,
     key: &S::K,
     self_val: &S::V,
     other_val: &S::V,
     is_ident: &mut bool,
     is_counter_ident: &mut bool
 ) {
-    match result {
-        AlgebraicResult::None => {
+    match result.into() {
+        None => {
             *is_ident = false;
             *is_counter_ident = false;
         },
-        AlgebraicResult::Element(new_val) => {
+        Some(AlgebraicResult::Element(new_val)) => {
             *is_ident = false;
             *is_counter_ident = false;
             result_set.insert(key.clone(), new_val);
         },
-        AlgebraicResult::Identity(mask) => {
+        Some(AlgebraicResult::Identity(mask)) => {
             if mask & SELF_IDENT > 0 {
                 result_set.insert(key.clone(), self_val.clone());
             } else {
@@ -1115,21 +1134,17 @@ pub fn set_lattice_integrate_into_result<S: SetLattice>(
     other_set_len: usize,
 ) -> AlgebraicResult<S> {
     let result_len = result_set.len();
-    if result_len == 0 {
-        AlgebraicResult::None
+    let mut ident_mask = 0;
+    if is_ident && self_set_len == result_len {
+        ident_mask |= SELF_IDENT;
+    }
+    if is_counter_ident && other_set_len == result_len {
+        ident_mask |= COUNTER_IDENT;
+    }
+    if ident_mask > 0 {
+        AlgebraicResult::Identity(ident_mask)
     } else {
-        let mut ident_mask = 0;
-        if is_ident && self_set_len == result_len {
-            ident_mask |= SELF_IDENT;
-        }
-        if is_counter_ident && other_set_len == result_len {
-            ident_mask |= COUNTER_IDENT;
-        }
-        if ident_mask > 0 {
-            AlgebraicResult::Identity(ident_mask)
-        } else {
-            AlgebraicResult::Element(result_set)
-        }
+        AlgebraicResult::Element(result_set)
     }
 }
 
@@ -1138,7 +1153,7 @@ pub fn set_lattice_integrate_into_result<S: SetLattice>(
 macro_rules! set_dist_lattice {
     ( $type_ident:ident $(< $( $lt:tt $( : $clt:tt $(+ $dlt:tt )* )? ),+ >)? ) => {
         impl $(< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $crate::ring::DistributiveLattice for $type_ident $(< $( $lt ),+ >)? where Self: $crate::ring::SetLattice + Clone, <Self as $crate::ring::SetLattice>::V: $crate::ring::DistributiveLattice {
-            fn psubtract(&self, other: &Self) -> $crate::ring::AlgebraicResult<Self> {
+            fn psubtract(&self, other: &Self) -> Option<$crate::ring::AlgebraicResult<Self>> {
                 let mut is_ident = true;
                 let mut result = self.clone();
                 //Two code paths, so that we only iterate over the smaller set
@@ -1155,13 +1170,13 @@ macro_rules! set_dist_lattice {
                         }
                     }
                 }
-                if $crate::ring::SetLattice::len(&result) == 0 {
-                    $crate::ring::AlgebraicResult::None
+                if $crate::ring::SetLattice::is_empty(&result) {
+                    None
                 } else if is_ident {
-                    $crate::ring::AlgebraicResult::Identity(SELF_IDENT)
+                    Some($crate::ring::AlgebraicResult::Identity(SELF_IDENT))
                 } else {
                     $crate::ring::SetLattice::shrink_to_fit(&mut result);
-                    $crate::ring::AlgebraicResult::Element(result)
+                    Some($crate::ring::AlgebraicResult::Element(result))
                 }
             }
         }
@@ -1178,14 +1193,14 @@ fn set_lattice_subtract_element<S: SetLattice>(
     is_ident: &mut bool,
 ) where S::V: DistributiveLattice {
     match self_val.psubtract(other_val) {
-        AlgebraicResult::Element(new_val) => {
+        Some(AlgebraicResult::Element(new_val)) => {
             SetLattice::replace(result_set, key, new_val);
             *is_ident = false;
         },
-        AlgebraicResult::Identity(mask) => {
+        Some(AlgebraicResult::Identity(mask)) => {
             debug_assert_eq!(mask, SELF_IDENT);
         },
-        AlgebraicResult::None => {
+        None => {
             SetLattice::remove(result_set, key);
             *is_ident = false;
         }
@@ -1248,8 +1263,8 @@ mod tests {
 
     type NestedSetMap = HashMap<u8, HashSet<u16>>;
 
-    fn assert_binary_result<T>(
-        result: AlgebraicResult<T>,
+    fn assert_binary_result<T, R>(
+        result: R,
         self_value: &T,
         counter_value: &T,
         expected: &T,
@@ -1257,12 +1272,14 @@ mod tests {
         context: &str,
     ) where
         T: Clone + Default + Eq + Debug,
+        R: Into<Option<AlgebraicResult<T>>>,
     {
+        let result = result.into();
         match &result {
-            AlgebraicResult::None => {
+            None => {
                 assert_eq!(expected, &T::default(), "{context}: None result");
             }
-            AlgebraicResult::Identity(mask) => {
+            Some(AlgebraicResult::Identity(mask)) => {
                 assert_ne!(*mask, 0, "{context}: zero identity mask");
                 assert_eq!(
                     *mask & !(SELF_IDENT | COUNTER_IDENT),
@@ -1286,10 +1303,12 @@ mod tests {
                     );
                 }
             }
-            AlgebraicResult::Element(_) => {}
+            Some(AlgebraicResult::Element(_)) => {}
         }
 
-        let actual = result.unwrap_or([self_value, counter_value], T::default());
+        let actual = result
+            .map(|result| result.unwrap([self_value, counter_value]))
+            .unwrap_or_default();
         assert_eq!(actual, *expected, "{context}: materialized result");
     }
 
@@ -1300,19 +1319,20 @@ mod tests {
             .collect()
     }
 
-    fn assert_nested_result(
-        result: AlgebraicResult<NestedSetMap>,
+    fn assert_nested_result<R>(
+        result: R,
         self_value: &NestedSetMap,
         counter_value: &NestedSetMap,
         expected: &NestedSetMap,
         allow_counter_identity: bool,
         context: &str,
-    ) {
+    ) where R: Into<Option<AlgebraicResult<NestedSetMap>>> {
+        let result = result.into();
         match &result {
-            AlgebraicResult::None => {
+            None => {
                 assert!(expected.is_empty(), "{context}: None result");
             }
-            AlgebraicResult::Identity(mask) => {
+            Some(AlgebraicResult::Identity(mask)) => {
                 assert_ne!(*mask, 0, "{context}: zero identity mask");
                 assert_eq!(
                     *mask & !(SELF_IDENT | COUNTER_IDENT),
@@ -1341,10 +1361,12 @@ mod tests {
                     );
                 }
             }
-            AlgebraicResult::Element(_) => {}
+            Some(AlgebraicResult::Element(_)) => {}
         }
 
-        let actual = result.unwrap_or([self_value, counter_value], NestedSetMap::new());
+        let actual = result
+            .map(|result| result.unwrap([self_value, counter_value]))
+            .unwrap_or_default();
         assert_eq!(
             normalize_nested_map(&actual),
             *expected,
@@ -1442,9 +1464,9 @@ mod tests {
         let mut a = HashSet::new();
         let mut b = HashSet::new();
 
-        //Test None result
+        // Joining two empty sets still produces an element: both inputs are identities.
         let joined_result = a.pjoin(&b);
-        assert_eq!(joined_result, AlgebraicResult::None);
+        assert_eq!(joined_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
 
         //Straightforward join
         a.insert("A");
@@ -1494,14 +1516,14 @@ mod tests {
         a.insert("A");
         b.insert("B");
         let meet_result = a.pmeet(&b);
-        assert_eq!(meet_result, AlgebraicResult::None);
+        assert_eq!(meet_result, None);
 
         //Straightforward meet
         a.insert("A");
         a.insert("C");
         b.insert("B");
         b.insert("C");
-        let meet_result = a.pmeet(&b);
+        let meet_result = a.pmeet(&b).unwrap();
         assert!(meet_result.is_element());
         let meet = meet_result.unwrap([&a, &b]);
         assert_eq!(meet.len(), 1);
@@ -1511,7 +1533,7 @@ mod tests {
 
         //Make "self" contain more entries
         a.insert("D");
-        let meet_result = a.pmeet(&b);
+        let meet_result = a.pmeet(&b).unwrap();
         assert!(meet_result.is_element());
         let meet = meet_result.unwrap([&a, &b]);
         assert_eq!(meet.len(), 1);
@@ -1520,22 +1542,22 @@ mod tests {
         b.insert("D");
         b.insert("E");
         b.insert("F");
-        let meet_result = a.pmeet(&b);
+        let meet_result = a.pmeet(&b).unwrap();
         assert!(meet_result.is_element());
         let meet = meet_result.unwrap([&a, &b]);
         assert_eq!(meet.len(), 2);
 
         //Test identity with self arg
         let meet_result = meet.pmeet(&b);
-        assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT));
+        assert_eq!(meet_result, Some(AlgebraicResult::Identity(SELF_IDENT)));
 
         //Test identity with other arg
         let meet_result = b.pmeet(&meet);
-        assert_eq!(meet_result, AlgebraicResult::Identity(COUNTER_IDENT));
+        assert_eq!(meet_result, Some(AlgebraicResult::Identity(COUNTER_IDENT)));
 
         //Test mutual identity
         let meet_result = meet.pmeet(&meet);
-        assert_eq!(meet_result, AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT));
+        assert_eq!(meet_result, Some(AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)));
     }
 
     #[test]
@@ -1634,7 +1656,7 @@ mod tests {
                 &format!("HashMap subtract seed {seed}"),
             );
 
-            let ab_join = a.pjoin(&b).unwrap_or([&a, &b], NestedSetMap::new());
+            let ab_join = a.pjoin(&b).unwrap_or([&a, &b]);
             let expected_chain = nested_subtract(&nested_join(&a, &b), &c);
             assert_nested_result(
                 ab_join.psubtract(&c),
@@ -1686,10 +1708,10 @@ mod tests {
         let joined_result = a.pjoin(&b);
         assert!(joined_result.is_element());
         let joined = joined_result.unwrap([&a, &b]);
-        assert_eq!(joined.len(), 2);
+        assert_eq!(joined.len(), 3);
         assert!(joined.get(&"A").is_some());
         assert!(joined.get(&"B").is_some());
-        assert!(joined.get(&"C").is_none()); //Empty sub-sets should not be merged
+        assert!(joined.get(&"C").unwrap().is_empty());
         a.0.remove("C");
         b.0.remove("C");
 
@@ -1732,7 +1754,7 @@ mod tests {
         a.0.insert("C", inner_map_c.clone());
         b.0.insert("B", inner_map_b.clone());
         b.0.insert("C", inner_map_c.clone());
-        let meet_result = a.pmeet(&b);
+        let meet_result = a.pmeet(&b).unwrap();
         assert!(meet_result.is_element());
         let meet = meet_result.unwrap([&a, &b]);
         assert_eq!(meet.len(), 1);
@@ -1740,7 +1762,7 @@ mod tests {
         assert!(meet.get(&"B").is_none());
         assert!(meet.get(&"C").is_some());
 
-        // Two level meet, results should be None even though the key existed in both args, because the inner values don't overlap
+        // The inner values do not overlap, so no outer entry remains.
         let mut inner_map_1 = HashMap::with_capacity(1);
         inner_map_1.insert("1", ());
         a.0.insert("A", inner_map_1);
@@ -1755,7 +1777,7 @@ mod tests {
         // Two level meet, now should return Element, because the values have some overlap
         inner_map_2.insert("1", ());
         b.0.insert("A", inner_map_2);
-        let meet_result = a.pmeet(&b);
+        let meet_result = a.pmeet(&b).unwrap();
         assert!(meet_result.is_element());
         let meet = meet_result.unwrap([&a, &b]);
         assert_eq!(meet.len(), 1);
@@ -1765,9 +1787,9 @@ mod tests {
         assert!(meet_inner.get(&"2").is_none());
 
         // Redoing the meet should yield Identity
-        let meet_result = meet.pmeet(&a);
+        let meet_result = meet.pmeet(&a).unwrap();
         assert_eq!(meet_result.identity_mask().unwrap(), SELF_IDENT);
-        let meet_result = b.pmeet(&meet);
+        let meet_result = b.pmeet(&meet).unwrap();
         assert_eq!(meet_result.identity_mask().unwrap(), COUNTER_IDENT);
     }
 }
