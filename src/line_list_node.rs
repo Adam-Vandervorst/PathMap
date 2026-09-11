@@ -3116,6 +3116,8 @@ mod tests {
         assert_eq!(used_bytes, 1);
         assert_eq!(child.as_tagged().node_get_val(b"b"), Some(&2));
         assert!(validate_node(&node));
+    }
+
     #[test]
     fn test_line_list_ascend_iter_token() {
         fn assert_panics(f: impl FnOnce()) {

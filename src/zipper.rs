@@ -2566,7 +2566,7 @@ pub(crate) mod read_zipper_core {
                         }
                     }
                 };
-                if result.is_some() {
+                if result {
                     self.ancestors.last_mut().unwrap().1 = NODE_ITER_INVALID;
                 }
                 if should_pop {
@@ -4504,19 +4504,15 @@ pub(crate) mod zipper_iteration_tests {
     ];
 
     /// Tests `..k_path` in a subtrie without attitional branches to descend, when the outer trie does have branches
-    pub fn k_path_testa<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+    pub fn k_path_testa<'a, Z: ZipperIteration>(mut zipper: Z) {
         zipper.reset();
-        let mut observed = Vec::<u8>::new();
         let k = K_PATH_TESTA_KEYS[0].len();
-        assert_eq!(zipper.descend_first_k_path_observed(k, &mut observed), true);
+        assert!(zipper.descend_first_k_path(k));
         assert_eq!(zipper.path(), K_PATH_TESTA_KEYS[0]);
-        assert_eq!(&observed[..], zipper.path());
-        assert_eq!(zipper.to_next_k_path_observed(k, &mut observed), true);
+        assert!(zipper.to_next_k_path(k));
         assert_eq!(zipper.path(), K_PATH_TESTA_KEYS[1]);
-        assert_eq!(&observed[..], zipper.path());
-        assert_eq!(zipper.to_next_k_path_observed(k, &mut observed), false);
+        assert!(!zipper.to_next_k_path(k));
         assert_eq!(zipper.path(), []);
-        assert_eq!(&observed[..], zipper.path());
     }
 }
 
@@ -5135,9 +5131,9 @@ mod tests {
 
         let mut after_sibling = map.read_zipper();
         after_sibling.descend_to(b"a");
-        assert_eq!(after_sibling.to_next_sibling_byte(), Some(b'w'));
+        assert!(after_sibling.to_next_sibling_byte());
         assert_eq!(after_sibling.path(), b"w");
-        assert_eq!(after_sibling.to_next_sibling_byte(), None);
+        assert!(!after_sibling.to_next_sibling_byte());
         assert_eq!(after_sibling.path(), b"w");
 
         let mut direct = map.read_zipper();
@@ -5171,7 +5167,7 @@ mod tests {
 
         let mut after_movement = map.read_zipper();
         assert!(after_movement.descend_first_k_path(2));
-        assert_eq!(after_movement.descend_first_byte(), Some(0));
+        assert!(after_movement.descend_first_byte());
         assert!(after_movement.ascend_byte());
 
         let mut unmoved = map.read_zipper();
@@ -5190,7 +5186,7 @@ mod tests {
         let mut after_prior_step = map.read_zipper();
         assert!(after_prior_step.descend_first_k_path(2));
         assert!(after_prior_step.to_next_k_path(2));
-        assert_eq!(after_prior_step.to_prev_sibling_byte(), Some(0));
+        assert!(after_prior_step.to_prev_sibling_byte());
 
         let mut unmoved = map.read_zipper();
         assert!(unmoved.descend_first_k_path(2));
