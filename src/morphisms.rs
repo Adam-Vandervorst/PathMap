@@ -1836,7 +1836,7 @@ mod tests {
                 // println!("collapse: {path:?}");
                 match *v {
                     1 => assert_eq!(path, &[97, 98]),
-                    0 => assert_eq!(path, &[]),
+                    0 => assert_eq!(path, &[] as &[u8]),
                     _ => unreachable!(),
                 }
             },

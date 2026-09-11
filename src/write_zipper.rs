@@ -5020,7 +5020,7 @@ mod tests {
         assert_eq!(wz.prune_path(), 7);
         assert_eq!(wz.path_exists(), false);
         assert_eq!(wz.ascend(7), true);
-        assert_eq!(wz.path(), &[]);
+        assert_eq!(wz.path(), &[] as &[u8]);
         assert_eq!(wz.path_exists(), true);
         assert_eq!(wz.child_count(), 0);
         assert_eq!(wz.val(), None);

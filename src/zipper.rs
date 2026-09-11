@@ -2632,7 +2632,6 @@ pub(crate) mod read_zipper_core {
                 } else {
                     if self.node_key_start() <= base_idx {
                         let excess = self.prefix_buf.len() - base_idx;
-                        obs.ascend(excess);
                         self.prefix_buf.truncate(base_idx);
                         if excess > 0 {
                             self.reascend_iter_token(excess);
@@ -2642,12 +2641,10 @@ pub(crate) mod read_zipper_core {
                     if let Some((focus_node, iter_tok, prefix_offset)) = self.ancestors.pop() {
                         *self.focus_node = focus_node;
                         self.focus_iter_token = iter_tok;
-                        obs.ascend(self.prefix_buf.len().saturating_sub(prefix_offset.max(obs_floor)));
                         self.prefix_buf.truncate(prefix_offset);
                     } else {
                         let new_len = self.origin_path.len();
                         self.focus_iter_token = NODE_ITER_INVALID;
-                        obs.ascend(self.prefix_buf.len().saturating_sub(new_len));
                         self.prefix_buf.truncate(new_len);
                         return false
                     }
@@ -3887,7 +3884,7 @@ pub(crate) mod zipper_moving_tests {
     pub const ZIPPER_BYTES_ITER_TEST3_PATH: &[u8] = &[3, 193, 4, 193, 5, 2, 193];
 
     pub fn zipper_byte_iter_test3<Z: ZipperMoving>(mut zipper: Z) {
-        assert_eq!(zipper.path(), &[]);
+        assert_eq!(zipper.path(), &[] as &[u8]);
         assert_eq!(zipper.descend_first_byte(), true);
         assert_eq!(zipper.path(), &[6]);
         assert_eq!(zipper.descend_first_byte(), true);
@@ -4515,7 +4512,7 @@ pub(crate) mod zipper_iteration_tests {
         assert_eq!(zipper.descend_first_k_path(1), true);
         assert_eq!(zipper.path(), &[1]);
         assert_eq!(zipper.to_next_k_path(1), false);
-        assert_eq!(zipper.path(), &[]);
+        assert_eq!(zipper.path(), &[] as &[u8]);
     }
 
     pub const K_PATH_TESTA_KEYS: &[&[u8]] = &[
@@ -4532,7 +4529,7 @@ pub(crate) mod zipper_iteration_tests {
         assert!(zipper.to_next_k_path(k));
         assert_eq!(zipper.path(), K_PATH_TESTA_KEYS[1]);
         assert!(!zipper.to_next_k_path(k));
-        assert_eq!(zipper.path(), []);
+        assert_eq!(zipper.path(), [] as [u8; 0]);
     }
 }
 
