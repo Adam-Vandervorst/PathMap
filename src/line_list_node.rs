@@ -3905,6 +3905,19 @@ mod tests {
         let r = m.restrict(&other_dangling_a());
         assert_eq!(keys(&r), Vec::<String>::new());
 
+        //The corresponding non-mutating meet and reverse zipper operation already handle the
+        //dangling branch as absent.
+        let m = mk(&[b"ab", b"ac"]);
+        assert_eq!(keys(&m.meet(&other_dangling_a())), Vec::<String>::new());
+        let mut m = mk(&[b"ab", b"ac"]);
+        let o = other_dangling_a();
+        assert!(m.write_zipper().restricting(&o.read_zipper()));
+        assert_eq!(keys(&m), Vec::<String>::new());
+
+        //A value slot (rather than a child link) also already produced the empty restriction.
+        let m = mk(&[b"ab"]);
+        assert_eq!(keys(&m.restrict(&other_dangling_a())), Vec::<String>::new());
+
         let mut m = mk(&[b"ab", b"ac"]);
         let o = other_dangling_a();
         m.write_zipper().restrict(&o.read_zipper());

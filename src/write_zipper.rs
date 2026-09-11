@@ -5903,6 +5903,60 @@ mod tests {
         assert_eq!(dst.val_at(b"root:z:old_z"), Some(&26));
     }
 
+    /// Issue #85: the ≥3-bit path of `graft_masked_branches` must materialize a dangling focus.
+    #[test]
+    fn graft_masked_branches_three_bits_at_dangling_focus() {
+        use crate::utils::BitMask;
+        fn mk(keys: &[&[u8]]) -> PathMap<()> {
+            let mut m = PathMap::new();
+            for k in keys { m.set_val_at(k, ()); }
+            m
+        }
+        fn keys(m: &PathMap<()>) -> Vec<String> {
+            m.iter().map(|(k, _)| String::from_utf8_lossy(&k).into_owned()).collect()
+        }
+        fn dangling_c() -> PathMap<()> {
+            let mut m = mk(&[b"ca", b"cb", b"d"]);
+            { let mut wz = m.write_zipper(); wz.descend_to(b"c"); wz.remove_branches(false); }
+            assert_eq!(keys(&m), ["d"]);
+            m
+        }
+        fn mask(bytes: &[u8]) -> ByteMask {
+            let mut m = ByteMask::EMPTY;
+            for b in bytes { m.set_bit(*b); }
+            m
+        }
+
+        let mut m = dangling_c();
+        let o = mk(&[b"ax", b"bx", b"dx"]);
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            wz.graft_masked_branches(&o.read_zipper(), mask(b"abd"), false);
+        }
+        assert_eq!(keys(&m), ["cax", "cbx", "cdx", "d"]);
+
+        //The one- and two-bit paths have a separate implementation at the same dangling focus.
+        let mut m = dangling_c();
+        let o = mk(&[b"ax", b"bx", b"dx"]);
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            wz.graft_masked_branches(&o.read_zipper(), mask(b"ab"), false);
+        }
+        assert_eq!(keys(&m), ["cax", "cbx", "d"]);
+
+        //The ≥3-bit path also works at a genuinely absent focus; it must not rely on a sentinel.
+        let mut m = mk(&[b"d"]);
+        let o = mk(&[b"ax", b"bx", b"dx"]);
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            wz.graft_masked_branches(&o.read_zipper(), mask(b"abd"), false);
+        }
+        assert_eq!(keys(&m), ["cax", "cbx", "cdx", "d"]);
+    }
+
     #[test]
     fn write_zipper_graft_masked_branches_test4() {
         // Upper bound 0: remove_unset=true with an empty mask.
@@ -6195,6 +6249,11 @@ mod tests {
         assert!(!rz.is_val(), "dangling path {path:?} unexpectedly has a value");
         assert_eq!(rz.child_count(), 0, "dangling path {path:?} unexpectedly has children");
     }
+    fn make_dangling_path_map(paths: &[&[u8]]) -> PathMap<()> {
+        let mut m = PathMap::<()>::new();
+        for path in paths { assert!(m.create_path(path)); }
+        m
+    }
 
     /// Joining into a dense node whose child at that byte is a dangling sentinel
     #[test]
@@ -6381,6 +6440,39 @@ mod tests {
         assert_eq!(m.val_count(), 3);
     }
 
+    /// Head-dropping is a join of the surviving subtries, so it must preserve dangling paths even
+    /// when they collide.  This deliberately uses no values, keeping the question independent of
+    /// any particular value lattice's treatment of its bottom element.
+    #[test]
+    fn write_zipper_join_k_path_dangling_paths() {
+        //Both paths shorten to "d", so their join is one dangling path at "d".
+        let mut m = make_dangling_path_map(&[b"abcd", b"dddd"]);
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(m.read_zipper().child_count(), 1);
+        assert_dangling_path(&m, b"d");
+        assert_valid_trie(m.root());
+
+        //Dropping the complete paths leaves nothing downstream of the root, so the operation reports
+        //false.  The root focus itself still exists, but it has neither a value nor any children.
+        let mut m = make_dangling_path_map(&[b"abcd", b"dddd"]);
+        let status = m.write_zipper().join_k_path_into(4, false);
+        assert!(!status);
+        assert!(m.is_empty());
+        let rz = m.read_zipper();
+        assert!(rz.path_exists());
+        assert!(!rz.is_val());
+        assert_eq!(rz.child_count(), 0);
+        assert_valid_trie(m.root());
+
+        //Distinct suffixes must both survive the join.
+        let mut m = make_dangling_path_map(&[b"abcd", b"efgh"]);
+        assert!(m.write_zipper().join_k_path_into(3, false));
+        assert_eq!(m.read_zipper().child_count(), 2);
+        assert_dangling_path(&m, b"d");
+        assert_dangling_path(&m, b"h");
+        assert_valid_trie(m.root());
+    }
+
     /// An emptied root (`remove_branches` at the root always leaves a LineListNode) joined with an empty
     /// map whose root was materialized by a read (a dense node under `all_dense_nodes`): both orders,
     /// with and without a root value.  Exercises the empty∪empty paths of every node-type pairing.
@@ -6453,6 +6545,15 @@ mod tests {
         }
         assert_eq!(keys(&m), ["cx", "d"]);
         assert_eq!(keys(&o), Vec::<String>::new());
+
+        //The non-taking join already worked at the same dangling destination focus.
+        let mut m = dangling_c();
+        {
+            let mut wz = m.write_zipper();
+            wz.descend_to(b"c");
+            assert_eq!(wz.join_map_into(mk(&[b"x"])), AlgebraicStatus::Element);
+        }
+        assert_eq!(keys(&m), ["cx", "d"]);
 
         //Dangling source
         let mut m = mk(&[b"x"]);
