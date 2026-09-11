@@ -577,6 +577,15 @@ pub trait BitMask {
     fn not(&self) -> Self where Self: Sized;
 }
 
+#[inline] const fn u64_4_raw_set_bit(mask : &mut [u64;4], k : u8) {
+        let idx = (k / 64) as usize;
+        mask[idx] |= 1 << (k % 64);
+}
+#[inline] const fn u64_4_raw_clear_bit(mask : &mut [u64;4], k : u8) {
+        let idx = (k / 64) as usize;
+        mask[idx] &= !(1 << (k % 64));
+}
+
 impl BitMask for [u64; 4] {
     #[inline]
     fn count_bits(&self) -> usize {
@@ -595,13 +604,11 @@ impl BitMask for [u64; 4] {
     }
     #[inline]
     fn set_bit(&mut self, k: u8) {
-        let idx = (k / 64) as usize;
-        self[idx] |= 1 << (k % 64);
+        u64_4_raw_set_bit(self, k);
     }
     #[inline]
     fn clear_bit(&mut self, k: u8) {
-        let idx = (k / 64) as usize;
-        self[idx] ^= 1 << (k % 64);
+        u64_4_raw_clear_bit(self, k);
     }
     #[inline]
     fn make_empty(&mut self) {
