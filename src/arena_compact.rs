@@ -2672,7 +2672,7 @@ where Storage: AsRef<[u8]>
         }
         while let Some(top_frame) = self.stack.last_mut() {
             let mut nchildren = top_frame.child_count;
-            // The zipper root can sit partway through a line node; retain that offset.
+            // case: partway into the node
             let remaining = self.path.len() - self.origin_depth;
             let mut this_steps = top_frame.node_depth.min(remaining);
             top_frame.node_depth -= this_steps;

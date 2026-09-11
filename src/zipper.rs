@@ -2617,6 +2617,9 @@ pub(crate) mod read_zipper_core {
             const MIN_EXCESS_TO_AVOID_COPY: usize = 12;
 
             debug_assert_iter_token_layout();
+
+            //Note: we may be able to eke out a win using the guarantees provided by TOKEN_LAST,
+            // however all experiements so far have been worse
             let target_idx = base_idx + k;
             loop {
                 if self.focus_iter_token == NODE_ITER_INVALID {

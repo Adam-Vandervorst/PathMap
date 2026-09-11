@@ -6342,12 +6342,9 @@ mod tests {
         }
         assert_eq!(keys(&m), ["cx", "cy", "d"]);
     }
-    /// `meet_2` guarded both sources with `try_as_tagged`, which answers `Some` for a
-    /// `BorrowedRc` whatever it holds, and then unwrapped `into_option`, which answers
-    /// `None` when that node is empty.  A source rooted at a dangling path -- an empty
-    /// node, which `create_path` leaves behind -- passed the guard and panicked on the
-    /// unwrap.  The intersection with an empty node is empty, so the answer is `None`
-    /// and nothing is grafted.
+    /// Exercises `meet_2` when one source is rooted at a dangling path: an empty node
+    /// left behind by `create_path`. The intersection with an empty node is empty, so
+    /// the operation returns `None` and does not graft anything.
     #[test]
     fn write_zipper_meet_2_with_an_empty_source_node() {
         for (label, b_keys, b_dangling) in [
