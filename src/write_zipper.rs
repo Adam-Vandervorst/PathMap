@@ -4733,6 +4733,22 @@ mod tests {
 
     #[test]
     fn write_zipper_join_results_test1() {
+        // Joining two nonexistent foci should leave the destination nonexistent and return `None`
+        let mut dst_map = PathMap::<bool>::new();
+        let src_map = PathMap::<bool>::new();
+        {
+            let mut wz = dst_map.write_zipper();
+            let mut rz = src_map.read_zipper();
+            wz.descend_to(b"dst:");
+            rz.descend_to(b"src:");
+            assert!(!wz.path_exists());
+            assert!(!rz.path_exists());
+            assert_eq!(wz.join_into(&rz), AlgebraicStatus::None);
+            assert!(!wz.path_exists());
+        }
+        assert!(dst_map.is_empty());
+        assert!(src_map.is_empty());
+
         let mut map = PathMap::<bool>::new();
         let head = map.zipper_head();
 

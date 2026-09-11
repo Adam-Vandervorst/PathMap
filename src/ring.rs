@@ -2,33 +2,39 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-/// The result of an algebraic operation on elements in a partial lattice
+/// The result of an algebraic operation on elements in a partial lattice.
 ///
-/// NOTE: For some operations, it is conceptually valid for both `Identity` and `None` results to be
+/// For some operations, it is conceptually valid for both `Identity` and `None` results to be
 /// simultaneously appropriate, for example `None.pmeet(Some)`. In these situations, `None` should take precedence
 /// over `Identity`, but either of the results can be considered correct so your code must behave correctly in
 /// either case.
-///
-/// NOTE 2: The following conditions for the Identity bitmask must be respected or the implementation may panic or
-/// produce logically invalid results.
-/// - The bit mask must be non-zero
-/// - Bits beyond the number of operation arguments must not be set.  e.g. an arity-2 operation may only set bit 0
-///     and bit 1, but never any additional bits.
-/// - Setting two or more bits simultaneously asserts the arguments are identities of each other, so this must be
-///     true in fact.
-/// - The inverse of the above does not hold.  E.g. if multiple bits are not set, it may **not** be assumed that 
-///     the arguments are not identities of each other.
-/// - Non-commutative operations, such as [DistributiveLattice::psubtract], must never set bits beyond bit 0 ([SELF_IDENT])
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlgebraicResult<V> {
-    /// A result indicating the input values perfectly annhilate and the output should be removed and discarded
-    #[default]
+    /// No output element remains, so any stored output should be removed.
+    ///
+    /// This is not a representation of a lattice's bottom element.  In particular, a join of supplied
+    /// elements must not return `None`, because join is an upper bound in the lattice, and therefore exists.
     None,
     /// A result indicating the output element is identical to the input element(s) identified by the bit mask
     ///
-    /// NOTE: The constants [SELF_IDENT] and [COUNTER_IDENT] can be used as conveniences when specifying the bitmask.
+    /// The constants [SELF_IDENT] and [COUNTER_IDENT] can be used as conveniences when specifying the bitmask.
+    ///
+    /// The following conditions for the `Identity` bitmask must be respected or the implementation may
+    /// panic or produce logically invalid results.
+    ///
+    /// - The bit mask must be non-zero
+    /// - Bits beyond the number of operation arguments must not be set.  e.g. an arity-2 operation may only set bit 0
+    ///     and bit 1, but never any additional bits.
+    /// - Setting two or more bits simultaneously asserts the arguments are identities of each other, so this must be
+    ///     true in fact.
+    /// - The inverse of the above does not hold.  E.g. if multiple bits are not set, it may **not** be assumed that 
+    ///     the arguments are not identities of each other.
+    /// - Non-commutative operations, such as [DistributiveLattice::psubtract], must never set bits beyond bit 0 ([SELF_IDENT])
     Identity(u64),
-    /// A new result element
+    /// The operation returns this output element rather than reusing an input.
+    ///
+    /// This variant makes no inequality claim: an implementation may return `Element` even when the
+    /// value happens to equal an input, although this is discouraged and will lead to performance loss.
     Element(V),
 }
 
@@ -320,29 +326,38 @@ impl<V> AlgebraicResult<Option<V>> {
     }
 }
 
-/// Status result that is returned from an in-place algebraic operation (a method that takes `&mut self`)
+/// Status returned from an in-place algebraic operation (a method that takes `&mut self`).
 ///
-/// NOTE: `AlgebraicStatus` values are ordered, with `Element` being the lowest value and `None` being the
-/// highest.  Higher values make stronger guarantees about the results of the operation, but a lower values
-/// are still correct and your code must behave appropriately.
+/// For some operations, it is conceptually valid for multiple results to be simultaneously appropriate.
+/// `None` is considered the "strongest" status, while `Identity` is a stronger status than `Element`.
+/// Implementations should return the strongest valid status.
 ///
-/// For example, for example `Empty.join(Empty)` would result in Empty, but also leave the original value
-/// unmodified, therefore both `Identity` and `None` are conceptually valid in that case.
+/// For example the status of:
+/// * `None.meet_into(Some)` could be correctly described as both `Identity` and `None`.  In this case,
+/// `None` should be preferred.
+/// * `0b1010.join_into(0b0010)` could be correctly described as both `Identity` and `Element`.  In this
+/// case, `Identity` should be preferred.
 ///
-/// In general, `AlgebraicStatus` return values are a valid signal for loop termination, but should not be
-/// strictly relied upon for other kinds of branching.  For example, `Element` might be returned by
-/// [ZipperWriting::join](crate::zipper::ZipperWriting::join) instead of `Identity` if the internal representation was changed by the method,
-/// however the next call to `join` ought to return `Identity` if nothing new is added.
-///
-/// This type mirrors [AlgebraicResult]
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// This type is a conceptual mirror of [AlgebraicResult] where the result location is unambiguous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AlgebraicStatus {
-    /// A result indicating `self` contains the operation's output
-    #[default]
+    /// `self` contains the operation's output, without a stronger guarantee about how it relates to
+    /// its previous value.
+    ///
+    /// This status does not guarantee that the mathematical result differs from the previous value.
+    /// For example, an operation may return `Element` instead of `Identity` when it changes the internal
+    /// representation while preserving the same value.
     Element,
-    /// A result indicating `self` was unmodified by the operation
+    /// Indicates that `self` was unmodified by the operation.
+    ///
+    /// If `self` was already empty and remains empty, both `Identity` and `None` describe the result.
+    /// An implementation may return `None` to report the additional fact that no output remains.
     Identity,
-    /// A result indicating `self` was completely annhilated and is now empty
+    /// No output element exists after the operation; `self` is now structurally empty.
+    ///
+    /// If `self` was already empty, `Identity` may also describe the result.  [Lattice::join_into]
+    /// must not return `None`, because it joins supplied elements.  A higher-level structural join may
+    /// return `None` when no operand exists at that location, without invoking the value-level join.
     None,
 }
 
