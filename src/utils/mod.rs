@@ -193,8 +193,13 @@ impl ByteMask {
         let mut c_ahead = m.count_ones() as usize;
         loop {
             if idx < c_ahead { break; }
-            if FORWARD { i += 1} else { i -= 1 };
-            if i > 3 { return None }
+            if FORWARD {
+                i += 1;
+                if i > 3 { return None }
+            } else {
+                if i == 0 { return None }
+                i -= 1;
+            }
             m = self.0[i];
             c = c_ahead;
             c_ahead += m.count_ones() as usize;
@@ -355,6 +360,8 @@ impl BitMask for ByteMask {
     fn set_bit(&mut self, k: u8) { self.0.set_bit(k) }
     #[inline]
     fn clear_bit(&mut self, k: u8) { self.0.clear_bit(k) }
+    #[inline]
+    fn toggle_bit(&mut self, k: u8) { self.0.toggle_bit(k) }
     #[inline]
     fn make_empty(&mut self) {self.0.make_empty() }
     #[inline]
@@ -534,6 +541,9 @@ pub trait BitMask {
     /// Clears the `k`th bit in mask
     fn clear_bit(&mut self, k: u8);
 
+    /// Flips the specified bit from 1 to 0 or from 0 to 1
+    fn toggle_bit(&mut self, k: u8);
+
     /// Clears all bits in the mask, restoring it to an empty mask
     fn make_empty(&mut self);
 
@@ -600,6 +610,11 @@ impl BitMask for [u64; 4] {
     }
     #[inline]
     fn clear_bit(&mut self, k: u8) {
+        let idx = (k / 64) as usize;
+        self[idx] &= !(1 << (k % 64));
+    }
+    #[inline]
+    fn toggle_bit(&mut self, k: u8) {
         let idx = (k / 64) as usize;
         self[idx] ^= 1 << (k % 64);
     }
@@ -810,7 +825,7 @@ impl DistributiveLattice for [u64; 4] {
 /// Internal function to compose AlgebraicResult after algebraic operation
 #[inline]
 fn bitmask_algebraic_result(result: [u64; 4], self_mask: &[u64; 4], other_mask: &[u64; 4]) -> AlgebraicResult<[u64; 4]> {
-    if result.is_empty() {
+    if result.is_empty_mask() {
         return AlgebraicResult::None
     }
     let mut mask = 0;
@@ -834,180 +849,263 @@ pub const fn empty_mask() -> [u64; 4] {
     [0; 4]
 }
 
-#[test]
-fn bit_utils_test() {
-    let mut mask = ByteMask::EMPTY;
-    assert_eq!(mask.count_bits(), 0);
-    assert_eq!(mask.is_empty_mask(), true);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    mask.set_bit(b'C');
-    mask.set_bit(b'a');
-    mask.set_bit(b't');
-    assert_eq!(mask.is_empty_mask(), false);
-    assert_eq!(mask.count_bits(), 3);
+    #[test]
+    fn bit_utils_test() {
+        let mut mask = ByteMask::EMPTY;
+        assert_eq!(mask.count_bits(), 0);
+        assert_eq!(mask.is_empty_mask(), true);
 
-    mask.set_bit(b'C');
-    mask.set_bit(b'a');
-    mask.set_bit(b'n');
-    assert_eq!(mask.count_bits(), 4);
+        mask.set_bit(b'C');
+        mask.set_bit(b'a');
+        mask.set_bit(b't');
+        assert_eq!(mask.is_empty_mask(), false);
+        assert_eq!(mask.count_bits(), 3);
 
-    mask.clear_bit(b't');
-    assert_eq!(mask.test_bit(b'n'), true);
-    assert_eq!(mask.test_bit(b't'), false);
-}
+        mask.set_bit(b'C');
+        mask.set_bit(b'a');
+        mask.set_bit(b'n');
+        assert_eq!(mask.count_bits(), 4);
 
-#[test]
-fn next_bit_test() {
-    fn do_test(test_mask: ByteMask) {
-        let set_bits: Vec<u8> = (0..=255).into_iter().filter(|i| test_mask.test_bit(*i)).collect();
+        mask.clear_bit(b't');
+        assert_eq!(mask.test_bit(b'n'), true);
+        assert_eq!(mask.test_bit(b't'), false);
+    }
 
-        let mut i = 0;
-        let mut cnt = test_mask.test_bit(0) as usize;
-        while let Some(next_bit) = test_mask.next_bit(i) {
-            assert!(test_mask.test_bit(next_bit));
-            i = next_bit;
-            cnt += 1;
+    #[test]
+    fn next_bit_test() {
+        fn do_test(test_mask: ByteMask) {
+            let set_bits: Vec<u8> = (0..=255).into_iter().filter(|i| test_mask.test_bit(*i)).collect();
+
+            let mut i = 0;
+            let mut cnt = test_mask.test_bit(0) as usize;
+            while let Some(next_bit) = test_mask.next_bit(i) {
+                assert!(test_mask.test_bit(next_bit));
+                i = next_bit;
+                cnt += 1;
+            }
+            assert_eq!(cnt, set_bits.len());
+
+            let mut i = 255;
+            let mut cnt = test_mask.test_bit(255) as usize;
+            while let Some(prev_bit) = test_mask.prev_bit(i) {
+                assert!(test_mask.test_bit(prev_bit));
+                i = prev_bit;
+                cnt += 1;
+            }
+            assert_eq!(cnt, set_bits.len());
         }
-        assert_eq!(cnt, set_bits.len());
+        do_test(ByteMask::from([
+            0b1010010010010010010010000000000000000000000000000000000000010101u64,
+            0b0000000000000000000000000000000000000000100000000000000000000000u64,
+            0b0000000000000000000000000000000000000000000000000000000000000000u64,
+            0b1001000000000000000000000000000000000000000000000000000000000001u64,
+        ]));
+        do_test(ByteMask::from([
+            0b0000000000000000000000000000000000000000000000000000000000000000u64,
+            0b0000000000000000000000000000000000000000100000000000000000000000u64,
+            0b0000000000000000000000000000000000000000000000000000000000000000u64,
+            0b1001000000000000000000000000000000000000000000000000000000000001u64,
+        ]));
+        do_test(ByteMask::from(ByteMask::FULL));
+    }
 
-        let mut i = 255;
-        let mut cnt = test_mask.test_bit(255) as usize;
-        while let Some(prev_bit) = test_mask.prev_bit(i) {
-            assert!(test_mask.test_bit(prev_bit));
-            i = prev_bit;
-            cnt += 1;
+    #[test]
+    fn next_bit_test2() {
+        let mut test_mask = ByteMask::EMPTY;
+        test_mask.set_bit(39);
+        test_mask.set_bit(97);
+        test_mask.set_bit(117);
+
+        assert_eq!(Some(39), test_mask.next_bit(0));
+        assert_eq!(Some(97), test_mask.next_bit(39));
+        assert_eq!(Some(117), test_mask.next_bit(97));
+        assert_eq!(None, test_mask.next_bit(117));
+    }
+
+    #[test]
+    fn bit_siblings_test() {
+        let x = 0b0000000000000000000000000000000000000100001001100000000000000010u64;
+        let i = 0b0000000000000000000000000000000000000000000001000000000000000000u64;
+        let p = 0b0000000000000000000000000000000000000000001000000000000000000000u64;
+        let n = 0b0000000000000000000000000000000000000000000000100000000000000000u64;
+        let f = 0b0000000000000000000000000000000000000100000000000000000000000000u64;
+        let l = 0b0000000000000000000000000000000000000000000000000000000000000010u64;
+        let mask = ByteMask::from([x, 0, 0, 0]);
+        let bit_i = i.trailing_zeros() as u8;
+        assert_eq!(i, 1u64 << bit_i);
+        assert_ne!(i & x, 0);
+
+        // Existing-child lookup within one mask word, including both ends.
+        assert_eq!(mask.prev_bit(bit_i), Some(n.trailing_zeros() as u8));
+        assert_eq!(mask.next_bit(bit_i), Some(p.trailing_zeros() as u8));
+        assert_eq!(mask.prev_bit(l.trailing_zeros() as u8), None);
+        assert_eq!(mask.next_bit(f.trailing_zeros() as u8), None);
+
+        // Missing-focus lookup and sibling lookup across every mask-word boundary.
+        let mut mask = ByteMask::EMPTY;
+        for byte in [10, 20, 70, 130, 200] {
+            mask.set_bit(byte);
         }
-        assert_eq!(cnt, set_bits.len());
-    }
-    do_test(ByteMask::from([
-        0b1010010010010010010010000000000000000000000000000000000000010101u64,
-        0b0000000000000000000000000000000000000000100000000000000000000000u64,
-        0b0000000000000000000000000000000000000000000000000000000000000000u64,
-        0b1001000000000000000000000000000000000000000000000000000000000001u64,
-    ]));
-    do_test(ByteMask::from([
-        0b0000000000000000000000000000000000000000000000000000000000000000u64,
-        0b0000000000000000000000000000000000000000100000000000000000000000u64,
-        0b0000000000000000000000000000000000000000000000000000000000000000u64,
-        0b1001000000000000000000000000000000000000000000000000000000000001u64,
-    ]));
-    do_test(ByteMask::from(ByteMask::FULL));
-}
-
-#[test]
-fn next_bit_test2() {
-    let mut test_mask = ByteMask::EMPTY;
-    test_mask.set_bit(39);
-    test_mask.set_bit(97);
-    test_mask.set_bit(117);
-
-    assert_eq!(Some(39), test_mask.next_bit(0));
-    assert_eq!(Some(97), test_mask.next_bit(39));
-    assert_eq!(Some(117), test_mask.next_bit(97));
-    assert_eq!(None, test_mask.next_bit(117));
-}
-
-#[test]
-fn bit_siblings_test() {
-    let x = 0b0000000000000000000000000000000000000100001001100000000000000010u64;
-    let i = 0b0000000000000000000000000000000000000000000001000000000000000000u64;
-    let p = 0b0000000000000000000000000000000000000000001000000000000000000000u64;
-    let n = 0b0000000000000000000000000000000000000000000000100000000000000000u64;
-    let f = 0b0000000000000000000000000000000000000100000000000000000000000000u64;
-    let l = 0b0000000000000000000000000000000000000000000000000000000000000010u64;
-    let mask = ByteMask::from([x, 0, 0, 0]);
-    let bit_i = i.trailing_zeros() as u8;
-    assert_eq!(i, 1u64 << bit_i);
-    assert_ne!(i & x, 0);
-
-    // Existing-child lookup within one mask word, including both ends.
-    assert_eq!(mask.prev_bit(bit_i), Some(n.trailing_zeros() as u8));
-    assert_eq!(mask.next_bit(bit_i), Some(p.trailing_zeros() as u8));
-    assert_eq!(mask.prev_bit(l.trailing_zeros() as u8), None);
-    assert_eq!(mask.next_bit(f.trailing_zeros() as u8), None);
-
-    // Missing-focus lookup and sibling lookup across every mask-word boundary.
-    let mut mask = ByteMask::EMPTY;
-    for byte in [10, 20, 70, 130, 200] {
-        mask.set_bit(byte);
-    }
-    assert_eq!(mask.prev_bit(64), Some(20));
-    assert_eq!(mask.next_bit(63), Some(70));
-    assert_eq!(mask.prev_bit(130), Some(70));
-    assert_eq!(mask.next_bit(70), Some(130));
-    assert_eq!(mask.prev_bit(200), Some(130));
-    assert_eq!(mask.next_bit(130), Some(200));
-}
-
-#[test]
-fn from_range_test() {
-    assert_eq!(ByteMask::from_range(10..70), ByteMask::from([
-        0b1111111111111111111111111111111111111111111111111111110000000000u64,
-        0b0000000000000000000000000000000000000000000000000000000000111111u64,
-        0b0000000000000000000000000000000000000000000000000000000000000000u64,
-        0b0000000000000000000000000000000000000000000000000000000000000000u64,
-    ]));
-   assert_eq!(ByteMask::from_range(..), ByteMask::FULL);
-   assert_eq!(ByteMask::from_range(..=127), ByteMask::from([
-        0b1111111111111111111111111111111111111111111111111111111111111111u64,
-        0b1111111111111111111111111111111111111111111111111111111111111111u64,
-        0b0000000000000000000000000000000000000000000000000000000000000000u64,
-        0b0000000000000000000000000000000000000000000000000000000000000000u64,
-    ]));
-    assert_eq!(ByteMask::from_range(10..), ByteMask::from([
-        0b1111111111111111111111111111111111111111111111111111110000000000u64,
-        0b1111111111111111111111111111111111111111111111111111111111111111u64,
-        0b1111111111111111111111111111111111111111111111111111111111111111u64,
-        0b1111111111111111111111111111111111111111111111111111111111111111u64,
-    ]));
-    assert_eq!(ByteMask::from_range(0..0), ByteMask::EMPTY);
-    assert_eq!(ByteMask::from_range(0..=0), ByteMask::from(0));
-    assert_eq!(ByteMask::from_range(255..255), ByteMask::EMPTY);
-    assert_eq!(ByteMask::from_range(255..=255), ByteMask::from(255));
-}
-
-#[test]
-fn range_iter_test() {
-    fn next_once(mask: ByteMask) -> Option<RangeInclusive<u8>> {
-        let mut iter = mask.range_iter();
-        iter.next()
+        assert_eq!(mask.prev_bit(64), Some(20));
+        assert_eq!(mask.next_bit(63), Some(70));
+        assert_eq!(mask.prev_bit(130), Some(70));
+        assert_eq!(mask.next_bit(70), Some(130));
+        assert_eq!(mask.prev_bit(200), Some(130));
+        assert_eq!(mask.next_bit(130), Some(200));
     }
 
-    // Returns from the short in-word path.
-    assert_eq!(next_once(ByteMask::from(10..12)), Some(10..=11));
+    #[test]
+    fn from_range_test() {
+        assert_eq!(ByteMask::from_range(10..70), ByteMask::from([
+            0b1111111111111111111111111111111111111111111111111111110000000000u64,
+            0b0000000000000000000000000000000000000000000000000000000000111111u64,
+            0b0000000000000000000000000000000000000000000000000000000000000000u64,
+            0b0000000000000000000000000000000000000000000000000000000000000000u64,
+        ]));
+    assert_eq!(ByteMask::from_range(..), ByteMask::FULL);
+    assert_eq!(ByteMask::from_range(..=127), ByteMask::from([
+            0b1111111111111111111111111111111111111111111111111111111111111111u64,
+            0b1111111111111111111111111111111111111111111111111111111111111111u64,
+            0b0000000000000000000000000000000000000000000000000000000000000000u64,
+            0b0000000000000000000000000000000000000000000000000000000000000000u64,
+        ]));
+        assert_eq!(ByteMask::from_range(10..), ByteMask::from([
+            0b1111111111111111111111111111111111111111111111111111110000000000u64,
+            0b1111111111111111111111111111111111111111111111111111111111111111u64,
+            0b1111111111111111111111111111111111111111111111111111111111111111u64,
+            0b1111111111111111111111111111111111111111111111111111111111111111u64,
+        ]));
+        assert_eq!(ByteMask::from_range(0..0), ByteMask::EMPTY);
+        assert_eq!(ByteMask::from_range(0..=0), ByteMask::from(0));
+        assert_eq!(ByteMask::from_range(255..255), ByteMask::EMPTY);
+        assert_eq!(ByteMask::from_range(255..=255), ByteMask::from(255));
+    }
 
-    // Returns at a word boundary when the next word starts with zero.
-    assert_eq!(next_once(ByteMask::from(62..=63)), Some(62..=63));
+    #[test]
+    fn range_iter_test() {
+        fn next_once(mask: ByteMask) -> Option<RangeInclusive<u8>> {
+            let mut iter = mask.range_iter();
+            iter.next()
+        }
 
-    // Returns from the next-word prefix path.
-    assert_eq!(next_once(ByteMask::from(62..=66)), Some(62..=66));
+        // Returns from the short in-word path.
+        assert_eq!(next_once(ByteMask::from(10..12)), Some(10..=11));
 
-    // Returns from the full-word continuation path after spanning a whole intermediate word.
-    assert_eq!(next_once(ByteMask::from(62..=130)), Some(62..=130));
+        // Returns at a word boundary when the next word starts with zero.
+        assert_eq!(next_once(ByteMask::from(62..=63)), Some(62..=63));
 
-    // Returns from the end-of-mask path.
-    assert_eq!(next_once(ByteMask::from(250..=255)), Some(250..=255));
+        // Returns from the next-word prefix path.
+        assert_eq!(next_once(ByteMask::from(62..=66)), Some(62..=66));
 
-    // Iterates multiple disjoint ranges in ascending order.
-    let mask = ByteMask::from(0..=3)
-        | ByteMask::from(10..12)
-        | ByteMask::from(64..=64)
-        | ByteMask::from(126..=130)
-        | ByteMask::from(255..=255);
-    let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
-    assert_eq!(ranges, vec![0..=3, 10..=11, 64..=64, 126..=130, 255..=255]);
+        // Returns from the full-word continuation path after spanning a whole intermediate word.
+        assert_eq!(next_once(ByteMask::from(62..=130)), Some(62..=130));
 
-    // Span multiple words
-    let mask = ByteMask::from(2..=4)
-        | ByteMask::from(30..220);
-    let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
-    assert_eq!(ranges, vec![2..=4, 30..=219]);
+        // Returns from the end-of-mask path.
+        assert_eq!(next_once(ByteMask::from(250..=255)), Some(250..=255));
 
-    // Empty mask
-    let mut iter = ByteMask::EMPTY.range_iter();
-    assert_eq!(iter.next(), None);
+        // Iterates multiple disjoint ranges in ascending order.
+        let mask = ByteMask::from(0..=3)
+            | ByteMask::from(10..12)
+            | ByteMask::from(64..=64)
+            | ByteMask::from(126..=130)
+            | ByteMask::from(255..=255);
+        let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
+        assert_eq!(ranges, vec![0..=3, 10..=11, 64..=64, 126..=130, 255..=255]);
 
-    // Full mask
-    let mut iter = ByteMask::FULL.range_iter();
-    assert_eq!(iter.next(), Some(0..=255));
+        // Span multiple words
+        let mask = ByteMask::from(2..=4)
+            | ByteMask::from(30..220);
+        let ranges: Vec<RangeInclusive<u8>> = mask.range_iter().collect();
+        assert_eq!(ranges, vec![2..=4, 30..=219]);
+
+        // Empty mask
+        let mut iter = ByteMask::EMPTY.range_iter();
+        assert_eq!(iter.next(), None);
+
+        // Full mask
+        let mut iter = ByteMask::FULL.range_iter();
+        assert_eq!(iter.next(), Some(0..=255));
+    }
+
+    #[test]
+    fn byte_mask_construction_and_formatting() {
+        assert_eq!(ByteMask::new(), ByteMask::EMPTY);
+        assert_eq!(ByteMask::from(42), ByteMask::from_range(42..=42));
+        assert_eq!(ByteMask::from(10..12), ByteMask::from_range(10..12));
+        assert_eq!(ByteMask::from(10..=11), ByteMask::from_range(10..=11));
+        assert_eq!(ByteMask::from([1, 2, 3, 4]).into_inner(), [1, 2, 3, 4]);
+        assert_eq!(<[u64; 4]>::from(ByteMask::from([1, 2, 3, 4])), [1, 2, 3, 4]);
+
+        let mask: ByteMask = [0, 64, 255].into_iter().collect();
+        assert_eq!(mask, [1, 1, 0, 1u64 << 63]);
+        assert_eq!(mask.as_ref(), &[1, 1, 0, 1u64 << 63]);
+        assert_eq!(core::borrow::Borrow::<[u64; 4]>::borrow(&mask), &[1, 1, 0, 1u64 << 63]);
+        assert_eq!(format!("{mask:?}"), "{0, 64, 255}");
+        assert_eq!(format!("{:?}", mask.fmt_binary()).len(), 256);
+        assert_eq!(format!("{}", mask.fmt_binary()).len(), 287);
+
+        let subset = ByteMask::subset(0b1010_0110);
+        for byte in 0..=255 {
+            assert_eq!(subset.test_bit(byte), byte & 0b1010_0110 == byte);
+        }
+    }
+
+    #[test]
+    fn byte_mask_bitwise_operations_and_assignments() {
+        let left = ByteMask::from_iter([0, 64, 128, 192]);
+        let right = ByteMask::from_iter([64, 65, 192, 255]);
+
+        assert_eq!(left.or(&right), ByteMask::from_iter([0, 64, 65, 128, 192, 255]));
+        assert_eq!(left.and(&right), ByteMask::from_iter([64, 192]));
+        assert_eq!(left.xor(&right), ByteMask::from_iter([0, 65, 128, 255]));
+        assert_eq!(left.andn(&right), ByteMask::from_iter([0, 128]));
+        assert_eq!(left.not().and(&left), ByteMask::EMPTY);
+        assert_eq!(left | right, left.or(&right));
+        assert_eq!(&left | &right, left.or(&right));
+        assert_eq!(&left & &right, left.and(&right));
+
+        let mut assigned = left;
+        assigned |= right;
+        assert_eq!(assigned, left.or(&right));
+        assigned &= right;
+        assert_eq!(assigned, right);
+        assigned.toggle_bit(65);
+        assert!(!assigned.test_bit(65));
+        assigned.toggle_bit(65);
+        assert!(assigned.test_bit(65));
+        assigned.make_empty();
+        assert_eq!(assigned, ByteMask::EMPTY);
+    }
+
+    #[test]
+    fn byte_mask_iteration_and_indexing() {
+        let mask = ByteMask::from_iter([0, 2, 63, 64, 130, 255]);
+        assert_eq!(mask.iter().collect::<Vec<_>>(), vec![0, 2, 63, 64, 130, 255]);
+        #[allow(deprecated)]
+        let deprecated_iter = mask.byte_mask_iter();
+        assert_eq!(deprecated_iter.collect::<Vec<_>>(), vec![0, 2, 63, 64, 130, 255]);
+        assert_eq!(mask.index_of(0), 0);
+        assert_eq!(mask.index_of(64), 3);
+        assert_eq!(mask.index_of(255), 5);
+        assert_eq!(mask.indexed_bit::<true>(0), Some(0));
+        assert_eq!(mask.indexed_bit::<true>(5), Some(255));
+        assert_eq!(mask.indexed_bit::<true>(6), None);
+        assert_eq!(mask.indexed_bit::<false>(0), Some(255));
+        assert_eq!(mask.indexed_bit::<false>(5), Some(0));
+        assert_eq!(mask.indexed_bit::<false>(6), None);
+    }
+
+    #[test]
+    fn byte_mask_lattice_operations() {
+        let left = ByteMask::from_iter([1, 2]);
+        let right = ByteMask::from_iter([2, 3]);
+        assert_eq!(left.pjoin(&right), AlgebraicResult::Element(ByteMask::from_iter([1, 2, 3])));
+        assert_eq!(left.pmeet(&right), AlgebraicResult::Element(ByteMask::from(2)));
+        assert_eq!(left.psubtract(&right), AlgebraicResult::Element(ByteMask::from(1)));
+        assert_eq!(left.psubtract(&left), AlgebraicResult::None);
+    }
 }
