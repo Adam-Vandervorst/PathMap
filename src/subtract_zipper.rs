@@ -22,8 +22,11 @@ pub struct SubtractZipper<V, A, B> {
     val: CachedVal<V>,
     val_count: Cell<Option<usize>>,
 
-    // Results of shared-child subtree probes performed at the current focus
-    // since the last logical movement or refresh.
+    // Shared-child subtree facts for the current backing-zipper focus.
+    //
+    // Only bits set in checked_common are authoritative. surviving_common may
+    // retain stale bits after invalidation; they are ignored unless the matching
+    // checked_common bit is set.
     checked_common: ByteMask,
     surviving_common: ByteMask,
 }
@@ -72,10 +75,23 @@ where
         this
     }
 
+    /// Invalidates all shared-child probe facts for the current focus.
+    ///
+    /// Clearing checked_common is sufficient: surviving_common is only read for
+    /// children whose checked_common bit is set.
     #[inline(always)]
     fn invalidate_child_probes(&mut self) {
         self.checked_common = ByteMask::EMPTY;
-        self.surviving_common = ByteMask::EMPTY;
+    }
+
+    #[inline(always)]
+    fn set_child_probe(&mut self, at: u8, survives: bool) {
+        self.checked_common.set_bit(at);
+        if survives {
+            self.surviving_common.set_bit(at);
+        } else {
+            self.surviving_common.clear_bit(at);
+        }
     }
 
     /// Rebuilds the cached virtual state for the current backing-zipper focus.
@@ -102,8 +118,9 @@ where
     /// Descends both backing zippers by one byte without refreshing the cached
     /// virtual state.
     ///
-    /// After this call, cached fields such as `path_exists`, `child_mask`, and
-    /// `val` are stale until `refresh()` is called or the movement is undone.
+    /// The shared-child probe cache belongs to the old focus and is invalidated.
+    /// Observable cached fields remain stale until refresh() is called or the
+    /// movement is undone.
     #[inline]
     fn descend_to_byte_raw(&mut self, byte: u8) {
         self.invalidate_child_probes();
@@ -111,26 +128,82 @@ where
         self.rhs.descend_to_byte(byte);
     }
 
-    /// Ascends both backing zippers by one byte without refreshing the cached
-    /// virtual state.
+    /// Ascends both backing zippers without rebuilding virtual state.
     ///
-    /// Must not be called at the virtual root. Cached virtual state remains stale
-    /// until `refresh()` is called or the movement is undone.
+    /// Any cached child-probe results are invalid after the focus changes and are
+    /// discarded.
     #[inline]
-    fn ascend_byte_raw(&mut self) -> bool {
+    fn ascend_raw(&mut self, steps: usize) {
+        if steps == 0 {
+            return;
+        }
+
         debug_assert!(
-            self.lhs.depth() > self.lhs_root_depth,
+            self.lhs.depth() >= self.lhs_root_depth + steps,
             "SubtractZipper attempted to ascend above its root"
         );
 
-        let lhs_ascended = self.lhs.ascend_byte();
-        let rhs_ascended = self.rhs.ascend_byte();
+        let lhs_ascended = self.lhs.ascend(steps);
+        let rhs_ascended = self.rhs.ascend(steps);
 
-        debug_assert_eq!(lhs_ascended, rhs_ascended);
+        debug_assert_eq!(lhs_ascended, steps);
+        debug_assert_eq!(rhs_ascended, steps);
 
         self.invalidate_child_probes();
+    }
 
-        lhs_ascended
+    /// Ascends both backing zippers without rebuilding the cached virtual state.
+    ///
+    /// A surviving subtree proves that every ancestor containing it survives, so
+    /// `true` may be propagated across multiple levels.
+    ///
+    /// A non-surviving subtree only proves that this particular child is empty at
+    /// its immediate parent, so `false` is valid only for a single-level ascent.
+    #[inline]
+    fn ascend_raw_known(&mut self, steps: usize, survives: bool) {
+        if steps == 0 {
+            return;
+        }
+        let multi_level = steps > 1;
+        // Survival is monotone upward, so it remains valid after any number of
+        // ascents. Emptiness describes only the immediate child and therefore
+        // cannot be carried through a multi-level ascent.
+        if multi_level && !survives {
+            self.ascend_raw(steps);
+            return;
+        }
+
+        debug_assert!(
+            self.lhs.depth() >= self.lhs_root_depth + steps,
+            "SubtractZipper attempted to ascend above its root"
+        );
+
+        // For a multi-level surviving ascent, only the child directly below the
+        // final focus matters. Ascend the prefix in bulk and leave the last step
+        // separate so that its byte can be recorded.
+        if multi_level {
+            let prefix = steps - 1;
+            let lhs_ascended = self.lhs.ascend(prefix);
+            let rhs_ascended = self.rhs.ascend(prefix);
+
+            debug_assert_eq!(lhs_ascended, prefix);
+            debug_assert_eq!(rhs_ascended, prefix);
+        }
+
+        let child_byte = self
+            .lhs
+            .focus_byte()
+            .expect("path is below SubtractZipper root");
+
+        self.ascend_raw(1);
+
+        // Probe facts are meaningful only for children shared by both tries.
+        // The raw focus being left may itself be structurally absent on either side,
+        // so record the propagated fact only when child_byte is a common child.
+        if self.lhs.child_mask().test_bit(child_byte) && self.rhs.child_mask().test_bit(child_byte)
+        {
+            self.set_child_probe(child_byte, survives);
+        }
     }
 
     /// Returns whether the child `at` contains anything in the materialized
@@ -156,15 +229,19 @@ where
         survives
     }
 
+    /// Returns whether shared child `at` survives in the materialized subtraction.
+    ///
+    /// The result is memoized for the current focus. Temporary movement performed
+    /// by the probe itself does not disturb the focus-local cache.
     #[inline]
     fn subtree_survives(&mut self, at: u8) -> bool {
-        let survives = self.subtree_survives_uncached(at);
-
-        self.checked_common.set_bit(at);
-        if survives {
-            self.surviving_common.set_bit(at);
+        if self.checked_common.test_bit(at) {
+            return self.surviving_common.test_bit(at);
         }
 
+        let survives = self.subtree_survives_uncached(at);
+
+        self.set_child_probe(at, survives);
         survives
     }
 
@@ -173,10 +250,10 @@ where
         let common = lhs_mask & self.rhs.child_mask();
 
         let mut out = lhs_mask;
-        // Remove shared children already known not to survive.
-        // checked_common ^ surviving_common is exactly the set of checked children
-        // known not to survive. All of them are present in lhs_mask, so XOR removes them.
-        out ^= self.checked_common ^ self.surviving_common;
+
+        // Checked shared children known to be empty can be removed immediately.
+        // Bits in surviving_common outside checked_common are intentionally ignored.
+        out ^= self.checked_common & !self.surviving_common;
 
         // Since checked_common ⊆ common, XOR gives exactly the unchecked children.
         let unchecked = common ^ self.checked_common;
@@ -396,7 +473,7 @@ where
 
             // Move to the parent without refreshing the virtual zipper state.
             // Intermediate nodes are not externally observable during this search.
-            self.ascend_byte_raw();
+            self.ascend_raw(1);
             ascended += 1;
 
             // Continue DFS from the next surviving sibling, if one exists.
@@ -701,14 +778,15 @@ where
     }
 
     fn ascend(&mut self, steps: usize) -> usize {
-        if steps == 0 {
+        let actual_steps = steps.min(self.depth());
+        if actual_steps == 0 {
             return 0;
         }
 
-        let actual_steps = steps.min(self.depth());
-
-        self.lhs.ascend(actual_steps);
-        self.rhs.ascend(actual_steps);
+        // The cached state is valid at entry. Survival can be propagated through
+        // every ancestor; non-survival is useful only for a single-level ascent,
+        // which ascend_raw_known() handles internally.
+        self.ascend_raw_known(actual_steps, self.path_exists());
         self.refresh();
 
         actual_steps
@@ -719,11 +797,20 @@ where
             return 0;
         }
 
+        // Survival is monotone upward: once the current subtree survives, every
+        // ancestor reached while ascending survives as well.
+        //
+        // If the current subtree does not survive, that remains true for every
+        // parent through which this loop continues: continuing means that the parent
+        // has neither a surviving value nor another surviving child. The first parent
+        // at which the subtraction may become non-empty is therefore exactly where
+        // this traversal stops.
+        let survives = self.path_exists();
         let mut ascended = 0;
         loop {
             let cur_byte = self.focus_byte().expect("not at root");
 
-            self.ascend_byte_raw();
+            self.ascend_raw_known(1, survives);
             ascended += 1;
 
             let stop = self.at_root()
@@ -742,16 +829,25 @@ where
             return 0;
         }
 
+        // Survival is monotone upward. A non-surviving subtree may become
+        // surviving at an ancestor because that ancestor has its own value.
+        // Unlike ascend_until(), values are not stopping points here, so we must
+        // detect that transition before continuing farther upward.
+        let mut survives = self.path_exists();
         let mut ascended = 0;
         loop {
             let cur_byte = self.focus_byte().expect("not at root");
 
-            self.ascend_byte_raw();
+            self.ascend_raw_known(1, survives);
             ascended += 1;
 
             if self.at_root() || self.has_surviving_sibling(cur_byte) {
                 self.refresh();
                 return ascended;
+            }
+
+            if !survives {
+                survives = value_survives::<V, _, _>(&self.lhs, &self.rhs);
             }
         }
     }
@@ -760,8 +856,10 @@ where
         let depth = self.depth();
 
         if depth != 0 {
-            self.lhs.ascend(depth);
-            self.rhs.ascend(depth);
+            // A surviving current subtree proves that the root survives along this path.
+            // For a non-surviving subtree, multi-level propagation is deliberately
+            // discarded by ascend_raw_known().
+            self.ascend_raw_known(depth, self.path_exists());
             self.refresh();
         }
 
@@ -802,7 +900,7 @@ where
             // materialized difference iff something survives below it.
             self.descend_to_byte_raw(byte);
             if !subtree_has_difference::<V, _, _>(&mut self.lhs, &mut self.rhs) {
-                self.ascend_byte_raw();
+                self.ascend_raw_known(1, false);
                 break;
             }
 
@@ -884,7 +982,7 @@ where
             // Both tries contain the structural child, but it exists in the
             // materialized difference only if something survives below it.
             if !subtree_has_difference::<V, _, _>(&mut self.lhs, &mut self.rhs) {
-                self.ascend_byte_raw();
+                self.ascend_raw_known(1, false);
                 break;
             }
 
@@ -940,7 +1038,7 @@ where
 
         // Move both backing zippers to the parent without refreshing the
         // virtual state, which is only needed at the final focus.
-        self.ascend_byte_raw();
+        self.ascend_raw(1);
 
         match self.surviving_sibling::<true>(cur_byte) {
             Some(byte) => {
@@ -963,7 +1061,7 @@ where
 
         // Move both backing zippers to the parent without refreshing the
         // virtual state, which is only needed at the final focus.
-        self.ascend_byte_raw();
+        self.ascend_raw(1);
 
         match self.surviving_sibling::<false>(cur_byte) {
             Some(byte) => {
@@ -999,7 +1097,7 @@ where
                 return false;
             };
 
-            self.ascend_byte_raw();
+            self.ascend_raw(1);
             ascended += 1;
 
             if let Some(byte) = self.surviving_sibling::<true>(cur_byte) {
@@ -1048,8 +1146,14 @@ where
         }
 
         if to_ascend != 0 {
-            self.lhs.ascend(to_ascend);
-            self.rhs.ascend(to_ascend);
+            if suffix.is_empty() {
+                // We stop at this ancestor, so any propagated child fact can be
+                // consumed immediately by refresh().
+                self.ascend_raw_known(to_ascend, self.path_exists());
+            } else {
+                // A subsequent descent would invalidate the propagated probe cache.
+                self.ascend_raw(to_ascend);
+            }
         }
         if !suffix.is_empty() {
             self.lhs.descend_to(suffix);
@@ -1106,7 +1210,7 @@ where
                     return false;
                 };
 
-                self.ascend_byte_raw();
+                self.ascend_raw(1);
                 ascended += 1;
 
                 if let Some(byte) = self.surviving_sibling::<true>(cur_byte) {
