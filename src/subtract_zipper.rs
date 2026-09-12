@@ -284,16 +284,16 @@ where
     /// `cur_byte` is assumed to be a child of the materialized subtraction.
     fn has_surviving_sibling(&mut self, cur_byte: u8) -> bool {
         let mut candidates = self.lhs.child_mask();
+        candidates.clear_bit(cur_byte);
+
         if candidates.is_empty_mask() {
             return false;
         }
-
         if !self.rhs.path_exists() {
             // The whole LHS subtree survives, so any other LHS child is enough.
-            return candidates.count_bits() > 1;
+            return true;
         }
 
-        candidates.clear_bit(cur_byte);
         let rhs_mask = self.rhs.child_mask();
 
         // Any LHS-only sibling survives wholesale.
