@@ -1232,7 +1232,7 @@ where
 
     fn descend_first_k_path_observed<P: PathObserver>(&mut self, k: usize, obs: &mut P) -> bool {
         if k == 0 {
-            return true;
+            return false;
         }
 
         let Some(byte) = self.child_mask.indexed_bit::<true>(0) else {
@@ -1715,6 +1715,17 @@ mod tests {
             subtract_at(lhs, rhs, path)
         }
     );
+
+    #[test]
+    fn zero_k_must_not_move() {
+        let lhs = PathMap::from_iter([([2], 7u64)]);
+        let rhs = PathMap::new();
+
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        zipper.descend_to_byte(2);
+        assert!(!zipper.descend_first_k_path(0), "zero-k must not move");
+        assert_eq!(zipper.path(), [2]);
+    }
 
     #[test]
     fn seek_k_path_exhaustion() {
