@@ -1715,4 +1715,28 @@ mod tests {
             subtract_at(lhs, rhs, path)
         }
     );
+
+    #[test]
+    fn seek_k_path_exhaustion() {
+        let lhs = PathMap::from_iter([([10, 20], 1u64), ([10, 21], 2)]);
+        let rhs = PathMap::from_iter([([10, 20], 1u64), ([10, 21], 2)]);
+
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        zipper.descend_to_byte(10);
+        assert!(!zipper.descend_first_k_path(2));
+        assert!(!zipper.path_exists(), "cache invalid");
+        assert!(!zipper.descend_first_k_path(2));
+        assert!(!zipper.path_exists(), "state invalid");
+    }
+
+    #[test]
+    fn to_next_k_path_must_refresh_after_advance_to_next_subtree_fails() {
+        let lhs = PathMap::from_iter([([10, 20], 1u64), ([10, 21], 2)]);
+        let rhs = PathMap::from_iter([([10, 20], 1u64), ([10, 21], 2)]);
+
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        zipper.descend_to([10, 20]);
+        assert!(!zipper.path_exists(), "state invalid");
+        assert!(!zipper.to_next_k_path(2));
+    }
 }
