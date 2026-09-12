@@ -75,6 +75,12 @@ where
         this
     }
 
+    pub fn new_at_path(mut lhs: A, mut rhs: B, path: &[u8]) -> Self {
+        lhs.descend_to(path);
+        rhs.descend_to(path);
+        Self::new(lhs, rhs)
+    }
+
     /// Invalidates all shared-child probe facts for the current focus.
     ///
     /// Clearing checked_common is sufficient: surviving_common is only read for
@@ -1732,8 +1738,7 @@ mod tests {
         let lhs = PathMap::from_iter([([10, 20], 1u64), ([10, 21], 2)]);
         let rhs = PathMap::from_iter([([10, 20], 1u64), ([10, 21], 2)]);
 
-        let mut zipper = subtract_at(&lhs, &rhs, &[]);
-        zipper.descend_to_byte(10);
+        let mut zipper = subtract_at(&lhs, &rhs, &[10]);
         assert!(!zipper.descend_first_k_path(2));
         assert!(!zipper.path_exists(), "cache invalid");
         assert!(!zipper.descend_first_k_path(2));
