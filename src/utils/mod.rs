@@ -315,7 +315,73 @@ impl ByteMask {
         }
         None
     }
+
+    /// turns on bits in inclusive range `start..=end`
+    #[inline(always)]
+    pub const fn set_inclusive_bit_range(&mut self, start : u8, end : u8) {
+        let b = BlockRange::new(start, end);
+
+        self.0[0] |= b.u64_block(0);
+        self.0[1] |= b.u64_block(1);
+        self.0[2] |= b.u64_block(2);
+        self.0[3] |= b.u64_block(3);
+    }
+    /// turns off bits in inclusive range `start..=end`
+    #[inline(always)]
+    pub const fn clear_inclusive_bit_range(&mut self, start : u8, end : u8) {
+        let b = BlockRange::new(start, end);
+
+        self.0[0] &= !b.u64_block(0);
+        self.0[1] &= !b.u64_block(1);
+        self.0[2] &= !b.u64_block(2);
+        self.0[3] &= !b.u64_block(3);
+    }
+    /// flips all bits in inclusive range `start..=end`
+    #[inline(always)]
+    pub const fn compliment_inclusive_bit_range(&mut self, start : u8, end : u8) {
+        let b = BlockRange::new(start, end);
+
+        self.0[0] ^= b.u64_block(0);
+        self.0[1] ^= b.u64_block(1);
+        self.0[2] ^= b.u64_block(2);
+        self.0[3] ^= b.u64_block(3);
+    }
 }
+
+#[derive(Clone, Copy)]
+struct BlockRange {
+    block_start : u8,
+    block_end   : u8,
+    bit_start   : u8,
+    bit_end     : u8,
+}
+impl BlockRange {
+    #[inline(always)]
+    const fn new(start : u8, end : u8) -> Self {
+        core::debug_assert!(start<=end);
+        Self {
+            block_start : start >> (u8::BITS - 2),
+            block_end   : end   >> (u8::BITS - 2),
+            bit_start   : start & (!0 >> 2),
+            bit_end     : end   & (!0 >> 2),
+        }
+    }
+    #[inline(always)]
+    const fn u64_block(self, n : u8) -> u64 {
+        core::debug_assert!(n < 0b100);
+        let Self { block_start, block_end, bit_start, bit_end } = self;
+        if n < block_start || n > block_end {
+            0
+        } else {
+            let lo = if n == block_start { bit_start } else { 0 };
+            let hi = if n == block_end   { bit_end   } else { 63 };
+            (!0u64 << lo) & (!0u64 >> (63 - hi))
+        }
+    }
+
+}
+
+
 
 impl core::fmt::Debug for ByteMask {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -1107,5 +1173,36 @@ mod tests {
         assert_eq!(left.pmeet(&right), AlgebraicResult::Element(ByteMask::from(2)));
         assert_eq!(left.psubtract(&right), AlgebraicResult::Element(ByteMask::from(1)));
         assert_eq!(left.psubtract(&left), AlgebraicResult::None);
+    }
+
+    #[test]fn byte_mask_inclusive_range_test() {
+        
+        fn test_single_range(b : &mut ByteMask, start : u8, end : u8) {
+            b.clear_inclusive_bit_range(u8::MIN, u8::MAX);
+            b.set_inclusive_bit_range(start, end);
+            let mut i = 0;
+            for (mask_b, range_b) in b.iter().zip(start..=end) {
+                core::assert_eq!(mask_b, range_b);
+                i += 1;
+            }
+            core::debug_assert_eq!(i, (end as usize - start as usize + 1));
+            b.clear_inclusive_bit_range(start, end);
+            core::assert!(b.iter().next().is_none());
+        }
+        let mut b = ByteMask::from([0;4]);
+        test_single_range(&mut b, b'a', b'z');
+        test_single_range(&mut b, b'A', b'Z');
+        test_single_range(&mut b, b'0', b'9');
+        test_single_range(&mut b, 0, 255);
+    
+        b.clear_inclusive_bit_range(0, 255);
+
+        b.set_inclusive_bit_range(0, 99);
+        b.set_inclusive_bit_range(201, 255);
+        b.compliment_inclusive_bit_range(0, 200);
+
+        for (mask_byte,range_byte) in b.iter().zip(100..=255) {
+            core::assert_eq!(mask_byte,range_byte);
+        }
     }
 }
