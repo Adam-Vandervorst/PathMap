@@ -3754,6 +3754,42 @@ mod tests {
         assert_eq!(map.iter().count(), 1);
     }
 
+    /// A value must survive `subtract_into` when the source only passes *through* its location on the
+    /// way to a deeper value.  The destination root here is a byte node (three branches worth of
+    /// payloads) and the source a line node, so the subtraction goes through `psubtract_abstract`,
+    /// which used to drop the value at `[0]` because the source has no value at that exact byte.
+    #[test]
+    fn write_zipper_subtract_into_value_under_source_path() {
+        let mut map: PathMap<u64> = PathMap::new();
+        map.insert([0], 0);
+        map.insert([0, 0], 0);
+        map.insert([0, 0, 0], 0);
+        map.insert([1, 0, 0], 0);
+        let mut src: PathMap<u64> = PathMap::new();
+        src.insert([0, 0], 0);
+        src.insert([1, 0, 0], 0);
+
+        assert_eq!(map.write_zipper().subtract_into(&src.read_zipper(), false), AlgebraicStatus::Element);
+        let remaining: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(remaining, vec![(vec![0], 0), (vec![0, 0, 0], 0)]);
+
+        // The same shape reached the way the fuzzer found it: join the source in first, then take it out again
+        let mut map: PathMap<u64> = PathMap::new();
+        map.insert([], 0);
+        map.insert([0], 0);
+        map.insert([0, 0, 0], 0);
+        let mut src: PathMap<u64> = PathMap::new();
+        src.insert([], 0);
+        src.insert([0, 0], 0);
+        src.insert([1, 0, 0], 0);
+        let mut wz = map.write_zipper();
+        wz.join_into(&src.read_zipper());
+        wz.subtract_into(&src.read_zipper(), false);
+        drop(wz);
+        let remaining: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(remaining, vec![(vec![0], 0), (vec![0, 0, 0], 0)]);
+    }
+
     /// Tests how `subtract_into` handles dangling paths, including situations with extraneous empty nodes hanging around
     #[test]
     fn write_zipper_subtract_into_test2() {

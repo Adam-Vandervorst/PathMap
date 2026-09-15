@@ -418,10 +418,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 let cf = unsafe{ self_node.values.get_unchecked(cf_idx) };
                 let mut new_cf = Cf::new(None, None);
 
-                //If there is a value at this key_byte, and the other node contains a value, subtract them
+                //If there is a value at this key_byte, and the other node contains a value, subtract them.
+                // If the other node only passes through this byte on the way to something deeper, it holds
+                // nothing at this exact location, so the value survives untouched.
                 if let Some(self_val) = cf.val() {
-                    if let Some(other_val) = other.node_get_val(&[key_byte]) {
-                        match self_val.psubtract(other_val) {
+                    match other.node_get_val(&[key_byte]) {
+                        Some(other_val) => match self_val.psubtract(other_val) {
                             AlgebraicResult::None => { is_identity = false; },
                             AlgebraicResult::Identity(mask) => {
                                 debug_assert_eq!(mask, SELF_IDENT); //subtract is not commutative
@@ -431,7 +433,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                                 is_identity = false;
                                 new_cf.set_val(e);
                             },
-                        }
+                        },
+                        None => new_cf.set_val(self_val.clone()),
                     }
                 }
 
