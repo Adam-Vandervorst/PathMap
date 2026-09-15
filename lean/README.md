@@ -491,25 +491,33 @@ documentation rather than from the code.
 
 ## Current agreement
 
-500 random programs (`./lean/differential.py --random 500 --seed 99 --max-fails 0`),
-model versus crate, comparing every return value plus both maps in full:
+20000 random programs (`./lean/differential.py --random 20000 --seed 7
+--max-fails 0`), model versus crate, comparing every return value plus both maps
+in full:
 
 ```
-404/500 inputs agree exactly
- 87/500 hit one of the classified defects in FINDINGS.md
-  9/500 diverge for reasons not yet classified
+19735/20000 inputs agree exactly
+  265/20000 hit one of the classified defects
+    0/20000 diverge for reasons not yet classified
 ```
 
-The 87 break down as: `to_next_val` after `to_next_step` (19), `ascend_until`
-corrupting a write zipper (17), zippers escaping their root (16), a `set_val`
-unwrap on `None` (14), the `TrieRef` slice underflow (12), `make_unique` on an
-empty sentinel (7), `join_into` dropping the source (2).
+The 265 break down as `graft_masked_branches` creating the focus (177),
+`join_into` dropping the source (24), `AlgebraicStatus` imprecision (20 + 18),
+value bias by node layout (11), a dangling child kept by an algebraic op (11),
+`val_at` at a dangling path (3), `subtract_into` dropping a value (1).
 
-Every defect listed in FINDINGS.md reproduces here exactly as it does on
-`master`; the blind-zipper migration neither fixed nor introduced any of them.
+Five of those classes are keyed on the *shape* of the divergence rather than on
+an operation name, because the same defect surfaces under whichever operation
+happens to read the damaged location -- value bias, for instance, is reported by
+`meet_into` where it is introduced but by `dump`, `val_at` or the final map dump
+wherever it is later observed.  `divergence_shape` in `differential.py` decides
+those, and returning "no familiar shape" is its important case: it is what keeps
+a genuinely new defect out of the known buckets.  A shrunk reproducer for each
+class is in `lean/corpus/`, and `./lean/differential.py lean/corpus/*.bin`
+replays them all.
 
-`differential.py` prints that breakdown itself, so new divergences stay visible
-as the known ones are fixed.
+`differential.py` prints the breakdown itself, so new divergences stay visible as
+the known ones are fixed.
 
 ## ArenaCompactTree as the read source
 
