@@ -1007,11 +1007,44 @@ pub trait ZipperIteration: ZipperMoving {
     /// with depth-first exploration until a path that is `k` bytes from the focus has been found, reporting
     /// movement to `obs`.
     ///
-    /// Returns `true` if the zipper has sucessfully descended `k` steps, or `false` otherwise.  If this
-    /// method returns `false` then the zipper will be in its original position.
+    /// ## Usage
     ///
-    /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to the paths
-    /// below the zipper's focus.  Although a typical cost is `order log n` or better.
+    /// Together with [`to_next_k_path_observed`](ZipperIteration::to_next_k_path_observed), this method provides a general
+    /// mechanism for iterating sub-paths at a fixed depth below the current focus.  This is useful
+    /// when decoding items encoded into the trie paths using a fixed-width encoding.
+    ///
+    /// This example encodes every element in `items` as a 4-byte representation in the trie path,
+    /// and then iterates each element using `descend_first_k_path_observed` and [`to_next_k_path_observed`](ZipperIteration::to_next_k_path_observed)
+    /// ```
+    /// # use pathmap::{PathMap, zipper::ZipperIteration};
+    /// let items = [7_u32, 42, 1_000, 1_000_000];
+    /// let mut trie = PathMap::new();
+    /// for item in items {
+    ///     trie.set_val_at(item.to_be_bytes(), ());
+    /// }
+    ///
+    /// let mut zipper = trie.read_zipper();
+    /// let mut path = Vec::new(); // Tracks movement reported by the observed methods.
+    /// let mut decoded = Vec::new();
+    /// if zipper.descend_first_k_path_observed(4, &mut path) {
+    ///     loop {
+    ///         decoded.push(u32::from_be_bytes(path.as_slice().try_into().unwrap()));
+    ///         if !zipper.to_next_k_path_observed(4, &mut path) {
+    ///             break;
+    ///         }
+    ///     }
+    /// }
+    /// assert_eq!(decoded, items);
+    /// ```
+    ///
+    /// ## Behavior
+    ///
+    /// Returns `true` if the zipper has sucessfully descended `k` steps.  Returns `false` there are no
+    /// existing paths `k` bytes below the focus, or if `k=0`.   When this method returns `false` the
+    /// focus will be in its original position.
+    ///
+    /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to
+    /// the paths below the zipper's focus.  Although a typical cost is `order log n` or better.
     ///
     /// `obs` is notified of every movement made, so a caller can track the zipper's location without
     /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
@@ -1029,6 +1062,14 @@ pub trait ZipperIteration: ZipperMoving {
     /// Moves the zipper's focus to the next location with the same path length as the current focus,
     /// following a depth-first exploration from a common root `k` steps above the current focus, reporting
     /// movement to `obs`.
+    ///
+    /// ## Usage
+    ///
+    /// This method is designed to be used in conjection with [descend_first_k_path](ZipperIteration::descend_first_k_path),
+    /// although the behavior will be the same regardless of the prior zipper methods called. See the
+    /// [descend_first_k_path](ZipperIteration::descend_first_k_path) documentation for a usage example.
+    ///
+    /// ## Behavior
     ///
     /// Returns `true` if the zipper has sucessfully moved to a new location at the same level, or `false`
     /// if no further locations exist.  If this method returns `false` then the zipper will be ascended `k`
