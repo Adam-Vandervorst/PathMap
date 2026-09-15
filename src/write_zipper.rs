@@ -6886,4 +6886,61 @@ mod tests {
         }
         assert_eq!(keys(&m), ["cx", "cy", "d"]);
     }
+
+    /// `join_into` with the source focus partway into a line node.  The focus node is then a
+    /// `TinyRefNode`, and the join used to be evaluated with the operands swapped and the
+    /// identity mask *not* swapped back.  A destination that already held everything the
+    /// source has reported `COUNTER_IDENT`, which `join_into` takes as "the result is the
+    /// source" -- so a dense destination was overwritten by the source (the data loss of
+    /// FINDINGS.md #1, in the form that survived the empty-destination fix), and a list
+    /// destination reported `Element` for a join that changed nothing.
+    #[test]
+    fn write_zipper_join_into_mid_key_source_keeps_destination() {
+        fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
+        fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
+        let src = mk(&[(&[0, 0, 0], 7)]);
+
+        //Dense destination: was replaced by `[0]=7`
+        let mut dst = mk(&[(&[0], 7), (&[1], 1), (&[2], 2), (&[3], 3)]);
+        let before = vals(&dst);
+        let st = { let mut wz = dst.write_zipper(); let mut rz = src.read_zipper(); rz.descend_to(&[0, 0]); wz.join_into(&rz) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), before);
+
+        //List destination: was `Element` for an unchanged trie
+        let mut dst = mk(&[(&[0], 7), (&[0, 0], 0)]);
+        let before = vals(&dst);
+        let st = { let mut wz = dst.write_zipper(); let mut rz = src.read_zipper(); rz.descend_to(&[0, 0]); wz.join_into(&rz) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), before);
+
+        //And a join that does add something still says so, with the destination intact
+        let mut dst = mk(&[(&[1], 1), (&[2], 2), (&[3], 3)]);
+        let st = { let mut wz = dst.write_zipper(); let mut rz = src.read_zipper(); rz.descend_to(&[0, 0]); wz.join_into(&rz) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(vals(&dst), vec![(vec![0], 7), (vec![1], 1), (vec![2], 2), (vec![3], 3)]);
+    }
+
+    /// `join_into` where a destination slot holds an onward child under a key that is a
+    /// prefix of the source's longer key.  `merge_guts` joined the child with the source's
+    /// remainder but always reported the pair as `Element`, so a source already contained in
+    /// that child made the whole join report `Element` although nothing changed.
+    #[test]
+    fn write_zipper_join_into_contained_under_child_is_identity() {
+        fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
+        fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
+        let mut dst = mk(&[(&[0, 0], 0), (&[0, 1], 0)]);
+        let before = vals(&dst);
+        let src = mk(&[(&[0, 0], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.join_into(&src.read_zipper()) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), before);
+
+        //The mirror image: the source holds the child, the destination the longer key
+        let mut dst = mk(&[(&[0, 0], 0)]);
+        let src = mk(&[(&[0, 0], 0), (&[0, 1], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.join_into(&src.read_zipper()) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(vals(&dst), vals(&src));
+    }
 }

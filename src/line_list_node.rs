@@ -1345,14 +1345,18 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
         unsafe{ intermediate_node.set_payload_owned::<0>(&a_key[overlap..], a_payload); }
         debug_assert!(validate_node(&intermediate_node));
         let intermediate_node = TrieNodeODRc::new_in(intermediate_node, a.alloc.clone());
-        let joined = b_child.pjoin(&intermediate_node).unwrap_or_else(|which_arg| {
-            match which_arg {
-                0 => b_child.clone(),
-                1 => intermediate_node,
-                _ => unreachable!()
-            }
-        }, || panic!());
-        return AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(joined)))
+        return match b_child.pjoin(&intermediate_node) {
+            AlgebraicResult::Element(joined) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(joined))),
+            //`b`'s child already held `a`'s payload, so `b`'s slot *is* the result -- COUNTER_IDENT
+            // from the caller's point of view.  Reporting it as `Element` made a join whose
+            // destination was unchanged report `Element`.  (The other identity, where the child
+            // held nothing beyond `a`'s payload, is still built as an `Element`: `a`'s slot has
+            // the same contents but not the `(prefix, child)` shape callers such as
+            // `drop_head` rely on.)
+            AlgebraicResult::Identity(mask) if mask & SELF_IDENT > 0 => AlgebraicResult::Identity(COUNTER_IDENT),
+            AlgebraicResult::Identity(_) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(intermediate_node))),
+            AlgebraicResult::None => unreachable!(), //`intermediate_node` is never empty
+        }
     }
     if a_key_len == overlap && a.is_child_ptr::<ASLOT>() && b_key_len > overlap {
         let a_child = unsafe{ a.child_in_slot::<ASLOT>() };
@@ -1361,14 +1365,13 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
         unsafe{ intermediate_node.set_payload_owned::<0>(&b_key[overlap..], b_payload); }
         debug_assert!(validate_node(&intermediate_node));
         let intermediate_node = TrieNodeODRc::new_in(intermediate_node, a.alloc.clone());
-        let joined = a_child.pjoin(&intermediate_node).unwrap_or_else(|which_arg| {
-            match which_arg {
-                0 => a_child.clone(),
-                1 => intermediate_node,
-                _ => unreachable!()
-            }
-        }, || panic!());
-        return AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(joined)))
+        return match a_child.pjoin(&intermediate_node) {
+            AlgebraicResult::Element(joined) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(joined))),
+            //Mirror of the case above: `a`'s slot is the result
+            AlgebraicResult::Identity(mask) if mask & SELF_IDENT > 0 => AlgebraicResult::Identity(SELF_IDENT),
+            AlgebraicResult::Identity(_) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(intermediate_node))),
+            AlgebraicResult::None => unreachable!(), //`intermediate_node` is never empty
+        }
     }
 
     //If we have overlapping initial bytes that can be joined together, make a new prefix node
@@ -2649,8 +2652,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 }
             },
             TINY_REF_NODE_TAG => {
+                //Expand the tiny node and keep `self` on the left (see DenseByteNode::pjoin_dyn)
                 let tiny_node = unsafe{ other.as_tiny_unchecked() };
-                tiny_node.pjoin_dyn(self.as_tagged())
+                match tiny_node.into_full() {
+                    Some(full_node) => self.pjoin_dyn(full_node.as_tagged()),
+                    None => AlgebraicResult::Identity(SELF_IDENT),
+                }
             }
             EMPTY_NODE_TAG => {
                 AlgebraicResult::Identity(SELF_IDENT)

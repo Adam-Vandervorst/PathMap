@@ -851,15 +851,24 @@ impl Lattice for () {
     fn pmeet(&self, _other: &Self) -> AlgebraicResult<Self> { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) }
 }
 
+/// Left-biased join for the plain integer placeholders: the result is always `self`, but when
+/// the two are equal it is also `other`, and the node algebra needs to know that to report an
+/// unchanged join as `Identity` (a join evaluated with swapped operands, e.g. against a
+/// `TinyRefNode`, otherwise never sees a self-identity)
+#[inline]
+fn left_biased_pjoin<T: PartialEq>(a: &T, b: &T) -> AlgebraicResult<T> {
+    if a == b { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) } else { AlgebraicResult::Identity(SELF_IDENT) }
+}
+
 //GOAT trash
 impl Lattice for usize {
-    fn pjoin(&self, _other: &usize) -> AlgebraicResult<usize> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &usize) -> AlgebraicResult<usize> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &usize) -> AlgebraicResult<usize> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
 //GOAT trash
 impl Lattice for u64 {
-    fn pjoin(&self, _other: &u64) -> AlgebraicResult<u64> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u64) -> AlgebraicResult<u64> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u64) -> AlgebraicResult<u64> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
@@ -873,13 +882,13 @@ impl DistributiveLattice for u64 {
 
 //GOAT trash
 impl Lattice for u32 {
-    fn pjoin(&self, _other: &u32) -> AlgebraicResult<u32> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u32) -> AlgebraicResult<u32> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u32) -> AlgebraicResult<u32> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
 //GOAT trash
 impl Lattice for u16 {
-    fn pjoin(&self, _other: &u16) -> AlgebraicResult<u16> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u16) -> AlgebraicResult<u16> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u16) -> AlgebraicResult<u16> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
@@ -893,7 +902,7 @@ impl DistributiveLattice for u16 {
 
 //GOAT trash
 impl Lattice for u8 {
-    fn pjoin(&self, _other: &u8) -> AlgebraicResult<u8> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u8) -> AlgebraicResult<u8> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u8) -> AlgebraicResult<u8> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
