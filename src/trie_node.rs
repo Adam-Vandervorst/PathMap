@@ -642,7 +642,16 @@ impl<V: Clone + Send + Sync, A: Allocator> ValOrChildUnion<V, A> {
 // was observed.  Therefore the the ~20% slowdown is simply the higher overheads of this generic function.
 //
 //The next port of call for optimization is probably to remove the recursion
-pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, MergeF>(self_payloads: &[(&[u8], PayloadRef<V, A>)], other: TaggedNodeRef<V, A>, merge_f: MergeF) -> AlgebraicResult<TrieNodeODRc<V, A>>
+//
+/// `swapped` says which operand `self_payloads` came from.  The meet is left-biased (a `Lattice`
+/// impl resolves a collision as `left.pmeet(right)`), so when a caller enumerates the *right*
+/// operand's payloads because that node type is the easier one to iterate, it passes `swapped =
+/// true`: every value and every recursive node meet is then computed as `other op self` and the
+/// identity masks are re-expressed relative to `self_payloads`.  The caller still applies
+/// `invert_identity()` to the final result to get back to its own orientation.  Without this, a
+/// dense-node-versus-list-node meet returned the list node's values regardless of which side it
+/// was on.
+pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, MergeF>(self_payloads: &[(&[u8], PayloadRef<V, A>)], other: TaggedNodeRef<V, A>, swapped: bool, merge_f: MergeF) -> AlgebraicResult<TrieNodeODRc<V, A>>
     where
     MergeF: FnOnce(&mut [Option<ValOrChild<V, A>>]) -> TrieNodeODRc<V, A>,
     V: Clone + Send + Sync + Lattice
@@ -657,7 +666,7 @@ pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, Merge
         request_results.push((0, PayloadRef::default()));
     }
 
-    let is_exhaustive = pmeet_generic_internal::<MAX_PAYLOAD_CNT, V, A>(self_payloads, &mut request_keys[..], &mut request_results[..], &mut element_results[..], other);
+    let is_exhaustive = pmeet_generic_internal::<MAX_PAYLOAD_CNT, V, A>(self_payloads, &mut request_keys[..], &mut request_results[..], &mut element_results[..], other, swapped);
     let mut is_none = true;
     let mut combined_mask = SELF_IDENT | COUNTER_IDENT;
     let mut result_payloads = ArrayVec::<Option<ValOrChild<V, A>>, MAX_PAYLOAD_CNT>::new();
@@ -697,7 +706,7 @@ pub(crate) fn node_count_branches_recursive<V: Clone + Send + Sync, A: Allocator
 }
 
 /// Internal function to implement the recursive part of `pmeet_generic`
-pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allocator>(self_payloads: &[(&[u8], PayloadRef<V, A>)], keys: &mut [(&[u8], bool)], request_results: &mut [(usize, PayloadRef<'trie, V, A>)], results: &mut [FatAlgebraicResult<ValOrChild<V, A>>], other_node: TaggedNodeRef<'trie, V, A>) -> bool
+pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allocator>(self_payloads: &[(&[u8], PayloadRef<V, A>)], keys: &mut [(&[u8], bool)], request_results: &mut [(usize, PayloadRef<'trie, V, A>)], results: &mut [FatAlgebraicResult<ValOrChild<V, A>>], other_node: TaggedNodeRef<'trie, V, A>, swapped: bool) -> bool
     where V: Clone + Send + Sync + Lattice
 {
     //If is_exhaustive gets set to `false`, then the pmeet method cannot return a `COUNTER_IDENTITY` result
@@ -729,14 +738,14 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
                 // we have the same node as the previous time through the loop
                 if cur_group.is_some() {
                     if (cur_group.as_ref().unwrap().1 as *const TrieNodeODRc<V, A>) != (child as *const TrieNodeODRc<V, A>) {
-                        pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results);
+                        pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results, swapped);
                         cur_group = Some((idx, child));
                     }
                 } else {
                     cur_group = Some((idx, child));
                 }
             } else {
-                pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results);
+                pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results, swapped);
 
                 //We've arrived at a contained value or onward link that has a correspondence
                 // to one of the values or links in `self`
@@ -745,13 +754,13 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
                 let result = match &self_payloads[idx].1 {
                     PayloadRef::Child(self_link) => {
                         let other_link = payload.child();
-                        let result = self_link.pmeet(other_link);
+                        let result = if swapped { other_link.pmeet(self_link).invert_identity() } else { self_link.pmeet(other_link) };
                         FatAlgebraicResult::from_binary_op_result(result, self_link, other_link)
                             .map(|child| ValOrChild::Child(child))
                     },
                     PayloadRef::Val(self_val) => {
                         let other_val = payload.val();
-                        let result = (*self_val).pmeet(other_val);
+                        let result = if swapped { other_val.pmeet(*self_val).invert_identity() } else { (*self_val).pmeet(other_val) };
                         FatAlgebraicResult::from_binary_op_result(result, *self_val, other_val)
                             .map(|val| ValOrChild::Val(val))
                     },
@@ -762,7 +771,7 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
                 results[idx] = result;
             }
         } else {
-            pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results);
+            pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results, swapped);
 
             //`other` holds no payload at this key, so the result has nothing here.  That equals
             // `other` at this key only if `other` has no path along it at all.  A path that shares a
@@ -778,7 +787,11 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
                 PayloadRef::Child(self_link) => {
                     match other_node.get_node_at_key(keys[idx].0).into_option() {
                         Some(other_onward_node) => {
-                            let result = self_link.as_tagged().pmeet_dyn(other_onward_node.as_tagged());
+                            let result = if swapped {
+                                other_onward_node.as_tagged().pmeet_dyn(self_link.as_tagged()).invert_identity()
+                            } else {
+                                self_link.as_tagged().pmeet_dyn(other_onward_node.as_tagged())
+                            };
                             FatAlgebraicResult::from_binary_op_result(result, self_link, &other_onward_node)
                                 .map(|child| ValOrChild::Child(child))
                         },
@@ -795,7 +808,7 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
             results[idx] = result;
         }
     }
-    pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, keys.len(), self_payloads, keys, request_results, results);
+    pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, keys.len(), self_payloads, keys, request_results, results, swapped);
 
     is_exhaustive
 }
@@ -803,7 +816,7 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
 /// Effectively part of `pmeet_generic_internal`, but factored out separately because it's called in
 /// several different places.  Resets the `cur_group` state and does a recursive call of `pmeet_generic_internal`
 #[inline]
-fn pmeet_generic_recursive_reset<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allocator>(cur_group: &mut Option<(usize, &'trie TrieNodeODRc<V, A>)>, is_exhaustive: &mut bool, idx: usize, self_payloads: &[(&[u8], PayloadRef<V, A>)], keys: &mut [(&[u8], bool)], request_results: &mut [(usize, PayloadRef<'trie, V, A>)], results: &mut [FatAlgebraicResult<ValOrChild<V, A>>])
+fn pmeet_generic_recursive_reset<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allocator>(cur_group: &mut Option<(usize, &'trie TrieNodeODRc<V, A>)>, is_exhaustive: &mut bool, idx: usize, self_payloads: &[(&[u8], PayloadRef<V, A>)], keys: &mut [(&[u8], bool)], request_results: &mut [(usize, PayloadRef<'trie, V, A>)], results: &mut [FatAlgebraicResult<ValOrChild<V, A>>], swapped: bool)
     where V: Clone + Send + Sync + Lattice
 {
     match core::mem::take(cur_group) {
@@ -811,7 +824,7 @@ fn pmeet_generic_recursive_reset<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allo
             let group_keys = &mut keys[group_start..idx];
             let group_results = &mut results[group_start..idx];
             let group_self_payloads = &self_payloads[group_start..idx];
-            if !pmeet_generic_internal::<MAX_PAYLOAD_CNT, V, A>(group_self_payloads, group_keys, request_results, group_results, next_node.as_tagged()) {
+            if !pmeet_generic_internal::<MAX_PAYLOAD_CNT, V, A>(group_self_payloads, group_keys, request_results, group_results, next_node.as_tagged(), swapped) {
                 *is_exhaustive = false;
             }
         },
@@ -3462,6 +3475,89 @@ mod tests {
     use crate::trie_node::TrieNodeODRc;
     use crate::PathMap;
     use crate::zipper::*;
+
+    fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> {
+        let mut m = PathMap::<u64>::new();
+        for (p, v) in ps { m.set_val_at(p, *v); }
+        m
+    }
+    fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> {
+        m.iter().map(|(p, v)| (p.to_vec(), *v)).collect()
+    }
+
+    /// `Lattice for u64` keeps `self` on a collision, so a meet carries the *left* operand's value.
+    /// That must not depend on which node type each operand happens to be stored in: a byte node
+    /// meeting a list node used to run the meet with the operands swapped and returned the list
+    /// node's values whichever side it was on.  Found by lean/differential.py.
+    #[test]
+    fn meet_value_bias_is_left_regardless_of_node_layout() {
+        let two_payload_list = mk(&[(&[0], 0), (&[0, 0], 0), (&[3, 0], 1)]);
+        let single_line = mk(&[(&[0], 1)]);
+        let dense = mk(&[(&[0], 0), (&[1], 0), (&[2], 0), (&[3], 0), (&[4], 0)]);
+        for (a, b, expect) in [
+            (&two_payload_list, &single_line, 0u64),
+            (&single_line, &two_payload_list, 1),
+            (&dense, &single_line, 0),
+            (&single_line, &dense, 1),
+            (&dense, &two_payload_list, 0),
+            (&two_payload_list, &dense, 0),
+        ] {
+            let mut out = PathMap::<u64>::new();
+            { let mut wz = out.write_zipper(); wz.meet_2(&a.read_zipper(), &b.read_zipper()); }
+            assert_eq!(out.get_val_at(&[0]), Some(&expect), "meet_2 of {:?} and {:?}", vals(a), vals(b));
+
+            let mut into = a.clone();
+            { let mut wz = into.write_zipper(); wz.meet_into(&b.read_zipper(), false); }
+            assert_eq!(into.get_val_at(&[0]), Some(&expect), "meet_into of {:?} and {:?}", vals(a), vals(b));
+        }
+    }
+
+    /// The same for joins: `PathMap::join` and `join_into` keep the left operand's value, whether
+    /// the left operand is a list node joining into a byte node or the other way round.
+    #[test]
+    fn join_value_bias_is_left_regardless_of_node_layout() {
+        let line = mk(&[(&[1], 0)]);
+        let dense = mk(&[(&[0], 0), (&[1], 1), (&[2], 0)]);
+        assert_eq!(line.join(&dense).get_val_at(&[1]), Some(&0));
+        assert_eq!(dense.join(&line).get_val_at(&[1]), Some(&1));
+
+        let mut into = line.clone();
+        { let mut wz = into.write_zipper(); wz.join_into(&dense.read_zipper()); }
+        assert_eq!(vals(&into), vec![(vec![0], 0), (vec![1], 0), (vec![2], 0)]);
+        let mut into = dense.clone();
+        { let mut wz = into.write_zipper(); wz.join_into(&line.read_zipper()); }
+        assert_eq!(vals(&into), vec![(vec![0], 0), (vec![1], 1), (vec![2], 0)]);
+
+        //A deeper collision, so the child-node join is exercised as well as the value join
+        let line = mk(&[(&[1, 5], 0), (&[1, 6], 0)]);
+        let dense = mk(&[(&[0], 0), (&[1, 5], 1), (&[2], 0)]);
+        assert_eq!(line.join(&dense).get_val_at(&[1, 5]), Some(&0));
+        assert_eq!(dense.join(&line).get_val_at(&[1, 5]), Some(&1));
+    }
+
+    /// `join_k_path_into` joins the surviving subtries in path order (`PathMap.dropHead` in the
+    /// Lean model folds over the k-paths in sorted order), so on a collision the value from the
+    /// lexicographically first k-path survives.  The byte node used to fold from the highest byte
+    /// down, and the list node's two-slot merge used to join with the second slot on the left.
+    #[test]
+    fn join_k_path_into_keeps_lexicographically_first_value() {
+        let mut m = mk(&[(&[0, 0, 0, 2], 0), (&[0, 1, 0, 2], 1), (&[0, 1, 0, 2, 0], 0)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(3, false); }
+        assert_eq!(vals(&m), vec![(vec![2], 0), (vec![2, 0], 0)]);
+
+        let mut m = mk(&[(&[1, 0, 3], 0), (&[0], 0), (&[0, 0, 0], 0), (&[0, 0, 3], 1)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(2, false); }
+        assert_eq!(vals(&m), vec![(vec![0], 0), (vec![3], 1)]);
+
+        let mut m = mk(&[(&[0, 0, 0], 0), (&[0], 0), (&[1, 0, 0], 1)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(2, false); }
+        assert_eq!(vals(&m), vec![(vec![0], 0)]);
+
+        //Three-plus branches at the root make it a byte node
+        let mut m = mk(&[(&[0, 0, 7], 0), (&[1, 0, 7], 1), (&[2, 0, 7], 2), (&[3, 0, 7], 3)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(2, false); }
+        assert_eq!(vals(&m), vec![(vec![7], 0)]);
+    }
 
     #[test]
     fn slim_ptrs_test1() {

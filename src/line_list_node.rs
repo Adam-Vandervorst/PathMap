@@ -1304,6 +1304,35 @@ fn try_merge<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: us
 }
 
 /// The part of `try_merge` that we probably shouldn't inline
+/// The subtrie left of one list-node slot after `byte_cnt` bytes are dropped from every path
+/// below it, or `None` if nothing is left.  Part of [TrieNode::drop_head_dyn].
+///
+/// A value sitting at depth `<= byte_cnt` is discarded (the joined node has nowhere to put a root
+/// value), a dangling child has nothing below the dropped bytes, and a key longer than `byte_cnt`
+/// just loses its first `byte_cnt` bytes.
+fn drop_head_from_payload<V: Clone + Lattice + Send + Sync, A: Allocator>(key: &[u8], payload: ValOrChild<V, A>, byte_cnt: usize, alloc: &A) -> Option<TrieNodeODRc<V, A>> {
+    let key_len = key.len();
+    if byte_cnt < key_len {
+        let mut new_node = LineListNode::new_in(alloc.clone());
+        unsafe { new_node.set_payload_owned::<0>(&key[byte_cnt..], payload); }
+        debug_assert!(validate_node(&new_node));
+        return Some(TrieNodeODRc::new_in(new_node, alloc.clone()))
+    }
+    match payload {
+        ValOrChild::Val(_) => None,
+        ValOrChild::Child(mut child) => {
+            if child.is_empty() {
+                return None
+            }
+            if byte_cnt == key_len {
+                Some(child)
+            } else {
+                child.make_mut().drop_head_dyn(byte_cnt - key_len)
+            }
+        }
+    }
+}
+
 fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: usize, const BSLOT: usize>(mut overlap: usize, a_key: &'a[u8], a: &LineListNode<V, A>, b_key: &'a[u8], b: &LineListNode<V, A>) -> AlgebraicResult<(&'a[u8], ValOrChild<V, A>)> {
     debug_assert!(overlap > 0);
     let a_key_len = a_key.len();
@@ -1345,15 +1374,18 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
         unsafe{ intermediate_node.set_payload_owned::<0>(&a_key[overlap..], a_payload); }
         debug_assert!(validate_node(&intermediate_node));
         let intermediate_node = TrieNodeODRc::new_in(intermediate_node, a.alloc.clone());
-        return match b_child.pjoin(&intermediate_node) {
+        //`a` is the left operand of this merge, so its payload must be the left operand
+        // of the join (the join is left-biased on colliding values).
+        return match intermediate_node.pjoin(b_child) {
             AlgebraicResult::Element(joined) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(joined))),
             //`b`'s child already held `a`'s payload, so `b`'s slot *is* the result -- COUNTER_IDENT
             // from the caller's point of view.  Reporting it as `Element` made a join whose
             // destination was unchanged report `Element`.  (The other identity, where the child
             // held nothing beyond `a`'s payload, is still built as an `Element`: `a`'s slot has
             // the same contents but not the `(prefix, child)` shape callers such as
-            // `drop_head` rely on.)
-            AlgebraicResult::Identity(mask) if mask & SELF_IDENT > 0 => AlgebraicResult::Identity(COUNTER_IDENT),
+            // `drop_head` rely on.)  The bit read here is COUNTER_IDENT rather than SELF_IDENT
+            // because `b_child` is now the right operand.
+            AlgebraicResult::Identity(mask) if mask & COUNTER_IDENT > 0 => AlgebraicResult::Identity(COUNTER_IDENT),
             AlgebraicResult::Identity(_) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(intermediate_node))),
             AlgebraicResult::None => unreachable!(), //`intermediate_node` is never empty
         }
@@ -2624,7 +2656,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             DENSE_BYTE_NODE_TAG => {
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
-                match new_node.merge_from_list_node(self) {
+                match new_node.merge_from_list_node(self, true) {
                     //Both nodes were empty so the join is empty too
                     AlgebraicStatus::None => {
                         debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
@@ -2641,7 +2673,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             CELL_BYTE_NODE_TAG => {
                 let other_dense_node = unsafe{ other.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
-                match new_node.merge_from_list_node(self) {
+                match new_node.merge_from_list_node(self, true) {
                     //See the DENSE_BYTE_NODE_TAG arm: two empty nodes join to an empty result
                     AlgebraicStatus::None => {
                         debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
@@ -2677,7 +2709,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             DENSE_BYTE_NODE_TAG => {
                 let other_dense_node = unsafe{ other_node.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
-                let status = new_node.merge_from_list_node(self);
+                let status = new_node.merge_from_list_node(self, true);
                 debug_assert!(!status.is_none());
                 (AlgebraicStatus::Element, Err(TrieNodeODRc::new_in(new_node, self.alloc.clone())))
             },
@@ -2688,7 +2720,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             CELL_BYTE_NODE_TAG => {
                 let other_dense_node = unsafe{ other_node.as_cell_unchecked() };
                 let mut new_node = other_dense_node.clone();
-                let status = new_node.merge_from_list_node(self);
+                let status = new_node.merge_from_list_node(self, true);
                 debug_assert!(!status.is_none());
                 (AlgebraicStatus::Element, Err(TrieNodeODRc::new_in(new_node, self.alloc.clone())))
             },
@@ -2848,45 +2880,63 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             return Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
         }
 
-        //The final case is to construct a brand new node from the remaining parts of the key after we have
-        // discarded what we can discard and then merged together what's left.  And then call this function
-        // recursively on the newly merged nodes
-        let chop_bytes = key0_len.min(key1_len);
-        debug_assert!(chop_bytes <= byte_cnt);
-        debug_assert!(chop_bytes > 0);
-        let new_key0 = &key0[chop_bytes-1..];
-        let new_key1 = &key1[chop_bytes-1..];
-
-        let overlap = find_prefix_overlap(&key0[chop_bytes..], &key1[chop_bytes..]);
-        let merged_payload = match merge_guts::<V, A, 0, 1>(overlap+1, new_key0, &temp_node, new_key1, &temp_node) {
-            AlgebraicResult::Element((_shared_key, merged_payload)) => merged_payload,
-            AlgebraicResult::Identity(mask) => {
-                if mask & SELF_IDENT > 0 {
-                    temp_node.clone_payload::<0>().unwrap()
-                } else {
-                    debug_assert_eq!(mask, COUNTER_IDENT);
-                    temp_node.clone_payload::<1>().unwrap()
-                }
-            },
-            AlgebraicResult::None => unreachable!() //`merge_guts` shouldn't return AlgebraicResult::None because that should have been caught by an earlier case
+        //The final case: at least one key is no longer than `byte_cnt`.  Drop the bytes from each
+        // slot on its own and join the two results, slot 0 (the lexicographically smaller key) on
+        // the left.  That is the order `PathMap::drop_head` is specified in -- a fold over the
+        // k-paths in sorted order, keeping the first value on a collision -- and it is what the
+        // byte node does one level up.  Merging the two slots at an intermediate depth and then
+        // dropping the remaining bytes, as this used to, joins the subtries in a different order
+        // and keeps different values.
+        let mut key0_buf: [MaybeUninit<u8>; KEY_BYTES_CNT] = [MaybeUninit::new(0); KEY_BYTES_CNT];
+        let mut key1_buf: [MaybeUninit<u8>; KEY_BYTES_CNT] = [MaybeUninit::new(0); KEY_BYTES_CNT];
+        let (key0, key1) = unsafe {
+            core::ptr::copy_nonoverlapping(key0.as_ptr(), key0_buf.as_mut_ptr().cast::<u8>(), key0_len);
+            core::ptr::copy_nonoverlapping(key1.as_ptr(), key1_buf.as_mut_ptr().cast::<u8>(), key1_len);
+            (core::slice::from_raw_parts(key0_buf.as_ptr().cast::<u8>(), key0_len),
+             core::slice::from_raw_parts(key1_buf.as_ptr().cast::<u8>(), key1_len))
         };
-
-        if let ValOrChild::Child(mut child_node) = merged_payload {
-            //A dangling child (the empty sentinel) has nothing below the dropped bytes and can't be made mutable
-            if child_node.is_empty() {
-                return None
-            }
-            if chop_bytes == byte_cnt {
-                return Some(child_node)
-            } else {
-                return child_node.make_mut().drop_head_dyn(byte_cnt-chop_bytes)
+        //Take slot 1 first: taking slot 0 would shift slot 1 into its place.
+        let payload1 = temp_node.take_payload::<1>().unwrap();
+        let payload0 = temp_node.take_payload::<0>().unwrap();
+        let dropped0 = drop_head_from_payload(key0, payload0, byte_cnt, &self.alloc);
+        let dropped1 = drop_head_from_payload(key1, payload1, byte_cnt, &self.alloc);
+        match (dropped0, dropped1) {
+            (None, None) => None,
+            (Some(node), None) | (None, Some(node)) => Some(node),
+            (Some(node0), Some(node1)) => match node0.pjoin(&node1) {
+                AlgebraicResult::Element(joined) => Some(joined),
+                AlgebraicResult::Identity(mask) => Some(if mask & SELF_IDENT > 0 { node0 } else { node1 }),
+                AlgebraicResult::None => None,
             }
         }
-
-        unreachable!()
     }
 
     fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+        self.pmeet_dyn_oriented(other, false)
+    }
+    fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
+        debug_assert!(validate_node(self));
+        let slot0_result = self.subtract_from_slot_contents::<0>(other);
+        let slot1_result = self.subtract_from_slot_contents::<1>(other);
+        self.combine_slot_results_into_node_result(slot0_result, slot1_result)
+    }
+    fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
+        debug_assert!(validate_node(self));
+        let slot0_result = self.restrict_slot_contents::<0>(other);
+        let slot1_result = self.restrict_slot_contents::<1>(other);
+        self.combine_slot_results_into_node_result(slot0_result, slot1_result)
+    }
+    fn clone_self(&self) -> TrieNodeODRc<V, A> {
+        TrieNodeODRc::new_in(self.clone(), self.alloc.clone())
+    }
+}
+
+impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
+    /// The body of [TrieNode::pmeet_dyn].  `swapped` means `self` is really the *right* operand of
+    /// the meet and `other` the left one; see [pmeet_generic].  A node type that cannot enumerate
+    /// its own payloads cheaply (a `ByteNode`) meets a list node by calling this with `swapped =
+    /// true` and inverting the identity mask of the result.
+    pub(crate) fn pmeet_dyn_oriented(&self, other: TaggedNodeRef<V, A>, swapped: bool) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
         debug_assert!(validate_node(self));
 
         let mut self_payloads_buf: [(&[u8], PayloadRef<V, A>); 2] = [(&[], PayloadRef::None); 2];
@@ -2911,7 +2961,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             _ => unsafe{ unreachable_unchecked() }
         };
 
-        pmeet_generic::<2, V, A, _>(self_payloads, other, |payloads| {
+        pmeet_generic::<2, V, A, _>(self_payloads, other, swapped, |payloads| {
             debug_assert_eq!(payloads.len(), self_payloads.len());
             let slot0_payload = payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into());
             let slot1_payload = payloads.get_mut(1).and_then(|p| core::mem::take(p)).map(|p| p.into());
@@ -2919,24 +2969,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             TrieNodeODRc::new_in(new_node, self.alloc.clone())
         })
     }
-    fn psubtract_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
-        debug_assert!(validate_node(self));
-        let slot0_result = self.subtract_from_slot_contents::<0>(other);
-        let slot1_result = self.subtract_from_slot_contents::<1>(other);
-        self.combine_slot_results_into_node_result(slot0_result, slot1_result)
-    }
-    fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
-        debug_assert!(validate_node(self));
-        let slot0_result = self.restrict_slot_contents::<0>(other);
-        let slot1_result = self.restrict_slot_contents::<1>(other);
-        self.combine_slot_results_into_node_result(slot0_result, slot1_result)
-    }
-    fn clone_self(&self) -> TrieNodeODRc<V, A> {
-        TrieNodeODRc::new_in(self.clone(), self.alloc.clone())
-    }
-}
 
-impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     /// Part of the implementation of methods the remove subtries from a node
     fn remove_subtries(&mut self, remove_0: bool, remove_1: bool, key0_starts_with: bool, prune: bool, key_len: usize) {
         //NOTE: the order here is important because removing slot_0 first might shift the
