@@ -260,6 +260,93 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         }
     }
 
+    /// [Self::join_child_into] with `node` as the left operand; status relative to `self`
+    pub(crate) fn join_child_into_left(&mut self, k: u8, node: TrieNodeODRc<V, A>) -> AlgebraicStatus where V: Clone + Lattice {
+        let ix = self.mask.index_of(k) as usize;
+        if self.mask.test_bit(k) {
+            let cf = unsafe { self.values.get_unchecked_mut(ix) };
+            match cf.rec_mut() {
+                Some(existing_node) => {
+                    match node.pjoin(existing_node) {
+                        //`COUNTER_IDENT` means the result is `existing_node`: nothing to do
+                        AlgebraicResult::Identity(mask) if mask & COUNTER_IDENT > 0 => AlgebraicStatus::Identity,
+                        AlgebraicResult::Identity(_) => {
+                            *existing_node = node;
+                            AlgebraicStatus::Element
+                        },
+                        AlgebraicResult::Element(joined) => {
+                            *existing_node = joined;
+                            AlgebraicStatus::Element
+                        },
+                        //Only two empty nodes join to nothing, and then there is nothing to change
+                        AlgebraicResult::None => AlgebraicStatus::Identity,
+                    }
+                },
+                None => {
+                    cf.set_rec(node);
+                    AlgebraicStatus::Element
+                }
+            }
+        } else {
+            self.mask.set_bit(k);
+            let new_cf = CoFree::new(Some(node), None);
+            self.values.insert(ix, new_cf);
+            AlgebraicStatus::Element
+        }
+    }
+
+    /// [Self::join_val_into] with `val` as the *left* operand of the join; see [Self::join_child_into_left]
+    pub(crate) fn join_val_into_left(&mut self, k: u8, val: V) -> AlgebraicStatus where V: Lattice {
+        let ix = self.mask.index_of(k) as usize;
+        if self.mask.test_bit(k) {
+            let cf = unsafe { self.values.get_unchecked_mut(ix) };
+            match cf.val_mut() {
+                Some(existing_val) => {
+                    match val.pjoin(existing_val) {
+                        AlgebraicResult::Identity(mask) if mask & COUNTER_IDENT > 0 => AlgebraicStatus::Identity,
+                        AlgebraicResult::Identity(_) => {
+                            *existing_val = val;
+                            AlgebraicStatus::Element
+                        },
+                        AlgebraicResult::Element(joined) => {
+                            *existing_val = joined;
+                            AlgebraicStatus::Element
+                        },
+                        //A join of two present values never has an empty result; see `Lattice::join_into`
+                        AlgebraicResult::None => AlgebraicStatus::Identity,
+                    }
+                }
+                None => {
+                    cf.set_val(val);
+                    AlgebraicStatus::Element
+                }
+            }
+        } else {
+            self.mask.set_bit(k);
+            let new_cf = CoFree::new(None, Some(val));
+            self.values.insert(ix, new_cf);
+            AlgebraicStatus::Element
+        }
+    }
+
+    /// Dispatches to [Self::join_child_into] or [Self::join_child_into_left]
+    #[inline]
+    pub(crate) fn join_child_into_oriented(&mut self, k: u8, node: TrieNodeODRc<V, A>, incoming_is_left: bool) -> AlgebraicStatus where V: Clone + Lattice {
+        if incoming_is_left { self.join_child_into_left(k, node) } else { self.join_child_into(k, node) }
+    }
+
+    /// Dispatches to [Self::join_payload_into] or its left-biased counterpart
+    #[inline]
+    pub(crate) fn join_payload_into_oriented(&mut self, k: u8, payload: ValOrChild<V, A>, incoming_is_left: bool) -> AlgebraicStatus where V: Clone + Lattice {
+        if !incoming_is_left {
+            return self.join_payload_into(k, payload)
+        }
+        match payload {
+            ValOrChild::Child(child) => self.join_child_into_left(k, child),
+            ValOrChild::Val(val) => self.join_val_into_left(k, val),
+        }
+    }
+
     /// Internal method to remove a CoFree from the node
     #[inline]
     fn remove(&mut self, k: u8) -> Option<Cf> {
@@ -545,7 +632,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     /// Merges the entries in the ListNode into the ByteNode
-    pub fn merge_from_list_node(&mut self, list_node: &LineListNode<V, A>) -> AlgebraicStatus where V: Clone + Lattice {
+    /// Joins `list_node` into `self`; `list_is_left` says which operand wins collisions
+    pub fn merge_from_list_node(&mut self, list_node: &LineListNode<V, A>, list_is_left: bool) -> AlgebraicStatus where V: Clone + Lattice {
         let self_was_empty = self.is_empty();
         self.reserve_capacity(2);
 
@@ -555,9 +643,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             if key.len() > 1 {
                 let mut child_node = LineListNode::<V, A>::new_in(self.alloc.clone());
                 unsafe{ child_node.set_payload_owned::<0>(&key[1..], payload); }
-                self.join_child_into(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()))
+                self.join_child_into_oriented(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()), list_is_left)
             } else {
-                self.join_payload_into(key[0], payload)
+                self.join_payload_into_oriented(key[0], payload, list_is_left)
             }
         } else {
             if self_was_empty {
@@ -573,9 +661,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             if key.len() > 1 {
                 let mut child_node = LineListNode::<V, A>::new_in(self.alloc.clone());
                 unsafe{ child_node.set_payload_owned::<0>(&key[1..], payload); }
-                self.join_child_into(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()))
+                self.join_child_into_oriented(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()), list_is_left)
             } else {
-                self.join_payload_into(key[0], payload)
+                self.join_payload_into_oriented(key[0], payload, list_is_left)
             }
         } else {
             if self_was_empty {
@@ -1308,7 +1396,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             LINE_LIST_NODE_TAG => {
                 let other_list_node = unsafe{ other.as_list_unchecked() };
                 let mut new_node = self.clone();
-                let status = new_node.merge_from_list_node(other_list_node);
+                let status = new_node.merge_from_list_node(other_list_node, false);
                 AlgebraicResult::from_status(status, || TrieNodeODRc::new_in(new_node, self.alloc.clone()))
             },
             #[cfg(feature = "bridge_nodes")]
@@ -1353,7 +1441,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 let other_list_node = unsafe{ other_node.into_list_unchecked() };
                 //GOAT, optimization opportunity to take the contents from the list, rather than cloning
                 // them, to turn around and drop the ListNode and free them / decrement the refcounts
-                self.merge_from_list_node(other_list_node)
+                self.merge_from_list_node(other_list_node, false)
             },
             #[cfg(feature = "bridge_nodes")]
             TaggedNodeRefMut::BridgeNode(_other_bridge_node) => {
@@ -1391,7 +1479,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             _ => {
                 let mut new_node = Self::new_in(self.alloc.clone());
-                while let Some(cf) = self.values.pop() {
+                //Ascending order, accumulated node on the left: the first path's value wins
+                for cf in self.values.drain(..) {
                     let child = cf.into_rec().filter(|child| !child.is_empty());
                     let child = if byte_cnt > 1 {
                         child.and_then(|mut child| child.make_mut().drop_head_dyn(byte_cnt-1))
@@ -1424,7 +1513,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             LINE_LIST_NODE_TAG => {
                 let other_list_node = unsafe { other.as_list_unchecked() };
-                other_list_node.pmeet_dyn(self.as_tagged()).invert_identity()
+                //`self` is the left operand, hence `swapped`
+                other_list_node.pmeet_dyn_oriented(self.as_tagged(), true).invert_identity()
             },
             #[cfg(feature = "bridge_nodes")]
             TaggedNodeRef::BridgeNode(other_bridge_node) => {
@@ -1436,7 +1526,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             TINY_REF_NODE_TAG => {
                 let tiny_node = unsafe { other.as_tiny_unchecked() };
-                tiny_node.pmeet_dyn(self.as_tagged()).invert_identity()
+                let full_node = tiny_node.into_full().unwrap();
+                self.pmeet_dyn(full_node.as_tagged())
             },
             EMPTY_NODE_TAG => AlgebraicResult::None,
             _ => unsafe{ unreachable_unchecked() }
