@@ -527,11 +527,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 54 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (ru, d) ← d.bool
              -- Fed the source's own child subtries, this must agree with
              -- `graft_masked_branches` on the same mask.
-             -- Skipped outright, not just in ACT mode: `graft_child_maps` is
-             -- broken three ways (FINDINGS.md #15) and the node representations
-             -- it leaves behind degrade the `AlgebraicStatus` that *later*
-             -- operations report, which would contaminate the whole run.
-             if true then some (emit s "graft_child_maps" skipQuarantined, d) else
+             if s.act then some (emit s "graft_child_maps" skipAct, d) else
              do
                let mask := ByteMask.ofList m
                let maps := mask.map (fun b => ([b], s.rz.trie.subtrie (s.rz.focus ++ [b])))

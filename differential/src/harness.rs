@@ -224,9 +224,8 @@ pub trait ReadSource:
 
     fn do_graft<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> bool { false }
     fn do_graft_masked<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
-    /// Currently unused: op 54 is quarantined (lean/FINDINGS.md #15).  Kept so
-    /// the op can be re-enabled with one line once the method is fixed.
-    #[allow(dead_code)]
+    /// `graft_child_maps` fed this zipper's own child subtries (op 54), which must
+    /// agree with `graft_masked_branches` on the same mask.
     fn do_graft_child_maps<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
     /// `meet_2` needs two sources; the second is this zipper moved to `path`.
     fn do_meet_2<W: ZipperWriting<u64>>(&self, _wz: &mut W, _path: &[u8]) -> Option<AlgebraicStatus> { None }
@@ -926,12 +925,14 @@ pub fn run_ops<R: ReadSource>(
                     let mut canon: Vec<u8> = m.clone();
                     canon.sort_unstable();
                     canon.dedup();
-                    // Skipped outright: `graft_child_maps` is broken three ways
-                    // (lean/FINDINGS.md #15) and the node representations it
-                    // leaves behind degrade the AlgebraicStatus that *later*
-                    // operations report, contaminating the rest of the run.
-                    let _ = (mask, ru, &canon);
-                    ("graft_child_maps", SKIP_QUARANTINED.to_string())
+                    // Fed the source's own child subtries, so it must agree with
+                    // `graft_masked_branches` on the same mask (op 53).
+                    let s = if (*rz).do_graft_child_maps(&mut wz, mask, ru) {
+                        format!("{}:{}", hex_path(&canon), show_bool(ru))
+                    } else {
+                        SKIP_ACT.to_string()
+                    };
+                    ("graft_child_maps", s)
                 }
                 55 => {
                     let p = get!(d.path(6));

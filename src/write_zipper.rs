@@ -1552,6 +1552,26 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         ;
         *focus_node = replacement;
     }
+    /// One masked branch of [Self::graft_masked_branches]: `self`'s branch at `byte` becomes the
+    /// source's, value included.
+    ///
+    /// When the source has nothing at `byte` -- no value and no node with contents, a dangling
+    /// source branch included -- grafting nothing removes the branch's contents and value, but
+    /// the location is neither created nor destroyed: an existing branch survives as a dangling
+    /// path (as after `graft` of an empty source, or the model's `graftBelow` + `removeVal`),
+    /// and an absent one stays absent.
+    fn graft_masked_branch<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, byte: u8) {
+        let src_node = src.get_focus_at([byte]);
+        let src_has_node = !src_node.is_none() && !src_node.as_tagged().node_is_empty();
+        self.descend_to_byte(byte);
+        if src_has_node || src.val_at([byte]).is_some() {
+            self.graft_src_at(src, [byte]);
+        } else if self.path_exists() {
+            self.remove_branches(false);
+            self.remove_val(false);
+        }
+        self.ascend_byte();
+    }
     /// See [ZipperWriting::graft_masked_branches]
     pub fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
         // The dense-node merge handles both pieces of the contract directly: it removes
@@ -1570,9 +1590,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 }
                 // SAFETY: this arm is selected only when `child_mask` has one bit.
                 let byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
-                self.descend_to_byte(byte);
-                self.graft_src_at(src, &[byte]);
-                self.ascend_byte();
+                self.graft_masked_branch(src, byte);
             }
             2 => {
                 if remove_unset {
@@ -1580,15 +1598,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 }
                 // SAFETY: this arm is selected only when `child_mask` has two bits.
                 let first_byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
-                self.descend_to_byte(first_byte);
-                self.graft_src_at(src, &[first_byte]);
-                self.ascend_byte();
+                self.graft_masked_branch(src, first_byte);
 
                 // SAFETY: `first_byte` is one of the two set bits, so it has a successor.
                 let second_byte = unsafe { child_mask.next_bit(first_byte).unwrap_unchecked() };
-                self.descend_to_byte(second_byte);
-                self.graft_src_at(src, &[second_byte]);
-                self.ascend_byte();
+                self.graft_masked_branch(src, second_byte);
             }
             _ => {
                 let src_focus = src.get_focus();
@@ -1599,11 +1613,18 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                         // to hand out) has no node to merge into even after the split, so the
                         // branches are merged into a fresh node that is grafted in afterwards.
                         // This used to unwrap the missing node.
+                        //
+                        // A focus that does not exist at all is not split either: the split
+                        // would create the path, and grafting nothing must not create a
+                        // location.  Its branches also go into a fresh node, which is grafted
+                        // (creating the path) only if the merge produced something.
                         let mut fresh_node: Option<TrieNodeODRc<V, A>> = None;
                         let self_focus_node = match self.try_borrow_focus_mut() {
                             Some(node) => node,
                             None => {
-                                self.split_at_focus();
+                                if self.path_exists() {
+                                    self.split_at_focus();
+                                }
                                 match self.try_borrow_focus_mut() {
                                     Some(node) => node,
                                     None => {
@@ -1653,7 +1674,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                                 if remove_unset {
                                     self.remove_branches(false);
                                 } else {
-                                    self.remove_unmasked_branches(child_mask.not(), false);
+                                    self.empty_masked_branches(child_mask);
                                 }
                             },
                         }
@@ -1667,11 +1688,26 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                         if remove_unset {
                             self.remove_branches(false);
                         } else {
-                            self.remove_unmasked_branches(child_mask.not(), false);
+                            self.empty_masked_branches(child_mask);
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// [Self::graft_masked_branches] when the source has no node at all to take branches from:
+    /// every existing branch of `self` named by `mask` is emptied -- contents and value -- but
+    /// survives as a dangling path, and no branch is created.  This is what grafting nothing
+    /// onto each branch amounts to; removing the branches outright would prune locations that
+    /// `graft` of an empty source would have left standing.
+    fn empty_masked_branches(&mut self, mask: ByteMask) {
+        let existing = mask & self.child_mask();
+        for byte in existing.iter() {
+            self.descend_to_byte(byte);
+            self.remove_branches(false);
+            self.remove_val(false);
+            self.ascend_byte();
         }
     }
 
@@ -1693,7 +1729,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             for child_byte in child_mask.iter() {
                 let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
                 let (src_root_node, src_root_val) = map.into_root();
-                if let Some(node) = src_root_node {
+                if let Some(node) = src_root_node.filter(|n| !n.as_tagged().node_is_empty()) {
                     new_node.set_child(child_byte, node);
                 }
                 if let Some(val) = src_root_val {
@@ -1701,7 +1737,14 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 }
             }
             let new_node_odrc = TrieNodeODRc::new_in(new_node, self.alloc.clone());
-            self.graft_internal(Some(new_node_odrc));
+            if new_node_odrc.as_tagged().node_is_empty() {
+                // Every map was empty: all that is left of the contract is "remove the unset
+                // branches", and that must not create the focus if it does not exist.  Grafting
+                // an empty node would leave a dangling path made out of nothing.
+                self.remove_branches(false);
+            } else {
+                self.graft_internal(Some(new_node_odrc));
+            }
         } else {
             // If we don't have enough children to justify forcing a new ByteNode, just set the nodes
             if remove_unset {
@@ -1712,7 +1755,21 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 let map = maps_iter.next().expect("maps iterator returned fewer items than the number of set bits in child_mask");
                 let (src_root_node, src_root_val) = map.into_root();
 
-                if let Some(node) = src_root_node {
+                // Each branch is *replaced* by its map, the way `graft` replaces a subtrie:
+                // whatever `self` had at `child_byte` -- children and value -- goes first, so an
+                // empty map empties the branch and a map without a root value removes the value.
+                // The location itself is neither created nor destroyed (an existing branch that
+                // receives nothing survives as a dangling path, as after `graft` of an empty
+                // source).  With `remove_unset` everything below the focus is already gone.
+                if !remove_unset {
+                    self.descend_to_byte(child_byte);
+                    if self.path_exists() {
+                        self.remove_branches(false);
+                        self.remove_val(false);
+                    }
+                    self.ascend_byte();
+                }
+                if let Some(node) = src_root_node.filter(|n| !n.as_tagged().node_is_empty()) {
                     self.set_node_at_child_path(&[child_byte], node)
                 }
                 if let Some(val) = src_root_val {
@@ -2439,19 +2496,24 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         RetryF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> R,
     {
         let key = self.key.node_key();
-        let mut focus_node = self.focus_stack.top_mut().unwrap();
-        if let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
-            debug_assert_eq!(key_bytes, key.len());
-            let (key, node) = node_along_path_mut(child_node, path, true);
-            let mut node_ref = node.make_mut();
-            match node_f(&mut node_ref, key) {
-                Ok(result) => result,
-                Err(replacement_node) => {
-                    *node = replacement_node;
-                    retry_f(&mut node.make_mut(), key)
-                },
+        // At the root the focus node *is* the top of the stack and there is no key to look up;
+        // `node_get_child_mut` must never see an empty key (a `DenseByteNode` indexes `key[0]`).
+        if key.len() > 0 {
+            let mut focus_node = self.focus_stack.top_mut().unwrap();
+            if let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
+                debug_assert_eq!(key_bytes, key.len());
+                let (key, node) = node_along_path_mut(child_node, path, true);
+                let mut node_ref = node.make_mut();
+                return match node_f(&mut node_ref, key) {
+                    Ok(result) => result,
+                    Err(replacement_node) => {
+                        *node = replacement_node;
+                        retry_f(&mut node.make_mut(), key)
+                    },
+                }
             }
-        } else {
+        }
+        {
             self.in_zipper_mut_static_result(
                 |focus_node, partial_key| {
                     let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
@@ -6086,6 +6148,122 @@ mod tests {
             wz.graft_masked_branches(&o.read_zipper(), mask(b"abd"), false);
         }
         assert_eq!(keys(&m), ["cax", "cbx", "cdx", "d"]);
+    }
+
+    /// lean/FINDINGS.md #15, `graft_child_maps_dense`: grafting nothing must neither create nor
+    /// destroy a location, and `graft_child_maps` must not abort on a dense destination.
+    ///
+    /// The contract for one masked branch is that of `graft` at that branch: the source's
+    /// contents and value replace whatever was there.  A source with nothing at the branch
+    /// (absent, or a dangling path) therefore empties an existing branch -- which then survives
+    /// as a dangling path, exactly as after `graft` of an empty source -- and leaves an absent
+    /// branch absent.  `remove_unset` removes the unset branches outright first.
+    #[test]
+    fn graft_child_maps_dense() {
+        use crate::utils::BitMask;
+        fn mask(bytes: &[u8]) -> ByteMask {
+            let mut m = ByteMask::EMPTY;
+            for b in bytes { m.set_bit(*b); }
+            m
+        }
+        fn dump(m: &PathMap<u64>) -> Vec<(Vec<u8>, Option<u64>)> {
+            // Every location, dangling ones included, with its value.
+            let mut z = m.read_zipper();
+            let mut out = Vec::new();
+            while z.to_next_step() { out.push((z.path().to_vec(), z.val().copied())); }
+            out
+        }
+        fn mk(kvs: &[(&[u8], u64)]) -> PathMap<u64> {
+            let mut m = PathMap::new();
+            for (k, v) in kvs { m.set_val_at(k, *v); }
+            m
+        }
+
+        // (a) A dense destination (>= 3 branches) used to reach `node_get_child_mut` with an
+        //     empty key and abort.
+        let mut dst = mk(&[(&[0, 0], 1), (&[1, 0], 1), (&[2, 0], 1), (&[3, 0], 1)]);
+        let child = mk(&[(&[], 7), (&[3], 8)]);
+        dst.write_zipper().graft_child_maps(mask(&[0]), vec![child], false);
+        assert_eq!(dump(&dst), vec![
+            (vec![0], Some(7)), (vec![0, 3], Some(8)),
+            (vec![1], None), (vec![1, 0], Some(1)),
+            (vec![2], None), (vec![2, 0], Some(1)),
+            (vec![3], None), (vec![3, 0], Some(1)),
+        ]);
+
+        // (b) Empty maps at a non-existent focus: nothing is created, both with and without
+        //     `remove_unset`, and the same for `graft_masked_branches` from an empty source.
+        for remove_unset in [true, false] {
+            let mut m = mk(&[(&[1], 1)]);
+            {
+                let mut wz = m.write_zipper();
+                wz.descend_to(&[0u8, 0]);
+                wz.graft_child_maps(mask(&[0, 1, 2]), vec![PathMap::new(); 3], remove_unset);
+                assert!(!wz.path_exists());
+            }
+            assert_eq!(dump(&m), vec![(vec![1], Some(1))]);
+        }
+        for bits in [&[0u8][..], &[0, 2], &[0, 2, 3]] {
+            let mut m = mk(&[(&[1], 1)]);
+            let src = mk(&[(&[1, 0], 5)]);
+            {
+                let mut wz = m.write_zipper();
+                wz.descend_to(&[2u8, 2]);
+                wz.graft_masked_branches(&src.read_zipper(), mask(bits), false);
+                assert!(!wz.path_exists(), "{bits:?}");
+            }
+            assert_eq!(dump(&m), vec![(vec![1], Some(1))], "{bits:?}");
+        }
+
+        // (c) A masked branch the source lacks is emptied but its location survives; a branch
+        //     the source has is replaced, value included (and a missing source value removes the
+        //     old one).  One-, two- and three-bit masks take different code paths.
+        let src = mk(&[(&[1, 0], 5)]);
+        for bits in [&[0u8][..], &[0, 1], &[0, 1, 2]] {
+            let mut m = mk(&[(&[0], 9), (&[0, 7], 9), (&[1], 1), (&[1, 1], 1), (&[3], 3)]);
+            m.write_zipper().graft_masked_branches(&src.read_zipper(), mask(bits), false);
+            let mut expected = vec![(vec![0], None)];
+            if bits.contains(&1) {
+                expected.extend([(vec![1], None), (vec![1, 0], Some(5))]);
+            } else {
+                expected.extend([(vec![1], Some(1)), (vec![1, 1], Some(1))]);
+            }
+            expected.push((vec![3], Some(3)));
+            assert_eq!(dump(&m), expected, "{bits:?}");
+        }
+        // A source whose focus is a bare value (no node) or a dangling path takes yet another
+        // path, and must behave as an empty source.
+        for src in [mk(&[(&[], 4)]), { let mut s = PathMap::<u64>::new(); s.write_zipper().create_path(); s }] {
+            let mut m = mk(&[(&[0], 9), (&[0, 7], 9), (&[1], 1), (&[3], 3)]);
+            m.write_zipper().graft_masked_branches(&src.read_zipper(), mask(&[0, 1, 2]), false);
+            assert_eq!(dump(&m), vec![(vec![0], None), (vec![1], None), (vec![3], Some(3))]);
+        }
+        // With `remove_unset` the branches go outright.
+        let mut m = mk(&[(&[0], 9), (&[0, 7], 9), (&[1], 1), (&[3], 3)]);
+        m.write_zipper().graft_masked_branches(&src.read_zipper(), mask(&[0, 1, 2]), true);
+        assert_eq!(dump(&m), vec![(vec![1], None), (vec![1, 0], Some(5))]);
+
+        // (d) `graft_child_maps` fed the source's own child subtries agrees with (c).
+        for bits in [&[0u8][..], &[0, 1], &[0, 1, 2]] {
+            let maps: Vec<PathMap<u64>> = bits.iter().map(|b| {
+                let mut z = src.read_zipper();
+                z.descend_to_byte(*b);
+                z.make_map()
+            }).collect();
+            let mut m = mk(&[(&[0], 9), (&[0, 7], 9), (&[1], 1), (&[1, 1], 1), (&[3], 3)]);
+            let mut reference = m.clone();
+            m.write_zipper().graft_child_maps(mask(bits), maps, false);
+            reference.write_zipper().graft_masked_branches(&src.read_zipper(), mask(bits), false);
+            assert_eq!(dump(&m), dump(&reference), "{bits:?}");
+        }
+        // A map with contents but no root value removes the old value; an empty map empties
+        // the branch and keeps the location.
+        let mut m = mk(&[(&[0], 9), (&[0, 7], 9), (&[1], 1)]);
+        m.write_zipper().graft_child_maps(mask(&[0]), vec![mk(&[(&[3], 3)])], false);
+        assert_eq!(dump(&m), vec![(vec![0], None), (vec![0, 3], Some(3)), (vec![1], Some(1))]);
+        let mut m = mk(&[(&[0], 9), (&[0, 7], 9), (&[1], 1)]);
+        m.write_zipper().graft_child_maps(mask(&[0]), vec![PathMap::new()], false);
+        assert_eq!(dump(&m), vec![(vec![0], None), (vec![1], Some(1))]);
     }
 
     #[test]

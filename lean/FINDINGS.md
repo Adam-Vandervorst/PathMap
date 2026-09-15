@@ -469,6 +469,14 @@ it.
 
 `case: graft_child_maps_dense` -- **abort, or a silently created path**
 
+*Fixed* (`bugfix/graft-child-maps`): the root-focus lookup no longer hands an
+empty key to the dense node, and grafting nothing onto a branch now follows
+`graft`: an existing branch is emptied but survives as a dangling path, an
+absent one is not created.  A third symptom found while fixing -- an empty map,
+or one without a root value, left the destination's old branch or old value in
+place -- is fixed the same way.  Op 54 is no longer skipped by the harness, and
+the regression test is `write_zipper::tests::graft_child_maps_dense`.
+
 Two symptoms, one method.
 
 **On any dense destination it aborts.**

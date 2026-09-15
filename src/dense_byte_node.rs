@@ -1578,14 +1578,30 @@ where
             }
         }
 
-        let src_range_mask = src_node.mask & ByteMask::from_range(range_start..=range_end);
-        let mut src_ix = src_node.mask.index_of(range_start) as usize;
-        for child_byte in src_range_mask.iter() {
-            let cf = unsafe { src_node.values.get_unchecked(src_ix) };
-            src_ix += 1;
-
-            if cf.has_rec() || cf.has_val() {
-                new_values.v.push(CfDst::from_cf(cf.clone()));
+        let range_mask = ByteMask::from_range(range_start..=range_end);
+        let src_range_mask = src_node.mask & range_mask;
+        let dst_range_mask = old_mask & range_mask;
+        for child_byte in (src_range_mask | dst_range_mask).iter() {
+            // A source branch counts only if it leads somewhere: a value, or a node with
+            // contents.  A dangling branch in the source is nothing to graft, exactly like an
+            // absent one, so it must not create a location here.
+            let mut grafted = false;
+            if src_range_mask.test_bit(child_byte) {
+                let cf = unsafe { src_node.values.get_unchecked(src_node.mask.index_of(child_byte) as usize) };
+                let rec_has_contents = cf.rec().map_or(false, |rec| !rec.as_tagged().node_is_empty());
+                if rec_has_contents || cf.has_val() {
+                    new_values.v.push(CfDst::from_cf(cf.clone()));
+                    new_mask.set_bit(child_byte);
+                    grafted = true;
+                }
+            }
+            if !grafted && !REMOVE_UNSET && dst_range_mask.test_bit(child_byte) {
+                // Grafting nothing over an existing branch removes its contents and its value,
+                // but the location itself survives as a dangling path -- the same thing
+                // `graft` of an empty source does at the focus, and what the model's
+                // `graftBelow` + `removeVal` specify.  With `remove_unset` the branch was
+                // removed outright instead.
+                new_values.v.push(CfDst::new(Some(TrieNodeODRc::new_empty()), None));
                 new_mask.set_bit(child_byte);
             }
         }
