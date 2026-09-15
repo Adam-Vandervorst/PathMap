@@ -215,6 +215,12 @@ KNOWN = [
     (["join_into"],
      "join_into() drops the source subtrie when the destination map is empty "
      "[join_into_empty_dst]"),
+    # Tested before the write-zipper entry below, which keys on the bare op name
+    # and was claiming these: here the write zipper is identical on both sides
+    # and only the ACT read zipper moved, so finding 9 cannot be the cause.
+    (["ascend_until", "ACT-READ-ZIPPER-ONLY"],
+     "ACTZipper::ascend_until()/ascend_until_branch() report a different ascent "
+     "than the model, usually one byte short [act: ascend_until_short]"),
     (["ascend_until"],
      "ascend_until()/ascend_until_branch() corrupt a write zipper rooted at a "
      "node boundary [ascend_until_wz]"),
@@ -391,6 +397,20 @@ def divergence_shape(a, b):
     return None
 
 
+def read_zipper_only(a, b):
+    """Do these differ only in the read zipper, leaving the write zipper equal?
+
+    In `--act` mode the read zipper is the ArenaCompactTree one and the write
+    zipper is still a `PathMap` one, so this separates an ACT read-side defect
+    from a write-side defect that the same operation would also report.
+    """
+    if any(" W=" not in t or " R=" not in t for t in (a, b)):
+        return False
+    w = lambda t: t.split(" W=", 1)[1].split(" R=", 1)[0]
+    r = lambda t: t.split(" R=", 1)[1]
+    return w(a) == w(b) and r(a) != r(b)
+
+
 def act_valcount_only(a, b):
     """Do these two trace lines differ *only* in the read zipper's val_count?
 
@@ -430,6 +450,8 @@ def compare(blob, oracle, other, other_label, act=False):
     for i, (a, b) in enumerate(zip(lean, real)):
         if a != b:
             tags = ["ACT-VALCOUNT-ONLY"] if act and act_valcount_only(a, b) else []
+            if act and read_zipper_only(a, b):
+                tags.append("ACT-READ-ZIPPER-ONLY")
             shape = divergence_shape(a, b)
             if shape:
                 tags.append(shape)
