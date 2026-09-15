@@ -505,12 +505,14 @@ def main():
 
     fails = 0
     known = {}
+    done = 0              # inputs actually classified; < n_inputs when --max-fails stops the run
     restarts = 0
     reports = []          # (idx, name, msg) for failures, so -j output is ordered
 
     def record(idx, msg):
         """Classify one result.  Returns True when the run should stop."""
-        nonlocal fails
+        nonlocal fails, done
+        done += 1
         name = source.name(idx)
         if not msg:
             if args.verbose:
@@ -567,8 +569,13 @@ def main():
     if restarts:
         print("(%d child restart(s) after a timeout or crash)" % restarts)
     hit = sum(known.values())
+    # Against `done`, not `n_inputs`: when --max-fails stops the run the remaining
+    # inputs were never executed, and counting them in the denominator would score
+    # every one of them as agreeing.
     print("%d/%d inputs agree (%d hit known bugs, %d new divergences)"
-          % (n_inputs - fails - hit, n_inputs, hit, fails))
+          % (done - fails - hit, done, hit, fails))
+    if done < n_inputs:
+        print("(%d of %d inputs were not run)" % (n_inputs - done, n_inputs))
     for note, n in sorted(known.items()):
         print("  known x%d: %s" % (n, note))
     return 1 if fails else 0

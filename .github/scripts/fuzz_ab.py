@@ -199,7 +199,13 @@ class Fuzz:
                   'differential.py; new = it matches none.  Only the new set is compared input by input below.', '',
                   '| side | agree | known | new divergences |', '|---|---:|---:|---:|']
             for side, s in (('head', hs), ('base', bs)):
-                if s:
+                if s and s[1] < n:
+                    # differential.py reports against the inputs it actually ran, so a denominator
+                    # below the requested count means the run stopped early (--max-fails).  The two
+                    # sides then covered different inputs and the comparison below is not a gate.
+                    L.append(f'| {side} | {s[0]}/{s[1]} — **stopped early, {n - s[1]} input(s) not run** | {s[2]} | {s[3]} |')
+                    unfinished += 1
+                elif s:
                     L.append(f'| {side} | {s[0]}/{s[1]} | {s[2]} | {s[3]} |')
                 elif side == 'head' or baseline != 'none':
                     L.append(f'| {side} | run did not finish, see fuzz-{label}-{side}.txt | | |')
@@ -239,7 +245,7 @@ class Fuzz:
                     L += ['', '</details>']
             L.append('')
         if unfinished:
-            L[2] = '**FAIL: a fuzz run did not finish**'
+            L[2] = '**FAIL: a fuzz run did not cover every input**'
         elif new_total:
             L[2] = f'**{"FAIL" if self.strict else "WARNING"}: {new_total} new divergence(s) relative to base**'
         else:
