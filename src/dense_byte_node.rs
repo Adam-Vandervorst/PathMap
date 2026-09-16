@@ -626,6 +626,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                                 is_identity = false;
                             }
                         }
+                    } else {
+                        //No onward link either, so nothing of this byte reaches the result.  A
+                        // co-free with neither a value nor a child is the dense representation of a
+                        // dangling path, and an unvalidated dangling path is dropped just like an
+                        // unvalidated value -- so this branch is a modification too.  Leaving the
+                        // flag set reported `Identity`, and the caller then kept `self` with the
+                        // dangling path still in it.
+                        is_identity = false;
                     }
                 }
             } else {
