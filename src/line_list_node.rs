@@ -1192,6 +1192,20 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
             AlgebraicResult::Identity(SELF_IDENT)
         }
     }
+    /// `true` when the slot is an empty link sharing its key with the other slot, so it carries nothing
+    fn slot_is_shadowed_dangling(&self, slot: usize) -> bool {
+        let is_used_child = if slot == 0 { self.is_used_child_0() } else { self.is_used_child_1() };
+        if !is_used_child || !self.is_used::<1>() {
+            return false
+        }
+        let (key0, key1) = self.get_both_keys();
+        if key0 != key1 {
+            return false
+        }
+        let child = unsafe{ if slot == 0 { self.child_in_slot::<0>() } else { self.child_in_slot::<1>() } };
+        child.as_tagged().node_is_empty()
+    }
+
     /// Internal method to restrict the contents of `SLOT` with the contents of the `other` node
     fn restrict_slot_contents<const SLOT: usize>(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<ValOrChildUnion<V, A>> where V: Clone {
         if self.is_used::<SLOT>() {
@@ -2900,6 +2914,18 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         debug_assert!(validate_node(self));
         let slot0_result = self.subtract_from_slot_contents::<0>(other);
         let slot1_result = self.subtract_from_slot_contents::<1>(other);
+
+        //Dropping a shadowed empty link is not a change
+        match (&slot0_result, &slot1_result) {
+            (AlgebraicResult::None, AlgebraicResult::Identity(_)) if self.slot_is_shadowed_dangling(0) => {
+                return AlgebraicResult::Identity(SELF_IDENT)
+            },
+            (AlgebraicResult::Identity(_), AlgebraicResult::None) if self.slot_is_shadowed_dangling(1) => {
+                return AlgebraicResult::Identity(SELF_IDENT)
+            },
+            _ => {}
+        }
+
         self.combine_slot_results_into_node_result(slot0_result, slot1_result)
     }
     fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
@@ -2921,16 +2947,31 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 
         let mut self_payloads_buf: [(&[u8], PayloadRef<V, A>); 2] = [(&[], PayloadRef::None); 2];
 
+        //A shadowed dangling slot carries nothing, so skip it
+        let skipped = if self.slot_is_shadowed_dangling(0) {
+            Some(0)
+        } else if self.slot_is_shadowed_dangling(1) {
+            Some(1)
+        } else {
+            None
+        };
+
         let self_slot_count = self.used_slot_count();
-        let self_payloads = match self_slot_count {
-            0 => return AlgebraicResult::None,
-            1 => {
+        let self_payloads = match (self_slot_count, skipped) {
+            (0, _) => return AlgebraicResult::None,
+            (_, Some(0)) => {
+                let key = unsafe{ self.key_unchecked::<1>() };
+                let payload = unsafe{ self.payload_in_slot::<1>() };
+                self_payloads_buf[0] = (key, payload);
+                &self_payloads_buf[..1]
+            },
+            (1, _) | (_, Some(1)) => {
                 let key = unsafe{ self.key_unchecked::<0>() };
                 let payload = unsafe{ self.payload_in_slot::<0>() };
                 self_payloads_buf[0] = (key, payload);
                 &self_payloads_buf[..1]
             },
-            2 => {
+            (2, None) => {
                 let (key0, key1) = self.get_both_keys();
                 let payload0 = unsafe{ self.payload_in_slot::<0>() };
                 let payload1 = unsafe{ self.payload_in_slot::<1>() };
@@ -2943,8 +2984,16 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 
         pmeet_generic::<2, V, A, _>(self_payloads, other, swapped, |payloads| {
             debug_assert_eq!(payloads.len(), self_payloads.len());
-            let slot0_payload = payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into());
-            let slot1_payload = payloads.get_mut(1).and_then(|p| core::mem::take(p)).map(|p| p.into());
+            //With a slot skipped, the single result belongs to the slot that stayed in, and the
+            // skipped one is dropped -- which is what the meet would have done with it anyway.
+            let (slot0_payload, slot1_payload) = match skipped {
+                Some(0) => (None, payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into())),
+                Some(_) => (payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into()), None),
+                None => (
+                    payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into()),
+                    payloads.get_mut(1).and_then(|p| core::mem::take(p)).map(|p| p.into()),
+                ),
+            };
             let new_node = self.clone_with_updated_payloads(slot0_payload, slot1_payload).unwrap();
             TrieNodeODRc::new_in(new_node, self.alloc.clone())
         })
