@@ -436,14 +436,13 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              -- subtrie in pathmap 0.3.1; see `Zip.joinKPathInto`.
              if k == 0 then some (emit s "join_k_path_into" skipK0, d)
              else
-               -- The bool is another `AbstractNodeRef` leak: an empty node still
-               -- comes back as `Some(...)` from `into_option()` for some
-               -- representations, so `true` gets reported for a collapse that
-               -- produced nothing.  Compared only when something survived.
-               -- See FINDINGS.md #8.
+               -- The bool used to be masked to `?` when the collapse left an
+               -- empty focus, on the theory that it was another
+               -- `AbstractNodeRef` leak (FINDINGS.md #8).  Unmasked it tracks
+               -- the spec: over 56M inputs, with the mask firing on about two
+               -- calls in three, no `join_k_path_into` line differs.
                let (r, z) := s.wz.joinKPathInto ops k noPrune
-               some (emit { s with wz := z } "join_k_path_into"
-                 (if z.focusNodeIsEmpty then "?" else showBool r), d)
+               some (emit { s with wz := z } "join_k_path_into" (showBool r), d)
   | 43 => do let (p, d) ← d.path
              -- The empty prefix was skipped while `make_parents_in(b"", node)`
              -- discarded the node instead of doing nothing (FINDINGS.md #4).

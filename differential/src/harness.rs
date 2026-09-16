@@ -770,14 +770,12 @@ pub fn run_ops<R: ReadSource>(
                     if k == 0 {
                         ("join_k_path_into", SKIP_K0.to_string())
                     } else {
-                        // The bool leaks node materialisation; see FINDINGS.md #8.
+                        // The bool was masked to `?` on an empty resulting
+                        // focus as a suspected materialisation leak
+                        // (FINDINGS.md #8).  It is not one: unmasked it tracks
+                        // the spec over the whole sweep.
                         let r = wz.join_k_path_into(k, no_prune);
-                        let s = if focus_node_empty(&wz) {
-                            "?".to_string()
-                        } else {
-                            show_bool(r).to_string()
-                        };
-                        ("join_k_path_into", s)
+                        ("join_k_path_into", show_bool(r).to_string())
                     }
                 }
                 43 => {

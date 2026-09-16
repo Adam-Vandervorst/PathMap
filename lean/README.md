@@ -359,20 +359,22 @@ the harness's order.
 `k_path_internal` carries iteration state and `pathmap`'s own debug assertions
 flag calling it cold.
 
-Some return values are compared as `?` when the focus has no descendants
-(`remove_branches`, `join_map_into`, `take_map`, and `join_k_path_into` on its
-result): they report on whether an empty node happens to be materialised at the
-focus, which is representation state rather than trie state.  The *effects* are
-still compared in full.  Each was re-tested by unmasking it alone and re-running
-the sweeps; `remove_branches`, `join_map_into` and `take_map` diverge on roughly
-one input in eight the moment the mask comes off, which is what keeps them.
+Three return values are compared as `?` when the focus has no descendants
+(`remove_branches`, `join_map_into`, `take_map`): they report on whether an
+empty node happens to be materialised at the focus, which is representation
+state rather than trie state.  The *effects* are still compared in full.  Each
+was re-tested by unmasking it alone and re-running the sweeps, and each diverges
+on roughly one input in eight the moment the mask comes off, which is what keeps
+it.
 
-`restrict` was on that list and is not any more.  Unmasked, its status matched
-the specification over the full 48M-input crate-mode sweep (it is `skip:act` in
-ACT mode, so ACT does not exercise it), and the mask fires on about seven of
-every eight calls, so that is 30M-odd compared statuses rather than a branch
-that never runs.  That is evidence the leak does not reach `restrict`, not a
-proof that it cannot.
+`restrict` and `join_k_path_into` were on that list and are not any more.
+Unmasked, both match the specification over the whole sweep — 20M inputs at
+maxlen 120, 20M at 300, 8M at 600, and for `join_k_path_into` 8M each at
+300/600 in ACT mode as well; `restrict` is `skip:act`, so ACT says nothing
+about it.  Neither is a branch that never runs: tracing 1500 inputs, the mask
+fired on 824 of 947 `restrict` calls and 678 of 1003 `join_k_path_into` calls.
+That is evidence the materialisation leak does not reach these two, not a proof
+that it cannot; each was lifted in its own commit so it can be put back alone.
 
 ## The blind-zipper contract
 

@@ -569,12 +569,11 @@ fn step(s: &mut St, d: &mut Dec) -> Option<()> {
             if k == 0 {
                 s.emit("join_k_path_into", SKIP_K0);
             } else {
-                // The bool is another `AbstractNodeRef` leak: an empty node still
-                // comes back as `Some(...)` from `into_option()` for some
-                // representations.  Compared only when something survived.
+                // The bool was masked to `?` on an empty resulting focus as a
+                // suspected `AbstractNodeRef` leak (FINDINGS.md #8).  It is not
+                // one: unmasked it tracks the spec over the whole sweep.
                 let r = s.wz.join_k_path_into(&OPS, k, NO_PRUNE);
-                let ret =
-                    if s.wz.focus_node_is_empty() { "?".to_string() } else { show_bool(r).to_string() };
+                let ret = show_bool(r).to_string();
                 s.emit("join_k_path_into", &ret);
             }
         }
