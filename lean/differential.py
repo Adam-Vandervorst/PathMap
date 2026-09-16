@@ -31,11 +31,13 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORACLE = os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
-TRACE_CANDIDATES = [
+# PATHMAP_TRACE / PATHMAP_ACT_TRACE override the search, for builds that live
+# in another target dir (CI builds two commits side by side).
+TRACE_CANDIDATES = [os.environ.get("PATHMAP_TRACE", "")] + [
     os.path.join(ROOT, "target", "release", "pathmap_trace"),
     os.path.join(ROOT, "target", "debug", "pathmap_trace"),
 ]
-ACT_CANDIDATES = [
+ACT_CANDIDATES = [os.environ.get("PATHMAP_ACT_TRACE", "")] + [
     os.path.join(ROOT, "target", "release", "act_trace"),
     os.path.join(ROOT, "target", "debug", "act_trace"),
 ]
@@ -48,7 +50,7 @@ TIMEOUT = 2.0
 
 def find_trace_bin(act):
     for c in (ACT_CANDIDATES if act else TRACE_CANDIDATES):
-        if os.path.exists(c):
+        if c and os.path.exists(c):
             return c
     if act:
         sys.exit("build the ACT side first: "
@@ -194,6 +196,11 @@ class Child:
 # and message.  See lean/FINDINGS.md for the write-up of each, and
 # `cargo run -p differential --bin zipper_bug_repros -- <case>` for a reproducer.
 KNOWN = [
+    # Tested first: this one is keyed on a shape, and an ACT val_count-only
+    # difference can land on a line whose op name matches an entry below.
+    (["ACT-VALCOUNT-ONLY"],
+     "ACTZipper::val_count() counts from the zipper root, not the focus "
+     "[act: val_count_ignores_focus]"),
     (["ESCAPED-ROOT"],
      "a zipper left its own root: root_prefix_path() changed [root_escape]"),
     (["to_next_val"],
@@ -259,9 +266,6 @@ KNOWN = [
      "copy-on-write cannot make a shared dangling path unique (finding 16) "
      "[shared_dangling_cow]"),
     # ArenaCompactTree read source (differential.py --act).
-    (["ACT-VALCOUNT-ONLY"],
-     "ACTZipper::val_count() counts from the zipper root, not the focus "
-     "[act: val_count_ignores_focus]"),
     (["k_path_walk"],
      "ACTZipper::descend_first_k_path() only walks the leftmost chain "
      "[act: first_k_path_no_backtrack]"),
@@ -271,7 +275,120 @@ KNOWN = [
     (["descend_last_path"],
      "ACTZipper::descend_last_path() runs one byte past the end of the trie "
      "[act: last_path_overshoots]"),
+    # Shape classes, from `divergence_shape`.  Last on purpose: every entry
+    # above is more specific, and these are meant to catch only what none of
+    # them explain.  Reproducers for each are in lean/corpus/.
+    (["STATUS-ONLY"],
+     "AlgebraicStatus::Identity is not returned reliably when nothing changed "
+     "(finding 8); meet_into/subtract_into, status only, effects agree "
+     "[status_imprecise]"),
+    (["DANGLING-KEPT"],
+     "an algebraic op keeps a dangling child the spec drops: an empty child "
+     "node meets/subtracts to itself rather than disappearing "
+     "[meet_keeps_dangling]"),
+    (["CONTENT-DROPPED"],
+     "subtract_into() drops a value under a path present in the source "
+     "[subtract_drops_value]"),
+    (["VALUE-ONLY"],
+     "which value survives a collision follows node layout rather than the "
+     "left-biased spec (join/meet and everything that later reads the "
+     "location) [value_bias_by_node_layout]"),
+    (["FOCUS-VALUE-FOR-DANGLING"],
+     "val_at()/get_val_at() return the focus value for a dangling child path "
+     "[val_at_dangling]"),
 ]
+
+
+# Shapes that several operations share.  These classes are defined by *which
+# fields of the trace line moved*, not by which operation produced them: the
+# same defect surfaces under whichever op happens to read the damaged location,
+# so keying them on an op name would both miss cases and over-match.
+STATUSES = ("Identity", "Element", "None")
+# Ops whose `ret` is a value rather than a flag or a count.  A bool return
+# renders as `ret=1`/`ret=0`, which is indistinguishable from a value by shape,
+# so the value-bias rule for `ret` is confined to these.
+VALUE_RET_OPS = ("val_at", "set_val", "remove_val")
+
+
+def _key(tok):
+    """The field name a trace token belongs to: `v126` -> v, `ret=X` -> ret."""
+    if "=" in tok:
+        return tok.split("=", 1)[0]
+    m = re.match(r"[A-Za-z]+", tok)
+    return m.group(0) if m else tok
+
+
+def _dump_shape(sa, sb):
+    """Shape of a difference between two trie dumps (`p:v,p:v,...`).
+
+    Both the `MAP0`/`MAP1` final dumps and the `dump` op's return are this
+    shape, and the value-bias class shows up in either.
+    """
+    ea, eb = sa.split(","), sb.split(",")
+    if len(ea) != len(eb):
+        return None
+    pa = [e.rsplit(":", 1) for e in ea]
+    pb = [e.rsplit(":", 1) for e in eb]
+    if any(len(x) != 2 for x in pa + pb):
+        return None
+    if [x[0] for x in pa] != [x[0] for x in pb]:
+        return None                      # the set of locations moved
+    moved = [(x[1], y[1]) for x, y in zip(pa, pb) if x[1] != y[1]]
+    if not moved or any("-" in m for m in moved):
+        return None                      # a value appeared or vanished
+    return "VALUE-ONLY"
+
+
+def divergence_shape(a, b):
+    """Name the shape of a divergence, or None when it has no familiar one.
+
+    Returning None is the important case: it is what keeps a genuinely new
+    defect out of the known buckets, so each shape below is deliberately narrow.
+    """
+    ta, tb = a.split(), b.split()
+    if len(ta) != len(tb):
+        return None
+    diff = [(x, y) for x, y in zip(ta, tb) if x != y]
+    if not diff:
+        return None
+    if ta[0].startswith(("MAP", "ROOT")):
+        return _dump_shape(ta[1], tb[1]) if len(ta) == 2 else None
+    keys = {_key(x) for x, _ in diff}
+    vals = {t[1:] for t in ta if _key(t) == "v"}
+    if keys == {"ret"}:
+        ra, rb = diff[0][0].split("=", 1)[1], diff[0][1].split("=", 1)[1]
+        if ra in STATUSES and rb in STATUSES:
+            return "STATUS-ONLY"
+        # `-` on the model side against the focus value on the crate side, in
+        # a bare return (`val_at`) or a component of one (`get_val_agrees`).
+        ca, cb = ra.split(":"), rb.split(":")
+        if len(ca) == len(cb):
+            moved = [(x, y) for x, y in zip(ca, cb) if x != y]
+            if moved and all(x == "-" and y in vals for x, y in moved):
+                return "FOCUS-VALUE-FOR-DANGLING"
+        if "," in ra or ra.count(":") == 1:
+            return _dump_shape(ra, rb)      # `dump` returns a whole subtrie
+        if ra.isdigit() and rb.isdigit() and len(ta) > 1 and ta[1] in VALUE_RET_OPS:
+            return "VALUE-ONLY"
+        return None
+    if keys == {"v"}:
+        # Both sides must hold a value: `v-` against `v42` is a value appearing
+        # or vanishing, which is a content difference, not a biased choice.
+        if all(x[1:].isdigit() and y[1:].isdigit() for x, y in diff):
+            return "VALUE-ONLY"
+        return None
+    if keys <= {"ret", "c", "n"} and ({"c", "n"} & keys):
+        # `c` (child_count) when it moved, else `n` (val_count): a dangling
+        # child adds a child without adding a value, a dropped value the
+        # reverse, so whichever field moved is the one that says which it was.
+        field = "c" if "c" in keys else "n"
+        xa = [int(x[1:]) for x, _ in diff if _key(x) == field]
+        xb = [int(y[1:]) for _, y in diff if _key(y) == field]
+        if all(y > x for x, y in zip(xa, xb)):
+            return "DANGLING-KEPT"
+        if all(y < x for x, y in zip(xa, xb)):
+            return "CONTENT-DROPPED"
+    return None
 
 
 def act_valcount_only(a, b):
@@ -312,7 +429,11 @@ def compare(blob, oracle, other, other_label, act=False):
         return "%s %s" % (other_label, real_err)
     for i, (a, b) in enumerate(zip(lean, real)):
         if a != b:
-            tag = "ACT-VALCOUNT-ONLY " if act and act_valcount_only(a, b) else ""
+            tags = ["ACT-VALCOUNT-ONLY"] if act and act_valcount_only(a, b) else []
+            shape = divergence_shape(a, b)
+            if shape:
+                tags.append(shape)
+            tag = "".join(t + " " for t in tags)
             return "%sline %d\n  lean:  %s\n  %-5s: %s" % (tag, i, a, other_label, b)
     if len(lean) != len(real):
         return "length %d (lean) vs %d (%s)" % (len(lean), len(real), other_label)
@@ -503,12 +624,14 @@ def main():
 
     fails = 0
     known = {}
+    done = 0              # inputs actually classified; < n_inputs when --max-fails stops the run
     restarts = 0
     reports = []          # (idx, name, msg) for failures, so -j output is ordered
 
     def record(idx, msg):
         """Classify one result.  Returns True when the run should stop."""
-        nonlocal fails
+        nonlocal fails, done
+        done += 1
         name = source.name(idx)
         if not msg:
             if args.verbose:
@@ -565,8 +688,13 @@ def main():
     if restarts:
         print("(%d child restart(s) after a timeout or crash)" % restarts)
     hit = sum(known.values())
+    # Against `done`, not `n_inputs`: when --max-fails stops the run the remaining
+    # inputs were never executed, and counting them in the denominator would score
+    # every one of them as agreeing.
     print("%d/%d inputs agree (%d hit known bugs, %d new divergences)"
-          % (n_inputs - fails - hit, n_inputs, hit, fails))
+          % (done - fails - hit, done, hit, fails))
+    if done < n_inputs:
+        print("(%d of %d inputs were not run)" % (n_inputs - done, n_inputs))
     for note, n in sorted(known.items()):
         print("  known x%d: %s" % (n, note))
     return 1 if fails else 0

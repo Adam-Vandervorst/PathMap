@@ -82,10 +82,13 @@ pub fn show_val(v: Option<&u64>) -> String {
 }
 
 /// Render a status the read source may have declined to produce.
+///
+/// Only the default `ReadSource` impls return `None`, and only the ACT zipper
+/// uses them, so the reason is always ACT mode.  See `SKIP_REASONS`.
 pub fn show_status_opt(s: Option<AlgebraicStatus>) -> String {
     match s {
         Some(s) => show_status(s).to_string(),
-        None => "skip".to_string(),
+        None => SKIP_ACT.to_string(),
     }
 }
 
@@ -134,6 +137,33 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
     )
 }
 
+/// Why an operation was skipped.  Every `skip` in the trace carries one of
+/// these, so a skipped op says which rule declined it rather than just that
+/// something declined it.  `lean/PathMapModel/Fuzz.lean` emits the same
+/// tokens; the two must agree exactly or every input with a skip diverges.
+///
+/// * `skip:act` — the ACT read source cannot be a merge source
+///   (`ZipperInfallibleSubtries` is not implemented for it) or does not
+///   implement the trait the op needs.
+/// * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root,
+///   where the native read zipper escapes its own root.
+/// * `skip:k0` — a degenerate `k = 0`.
+/// * `skip:empty-focus` — the focus has nothing below it, where the op's
+///   behaviour is a function of node materialisation rather than trie state.
+/// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
+/// * `skip:off-root-prune` — a prune on a write zipper not rooted at the map
+///   root, where the depth pruned is a function of internal node layout.
+/// * `skip:quarantined` — the op is disabled outright (op 54).
+///
+/// Each is recorded in lean/FINDINGS.md and commented at its site.
+pub const SKIP_ACT: &str = "skip:act";
+pub const SKIP_AT_ROOT: &str = "skip:at-root";
+pub const SKIP_K0: &str = "skip:k0";
+pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
+pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
+pub const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
+pub const SKIP_QUARANTINED: &str = "skip:quarantined";
+
 /// Does the focus have no descendants at all?
 ///
 /// Several return values (`remove_branches`, `restricting`, `join_map_into`,
@@ -175,7 +205,7 @@ pub fn dump<Z: ZipperMoving + ZipperPath + ZipperValues<u64>>(z: &mut Z) -> Stri
 /// Keeping this behind a trait means there is still exactly one operation table,
 /// so the two front ends cannot drift apart.
 pub trait ReadSource:
-    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath + ZipperIteration
+    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration
 {
     /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk).
     fn dump_fork(&self) -> String;
@@ -523,7 +553,7 @@ pub fn run_ops<R: ReadSource>(
                     // Skipped at the zipper root: the native ReadZipper escapes
                     // its own root there. See `Zip.toNextSiblingByte`.
                     if tgt!(t, wz, *rz, z, z.at_root()) {
-                        ("to_next_sibling_byte", "skip".to_string())
+                        ("to_next_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
                         let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
                         ("to_next_sibling_byte", show_byte_opt(r))
@@ -532,7 +562,7 @@ pub fn run_ops<R: ReadSource>(
                 12 => {
                     let t = get!(d.modn(2));
                     if tgt!(t, wz, *rz, z, z.at_root()) {
-                        ("to_prev_sibling_byte", "skip".to_string())
+                        ("to_prev_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
                         let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
                         ("to_prev_sibling_byte", show_byte_opt(r))
@@ -555,7 +585,7 @@ pub fn run_ops<R: ReadSource>(
                     let k = get!(d.modn(4));
                     // k == 0 is degenerate; see Fuzz.lean.
                     if k == 0 {
-                        ("descend_first_k_path", "skip".to_string())
+                        ("descend_first_k_path", SKIP_K0.to_string())
                     } else {
                         let r = (*rz).descend_first_k_path(k);
                         ("descend_first_k_path", show_bool(r).to_string())
@@ -570,7 +600,7 @@ pub fn run_ops<R: ReadSource>(
                     let mut v: Vec<String> = Vec::new();
                     if k == 0 {
                         let _ = writeln!(out, 
-                            "{step} k_path_walk ret=skip W={} R={}",
+                            "{step} k_path_walk ret={SKIP_K0} W={} R={}",
                             fingerprint(&wz, root0), fingerprint(rz, root1));
                         step += 1;
                         continue;
@@ -639,7 +669,7 @@ pub fn run_ops<R: ReadSource>(
                     };
                     match n {
                         Some(n) => ("make_map_val_count", format!("{n}")),
-                        None => ("make_map_val_count", "skip".to_string()),
+                        None => ("make_map_val_count", SKIP_ACT.to_string()),
                     }
                 }
                 26 => {
@@ -664,14 +694,14 @@ pub fn run_ops<R: ReadSource>(
                     if pruneable {
                         ("prune_path", format!("{}", wz.prune_path()))
                     } else {
-                        ("prune_path", "skip".to_string())
+                        ("prune_path", SKIP_OFF_ROOT_PRUNE.to_string())
                     }
                 }
                 31 => {
                     if pruneable {
                         ("prune_ascend", format!("{}", wz.prune_ascend()))
                     } else {
-                        ("prune_ascend", "skip".to_string())
+                        ("prune_ascend", SKIP_OFF_ROOT_PRUNE.to_string())
                     }
                 }
                 32 => {
@@ -693,7 +723,7 @@ pub fn run_ops<R: ReadSource>(
                     ("remove_unmasked_branches", hex_path(&canon))
                 }
                 34 => {
-                    let s = if (*rz).do_graft(&mut wz) { "-" } else { "skip" };
+                    let s = if (*rz).do_graft(&mut wz) { "-" } else { SKIP_ACT };
                     ("graft", s.to_string())
                 }
                 35 => {
@@ -701,7 +731,7 @@ pub fn run_ops<R: ReadSource>(
                     let s = if (*rz).do_graft_src_at(&mut wz, &p) {
                         hex_path(&p)
                     } else {
-                        "skip".to_string()
+                        SKIP_ACT.to_string()
                     };
                     ("graft_src_at", s)
                 }
@@ -741,11 +771,11 @@ pub fn run_ops<R: ReadSource>(
                     // Skipped when either side has nothing below its focus; see
                     // Fuzz.lean and lean/FINDINGS.md #8.
                     if focus_node_empty(&wz) || focus_node_empty(rz) {
-                        ("restricting", "skip".to_string())
+                        ("restricting", SKIP_EMPTY_FOCUS.to_string())
                     } else {
                         match (*rz).do_restricting(&mut wz) {
                             Some(b) => ("restricting", show_bool(b).to_string()),
-                            None => ("restricting", "skip".to_string()),
+                            None => ("restricting", SKIP_ACT.to_string()),
                         }
                     }
                 }
@@ -754,7 +784,7 @@ pub fn run_ops<R: ReadSource>(
                     let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
                     // `join_k_path_into(0)` destroys the subtrie in pathmap 0.3.1.
                     if k == 0 {
-                        ("join_k_path_into", "skip".to_string())
+                        ("join_k_path_into", SKIP_K0.to_string())
                     } else {
                         // The bool leaks node materialisation; see FINDINGS.md #8.
                         let r = wz.join_k_path_into(k, no_prune);
@@ -770,7 +800,7 @@ pub fn run_ops<R: ReadSource>(
                     let p = get!(d.path(6));
                     // `insert_prefix("")` destroys the subtrie in pathmap 0.3.1.
                     if p.is_empty() {
-                        ("insert_prefix", "skip".to_string())
+                        ("insert_prefix", SKIP_EMPTY_PATH.to_string())
                     } else {
                         ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
                     }
@@ -797,8 +827,10 @@ pub fn run_ops<R: ReadSource>(
                     // `meet_k_path_into` spins forever when the focus has no
                     // children, and escapes the focus subtree when k == 0.
                     // See `Zip.meetKPathUnspecified`.
-                    if k == 0 || wz.child_count() == 0 {
-                        ("meet_k_path_into", "skip".to_string())
+                    if k == 0 {
+                        ("meet_k_path_into", SKIP_K0.to_string())
+                    } else if wz.child_count() == 0 {
+                        ("meet_k_path_into", SKIP_EMPTY_FOCUS.to_string())
                     } else {
                         (
                             "meet_k_path_into",
@@ -869,7 +901,7 @@ pub fn run_ops<R: ReadSource>(
                             show_bool(agree)
                         ),
                     ),
-                    None => ("to_next_get_val", "skip".to_string()),
+                    None => ("to_next_get_val", SKIP_ACT.to_string()),
                 },
                 53 => {
                     let n = get!(d.modn(4));
@@ -882,7 +914,7 @@ pub fn run_ops<R: ReadSource>(
                     let s = if (*rz).do_graft_masked(&mut wz, mask, ru) {
                         format!("{}:{}", hex_path(&canon), show_bool(ru))
                     } else {
-                        "skip".to_string()
+                        SKIP_ACT.to_string()
                     };
                     ("graft_masked_branches", s)
                 }
@@ -899,7 +931,7 @@ pub fn run_ops<R: ReadSource>(
                     // leaves behind degrade the AlgebraicStatus that *later*
                     // operations report, contaminating the rest of the run.
                     let _ = (mask, ru, &canon);
-                    ("graft_child_maps", "skip".to_string())
+                    ("graft_child_maps", SKIP_QUARANTINED.to_string())
                 }
                 55 => {
                     let p = get!(d.path(6));
