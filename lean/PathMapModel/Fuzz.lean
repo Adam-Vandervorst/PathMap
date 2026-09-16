@@ -60,8 +60,6 @@ agree exactly or every input with a skip diverges.
 * `skip:act` — the ACT read source cannot be a merge source
   (`ZipperInfallibleSubtries` is not implemented for it) or does not implement
   the trait the op needs.
-* `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root, where
-  the native read zipper escapes its own root.
 * `skip:k0` — a degenerate `k = 0`.
 * `skip:empty-focus` — the focus has nothing below it, where the op's behaviour
   is a function of node materialisation rather than trie state.
@@ -73,7 +71,6 @@ agree exactly or every input with a skip diverges.
 Each is recorded in FINDINGS.md and commented at its site. -/
 
 def skipAct : String := "skip:act"
-def skipAtRoot : String := "skip:at-root"
 def skipK0 : String := "skip:k0"
 def skipEmptyFocus : String := "skip:empty-focus"
 def skipEmptyPath : String := "skip:empty-path"
@@ -290,17 +287,16 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              let (r, s) := onTarget s t (fun z => z.ascendUntilBranch)
              some (emit s "ascend_until_branch" (toString r), d)
   | 11 => do let (t, d) ← d.mod 2
-             -- Skipped at the zipper root: `ReadZipper::to_next_sibling_byte`
-             -- escapes its own root there (see the notes in `Zip.toNextSiblingByte`).
-             if (getTarget s t).atRoot then some (emit s "to_next_sibling_byte" skipAtRoot, d)
-             else
-               let (r, s) := onTarget s t (fun z => z.toNextSiblingByte)
-               some (emit s "to_next_sibling_byte" (showByteOpt r), d)
+             -- Formerly skipped at the zipper root, where `ReadZipper::
+             -- to_next_sibling_byte` used to escape its own root
+             -- (FINDINGS.md #3).  That is fixed: the override now guards on
+             -- `at_root()`, returns `None` there and leaves `origin_path()`
+             -- alone, so the root case is compared like any other.
+             let (r, s) := onTarget s t (fun z => z.toNextSiblingByte)
+             some (emit s "to_next_sibling_byte" (showByteOpt r), d)
   | 12 => do let (t, d) ← d.mod 2
-             if (getTarget s t).atRoot then some (emit s "to_prev_sibling_byte" skipAtRoot, d)
-             else
-               let (r, s) := onTarget s t (fun z => z.toPrevSiblingByte)
-               some (emit s "to_prev_sibling_byte" (showByteOpt r), d)
+             let (r, s) := onTarget s t (fun z => z.toPrevSiblingByte)
+             some (emit s "to_prev_sibling_byte" (showByteOpt r), d)
   | 13 => do let (t, d) ← d.mod 2
              let (r, s) := onTarget s t (fun z => z.toNextStep)
              some (emit s "to_next_step" (showBool r), d)

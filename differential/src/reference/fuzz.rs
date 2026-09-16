@@ -52,9 +52,6 @@ const OPS: U64Ops = U64Ops;
 /// The ACT read source cannot be a merge source (`ZipperInfallibleSubtries` is
 /// not implemented for it) or does not implement the trait the op needs.
 const SKIP_ACT: &str = "skip:act";
-/// `to_next`/`to_prev_sibling_byte` at the zipper root, where the native read
-/// zipper escapes its own root.
-const SKIP_AT_ROOT: &str = "skip:at-root";
 /// A degenerate `k = 0`.
 const SKIP_K0: &str = "skip:k0";
 /// The focus has nothing below it, where the op's behaviour is a function of
@@ -324,25 +321,17 @@ fn step(s: &mut St, d: &mut Dec) -> Option<()> {
             s.emit("ascend_until_branch", &r.to_string());
         }
         11 => {
-            // Skipped at the zipper root: `ReadZipper::to_next_sibling_byte`
-            // escapes its own root there (see the notes in
-            // `Zip::to_next_sibling_byte`).
+            // Formerly skipped at the zipper root, where
+            // `ReadZipper::to_next_sibling_byte` escaped its own root
+            // (FINDINGS.md #3).  Fixed: the root case is compared like any other.
             let t = d.modn(2)?;
-            if s.target_ref(t).at_root() {
-                s.emit("to_next_sibling_byte", SKIP_AT_ROOT);
-            } else {
-                let r = s.target(t).to_next_sibling_byte();
-                s.emit("to_next_sibling_byte", &show_byte_opt(r));
-            }
+            let r = s.target(t).to_next_sibling_byte();
+            s.emit("to_next_sibling_byte", &show_byte_opt(r));
         }
         12 => {
             let t = d.modn(2)?;
-            if s.target_ref(t).at_root() {
-                s.emit("to_prev_sibling_byte", SKIP_AT_ROOT);
-            } else {
-                let r = s.target(t).to_prev_sibling_byte();
-                s.emit("to_prev_sibling_byte", &show_byte_opt(r));
-            }
+            let r = s.target(t).to_prev_sibling_byte();
+            s.emit("to_prev_sibling_byte", &show_byte_opt(r));
         }
         13 => {
             let t = d.modn(2)?;

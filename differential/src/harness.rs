@@ -145,8 +145,6 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 /// * `skip:act` — the ACT read source cannot be a merge source
 ///   (`ZipperInfallibleSubtries` is not implemented for it) or does not
 ///   implement the trait the op needs.
-/// * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root,
-///   where the native read zipper escapes its own root.
 /// * `skip:k0` — a degenerate `k = 0`.
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
@@ -157,7 +155,6 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
 pub const SKIP_ACT: &str = "skip:act";
-pub const SKIP_AT_ROOT: &str = "skip:at-root";
 pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
 pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
@@ -549,23 +546,16 @@ pub fn run_ops<R: ReadSource>(
                 }
                 11 => {
                     let t = get!(d.modn(2));
-                    // Skipped at the zipper root: the native ReadZipper escapes
-                    // its own root there. See `Zip.toNextSiblingByte`.
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
-                        ("to_next_sibling_byte", SKIP_AT_ROOT.to_string())
-                    } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
-                        ("to_next_sibling_byte", show_byte_opt(r))
-                    }
+                    // Formerly skipped at the zipper root, where the native
+                    // ReadZipper escaped its own root (FINDINGS.md #3).  Fixed:
+                    // the root case is now compared like any other.
+                    let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
+                    ("to_next_sibling_byte", show_byte_opt(r))
                 }
                 12 => {
                     let t = get!(d.modn(2));
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
-                        ("to_prev_sibling_byte", SKIP_AT_ROOT.to_string())
-                    } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
-                        ("to_prev_sibling_byte", show_byte_opt(r))
-                    }
+                    let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
+                    ("to_prev_sibling_byte", show_byte_opt(r))
                 }
                 13 => {
                     let t = get!(d.modn(2));
