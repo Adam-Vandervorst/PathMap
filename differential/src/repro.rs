@@ -190,7 +190,8 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                     if k == 0 { "// join_k_path_into(0): skipped by the harness".to_string() }
                     else { format!("wz.join_k_path_into({k}, false);") } }
             43 => { let p = g!(d.path(6));
-                    if p.is_empty() { "// insert_prefix(\"\"): skipped by the harness".to_string() }
+                    // `insert_prefix` is generic over the prefix, so a bare `&[]` has no element type.
+                    if p.is_empty() { "wz.insert_prefix(&[0u8; 0]);".to_string() }
                     else { format!("wz.insert_prefix({});", rs_bytes(&p)) } }
             44 => { let n = g!(d.modn(6)); format!("wz.remove_prefix({n});") }
             45 => { let _pr = g!(d.boolean());
