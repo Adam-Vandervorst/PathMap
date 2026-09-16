@@ -317,6 +317,7 @@ where
     ///
     /// Returns `DescendState::Continue(byte)` only when there is no surviving value and exactly
     /// one surviving child. Otherwise returns the reason traversal must stop.
+    #[inline]
     fn current_descend_state<const STOP_ON_BRANCH: bool>(&mut self) -> DescendState {
         if !self.rhs.path_exists() {
             // Once RHS no longer contains the current path, subtraction has no
@@ -552,11 +553,15 @@ where
     B: ZipperMoving + ZipperValues<V>,
 {
     let mut depth = 0;
-    let mut lhs_mask = lhs.child_mask();
-    let mut rhs_mask = rhs.child_mask();
-    'descend: loop {
-        // Entire LHS-only branches survive.
-        // A value at this exact key survives.
+    let mut branch_bytes = SmallVec::<[u8; 8]>::new();
+
+    loop {
+        let lhs_mask = lhs.child_mask();
+        let rhs_mask = rhs.child_mask();
+
+        // Any LHS-only child survives wholesale. If there is none, every LHS
+        // child is also present in RHS, so lhs_mask itself is the set of common
+        // children that still need to be searched.
         if !((lhs_mask ^ rhs_mask) & lhs_mask).is_empty_mask()
             || value_survives::<V, _, _>(lhs, rhs)
         {
@@ -569,42 +574,56 @@ where
             return true;
         }
 
-        let mut combined_mask = lhs_mask & rhs_mask;
-        let mut next_common_byte = combined_mask.indexed_bit::<true>(0);
-        'node: loop {
-            match next_common_byte {
-                Some(byte) => {
-                    lhs.descend_to_byte(byte);
-                    rhs.descend_to_byte(byte);
-
-                    lhs_mask = lhs.child_mask();
-                    rhs_mask = rhs.child_mask();
-
-                    depth += 1;
-                    continue 'descend;
+        // At this point: lhs_mask ⊆ rhs_mask => lhs_mask & rhs_mask == lhs_mask
+        let next_common_byte = lhs_mask.indexed_bit::<true>(0);
+        match next_common_byte {
+            Some(byte) => {
+                // Remember only genuine branch points. The zipper itself knows
+                // how far it must ascend to get back here.
+                if let Some(following_byte) = lhs_mask.next_bit(byte) {
+                    branch_bytes.push(following_byte);
                 }
-                None => {
-                    if depth == 0 {
-                        break 'descend;
-                    }
 
-                    let cur_byte = lhs.focus_byte().expect("non-empty path when depth > 0");
-                    lhs.ascend_byte();
-                    rhs.ascend_byte();
+                lhs.descend_to_byte(byte);
+                rhs.descend_to_byte(byte);
 
-                    lhs_mask = lhs.child_mask();
-                    rhs_mask = rhs.child_mask();
-                    combined_mask = lhs_mask & rhs_mask;
-                    next_common_byte = combined_mask.next_bit(cur_byte);
+                depth += 1;
+            }
+            None => {
+                // The current subtree is exhausted. Skip the entire unary suffix and
+                // return directly to the nearest branch with unexplored children.
+                let Some(next_byte) = branch_bytes.last_mut() else {
+                    let lhs_ascended = lhs.ascend(depth);
+                    let rhs_ascended = rhs.ascend(depth);
 
-                    depth -= 1;
-                    continue 'node;
+                    debug_assert_eq!(lhs_ascended, depth);
+                    debug_assert_eq!(rhs_ascended, depth);
+
+                    return false;
+                };
+
+                let ascended = lhs.ascend_until_branch();
+                let rhs_ascended = rhs.ascend(ascended);
+
+                debug_assert_eq!(rhs_ascended, ascended);
+
+                depth -= ascended;
+
+                // We are back at the branch point. If another child follows the one
+                // we are about to visit, keep this branch point on the resume stack.
+                let cur_byte = *next_byte;
+                if let Some(following_byte) = lhs.child_mask().next_bit(cur_byte) {
+                    *next_byte = following_byte;
+                } else {
+                    branch_bytes.pop();
                 }
+
+                lhs.descend_to_byte(cur_byte);
+                rhs.descend_to_byte(cur_byte);
+                depth += 1;
             }
         }
     }
-
-    false
 }
 
 /// Counts values in the materialized subtraction below the current focus.
