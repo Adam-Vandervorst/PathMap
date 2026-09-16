@@ -344,8 +344,8 @@ back unchanged, since a fixed operation changes no state.
 
 | token | why it is gone |
 |---|---|
-| `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root (FINDINGS.md #3).  The override now guards on `at_root()`: it returns `None` and leaves `origin_path()` alone, for a read zipper and a write zipper alike, whether or not the root exists.  A/B over 56M inputs (maxlen 120/300/600, crate and ACT) reproduced the baseline divergence report byte for byte, with no `ESCAPED-ROOT` anywhere. |
-| `skip:empty-path` | `insert_prefix("")` (FINDINGS.md #4).  Fixed upstream, with the regression test `write_zipper_insert_prefix_empty_is_identity`.  Directly: over seven trie shapes (empty, root value only, one line, branchy, wide, dangling, grafted), at the map root and at a non-root focus, `insert_prefix(&[])` leaves the trie untouched and returns exactly what the model's `focusNodeIsEmpty` rule predicts.  Same 56M-input A/B, again byte for byte identical. |
+| `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root (FINDINGS.md #3).  The override now guards on `at_root()`: it returns `None` and leaves `origin_path()` alone, for a read zipper and a write zipper alike, whether or not the root exists.  A/B over 64M inputs (20M at maxlen 120, 20M at 300 and 8M at 600 in crate mode, 8M each at 300/600 in ACT mode) reproduced the baseline divergence report byte for byte, with no `ESCAPED-ROOT` anywhere. |
+| `skip:empty-path` | `insert_prefix("")` (FINDINGS.md #4).  Fixed upstream, with the regression test `write_zipper_insert_prefix_empty_is_identity`.  Directly: over seven trie shapes (empty, root value only, one line, branchy, wide, dangling, grafted), at the map root and at a non-root focus, `insert_prefix(&[])` leaves the trie untouched and returns exactly what the model's `focusNodeIsEmpty` rule predicts.  Same 64M-input A/B, again byte for byte identical. |
 | `skip:quarantined` | `graft_child_maps` (op 54), the only op it ever named, was un-quarantined when its bug was fixed.  The token outlived it as a definition with no call site on any of the three sides — the Rust one needed `#[allow(dead_code)]` to compile.  Removed rather than kept: a vocabulary entry nothing can emit invites the next reader to keep a live suppression alive by analogy with it. |
 
 Naming these turned up an ordering bug the bare token had hidden: for
@@ -372,9 +372,11 @@ Unmasked, both match the specification over the whole sweep — 20M inputs at
 maxlen 120, 20M at 300, 8M at 600, and for `join_k_path_into` 8M each at
 300/600 in ACT mode as well; `restrict` is `skip:act`, so ACT says nothing
 about it.  Neither is a branch that never runs: tracing 1500 inputs, the mask
-fired on 824 of 947 `restrict` calls and 678 of 1003 `join_k_path_into` calls.
-That is evidence the materialisation leak does not reach these two, not a proof
-that it cannot; each was lifted in its own commit so it can be put back alone.
+fired on 824 of 947 `restrict` calls and 678 of 1003 `join_k_path_into` calls,
+which puts the sweeps at roughly 26M and 29M formerly-masked returns actually
+compared.  That is evidence the materialisation leak does not reach these two,
+not a proof that it cannot; each was lifted in its own commit so it can be put
+back alone.
 
 ## The blind-zipper contract
 

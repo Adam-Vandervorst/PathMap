@@ -437,7 +437,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                -- The bool used to be masked to `?` when the collapse left an
                -- empty focus, on the theory that it was another
                -- `AbstractNodeRef` leak (FINDINGS.md #8).  Unmasked it tracks
-               -- the spec: over 56M inputs, with the mask firing on about two
+               -- the spec: over 64M inputs, with the mask firing on about two
                -- calls in three, no `join_k_path_into` line differs.
                let (r, z) := s.wz.joinKPathInto ops k noPrune
                some (emit { s with wz := z } "join_k_path_into" (showBool r), d)
