@@ -6683,6 +6683,30 @@ mod tests {
         assert_eq!(z.path(), &[3]);
     }
 
+    /// A location holding both a value and a child is stored in a list node as two slots with the same
+    /// key.  Stepping to it as the *previous* sibling looked for the onward child only in the slot
+    /// whose byte it found first, which can be the value slot, so the zipper landed on the location
+    /// without its node: `child_count` said 0 and nothing below could be reached.
+    #[test]
+    fn read_zipper_prev_sibling_onto_a_value_and_child_location() {
+        let mut m = PathMap::<u64>::new();
+        m.set_val_at(&[2u8, 0], 0);
+        m.set_val_at(&[2u8, 1], 0);
+        m.set_val_at(&[2u8], 0);
+        for start in [&[3u8][..], &[9u8]] {
+            let mut z = m.read_zipper();
+            z.descend_to(start);
+            assert!(!z.path_exists());
+            assert_eq!(z.to_prev_sibling_byte(), Some(2), "from {start:?}");
+            assert_eq!(z.path(), &[2u8]);
+            assert_eq!(z.val(), Some(&0));
+            assert_eq!(z.child_count(), 2, "from {start:?}");
+            assert_eq!(z.child_mask().iter().collect::<Vec<_>>(), vec![0u8, 1]);
+            assert_eq!(z.descend_first_byte(), Some(0), "from {start:?}");
+            assert_eq!(z.path(), &[2u8, 0]);
+        }
+    }
+
     #[test]
     fn read_zipper_prev_sibling_cases() {
         let m: PathMap<()> = [&[10u8][..], &[20], &[70]].into_iter().collect();   // dense node
