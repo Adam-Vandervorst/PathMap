@@ -161,11 +161,18 @@ fn compare(blob: &[u8], act: bool) -> Option<String> {
 /// summary.  Buckets by *op*, not by defect: the defect taxonomy is the `KNOWN`
 /// table in `lean/differential.py`, and there is one of it.
 fn first_diff_op(msg: &str) -> String {
-    msg.lines()
+    let line = msg
+        .lines()
         .find_map(|l| l.trim_start().strip_prefix("model: "))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .unwrap_or("?")
-        .to_string()
+        .unwrap_or("?");
+    let mut it = line.split_whitespace();
+    match it.next() {
+        // An operation line is `<step> <op> ret=...`; the trailer lines are
+        // `MAP0 <dump>` and `ROOT0 <path>`, whose own first token is the name.
+        Some(tok) if tok.parse::<usize>().is_ok() => it.next().unwrap_or("?").to_string(),
+        Some(tok) => tok.to_string(),
+        None => "?".to_string(),
+    }
 }
 
 fn main() {
