@@ -458,8 +458,13 @@ impl<V: Clone> PathMap<V> {
         PathMap::mk(vals, a.paths().chain(b.paths()).cloned())
     }
 
-    /// Meet (intersection).  A location survives only if it lies on the way to a
-    /// surviving value, so dangling paths never survive a meet.
+    /// Meet (intersection).  A location exists in the result exactly when it
+    /// exists in both operands, dangling or not, and a value exists exactly where
+    /// both operands hold one, as the meet of the two.  So meet is commutative,
+    /// associative and idempotent on locations, and a meet with an equal trie
+    /// changes nothing.
+    ///
+    /// This is the meet with `prune = false`; see [`PathMap::meet_pruned`].
     pub fn meet(ops: &impl ValOps<V>, a: &PathMap<V>, b: &PathMap<V>) -> PathMap<V> {
         let vals: Vec<(Vec<u8>, V)> = a
             .vals()
@@ -467,7 +472,21 @@ impl<V: Clone> PathMap<V> {
                 Self::meet_val(ops, Some(av), b.val_at(k)).map(|v| (k.clone(), v))
             })
             .collect();
+        PathMap::mk(vals, a.paths().filter(|q| b.path_exists(q)).cloned())
+    }
+
+    /// The trie with every dangling path removed: only the root and the locations
+    /// on the way to a value remain.
+    pub fn drop_dangling(&self) -> PathMap<V> {
+        let vals: Vec<(Vec<u8>, V)> = self.vals().map(|(k, v)| (k.clone(), v.clone())).collect();
         PathMap::mk(vals, std::iter::empty())
+    }
+
+    /// The meet with `prune = true`: the same values as [`PathMap::meet`], and only
+    /// the locations on the way to one of them, so no dangling path survives --
+    /// including one both operands had.
+    pub fn meet_pruned(ops: &impl ValOps<V>, a: &PathMap<V>, b: &PathMap<V>) -> PathMap<V> {
+        Self::meet(ops, a, b).drop_dangling()
     }
 
     /// Subtract.

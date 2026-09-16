@@ -476,9 +476,12 @@ impl<V: Clone> Zip<V> {
     /// `ZipperWriting::meet_into`: intersect the focus's submap with the
     /// source's.
     ///
-    /// The value step runs first and can prune the focus out from under the node
-    /// step.  A meet drops every dangling path, since a location only survives if
-    /// it leads to a surviving value.
+    /// Below the focus the result is [`PathMap::meet`] with `prune = false` --
+    /// every location both sides have survives, dangling ones included -- and
+    /// [`PathMap::meet_pruned`] with `prune = true`, which keeps only the locations
+    /// leading to a surviving value.  The focus itself is never removed: pruning
+    /// stops at it, so a focus left without a value or anything below it is still
+    /// there.
     pub fn meet_into(&mut self, ops: &impl ValOps<V>, src: &Zip<V>, prune: bool) -> AlgStatus {
         let (val_status, val_was_none) = match (self.val().cloned(), src.val().cloned()) {
             (Some(sv), Some(ov)) => {
@@ -489,14 +492,14 @@ impl<V: Clone> Zip<V> {
                         self.set_val(v);
                     }
                     None => {
-                        self.remove_val(prune);
+                        self.remove_val(false);
                     }
                 }
                 (st, false)
             }
             (None, Some(_)) => (AlgStatus::None, true),
             (Some(_), None) => {
-                self.remove_val(prune);
+                self.remove_val(false);
                 (AlgStatus::None, false)
             }
             (None, None) => (AlgStatus::None, true),
@@ -506,17 +509,16 @@ impl<V: Clone> Zip<V> {
         if self_b.is_empty_map() {
             return AlgStatus::merge(AlgStatus::None, val_status, true, val_was_none);
         }
+        let f = self.focus();
         if src_b.is_empty_map() {
-            let f = self.focus();
             self.trie.remove_below(&f);
-            if prune {
-                self.trie.prune_path(0, &f);
-            }
             return AlgStatus::merge(AlgStatus::None, val_status, false, val_was_none);
         }
-        let r = PathMap::meet(ops, &self_b, &src_b);
+        let r = if prune { PathMap::meet_pruned(ops, &self_b, &src_b) } else { PathMap::meet(ops, &self_b, &src_b) };
         let st = Self::node_status(ops, &self_b, &r);
-        self.write_node(st, &r, prune);
+        if st != AlgStatus::Identity {
+            self.trie.graft_below(&f, &r);
+        }
         AlgStatus::merge(st, val_status, false, val_was_none)
     }
 
@@ -561,7 +563,8 @@ impl<V: Clone> Zip<V> {
     }
 
     /// `ZipperWriting::meet_2`: meet two *source* submaps and write the result at
-    /// the focus.
+    /// the focus.  There is no `prune` argument, so this is [`PathMap::meet`]:
+    /// every location both sources have survives, dangling ones included.
     ///
     /// Two things separate this from [`Zip::meet_into`].  It does not consult
     /// what is already at the focus, so — as the implementation notes — it never
@@ -690,13 +693,16 @@ impl<V: Clone> Zip<V> {
                 Some(a) => PathMap::meet(ops, &a, &m),
             });
         }
-        match result {
+        // `prune` drops every dangling path from the meet, including one that a
+        // single k-path's subtrie brings along unmet.  The focus itself is never
+        // removed.
+        match result.map(|m| if prune { m.drop_dangling() } else { m }) {
             Some(m) if !m.is_empty_map() => {
                 self.graft_map(&m);
                 true
             }
             _ => {
-                self.remove_branches(prune);
+                self.remove_branches(false);
                 false
             }
         }

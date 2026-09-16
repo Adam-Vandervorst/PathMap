@@ -396,10 +396,12 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                let (st, z) := s.wz.joinMapInto ops s.rz.makeMap
                some (emit { s with wz := z } "join_map_into"
                  (if leaky then "?" else toString st), d)
-  | 38 => do let (_pr, d) ← d.bool
+  | 38 => do let (pr, d) ← d.bool
              if s.act then some (emit s "meet_into" skipAct, d)
              else
-               let (st, z) := s.wz.meetInto ops s.rz noPrune
+               -- Unlike the other operations, meet's `prune` has an exact meaning
+               -- (see `Zip.meetInto`), so the decoded flag is used.
+               let (st, z) := s.wz.meetInto ops s.rz pr
                some (emit { s with wz := z } "meet_into" (toString st), d)
   | 39 => do let (_pr, d) ← d.bool
              if s.act then some (emit s "subtract_into" skipAct, d)
@@ -461,7 +463,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              match m with
              | some mm => some (emit { s with wz := z.graftMap mm } "take_map_restore" "1", d)
              | none => some (emit { s with wz := z } "take_map_restore" "0", d)
-  | 46 => do let (k, d) ← d.mod 4; let (_pr, d) ← d.bool
+  | 46 => do let (k, d) ← d.mod 4; let (pr, d) ← d.bool
              -- `meet_k_path_into` is not implementable for these arguments; see
              -- `Zip.meetKPathUnspecified`, whose two disjuncts are split out here
              -- so the skip names which one fired.  The Rust side matches.
@@ -469,7 +471,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              else if s.wz.focusNodeIsEmpty then
                some (emit s "meet_k_path_into" skipEmptyFocus, d)
              else
-               let (r, z) := s.wz.meetKPathInto ops k noPrune
+               let (r, z) := s.wz.meetKPathInto ops k pr
                some (emit { s with wz := z } "meet_k_path_into" (showBool r), d)
   | 47 => do let (t, d) ← d.mod 2
              -- The blind-zipper addition: `descend_until` reporting the bytes it

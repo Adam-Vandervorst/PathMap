@@ -259,10 +259,13 @@ mod tests {
         for a in &fs {
             assert!(join_idem(&OPS, a));
             assert!(meet_idem_on_vals(&OPS, a));
+            assert!(meet_idem(&OPS, a));
+            assert!(meet_pruned_idem(&OPS, a));
             assert!(sub_self_empty_vals(&OPS, a));
             assert!(restrict_self(&OPS, a));
             for b in &fs {
                 assert!(join_comm_on_paths(&OPS, a, b));
+                assert!(meet_comm_on_paths(&OPS, a, b));
                 for c in &fs {
                     assert!(join_assoc(&OPS, a, b, c));
                 }

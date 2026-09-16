@@ -234,12 +234,26 @@ pub fn join_assoc<V: Clone>(
     l.beq_t(ops, &r)
 }
 
-/// `meet` is idempotent *on values*.  It is not idempotent on locations: a
-/// meet discards dangling paths, so `meet a a` keeps only the value-bearing
-/// skeleton.
+/// `meet` is idempotent *on values*.
 pub fn meet_idem_on_vals<V: Clone>(ops: &impl ValOps<V>, a: &PathMap<V>) -> bool {
     PathMap::meet(ops, a, a).vals().map(|(k, _)| k.clone()).collect::<Vec<_>>()
         == a.vals().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+}
+
+/// `meet` is idempotent outright, dangling paths included: a location survives
+/// exactly when both operands have it.
+pub fn meet_idem<V: Clone>(ops: &impl ValOps<V>, a: &PathMap<V>) -> bool {
+    PathMap::meet(ops, a, a).beq_t(ops, a)
+}
+
+/// `meet_pruned(a, a)` is `a` with its dangling paths dropped.
+pub fn meet_pruned_idem<V: Clone>(ops: &impl ValOps<V>, a: &PathMap<V>) -> bool {
+    PathMap::meet_pruned(ops, a, a).beq_t(ops, &a.drop_dangling())
+}
+
+/// `meet` is commutative on locations.
+pub fn meet_comm_on_paths<V: Clone>(ops: &impl ValOps<V>, a: &PathMap<V>, b: &PathMap<V>) -> bool {
+    PathMap::meet(ops, a, b).paths().collect::<Vec<_>>() == PathMap::meet(ops, b, a).paths().collect::<Vec<_>>()
 }
 
 /// Subtracting a map from itself leaves no values.

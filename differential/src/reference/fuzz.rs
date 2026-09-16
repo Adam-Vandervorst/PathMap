@@ -508,11 +508,13 @@ fn step(s: &mut St, d: &mut Dec) -> Option<()> {
             }
         }
         38 => {
-            let _pr = d.boolean()?;
+            let pr = d.boolean()?;
             if s.act {
                 s.emit("meet_into", SKIP_ACT);
             } else {
-                let st = s.wz.meet_into(&OPS, &s.rz, NO_PRUNE);
+                // Unlike the other operations, meet's `prune` has an exact meaning
+                // (see `Zip::meet_into`), so the decoded flag is used.
+                let st = s.wz.meet_into(&OPS, &s.rz, pr);
                 s.emit("meet_into", &show_status(st));
             }
         }
@@ -604,7 +606,7 @@ fn step(s: &mut St, d: &mut Dec) -> Option<()> {
         }
         46 => {
             let k = d.modn(4)?;
-            let _pr = d.boolean()?;
+            let pr = d.boolean()?;
             // `meet_k_path_into` is not implementable for these arguments; see
             // `Zip::meet_k_path_unspecified`, whose two disjuncts are split out
             // here so the skip names which one fired.  The crate side matches.
@@ -613,7 +615,7 @@ fn step(s: &mut St, d: &mut Dec) -> Option<()> {
             } else if s.wz.focus_node_is_empty() {
                 s.emit("meet_k_path_into", SKIP_EMPTY_FOCUS);
             } else {
-                let r = s.wz.meet_k_path_into(&OPS, k, NO_PRUNE);
+                let r = s.wz.meet_k_path_into(&OPS, k, pr);
                 s.emit("meet_k_path_into", show_bool(r));
             }
         }
