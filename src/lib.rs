@@ -593,8 +593,11 @@ mod tests {
             assert_eq!(met, l);
         }
 
+        //`l` and `r` hold no value in common, but they share the first bytes of their paths, and
+        // those locations survive the meet as dangling paths
         let met = met.meet(&r);
-        assert!(met.is_empty());
+        assert_eq!(met.val_count(), 0);
+        assert!(!met.is_empty());
     }
 
     #[test]

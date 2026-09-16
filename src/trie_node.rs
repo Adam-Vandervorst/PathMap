@@ -2205,7 +2205,7 @@ mod tagged_node_ref {
             }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
-                EMPTY_NODE_TAG => AlgebraicResult::None,
+                EMPTY_NODE_TAG => crate::empty_node::EmptyNode.pmeet_dyn(other),
                 DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.pmeet_dyn(other),
                 LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.pmeet_dyn(other),
                 CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.pmeet_dyn(other),

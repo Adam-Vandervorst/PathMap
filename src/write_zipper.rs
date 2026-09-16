@@ -4024,6 +4024,56 @@ mod tests {
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
+    /// The tag of the root node of `map`
+    fn root_tag(map: &PathMap<u64>) -> usize {
+        map.root().unwrap().as_tagged().tag()
+    }
+
+    /// Two dense nodes whose co-frees at a byte meet to nothing still share the byte, so it survives
+    /// the meet as a dangling path.  A dangling byte -- a co-free with neither a value nor an onward
+    /// node, or one whose onward node is empty -- is what such a meet leaves, so it meets anything at
+    /// that byte as an identity of the dangling side.
+    #[test]
+    fn write_zipper_meet_into_dense_keeps_bytes_that_meet_to_nothing() {
+        type Build = fn() -> PathMap<u64>;
+        type Locations = Vec<(Vec<u8>, Option<u64>)>;
+        const BYTES: [u8; 4] = [1, 2, 3, 4];
+        let values_at_0: Build = || { let mut m = PathMap::<u64>::new(); for b in BYTES { m.set_val_at(&[b, 0], 1); } m };
+        let values_at_1: Build = || { let mut m = PathMap::<u64>::new(); for b in BYTES { m.set_val_at(&[b, 1], 2); } m };
+        let dangling: Build = || { let mut m = PathMap::<u64>::new(); for b in BYTES { m.create_path(&[b]); } m };
+        let emptied: Build = || {
+            let mut m = PathMap::<u64>::new();
+            for b in BYTES { m.set_val_at(&[b, 0], 1); }
+            for b in BYTES { m.write_zipper_at_path(&[b]).remove_branches(false); }
+            m
+        };
+        for build in [values_at_0, values_at_1, dangling, emptied] {
+            assert_eq!(root_tag(&build()), DENSE_BYTE_NODE_TAG);
+        }
+        let bare: Locations = core::iter::once((vec![], None)).chain(BYTES.iter().map(|b| (vec![*b], None))).collect();
+        assert_eq!(all_locations(&dangling()), bare);
+        assert_eq!(all_locations(&emptied()), bare);
+
+        // The values below each byte meet to nothing; the bytes stay
+        assert_eq!(all_locations(&values_at_0().meet(&values_at_1())), bare);
+        let mut dst = values_at_0();
+        assert_eq!(dst.write_zipper().meet_into(&values_at_1().read_zipper(), false), AlgebraicStatus::Element);
+        assert_eq!(all_locations(&dst), bare);
+
+        // A dangling side is an identity for the meet, whichever form the dangling byte takes
+        for dangling_side in [dangling, emptied] {
+            for other in [values_at_0, values_at_1, dangling, emptied] {
+                let mut dst = dangling_side();
+                assert_eq!(dst.write_zipper().meet_into(&other().read_zipper(), false), AlgebraicStatus::Identity);
+                assert_eq!(all_locations(&dst), bare);
+                let mut dst = other();
+                let expected = if all_locations(&dst) == bare { AlgebraicStatus::Identity } else { AlgebraicStatus::Element };
+                assert_eq!(dst.write_zipper().meet_into(&dangling_side().read_zipper(), false), expected);
+                assert_eq!(all_locations(&dst), bare);
+            }
+        }
+    }
+
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
     #[test]
     fn write_zipper_subtract_into_test1() {

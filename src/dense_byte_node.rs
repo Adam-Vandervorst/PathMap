@@ -2024,18 +2024,56 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         rec_status.merge(val_status, true, true)
     }
     fn pmeet(&self, other: &OtherCf) -> AlgebraicResult<Self> {
-        //If one or the other cofree is dangling, it's an identity result for the dangling cofree
-        let mut identity_flag = 0;
-        if !self.has_rec() && !self.has_val() {identity_flag = SELF_IDENT;}
-        if !other.has_rec() && !other.has_val() {identity_flag |= COUNTER_IDENT;}
-        if identity_flag > 0 {
-            return AlgebraicResult::Identity(identity_flag)
+        //Both co-frees exist, so the location they stand at exists in both operands, and it survives
+        // the meet even when nothing at or below it does: the result is never `None`.  An onward link
+        // to an empty node carries nothing, so it counts as no link at all.
+        let self_rec = self.rec().filter(|node| !node.as_tagged().node_is_empty());
+        let other_rec = other.rec().filter(|node| !node.as_tagged().node_is_empty());
+        let self_dangling = self_rec.is_none() && !self.has_val();
+        let other_dangling = other_rec.is_none() && !other.has_val();
+        if self_dangling || other_dangling {
+            //The meet is the bare location, which is exactly what a dangling side holds
+            let mut mask = 0;
+            if self_dangling { mask |= SELF_IDENT; }
+            if other_dangling { mask |= COUNTER_IDENT; }
+            return AlgebraicResult::Identity(mask)
         }
 
-        //Otherwise actually work with what the cofrees contain
-        let rec = self.rec().pmeet(&other.rec());
+        let rec = match (self_rec, other_rec) {
+            (Some(l), Some(r)) => l.pmeet(r),
+            _ => AlgebraicResult::None,
+        };
         let val = self.val().pmeet(&other.val());
-        self.combine_algebraic_results(other, rec, val)
+
+        //A part that meets to nothing equals the side that had nothing there
+        let (rec_self, rec_counter) = match &rec {
+            AlgebraicResult::Identity(mask) => (mask & SELF_IDENT > 0, mask & COUNTER_IDENT > 0),
+            AlgebraicResult::None => (self_rec.is_none(), other_rec.is_none()),
+            AlgebraicResult::Element(_) => (false, false),
+        };
+        let (val_self, val_counter) = match &val {
+            AlgebraicResult::Identity(mask) => (mask & SELF_IDENT > 0, mask & COUNTER_IDENT > 0),
+            AlgebraicResult::None => (!self.has_val(), !other.has_val()),
+            AlgebraicResult::Element(_) => (false, false),
+        };
+        let mut mask = 0;
+        if rec_self && val_self { mask |= SELF_IDENT; }
+        if rec_counter && val_counter { mask |= COUNTER_IDENT; }
+        if mask > 0 {
+            return AlgebraicResult::Identity(mask)
+        }
+
+        let new_rec = match rec {
+            AlgebraicResult::Element(node) => Some(node),
+            AlgebraicResult::Identity(mask) => if mask & SELF_IDENT > 0 { self_rec.cloned() } else { other_rec.cloned() },
+            AlgebraicResult::None => None,
+        };
+        let new_val = match val {
+            AlgebraicResult::Element(val) => val,
+            AlgebraicResult::Identity(mask) => if mask & SELF_IDENT > 0 { self.val().cloned() } else { other.val().cloned() },
+            AlgebraicResult::None => None,
+        };
+        AlgebraicResult::Element(Self::new(new_rec, new_val))
     }
     //GOAT, HeteroLattice will totally disappear when we do the policy refactor
     // fn join_all(_xs: &[&Self]) -> Self where Self: Sized {
