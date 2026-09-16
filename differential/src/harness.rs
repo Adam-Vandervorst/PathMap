@@ -150,14 +150,12 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 ///   behaviour is a function of node materialisation rather than trie state.
 /// * `skip:off-root-prune` — a prune on a write zipper not rooted at the map
 ///   root, where the depth pruned is a function of internal node layout.
-/// * `skip:quarantined` — the op is disabled outright (op 54).
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
 pub const SKIP_ACT: &str = "skip:act";
 pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
 pub const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
-pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 
 /// Does the focus have no descendants at all?
 ///

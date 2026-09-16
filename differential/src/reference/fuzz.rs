@@ -60,12 +60,6 @@ const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
 /// A prune on a write zipper not rooted at the map root, where the depth pruned
 /// is a function of internal node layout.
 const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
-/// The op is disabled outright.  Nothing uses this today: op 54
-/// (`graft_child_maps`) was quarantined when the archive was taken and has since
-/// been let back in.  Kept because `Fuzz.lean` and `harness.rs` both still
-/// define it, and the vocabulary is the contract.
-#[allow(dead_code)]
-const SKIP_QUARANTINED: &str = "skip:quarantined";
 
 // ---------------------------------------------------------------------------
 // Decoder — `Fuzz.Dec`

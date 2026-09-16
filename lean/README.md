@@ -332,7 +332,6 @@ skips diverges:
 | `skip:k0` | `meet_k_path_into(0)`, `join_k_path_into(0)`, `descend_first_k_path(0)` / `to_next_k_path(0)` — degenerate; the first two should be the identity and destroy the subtrie, the last reports success without moving, forever. |
 | `skip:empty-focus` | `meet_k_path_into` with no children (it does not terminate), and `restricting` when either side has nothing below its focus (the two branches differ in *effect*, not just in the reported bool). |
 | `skip:off-root-prune` | `prune_path` / `prune_ascend`, and the `prune` flag on every other operation, for a write zipper not rooted at the map root — the depth pruned is a function of internal node layout, so there is nothing to specify. |
-| `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
 | `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
 
 #### Suppressions that have been lifted
@@ -347,6 +346,7 @@ back unchanged, since a fixed operation changes no state.
 |---|---|
 | `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root (FINDINGS.md #3).  The override now guards on `at_root()`: it returns `None` and leaves `origin_path()` alone, for a read zipper and a write zipper alike, whether or not the root exists.  A/B over 56M inputs (maxlen 120/300/600, crate and ACT) reproduced the baseline divergence report byte for byte, with no `ESCAPED-ROOT` anywhere. |
 | `skip:empty-path` | `insert_prefix("")` (FINDINGS.md #4).  Fixed upstream, with the regression test `write_zipper_insert_prefix_empty_is_identity`.  Directly: over seven trie shapes (empty, root value only, one line, branchy, wide, dangling, grafted), at the map root and at a non-root focus, `insert_prefix(&[])` leaves the trie untouched and returns exactly what the model's `focusNodeIsEmpty` rule predicts.  Same 56M-input A/B, again byte for byte identical. |
+| `skip:quarantined` | `graft_child_maps` (op 54), the only op it ever named, was un-quarantined when its bug was fixed.  The token outlived it as a definition with no call site on any of the three sides — the Rust one needed `#[allow(dead_code)]` to compile.  Removed rather than kept: a vocabulary entry nothing can emit invites the next reader to keep a live suppression alive by analogy with it. |
 
 Naming these turned up an ordering bug the bare token had hidden: for
 `restricting` the model tested ACT mode first and the harness tested the empty

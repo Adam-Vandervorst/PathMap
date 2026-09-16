@@ -65,7 +65,6 @@ agree exactly or every input with a skip diverges.
   is a function of node materialisation rather than trie state.
 * `skip:off-root-prune` — a prune on a write zipper not rooted at the map root,
   where the depth pruned is a function of internal node layout.
-* `skip:quarantined` — the op is disabled outright (op 54).
 
 Each is recorded in FINDINGS.md and commented at its site. -/
 
@@ -73,7 +72,6 @@ def skipAct : String := "skip:act"
 def skipK0 : String := "skip:k0"
 def skipEmptyFocus : String := "skip:empty-focus"
 def skipOffRootPrune : String := "skip:off-root-prune"
-def skipQuarantined : String := "skip:quarantined"
 
 /-! ## Rendering -/
 
