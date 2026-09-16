@@ -1993,6 +1993,16 @@ impl<V: Clone + Send + Sync + DistributiveLattice, A: Allocator, Cf: CoFree<V=V,
         let self_rec = self.rec().filter(|child| !child.as_tagged().node_is_empty());
         let rec = self_rec.psubtract(&other.rec());
         let val = self.val().psubtract(&other.val());
+        //An empty onward link beside a value carries nothing: the value already holds the
+        // location.  Dropping it when the value survives is not a change, but
+        // `combine_algebraic_results` sees a link go and would report `Element`.
+        if self_rec.is_none() && self.rec().is_some() {
+            if let (AlgebraicResult::None, AlgebraicResult::Identity(mask)) = (&rec, &val) {
+                if mask & SELF_IDENT > 0 {
+                    return AlgebraicResult::Identity(SELF_IDENT)
+                }
+            }
+        }
         self.combine_algebraic_results(other, rec, val)
     }
 }

@@ -4375,6 +4375,52 @@ mod tests {
         assert_eq!(vals(&dst), vec![(vec![0], 1), (vec![1], 3), (vec![2], 4)]);
     }
 
+    /// `subtract_into` into a byte node whose location holds a value *and* an empty onward link.
+    /// The link carries nothing, since the value already holds the location, so dropping it while
+    /// the value survives leaves the trie as it was and the status has to be `Identity`.  It used to
+    /// be `Element`.
+    #[test]
+    fn write_zipper_subtract_into_value_beside_an_empty_link_is_identity() {
+        let mut src = PathMap::<u64>::new();
+        for (p, v) in [(&[0u8, 0][..], 0), (&[0, 1], 0), (&[0, 3], 0), (&[1], 1)] { src.set_val_at(p, v); }
+
+        //These steps leave `dst` with the content of `src`, and an empty link beside the value at [1]
+        let mk_dst = || {
+            let mut dst = PathMap::<u64>::new();
+            let rz = src.read_zipper();
+            let mut wz = dst.write_zipper();
+            wz.join_into(&rz);
+            wz.insert_prefix(&[1u8]);
+            wz.meet_into(&rz, false);
+            wz.join_into(&rz);
+            drop(wz);
+            let link = dst.root().unwrap().as_tagged().node_get_child(&[1]).map(|(_, child)| child.as_tagged().node_is_empty());
+            assert_eq!(link, Some(true), "the layout this test needs");
+            dst
+        };
+        let locations = |m: &PathMap<u64>| {
+            let mut z = m.read_zipper();
+            let mut locs = vec![(z.path().to_vec(), z.val().copied())];
+            while z.to_next_step() { locs.push((z.path().to_vec(), z.val().copied())); }
+            locs
+        };
+
+        //Source {[0]:0, [1]:0, [3]:0}: the value at [1] differs, so nothing annihilates
+        let mut dst = mk_dst();
+        let before = locations(&dst);
+        let st = dst.write_zipper().subtract_into(&src.read_zipper_at_path(&[0u8]), false);
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(locations(&dst), before);
+
+        //An equal value annihilates, and the location goes with it
+        let mut dst = mk_dst();
+        let mut sub = PathMap::<u64>::new();
+        sub.set_val_at(&[1u8], 1);
+        let st = dst.write_zipper().subtract_into(&sub.read_zipper(), false);
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(locations(&dst), vec![(vec![], None), (vec![0], None), (vec![0, 0], Some(0)), (vec![0, 1], Some(0)), (vec![0, 3], Some(0))]);
+    }
+
     /// Tests how `subtract_into` handles dangling paths, including situations with extraneous empty nodes hanging around
     #[test]
     fn write_zipper_subtract_into_test2() {
