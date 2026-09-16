@@ -3519,6 +3519,23 @@ mod tests {
         assert_eq!(vals(&m), vec![(vec![7], 0)]);
     }
 
+    /// `LineListNode::drop_head_dyn` with both keys longer than `byte_cnt`: the shortened keys come
+    /// out in the opposite order ([0,0] from slot 0 and [0] from slot 1), so the slots are swapped
+    /// before `factor_prefix` merges them.  The merge joined the swapped slot 0 (the original
+    /// slot 1, the later k-path) on the left, so its value won the collision at [0,0].
+    #[test]
+    fn join_k_path_into_keeps_first_value_when_shortened_keys_reorder() {
+        let mut m = PathMap::<u64>::new();
+        m.set_val_at(&[3u8, 0, 0, 0], 173);
+        m.set_val_at(&[0u8], 0);
+        m.set_val_at(&[3u8, 1, 0, 0], 0);
+        m.set_val_at(&[3u8, 1, 0, 1, 2], 82);
+        m.set_val_at(&[0u8, 0, 2], 196);
+        m.set_val_at(&[0u8, 0, 3, 1], 38);
+        m.write_zipper().join_k_path_into(2, false);
+        assert_eq!(vals(&m), vec![(vec![0, 0], 173), (vec![0, 1, 2], 82), (vec![2], 196), (vec![3, 1], 38)]);
+    }
+
     #[test]
     fn slim_ptrs_test1() {
         let map = PathMap::<()>::new();

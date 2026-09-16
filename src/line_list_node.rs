@@ -1074,7 +1074,11 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     /// Ensures that a node is valid by combining an illegal shared prefix between the keys if there is one
     /// This is currently used by drop_head, because dropping a disjoint prefix may cause downstream paths
     /// to collide, and thus require merging
-    fn factor_prefix(&mut self) where V: Clone + Lattice {
+    ///
+    /// `slot1_first` makes slot 1 the left operand of the merge, so a colliding value is taken from
+    /// slot 1.  `drop_head_dyn` needs that when shortening the keys reversed their order: slot 1 then
+    /// holds the payload from the lexicographically first k-path, which must win the collision.
+    fn factor_prefix(&mut self, slot1_first: bool) where V: Clone + Lattice {
         let (key0, key1) = self.get_both_keys();
         let overlap = find_prefix_overlap(key0, key1);
         //Overlap of 1 is legal if and only if ONE OF the following two conditions are true:
@@ -1086,16 +1090,27 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 
         //If the overlap is illegal, split the prefix
         if overlap > 0 && !legal_overlap {
-            match merge_guts::<V, A, 0, 1>(overlap, key0, self, key1, self) {
+            let merged = if slot1_first {
+                merge_guts::<V, A, 1, 0>(overlap, key1, self, key0, self)
+            } else {
+                merge_guts::<V, A, 0, 1>(overlap, key0, self, key1, self)
+            };
+            match merged {
                 AlgebraicResult::Element((shared_key, merged_payload)) => {
                     let mut new_node = Self::new_in(self.alloc.clone());
                     unsafe{ new_node.set_payload_owned::<0>(shared_key, merged_payload) };
                     *self = new_node;
                 },
                 AlgebraicResult::Identity(mask) => {
-                    debug_assert!(mask & SELF_IDENT > 0);
+                    //SELF_IDENT names the left operand's slot, COUNTER_IDENT the right one's
+                    let left_slot_wins = mask & SELF_IDENT > 0;
+                    debug_assert!(left_slot_wins || mask & COUNTER_IDENT > 0);
                     let mut new_node = Self::new_in(self.alloc.clone());
-                    unsafe{ new_node.set_payload_owned::<0>(key0, self.clone_payload::<0>().unwrap()) };
+                    if left_slot_wins != slot1_first {
+                        unsafe{ new_node.set_payload_owned::<0>(key0, self.clone_payload::<0>().unwrap()) };
+                    } else {
+                        unsafe{ new_node.set_payload_owned::<0>(key1, self.clone_payload::<1>().unwrap()) };
+                    }
                     *self = new_node;
                 },
                 AlgebraicResult::None => {}
@@ -2820,7 +2835,8 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             let mut new_key0_len = key0_len-byte_cnt;
             let mut new_key1_len = key1_len-byte_cnt;
             //Make sure the new keys are in the correctly sorted order
-            if &key0[byte_cnt..] <= &key1[byte_cnt..] {
+            let reordered = &key0[byte_cnt..] > &key1[byte_cnt..];
+            if !reordered {
                 unsafe {
                     //Shorten key0
                     let base_ptr = temp_node.key_bytes.as_mut_ptr().cast::<u8>();
@@ -2854,7 +2870,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 core::mem::swap(&mut temp_node.val_or_child0, &mut temp_node.val_or_child1);
             }
             temp_node.header = Self::header0(slot0_child, new_key0_len) | Self::header1(slot1_child, new_key1_len);
-            temp_node.factor_prefix();
+            //If the keys were reordered, slot 1 now holds the original slot 0: the lexicographically
+            // first k-path, whose value must win any collision the prefix merge finds
+            temp_node.factor_prefix(reordered);
             debug_assert!(validate_node(&temp_node));
             return Some(TrieNodeODRc::new_in(temp_node, self.alloc.clone()))
         }
