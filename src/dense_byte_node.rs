@@ -552,10 +552,17 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     }
                 }
 
-                //If we ended up with a value or a link in the CF, insert it into a new node
+                //If we ended up with a value or a link in the CF, insert it into a new node.
+                // Otherwise the location is gone from the result -- including when `self` held
+                // only a dangling path here (an empty link, or a CoFree with neither), which the
+                // other node reaches and so does not survive the subtraction.  Either way the
+                // result is no longer `self`; leaving `is_identity` set here reported `Identity`
+                // for a node that had just lost a branch, and the caller kept the dangling path.
                 if new_cf.has_rec() || new_cf.has_val() {
                     new_node.mask.set_bit(key_byte);
                     new_node.values.push(new_cf);
+                } else {
+                    is_identity = false;
                 }
             } else {
                 new_node.mask.set_bit(key_byte);

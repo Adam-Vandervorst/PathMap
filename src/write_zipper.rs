@@ -3897,6 +3897,74 @@ mod tests {
         assert_eq!(m.path_exists_at(&[2u8]), false);
     }
 
+    /// Every existing location in `map` -- dangling paths included -- with its value, in
+    /// depth-first order
+    fn all_locations(map: &PathMap<u64>) -> Vec<(Vec<u8>, Option<u64>)> {
+        let mut rz = map.read_zipper();
+        let mut locations = vec![];
+        loop {
+            locations.push((rz.path().to_vec(), rz.val().cloned()));
+            if !rz.to_next_step() { break }
+        }
+        locations
+    }
+
+    /// A DenseByteNode subtracted by a node of another type (list or tiny) must drop a dangling
+    /// path the source reaches, and must not report `Identity` for having done so.  Covers both
+    /// shapes a dangling slot takes in a dense node: an empty onward link, and a CoFree holding
+    /// neither a link nor a value.
+    #[test]
+    fn write_zipper_subtract_into_dense_drops_reached_dangling_path() {
+        // Empty onward link at [2]; the source (a LineListNode) reaches [2]
+        let mut dst = PathMap::<u64>::new();
+        for b in [1u8, 3, 4] { dst.set_val_at(&[b], 1); }
+        dst.create_path(&[2u8]);
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[2u8, 0, 1], 246);
+        let mut wz = dst.write_zipper();
+        assert_eq!(wz.subtract_into(&src.read_zipper(), false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![(vec![], None), (vec![1], Some(1)), (vec![3], Some(1)), (vec![4], Some(1))]);
+
+        // A dangling [2] left by a meet that came to nothing, next to a value-and-link at [0]; the
+        // source is a TinyRefNode reaching [2]
+        let mut dst = PathMap::<u64>::new();
+        dst.set_val_at(&[2u8, 0, 0, 0, 0], 0);
+        dst.set_val_at(&[0u8, 0, 0, 0, 0], 0);
+        dst.set_val_at(&[0u8], 0);
+        let mut srcs = PathMap::<u64>::new();
+        srcs.set_val_at(&[1u8, 2, 0], 0);
+        let mut wz = dst.write_zipper();
+        wz.descend_to_byte(2);
+        let ra = srcs.read_zipper_at_path(&[1u8]);
+        let rb = srcs.read_zipper_at_path(&[1u8, 0]);
+        assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None);
+        wz.reset();
+        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[2u8]); probe.path_exists() }, true, "the meet should leave [2] dangling");
+        assert_eq!(wz.subtract_into(&ra, false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![
+            (vec![], None), (vec![0], Some(0)), (vec![0, 0], None), (vec![0, 0, 0], None),
+            (vec![0, 0, 0, 0], None), (vec![0, 0, 0, 0, 0], Some(0)),
+        ]);
+
+        // `graft_child_maps` of an empty map leaves a dangling [0] beside [1, 0]
+        let mut dst = PathMap::<u64>::new();
+        dst.set_val_at(&[], 0);
+        dst.set_val_at(&[0u8], 0);
+        dst.set_val_at(&[0u8, 0], 0);
+        dst.set_val_at(&[1u8, 0], 0);
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[2u8, 3, 0, 0], 0);
+        let mut wz = dst.write_zipper();
+        wz.graft_child_maps(ByteMask::from_iter([0u8]), vec![PathMap::new()], false);
+        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[0u8]); probe.path_exists() }, true, "the graft should leave [0] dangling");
+        let rz = src.read_zipper_at_path(&[2u8, 3]);
+        assert_eq!(wz.subtract_into(&rz, false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![(vec![], Some(0)), (vec![1], None), (vec![1, 0], Some(0))]);
+    }
+
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
     #[test]
     fn write_zipper_subtract_into_test1() {
