@@ -2269,9 +2269,22 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [WriteZipper::remove_unmasked_branches]
     pub fn remove_unmasked_branches(&mut self, mask: ByteMask, prune: bool) {
-        let mut focus_node = self.focus_stack.top_mut().unwrap();
         let node_key = self.key.node_key();
-        if node_key.len() > 0 {
+
+        //A dangling focus has no branches to filter; `get_child_mut` won't descend into it
+        let below_dangling_stub = node_key.len() > 0
+            && match self.focus_stack.top() {
+                Some(focus_node) => match focus_node.node_get_child(node_key) {
+                    Some((_consumed_bytes, child_node)) => child_node.is_empty(),
+                    None => false
+                },
+                None => false
+            };
+
+        let mut focus_node = self.focus_stack.top_mut().unwrap();
+        if below_dangling_stub {
+            //Nothing to do
+        } else if node_key.len() > 0 {
             match focus_node.node_get_child_mut(node_key) {
                 Some((consumed_bytes, child_node)) => {
                     if node_key.len() >= consumed_bytes {
@@ -6671,5 +6684,37 @@ mod tests {
             assert_eq!(wz.join_into_take(&mut src, false), AlgebraicStatus::Element);
         }
         assert_eq!(keys(&m), ["cx", "cy", "d"]);
+    }
+
+    /// `remove_unmasked_branches` at or below a dangling path does nothing
+    #[test]
+    fn write_zipper_test_remove_unmasked_branches_dangling_focus() {
+        //List node root: onward link at [0], dangling stub at [1, 0]
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([0u8], 0);
+        map.set_val_at([0u8, 0], 1);
+        assert!(map.create_path([1u8, 0]));
+
+        //Focus exactly on the dangling path
+        let mut wz = map.write_zipper_at_path(&[1u8, 0]);
+        assert!(wz.path_exists());
+        wz.remove_unmasked_branches(ByteMask::EMPTY, false);
+        assert!(wz.path_exists());
+        drop(wz);
+
+        //Focus below the dangling path
+        let mut wz = map.write_zipper_at_path(&[1u8, 0, 7]);
+        wz.remove_unmasked_branches(ByteMask::EMPTY, false);
+        drop(wz);
+
+        //Nothing may have changed
+        assert_eq!(map.val_at([0u8]), Some(&0));
+        assert_eq!(map.val_at([0u8, 0]), Some(&1));
+        assert_eq!(map.val_at([1u8, 0]), None);
+        let mut rz = map.read_zipper();
+        rz.descend_to([1u8, 0]);
+        assert!(rz.path_exists());
+        drop(rz);
+        assert_eq!(map.val_count(), 2);
     }
 }
