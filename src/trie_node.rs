@@ -688,6 +688,62 @@ pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, Merge
     AlgebraicResult::Element(merge_f(&mut result_payloads[..]))
 }
 
+/// Where `key` lands in `node`: follows the onward links that cover a strict prefix of `key`, and
+/// returns the node that holds the rest of the key, together with that rest (never empty)
+#[inline]
+pub(crate) fn meet_locate_key<'n, 'k, V: Clone + Send + Sync, A: Allocator>(mut node: TaggedNodeRef<'n, V, A>, mut key: &'k [u8]) -> (TaggedNodeRef<'n, V, A>, &'k [u8]) {
+    debug_assert!(key.len() > 0);
+    while let Some((consumed, child)) = node.node_get_child(key) {
+        if consumed >= key.len() {
+            break
+        }
+        node = child.as_tagged();
+        key = &key[consumed..];
+    }
+    (node, key)
+}
+
+/// The onward node exactly at `key` in `src`, if there is one
+#[inline]
+pub(crate) fn meet_src_child<'a, V: Clone + Send + Sync, A: Allocator>(src: Option<TaggedNodeRef<'a, V, A>>, key: &[u8]) -> Option<TaggedNodeRef<'a, V, A>> {
+    let (node, rest) = meet_locate_key(src?, key);
+    match node.node_get_child(rest) {
+        Some((consumed, child)) if consumed == rest.len() => Some(child.as_tagged()),
+        _ => None
+    }
+}
+
+/// The outcome of [node_drop_dangling]
+pub(crate) enum DropDangling<V: Clone + Send + Sync, A: Allocator> {
+    /// The node is kept as it is
+    Unchanged,
+    /// No value is left below the node's root
+    Empty,
+    /// The node with its dangling paths dropped
+    New(TrieNodeODRc<V, A>),
+}
+
+/// Drops the dangling paths below the root of `node`, keeping only the locations on the way to a
+/// value.  `src` is the node standing at the same location in the source of a pruned meet: a node
+/// shared with it is skipped rather than walked, so a dangling path inside a shared node survives.
+pub(crate) fn node_drop_dangling<V: Clone + Send + Sync, A: Allocator>(node: &TrieNodeODRc<V, A>, src: Option<TaggedNodeRef<V, A>>) -> DropDangling<V, A> {
+    let tagged = node.as_tagged();
+    if tagged.node_is_empty() {
+        return DropDangling::Empty
+    }
+    if let Some(src) = src {
+        if tagged.shared_node_id() == src.shared_node_id() {
+            return DropDangling::Unchanged
+        }
+    }
+    match tagged.tag() {
+        DENSE_BYTE_NODE_TAG => unsafe{ tagged.as_dense_unchecked() }.drop_dangling(src),
+        LINE_LIST_NODE_TAG => unsafe{ tagged.as_list_unchecked() }.drop_dangling(src),
+        CELL_BYTE_NODE_TAG => unsafe{ tagged.as_cell_unchecked() }.drop_dangling(src),
+        _ => unreachable!()
+    }
+}
+
 pub(crate) fn node_count_branches_recursive<V: Clone + Send + Sync, A: Allocator>(node: TaggedNodeRef<V, A>, key: &[u8]) -> usize {
     if key.len() == 0 {
         return node.count_branches(b"");

@@ -2537,6 +2537,56 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V,
 
 //NOTE: This *looks* like an impl of Quantale, but it isn't, so we can have `self` and
 // `other` be differently parameterized types
+impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> where Self: TrieNodeDowncast<V, A> {
+    /// See [node_drop_dangling]
+    pub(crate) fn drop_dangling(&self, src: Option<TaggedNodeRef<V, A>>) -> DropDangling<V, A> {
+        let mut new_node: Option<Self> = None;
+        for (idx, byte) in self.mask.iter().enumerate() {
+            let cf = unsafe{ self.values.get_unchecked(idx) };
+            let rec = match cf.rec() {
+                Some(child) => node_drop_dangling(child, meet_src_child(src, &[byte])),
+                None => DropDangling::Empty,
+            };
+            let unchanged = match (&rec, cf.rec()) {
+                (DropDangling::Unchanged, _) => true,
+                (DropDangling::Empty, None) => cf.has_val(),
+                _ => false,
+            };
+            if unchanged && new_node.is_none() {
+                continue
+            }
+            let new_node = new_node.get_or_insert_with(|| {
+                let mut node = Self::with_capacity_in(self.values.len(), self.alloc.clone());
+                for (prev_idx, prev_byte) in self.mask.iter().enumerate().take(idx) {
+                    node.set_cf(prev_byte, unsafe{ self.values.get_unchecked(prev_idx) }.rec().cloned(), unsafe{ self.values.get_unchecked(prev_idx) }.val().cloned());
+                }
+                node
+            });
+            let new_rec = match rec {
+                DropDangling::Unchanged => cf.rec().cloned(),
+                DropDangling::Empty => None,
+                DropDangling::New(node) => Some(node),
+            };
+            if new_rec.is_some() || cf.has_val() {
+                new_node.set_cf(byte, new_rec, cf.val().cloned());
+            }
+        }
+        match new_node {
+            None => DropDangling::Unchanged,
+            Some(node) if node.values.len() == 0 => DropDangling::Empty,
+            Some(node) => DropDangling::New(TrieNodeODRc::new_in(node, self.alloc.clone())),
+        }
+    }
+    fn set_cf(&mut self, byte: u8, rec: Option<TrieNodeODRc<V, A>>, val: Option<V>) {
+        if let Some(rec) = rec {
+            self.set_child(byte, rec);
+        }
+        if let Some(val) = val {
+            self.set_val(byte, val);
+        }
+    }
+}
+
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> {
     fn prestrict<OtherCf: CoFree<V=V, A=A>>(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> where Self: Sized {
         // Iterate the overlap mask directly. Slot indexes are recovered with

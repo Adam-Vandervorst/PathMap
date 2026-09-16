@@ -3040,6 +3040,49 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         })
     }
 
+    /// See [node_drop_dangling]
+    pub(crate) fn drop_dangling(&self, src: Option<TaggedNodeRef<V, A>>) -> DropDangling<V, A> {
+        let (key0, key1) = self.get_both_keys();
+        let slot_result = |key: &[u8], is_child: bool, child: fn(&Self) -> &TrieNodeODRc<V, A>| {
+            if is_child {
+                node_drop_dangling(child(self), meet_src_child(src, key))
+            } else {
+                DropDangling::Unchanged
+            }
+        };
+        let result0 = if self.is_used::<0>() {
+            slot_result(key0, self.is_child_ptr::<0>(), |node| unsafe{ node.child_in_slot::<0>() })
+        } else {
+            DropDangling::Empty
+        };
+        let result1 = if self.is_used::<1>() {
+            slot_result(key1, self.is_child_ptr::<1>(), |node| unsafe{ node.child_in_slot::<1>() })
+        } else {
+            DropDangling::Empty
+        };
+        let is_unchanged = |result: &DropDangling<V, A>, used: bool| matches!(result, DropDangling::Unchanged) || (!used && matches!(result, DropDangling::Empty));
+        if is_unchanged(&result0, self.is_used::<0>()) && is_unchanged(&result1, self.is_used::<1>()) {
+            return DropDangling::Unchanged
+        }
+        let payload = |result: DropDangling<V, A>, slot: usize| match result {
+            DropDangling::Unchanged => if slot == 0 { self.clone_payload::<0>() } else { self.clone_payload::<1>() },
+            DropDangling::Empty => None,
+            DropDangling::New(node) => Some(ValOrChild::Child(node)),
+        };
+        let mut new_node = Self::new_in(self.alloc.clone());
+        match (payload(result0, 0), payload(result1, 1)) {
+            (Some(payload0), Some(payload1)) => {
+                unsafe{ new_node.set_payload_owned::<0>(key0, payload0); }
+                unsafe{ new_node.set_payload_owned::<1>(key1, payload1); }
+            },
+            (Some(payload), None) => unsafe{ new_node.set_payload_owned::<0>(key0, payload); },
+            (None, Some(payload)) => unsafe{ new_node.set_payload_owned::<0>(key1, payload); },
+            (None, None) => return DropDangling::Empty,
+        }
+        debug_assert!(validate_node(&new_node));
+        DropDangling::New(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
+    }
+
     /// Part of the implementation of methods the remove subtries from a node
     fn remove_subtries(&mut self, remove_0: bool, remove_1: bool, key0_starts_with: bool, prune: bool, key_len: usize) {
         //NOTE: the order here is important because removing slot_0 first might shift the

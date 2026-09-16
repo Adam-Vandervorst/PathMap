@@ -1973,8 +1973,21 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         } else {
             PathMap::new_in(self.alloc.clone())
         };
+        //`prune` drops the dangling paths from the meet; the focus itself is never removed
+        let temp_map = if prune {
+            let alloc = temp_map.alloc.clone();
+            let (root, root_val) = temp_map.into_root();
+            let root = root.and_then(|root| match node_drop_dangling(&root, None) {
+                DropDangling::Unchanged => Some(root),
+                DropDangling::Empty => None,
+                DropDangling::New(new_root) => Some(new_root),
+            });
+            PathMap::new_with_root_in(root, root_val, alloc)
+        } else {
+            temp_map
+        };
         if temp_map.is_empty() {
-            self.remove_branches(prune);
+            self.remove_branches(false);
             false
         } else {
             self.graft_map(temp_map);
@@ -2046,6 +2059,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::meet_into]
     pub fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice {
+        //The focus is never removed, with or without `prune`: only what is below it can change,
+        // along with the focus value
         let src_root_val = read_zipper.val();
         #[cfg(not(feature = "graft_root_vals"))]
         let _ = src_root_val;
@@ -2054,60 +2069,77 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             (Some(self_val), Some(src_val)) => {
                 let new_status = match self_val.pmeet(src_val) {
                     AlgebraicResult::Element(new_val) => {self.set_val(new_val); AlgebraicStatus::Element },
-                    AlgebraicResult::None => {self.remove_val(prune); AlgebraicStatus::None },
+                    AlgebraicResult::None => {self.remove_val(false); AlgebraicStatus::None },
                     AlgebraicResult::Identity(_) => { AlgebraicStatus::Identity }
                 };
                 (new_status, false)
             },
             (None, Some(_)) => { (AlgebraicStatus::None, true) },
-            (Some(_), None) => { self.remove_val(prune); (AlgebraicStatus::None, false) },
+            (Some(_), None) => { self.remove_val(false); (AlgebraicStatus::None, false) },
             (None, None) => { (AlgebraicStatus::None, true) },
         };
 
-        let node_was_none;
-        let node_status = match self.get_focus().try_as_tagged() {
-            Some(self_node) => {
-                if !self_node.node_is_empty() {
-                    node_was_none = false;
-                    let src = read_zipper.get_focus();
-                    if src.is_none() {
-                        self.graft_internal(None);
-                        if prune {
-                            self.prune_path();
-                        }
-                        AlgebraicStatus::None
-                    } else {
-                        match self_node.pmeet_dyn(src.as_tagged()) {
-                            AlgebraicResult::Element(intersection) => {
-                                self.graft_internal(Some(intersection));
-                                AlgebraicStatus::Element
-                            },
-                            AlgebraicResult::None => {
-                                self.graft_internal(None);
-                                if prune {
-                                    self.prune_path();
-                                }
-                                AlgebraicStatus::None
-                            },
-                            AlgebraicResult::Identity(mask) => {
-                                if mask & SELF_IDENT > 0 {
-                                    AlgebraicStatus::Identity
-                                } else {
-                                    debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be self or other
-                                    self.graft_internal(Some(src.into_option().unwrap()));
-                                    AlgebraicStatus::Element
-                                }
-                            },
-                        }
-                    }
-                } else {
-                    node_was_none = true;
-                    AlgebraicStatus::None
+        let self_focus = self.get_focus();
+        let node_was_none = match self_focus.try_as_tagged() {
+            Some(self_node) => self_node.node_is_empty(),
+            None => true
+        };
+        let node_status = if node_was_none {
+            AlgebraicStatus::None
+        } else {
+            let src = read_zipper.get_focus();
+            let result = match src.try_as_tagged() {
+                Some(src_node) => self_focus.as_tagged().pmeet_dyn(src_node),
+                None => AlgebraicResult::None,
+            };
+            //With `prune`, only the locations on the way to a value are kept.  A node shared with the
+            // source may be left as it is.
+            let drop_dangling = |node: TrieNodeODRc<V, A>, src: Option<TaggedNodeRef<V, A>>| -> Option<TrieNodeODRc<V, A>> {
+                match node_drop_dangling(&node, src) {
+                    DropDangling::Unchanged => Some(node),
+                    DropDangling::Empty => None,
+                    DropDangling::New(new_node) => Some(new_node),
                 }
-            },
-            None => {
-                node_was_none = true;
-                AlgebraicStatus::None
+            };
+            let (unchanged, new_node) = match result {
+                AlgebraicResult::Element(intersection) => {
+                    (false, if prune { drop_dangling(intersection, src.try_as_tagged()) } else { Some(intersection) })
+                },
+                AlgebraicResult::None => (false, None),
+                AlgebraicResult::Identity(mask) => {
+                    if mask & SELF_IDENT > 0 {
+                        if prune {
+                            let self_rc = self_focus.into_option().unwrap();
+                            match node_drop_dangling(&self_rc, src.try_as_tagged()) {
+                                DropDangling::Unchanged => (true, None),
+                                DropDangling::Empty => (false, None),
+                                DropDangling::New(new_node) => (false, Some(new_node)),
+                            }
+                        } else {
+                            (true, None)
+                        }
+                    } else {
+                        debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be self or other
+                        //The source's own node is shared with the source, so pruning may skip it
+                        let src_is_shared = matches!(src.0, AbstractNodeRef::BorrowedRc(_));
+                        let src_rc = src.into_option().unwrap();
+                        (false, if prune && !src_is_shared { drop_dangling(src_rc, None) } else { Some(src_rc) })
+                    }
+                },
+            };
+            if unchanged {
+                AlgebraicStatus::Identity
+            } else {
+                match new_node {
+                    Some(new_node) => {
+                        self.graft_internal(Some(new_node));
+                        AlgebraicStatus::Element
+                    },
+                    None => {
+                        self.graft_internal(None);
+                        AlgebraicStatus::None
+                    }
+                }
             }
         };
 
@@ -2116,6 +2148,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         #[cfg(feature = "graft_root_vals")]
         return node_status.merge(val_status, node_was_none, val_was_none)
     }
+
     /// See [WriteZipper::meet_2]
     pub fn meet_2<ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice {
         let a_focus = rz_a.get_focus();
@@ -3772,7 +3805,9 @@ mod tests {
         assert_eq!(btm.path_exists_at(&[1, 255, 0]), true);
         assert_eq!(btm.path_exists_at(&[0, 255, 0]), true);
 
-        // Test 3: meet from a higher level with all dangling paths and prune=true
+        // Test 3: meet from a higher level with all dangling paths and prune=true.  With prune, only
+        // the locations on the way to a value survive, so the dangling path both sides have goes
+        // too, leaving nothing below the focus; the focus itself stays.
         let mut btm2: PathMap<()> = PathMap::new();
         btm2.create_path(&[0, 255, 0]);
         btm2.create_path(&[0, 255, 1]);
@@ -3783,16 +3818,35 @@ mod tests {
         let mut wz = zh2.write_zipper_at_exclusive_path(&[0]).unwrap();
         let rz = zh2.read_zipper_at_path(&[1]).unwrap();
         let alg_result = wz.meet_into(&rz, true);
-        assert_eq!(alg_result, AlgebraicStatus::Element);
+        assert_eq!(alg_result, AlgebraicStatus::None);
         drop(wz);
         drop(rz);
         drop(zh2);
 
         // Verify the meet operation did what it should have
         assert_eq!(btm2.path_exists_at(&[1, 255, 0]), true);
-        assert_eq!(btm2.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm2.path_exists_at(&[0]), true);
+        assert_eq!(btm2.path_exists_at(&[0, 255]), false);
         assert_eq!(btm2.path_exists_at(&[0, 200, 5]), false);
         assert_eq!(btm2.path_exists_at(&[0, 255, 1]), false);
+
+        // Test 4: the same without prune keeps the path both sides have, and only that
+        let mut btm3: PathMap<()> = PathMap::new();
+        btm3.create_path(&[0, 255, 0]);
+        btm3.create_path(&[0, 255, 1]);
+        btm3.create_path(&[0, 200, 5]);
+        btm3.create_path(&[1, 255, 0]);
+        let zh3 = btm3.zipper_head();
+
+        let mut wz = zh3.write_zipper_at_exclusive_path(&[0]).unwrap();
+        let rz = zh3.read_zipper_at_path(&[1]).unwrap();
+        assert_eq!(wz.meet_into(&rz, false), AlgebraicStatus::Element);
+        drop(wz);
+        drop(rz);
+        drop(zh3);
+        assert_eq!(btm3.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm3.path_exists_at(&[0, 200]), false);
+        assert_eq!(btm3.path_exists_at(&[0, 255, 1]), false);
     }
 
     /// Every existing location in `map` -- dangling paths included -- with its value, in
@@ -4072,6 +4126,69 @@ mod tests {
                 assert_eq!(all_locations(&dst), bare);
             }
         }
+    }
+
+    /// `meet_into` never removes its focus: not when the focus value goes because the source has
+    /// none, and not when nothing is left below it, with or without `prune`.  `prune` drops only the
+    /// dangling paths below the focus.
+    #[test]
+    fn write_zipper_meet_into_keeps_focus() {
+        type Locations = Vec<(Vec<u8>, Option<u64>)>;
+        let dst = || { let mut m = PathMap::<u64>::new(); m.set_val_at(&[5u8], 1); m.set_val_at(&[5u8, 0], 2); m.set_val_at(&[9u8], 9); m };
+        let src = || { let mut m = PathMap::<u64>::new(); m.set_val_at(&[5u8, 1], 3); m };
+        let focus_left: Locations = vec![(vec![], None), (vec![5], None), (vec![9], Some(9))];
+        for prune in [false, true] {
+            let mut d = dst();
+            let s = src();
+            assert_eq!(d.write_zipper_at_path(&[5u8]).meet_into(&s.read_zipper_at_path(&[5u8]), prune), AlgebraicStatus::None, "prune = {prune}");
+            assert_eq!(all_locations(&d), focus_left, "prune = {prune}");
+        }
+
+        // The source's focus value is gone, but a dangling path both sides have survives unless pruned
+        let dst = || { let mut m = PathMap::<u64>::new(); m.set_val_at(&[5u8], 1); m.create_path(&[5u8, 0, 0]); m.set_val_at(&[9u8], 9); m };
+        let src = || { let mut m = PathMap::<u64>::new(); m.create_path(&[5u8, 0, 0]); m };
+        let mut d = dst();
+        assert_eq!(d.write_zipper_at_path(&[5u8]).meet_into(&src().read_zipper_at_path(&[5u8]), false), AlgebraicStatus::Element);
+        assert_eq!(all_locations(&d), vec![(vec![], None), (vec![5], None), (vec![5, 0], None), (vec![5, 0, 0], None), (vec![9], Some(9))]);
+        let mut d = dst();
+        assert_eq!(d.write_zipper_at_path(&[5u8]).meet_into(&src().read_zipper_at_path(&[5u8]), true), AlgebraicStatus::None);
+        assert_eq!(all_locations(&d), focus_left);
+    }
+
+    /// `meet_k_path_into` meets the subtries `k` bytes below the focus, dangling paths included, and
+    /// with `prune` drops the dangling paths from the result.  The focus stays either way.
+    #[test]
+    fn write_zipper_meet_k_path_into_dangling_paths() {
+        let build = || {
+            let mut m = PathMap::<u64>::new();
+            m.set_val_at(&[8u8], 8);
+            m.set_val_at(&[9u8, 1, 2], 5);
+            m.create_path(&[9u8, 1, 3]);
+            m.set_val_at(&[9u8, 2, 2], 6);
+            m.create_path(&[9u8, 2, 3]);
+            m
+        };
+        let mut m = build();
+        assert_eq!(m.write_zipper_at_path(&[9u8]).meet_k_path_into(1, false), true);
+        assert_eq!(all_locations(&m), vec![(vec![], None), (vec![8], Some(8)), (vec![9], None), (vec![9, 2], Some(5)), (vec![9, 3], None)]);
+        let mut m = build();
+        assert_eq!(m.write_zipper_at_path(&[9u8]).meet_k_path_into(1, true), true);
+        assert_eq!(all_locations(&m), vec![(vec![], None), (vec![8], Some(8)), (vec![9], None), (vec![9, 2], Some(5))]);
+
+        // Only a dangling path in common: kept without prune, and with prune nothing is left below
+        let build = || {
+            let mut m = PathMap::<u64>::new();
+            m.set_val_at(&[8u8], 8);
+            m.create_path(&[9u8, 1, 3]);
+            m.create_path(&[9u8, 2, 3]);
+            m
+        };
+        let mut m = build();
+        assert_eq!(m.write_zipper_at_path(&[9u8]).meet_k_path_into(1, false), true);
+        assert_eq!(all_locations(&m), vec![(vec![], None), (vec![8], Some(8)), (vec![9], None), (vec![9, 3], None)]);
+        let mut m = build();
+        assert_eq!(m.write_zipper_at_path(&[9u8]).meet_k_path_into(1, true), false);
+        assert_eq!(all_locations(&m), vec![(vec![], None), (vec![8], Some(8)), (vec![9], None)]);
     }
 
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
