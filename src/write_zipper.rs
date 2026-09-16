@@ -3857,6 +3857,121 @@ mod tests {
         assert_eq!(all_locations(&dst), vec![(vec![], Some(0)), (vec![1], None), (vec![1, 0], Some(0))]);
     }
 
+    /// The meet rule, dangling paths included.
+    ///
+    /// With `prune = false` a path exists in the result exactly when it exists in both operands, and
+    /// a value exists exactly where both hold one, as the meet of the two.  So a meet with an equal
+    /// trie -- a clone that shares its nodes, or an independent copy -- changes nothing and reports
+    /// `Identity`, whatever node types the two sides use.
+    ///
+    /// With `prune = true` the values are the same, but only the locations on the way to a value
+    /// survive: every dangling path is dropped, including one both operands had -- except that a node
+    /// shared with the source may be skipped rather than walked, so a dangling path inside it may
+    /// survive.  The focus itself is never removed.
+    #[test]
+    fn write_zipper_meet_into_dangling_paths() {
+        type Build = fn() -> PathMap<u64>;
+        type Locations = Vec<(Vec<u8>, Option<u64>)>;
+
+        // meet({[0,0]:-}, {[0,1]:-}) -> {[0]:-}, and with prune nothing but the root
+        let a = || { let mut m = PathMap::<u64>::new(); m.create_path(&[0u8, 0]); m };
+        let b = || { let mut m = PathMap::<u64>::new(); m.create_path(&[0u8, 1]); m };
+        assert_eq!(all_locations(&a().meet(&b())), vec![(vec![], None), (vec![0], None)]);
+        let mut d = a();
+        assert_eq!(d.write_zipper().meet_into(&b().read_zipper(), false), AlgebraicStatus::Element);
+        assert_eq!(all_locations(&d), vec![(vec![], None), (vec![0], None)]);
+        let mut d = a();
+        assert_eq!(d.write_zipper().meet_into(&b().read_zipper(), true), AlgebraicStatus::None);
+        assert_eq!(all_locations(&d), vec![(vec![], None)]);
+
+        // A dangling path met against a value keeps the path without the value, in both orders
+        let left = || { let mut m = PathMap::<u64>::new(); m.create_path([7u8, 1, 0]); m };
+        let right = || { let mut m = PathMap::<u64>::new(); m.set_val_at([7u8, 1, 0], 10); m.set_val_at([7u8, 2, 0], 20); m.create_path([7u8, 3]); m };
+        let expected: Locations = vec![(vec![], None), (vec![7], None), (vec![7, 1], None), (vec![7, 1, 0], None)];
+        assert_eq!(all_locations(&left().meet(&right())), expected);
+        assert_eq!(all_locations(&right().meet(&left())), expected);
+
+        // Meeting an equal trie: unchanged without prune, dangling paths dropped with it
+        let equal_cases: [(&str, Build, Locations); 3] = [
+            ("create_path", || { let mut m = PathMap::new(); m.create_path(&[1u8]); m }, vec![(vec![], None)]),
+            ("value removed", || { let mut m = PathMap::new(); m.set_val_at(&[1u8], 5); m.remove_val_at(&[1u8], false); m }, vec![(vec![], None)]),
+            ("dangling beside values", || {
+                let mut m = PathMap::new();
+                m.set_val_at(&[1u8, 2], 5);
+                m.set_val_at(&[1u8, 4, 4, 4], 5);
+                m.set_val_at(&[9u8], 5);
+                m.write_zipper_at_path(&[1u8, 4]).remove_branches(false);
+                m
+            }, vec![(vec![], None), (vec![1], None), (vec![1, 2], Some(5)), (vec![9], Some(5))]),
+        ];
+        for (name, build, pruned) in equal_cases {
+            let expected = all_locations(&build());
+            let mut shared = build();
+            let clone = shared.clone();
+            assert_eq!(shared.write_zipper().meet_into(&clone.read_zipper(), false), AlgebraicStatus::Identity, "{name}: meet with a clone");
+            assert_eq!(all_locations(&shared), expected, "{name}: meet with a clone");
+            let mut unshared = build();
+            assert_eq!(unshared.write_zipper().meet_into(&build().read_zipper(), false), AlgebraicStatus::Identity, "{name}: meet with a copy");
+            assert_eq!(all_locations(&unshared), expected, "{name}: meet with a copy");
+            assert_eq!(all_locations(&build().meet(&build())), expected, "{name}: PathMap::meet");
+
+            // With a clone every node is shared, so pruning may skip all of it: the result lies
+            // between fully pruned and not pruned at all, with the values unchanged
+            let mut shared = build();
+            let clone = shared.clone();
+            shared.write_zipper().meet_into(&clone.read_zipper(), true);
+            let got = all_locations(&shared);
+            assert!(pruned.iter().all(|l| got.contains(l)) && got.iter().all(|l| expected.contains(l)),
+                    "{name}: pruned meet with a clone: {got:?} is not between {pruned:?} and {expected:?}");
+            let mut unshared = build();
+            unshared.write_zipper().meet_into(&build().read_zipper(), true);
+            assert_eq!(all_locations(&unshared), pruned, "{name}: pruned meet with a copy");
+        }
+
+        // Pruning never removes the focus, below the root or at a zipper's root
+        let dst = || { let mut m = PathMap::<u64>::new(); m.set_val_at(&[9u8], 9); m.create_path(&[5u8, 0]); m };
+        let src = || { let mut m = PathMap::<u64>::new(); m.create_path(&[5u8, 1]); m };
+        let mut d = dst();
+        let s = src();
+        { let mut wz = d.write_zipper(); wz.descend_to(&[5u8]); assert_eq!(wz.meet_into(&s.read_zipper_at_path(&[5u8]), true), AlgebraicStatus::None); }
+        assert_eq!(all_locations(&d), vec![(vec![], None), (vec![5], None), (vec![9], Some(9))]);
+        let mut d = dst();
+        { let mut wz = d.write_zipper_at_path(&[5u8]); assert_eq!(wz.meet_into(&s.read_zipper_at_path(&[5u8]), true), AlgebraicStatus::None); }
+        assert_eq!(all_locations(&d), vec![(vec![], None), (vec![5], None), (vec![9], Some(9))]);
+
+        // A dangling [2] in the destination, against sources of different node types
+        let dense_dst: Build = || { let mut d = PathMap::new(); for b in [1u8, 3, 4] { d.set_val_at(&[b], 1); } d.create_path(&[2u8]); d };
+        let list_dst: Build = || { let mut d = PathMap::new(); d.set_val_at(&[1u8], 1); d.create_path(&[2u8]); d };
+        let list_src_below_2: Build = || { let mut s = PathMap::new(); s.set_val_at(&[1u8], 1); s.set_val_at(&[2u8, 0, 1], 246); s };
+        let dense_src_below_2: Build = || { let mut s = PathMap::new(); for b in [1u8, 3, 4] { s.set_val_at(&[b], 1); } s.set_val_at(&[2u8, 0, 1], 246); s };
+        let dense_src_without_2: Build = || { let mut s = PathMap::new(); for b in [1u8, 3, 4] { s.set_val_at(&[b], 1); } s };
+        let dense_all: Locations = vec![(vec![], None), (vec![1], Some(1)), (vec![2], None), (vec![3], Some(1)), (vec![4], Some(1))];
+        let cases: [(&str, Build, Build, AlgebraicStatus, Locations); 6] = [
+            ("list dst, list src with [2]", list_dst, list_src_below_2, AlgebraicStatus::Identity,
+             vec![(vec![], None), (vec![1], Some(1)), (vec![2], None)]),
+            ("list dst, list src dangling at [2]", list_dst, list_dst, AlgebraicStatus::Identity,
+             vec![(vec![], None), (vec![1], Some(1)), (vec![2], None)]),
+            ("dense dst, dense src with [2]", dense_dst, dense_src_below_2, AlgebraicStatus::Identity, dense_all.clone()),
+            ("dense dst, dense src dangling at [2]", dense_dst, dense_dst, AlgebraicStatus::Identity, dense_all),
+            ("dense dst, list src with [2]", dense_dst, list_src_below_2, AlgebraicStatus::Element,
+             vec![(vec![], None), (vec![1], Some(1)), (vec![2], None)]),
+            ("dense dst, src without [2]", dense_dst, dense_src_without_2, AlgebraicStatus::Element,
+             vec![(vec![], None), (vec![1], Some(1)), (vec![3], Some(1)), (vec![4], Some(1))]),
+        ];
+        let mut failures = vec![];
+        for (name, dst, src, status, expected) in cases {
+            let mut d = dst();
+            let s = src();
+            let st = d.write_zipper().meet_into(&s.read_zipper(), false);
+            let got = all_locations(&d);
+            let whole = all_locations(&dst().meet(&src()));
+            if st != status || got != expected || whole != expected {
+                failures.push(format!("{name}: meet_into {st:?} {got:?}, PathMap::meet {whole:?}; expected {status:?} {expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
     #[test]
     fn write_zipper_subtract_into_test1() {
