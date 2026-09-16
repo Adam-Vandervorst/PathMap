@@ -535,9 +535,10 @@ fn step(s: &mut St, d: &mut Dec) -> Option<()> {
             if s.act {
                 s.emit("restrict", SKIP_ACT);
             } else {
-                let leaky = s.wz.focus_node_is_empty();
+                // Formerly masked to `?` at an empty focus (FINDINGS.md #8);
+                // the crate's status tracks the spec, so it is compared.
                 let st = s.wz.restrict(&OPS, &s.rz);
-                let ret = if leaky { "?".to_string() } else { show_status(st) };
+                let ret = show_status(st);
                 s.emit("restrict", &ret);
             }
         }

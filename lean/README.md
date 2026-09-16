@@ -359,11 +359,20 @@ the harness's order.
 `k_path_internal` carries iteration state and `pathmap`'s own debug assertions
 flag calling it cold.
 
-Five return values are compared as `?` when the focus has no descendants
-(`remove_branches`, `join_map_into`, `restrict`, `restricting`, `take_map`):
-they report on whether an empty node happens to be materialised at the focus,
-which is representation state rather than trie state.  The *effects* are still
-compared in full.
+Some return values are compared as `?` when the focus has no descendants
+(`remove_branches`, `join_map_into`, `take_map`, and `join_k_path_into` on its
+result): they report on whether an empty node happens to be materialised at the
+focus, which is representation state rather than trie state.  The *effects* are
+still compared in full.  Each was re-tested by unmasking it alone and re-running
+the sweeps; `remove_branches`, `join_map_into` and `take_map` diverge on roughly
+one input in eight the moment the mask comes off, which is what keeps them.
+
+`restrict` was on that list and is not any more.  Unmasked, its status matched
+the specification over the full 48M-input crate-mode sweep (it is `skip:act` in
+ACT mode, so ACT does not exercise it), and the mask fires on about seven of
+every eight calls, so that is 30M-odd compared statuses rather than a branch
+that never runs.  That is evidence the leak does not reach `restrict`, not a
+proof that it cannot.
 
 ## The blind-zipper contract
 

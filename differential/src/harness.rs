@@ -162,9 +162,9 @@ pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 /// Does the focus have no descendants at all?
 ///
 /// Several return values (`remove_branches`, `restricting`, `join_map_into`,
-/// `take_map`, `restrict`) hinge on whether an *empty node* happens to be
-/// materialised at the focus rather than on the logical state, so the harness
-/// masks them here.  See lean/README.md.
+/// `take_map`) hinge on whether an *empty node* happens to be materialised at
+/// the focus rather than on the logical state, so the harness masks them here.
+/// `restrict` used to be in that list and no longer is.  See lean/README.md.
 pub fn focus_node_empty<Z: Zipper>(z: &Z) -> bool {
     z.child_count() == 0
 }
@@ -745,14 +745,11 @@ pub fn run_ops<R: ReadSource>(
                     )
                 }
                 40 => {
-                    let leaky = focus_node_empty(&wz);
+                    // The status used to be masked to `?` at a focus with
+                    // nothing below it (FINDINGS.md #8).  No longer: it tracks
+                    // the spec over the whole sweep.
                     let st = (*rz).do_restrict(&mut wz);
-                    let s = if leaky && st.is_some() {
-                        "?".to_string()
-                    } else {
-                        show_status_opt(st)
-                    };
-                    ("restrict", s)
+                    ("restrict", show_status_opt(st))
                 }
                 41 => {
                     // Skipped when either side has nothing below its focus; see

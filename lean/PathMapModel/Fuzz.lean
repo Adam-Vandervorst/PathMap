@@ -410,10 +410,13 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit { s with wz := z } "subtract_into" (toString st), d)
   | 40 => do if s.act then some (emit s "restrict" skipAct, d) else
              do
-               let leaky := s.wz.focusNodeIsEmpty
+               -- The status used to be masked to `?` at a focus with nothing
+               -- below it, as one of the node-materialisation leaks in
+               -- FINDINGS.md #8.  It is no longer: over 48M inputs, of which
+               -- roughly seven in eight reach this op with an empty focus, the
+               -- crate's status matches the spec every time.
                let (st, z) := s.wz.restrict ops s.rz
-               some (emit { s with wz := z } "restrict"
-                 (if leaky then "?" else toString st), d)
+               some (emit { s with wz := z } "restrict" (toString st), d)
              -- Skipped, not merely masked, when either side has nothing below
              -- its focus: there `restricting` branches on whether an empty node
              -- happens to be materialised, and the two branches differ in
