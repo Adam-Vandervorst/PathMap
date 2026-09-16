@@ -1323,8 +1323,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 self.pjoin(other_byte_node).map(|new_node| TrieNodeODRc::new_in(new_node, self.alloc.clone()))
             },
             TINY_REF_NODE_TAG => {
+                //Expand the tiny node and keep `self` on the left, so the identity mask stays ours
                 let tiny_node = unsafe{ other.as_tiny_unchecked() };
-                tiny_node.pjoin_dyn(self.as_tagged())
+                match tiny_node.into_full() {
+                    Some(full_node) => self.pjoin_dyn(full_node.as_tagged()),
+                    None => AlgebraicResult::Identity(SELF_IDENT),
+                }
             }
             EMPTY_NODE_TAG => {
                 AlgebraicResult::Identity(SELF_IDENT)
