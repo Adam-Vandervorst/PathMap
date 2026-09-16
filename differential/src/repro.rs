@@ -172,8 +172,8 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             27 => { let v = g!(d.u8()) as u64; format!("wz.set_val({v});") }
             28 => { let _pr = g!(d.boolean()); "wz.remove_val(false);".to_string() }
             29 => "wz.create_path();".to_string(),
-            30 => "wz.prune_path();".to_string(),
-            31 => "wz.prune_ascend();".to_string(),
+            30 => if r0.is_empty() { "wz.prune_path();".to_string() } else { "// prune_path off the map root: skipped by the harness".to_string() },
+            31 => if r0.is_empty() { "wz.prune_ascend();".to_string() } else { "// prune_ascend off the map root: skipped by the harness".to_string() },
             32 => { let _pr = g!(d.boolean()); "wz.remove_branches(false);".to_string() }
             33 => { let n = g!(d.modn(4)); let m = g!(d.path_n(n)); let _pr = g!(d.boolean());
                     format!("wz.remove_unmasked_branches(ByteMask::from_iter({}.iter().copied()), false);", rs_mask(&m)) }
@@ -185,7 +185,7 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             38 => { let _pr = g!(d.boolean()); "wz.meet_into(&rz, false);".to_string() }
             39 => { let _pr = g!(d.boolean()); "wz.subtract_into(&rz, false);".to_string() }
             40 => "wz.restrict(&rz);".to_string(),
-            41 => "wz.restricting(&rz);".to_string(),
+            41 => "if wz.child_count() != 0 && rz.child_count() != 0 { wz.restricting(&rz); }".to_string(),
             42 => { let k = g!(d.modn(4)); let _pr = g!(d.boolean());
                     if k == 0 { "// join_k_path_into(0): skipped by the harness".to_string() }
                     else { format!("wz.join_k_path_into({k}, false);") } }
@@ -206,7 +206,7 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             50 => { let v = g!(d.u8()) as u64; format!("wz.get_val_or_set_mut_with(|| {v});") }
             51 => { let t = g!(d.modn(2)); let p = g!(d.path(6));
                     format!("{{ {z}.val(); {z}.val_at({p}); }}", z = z!(t), p = rs_bytes(&p)) }
-            52 => "rz.to_next_val();  // to_next_get_val".to_string(),
+            52 => "rz.to_next_get_val();".to_string(),
             53 => { let n = g!(d.modn(4)); let m = g!(d.path_n(n)); let ru = g!(d.boolean());
                     format!("wz.graft_masked_branches(&rz, ByteMask::from_iter({}.iter().copied()), {ru});", rs_mask(&m)) }
             // As `do_graft_child_maps`: fed the source's own child subtries under the mask.
@@ -215,8 +215,7 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                              let maps: Vec<PathMap<u64>> = m.iter().map(|b| {{ let mut c = rz.clone(); c.descend_to_byte(b); c.make_map() }}).collect(); \
                              wz.graft_child_maps(m, maps, {ru}); }}", rs_mask(&m)) }
             55 => { let p = g!(d.path(6));
-                    format!("{{ let mut b = map1.read_zipper_at_path({}); b.descend_to({}); wz.meet_2(&rz, &b); }}",
-                            rs_bytes(&r1), rs_bytes(&p)) }
+                    format!("{{ let mut b = rz.clone(); b.descend_to({}); wz.meet_2(&rz, &b); }}", rs_bytes(&p)) }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));
