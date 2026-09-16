@@ -7,6 +7,8 @@
 //!   table are a contract shared with `lean/PathMapModel/Fuzz.lean`.
 //! * [`server`] is the resident-process protocol the driver speaks.
 //! * [`repro`] turns an input back into standalone `pathmap` calls.
+//! * [`source`] generates random inputs by index, for the in-process front ends.
+//! * [`crash`] is a second op table that only has to not crash; see `bin/crash_fuzz.rs`.
 //! * [`act`] is the `ArenaCompactTree` read source behind `act_trace`.
 //! * [`reference`] is a second executable model: a Rust transcription of the
 //!   same Lean specification, sharing no code with `pathmap`.  It is what
@@ -18,6 +20,8 @@ pub mod harness;
 pub mod reference;
 pub mod repro;
 pub mod server;
+pub mod source;
+pub mod crash;
 
 pub use act::*;
 pub use harness::*;
