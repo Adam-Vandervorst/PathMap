@@ -482,9 +482,13 @@ impl<V: Clone> PathMap<V> {
         PathMap::mk(vals, std::iter::empty())
     }
 
-    /// The meet with `prune = true`: the same values as [`PathMap::meet`], and only
-    /// the locations on the way to one of them, so no dangling path survives --
-    /// including one both operands had.
+    /// The meet with `prune = true`, at its most pruned: the same values as
+    /// [`PathMap::meet`], and only the locations on the way to one of them.
+    ///
+    /// `pathmap` may stop short of this: it can skip a node shared with the source
+    /// rather than walk it, so a dangling path inside a shared node may survive.
+    /// The result always lies between `meet_pruned` and `meet`, and is not
+    /// compared by the fuzzer.
     pub fn meet_pruned(ops: &impl ValOps<V>, a: &PathMap<V>, b: &PathMap<V>) -> PathMap<V> {
         Self::meet(ops, a, b).drop_dangling()
     }

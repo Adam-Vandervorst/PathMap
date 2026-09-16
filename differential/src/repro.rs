@@ -182,7 +182,7 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                     format!("wz.graft_src_at(&rz, {});", rs_bytes(&p)) }
             36 => "wz.join_into(&rz);".to_string(),
             37 => "wz.join_map_into(rz.make_map());".to_string(),
-            38 => { let pr = g!(d.boolean()); format!("wz.meet_into(&rz, {pr});") }
+            38 => { let _pr = g!(d.boolean()); "wz.meet_into(&rz, false);".to_string() }
             39 => { let _pr = g!(d.boolean()); "wz.subtract_into(&rz, false);".to_string() }
             40 => "wz.restrict(&rz);".to_string(),
             41 => "wz.restricting(&rz);".to_string(),
@@ -196,8 +196,8 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             44 => { let n = g!(d.modn(6)); format!("wz.remove_prefix({n});") }
             45 => { let _pr = g!(d.boolean());
                     "if let Some(m) = wz.take_map(false) { wz.graft_map(m); }".to_string() }
-            46 => { let k = g!(d.modn(4)); let pr = g!(d.boolean());
-                    format!("if {k} != 0 && wz.child_count() != 0 {{ wz.meet_k_path_into({k}, {pr}); }}") }
+            46 => { let k = g!(d.modn(4)); let _pr = g!(d.boolean());
+                    format!("if {k} != 0 && wz.child_count() != 0 {{ wz.meet_k_path_into({k}, false); }}") }
             47 => { let t = g!(d.modn(2));
                     format!("{{ let mut obs = Vec::new(); {}.descend_until_observed(&mut obs); }}", z!(t)) }
             48 => { let v = g!(d.u8()) as u64;

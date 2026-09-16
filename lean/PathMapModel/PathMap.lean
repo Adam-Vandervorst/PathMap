@@ -353,9 +353,14 @@ def meet (a b : PathMap V) : PathMap V :=
 the way to a value remain. -/
 def dropDangling (t : PathMap V) : PathMap V := mk' t.vals []
 
-/-- The meet with `prune = true`: the same values as `meet`, and only the
-locations on the way to one of them, so no dangling path survives -- including
-one both operands had. -/
+/-- The meet with `prune = true`, at its most pruned: the same values as `meet`,
+and only the locations on the way to one of them.
+
+`pathmap` may stop short of this: it can skip a node shared with the source
+rather than walk it, so a dangling path inside a shared node may survive.  The
+result always lies between `meetPruned` and `meet` -- same values, locations a
+subset of `meet`'s and a superset of `meetPruned`'s -- and is not compared by
+the fuzzer. -/
 def meetPruned (a b : PathMap V) : PathMap V := (meet ops a b).dropDangling
 
 /-- Subtract.

@@ -477,9 +477,10 @@ impl<V: Clone> Zip<V> {
     /// source's.
     ///
     /// Below the focus the result is [`PathMap::meet`] with `prune = false` --
-    /// every location both sides have survives, dangling ones included -- and
-    /// [`PathMap::meet_pruned`] with `prune = true`, which keeps only the locations
-    /// leading to a surviving value.  The focus itself is never removed: pruning
+    /// every location both sides have survives, dangling ones included.  With
+    /// `prune = true` the model gives [`PathMap::meet_pruned`]; `pathmap` may leave
+    /// dangling paths inside nodes shared with the source, so that case is
+    /// best-effort and not compared.  The focus itself is never removed: pruning
     /// stops at it, so a focus left without a value or anything below it is still
     /// there.
     pub fn meet_into(&mut self, ops: &impl ValOps<V>, src: &Zip<V>, prune: bool) -> AlgStatus {
