@@ -181,9 +181,8 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
             };
 
             match node.as_tagged().node_get_child(next_node_path) {
-                //The child was reached at or beyond the end of `node_key`, so what is left to walk
-                //is a suffix of `path` and the step can be taken here.
-                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len => {
+                //Only step into the child if path remains, or we'd answer with the focus value
+                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len && consumed_byte_cnt < node_key_len + path_len => {
                     node = next_node;
                     path = &path[consumed_byte_cnt-node_key_len..];
                 }
@@ -578,9 +577,8 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieRefOwned<V, A> {
             };
 
             match node.as_tagged().node_get_child(next_node_path) {
-                //The child was reached at or beyond the end of `node_key`, so what is left to walk
-                //is a suffix of `path` and the step can be taken here.
-                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len => {
+                //Only step into the child if path remains, or we'd answer with the focus value
+                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len && consumed_byte_cnt < node_key_len + path_len => {
                     node = next_node;
                     path = &path[consumed_byte_cnt-node_key_len..];
                 }
@@ -1298,6 +1296,54 @@ mod tests {
         assert_eq!(tr.val_at(&[1u8]), Some(&5));
         let tr = map.trie_ref_at_path(&[2u8, 2, 2, 1]);
         assert_eq!(tr.val_at(&[3u8, 1, 4]), Some(&6));
+    }
+
+    /// `val_at` on a dangling child of a focus with a value is `None`
+    #[test]
+    fn trie_ref_val_at_dangling_child_is_none() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8], 7);
+        map.create_path(&[0u8, 3]);
+
+        //Read zipper descended to the value-bearing location
+        let mut rz = map.read_zipper();
+        rz.descend_to(&[0u8]);
+        assert_eq!(rz.val(), Some(&7));
+        assert!({ let mut z = rz.fork_read_zipper(); z.descend_to(&[3u8]); z.path_exists() });
+        assert_eq!(rz.val_at(&[3u8]), None);
+        assert_eq!(rz.get_val_at(&[3u8]), None);
+        assert_eq!(rz.val_at(&[3u8, 9]), None);
+        assert_eq!(rz.val_at(&[5u8]), None);
+        assert_eq!(rz.val_at(&[]), Some(&7));
+        drop(rz);
+
+        //Write zipper
+        let mut wz = map.write_zipper();
+        wz.descend_to(&[0u8]);
+        assert_eq!(wz.val_at(&[3u8]), None);
+        assert_eq!(wz.val_at(&[]), Some(&7));
+        drop(wz);
+
+        //TrieRefs, borrowed and owned
+        assert_eq!(map.trie_ref_at_path(&[0u8]).val_at(&[3u8]), None);
+        assert_eq!(map.trie_ref_at_path(&[0u8]).val_at(&[]), Some(&7));
+        assert_eq!(map.trie_ref_at_path(&[]).val_at(&[0u8, 3]), None);
+        let owned = match TrieRef::from(map.clone()) {
+            TrieRef::Owned(trie_ref) => trie_ref,
+            TrieRef::Borrowed(_) => unreachable!(),
+        };
+        assert_eq!(owned.trie_ref_at_path(&[0u8]).val_at(&[3u8]), None);
+        assert_eq!(owned.trie_ref_at_path(&[0u8]).val_at(&[]), Some(&7));
+        assert_eq!(owned.val_at(&[0u8, 3]), None);
+
+        //A value stored exactly at a node boundary is still found
+        map.set_val_at(&[0u8, 3], 8);
+        map.set_val_at(&[0u8, 3, 1], 9);
+        let mut rz = map.read_zipper();
+        rz.descend_to(&[0u8]);
+        assert_eq!(rz.val_at(&[3u8]), Some(&8));
+        assert_eq!(rz.val_at(&[3u8, 1]), Some(&9));
+        assert_eq!(map.trie_ref_at_path(&[0u8]).val_at(&[3u8]), Some(&8));
     }
 
     fn assert_invalid_trie_ref<T>(trie_ref: &T)
