@@ -592,6 +592,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     new_node.values.push(cf.clone());
                 } else {
 
+                    //Without a value in `other`, the empty path doesn't validate, so a value of
+                    // `self`'s at this byte is dropped.  That is a modification, even when the
+                    // onward link below it restricts to an identity, and it is also the whole of
+                    // the change when there is no onward link at all.
+                    if cf.val().is_some() {
+                        is_identity = false;
+                    }
+
                     //If there is an onward link in the CF and other node, continue the restriction recursively
                     if let Some(self_child) = cf.rec() {
                         let other_child = other.get_node_at_key(&[key_byte]);
@@ -2478,7 +2486,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         // Iterate the overlap mask directly. Slot indexes are recovered with
         // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
-        let mut is_identity = self.mask == mm && other.mask == mm;
+        //NOTE: restrict is non-commutative.  The result is an identity of `self` when every one of
+        // `self`'s branches survives, i.e. `self.mask == mm`.  Branches that exist only in `other`
+        // never contribute to the result, so requiring `other.mask == mm` as well only threw away
+        // identities that were there.
+        let mut is_identity = self.mask == mm;
 
         let mmc = [mm.0[0].count_ones(), mm.0[1].count_ones(), mm.0[2].count_ones(), mm.0[3].count_ones()];
 

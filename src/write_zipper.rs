@@ -7051,4 +7051,55 @@ mod tests {
         assert_eq!(st, AlgebraicStatus::Element);
         assert_eq!(vals(&dst), vals(&src));
     }
+
+    /// `restrict` between two dense nodes, where the source has branches the destination lacks.
+    /// `restrict` is non-commutative: only the destination's branches can be dropped, so branches
+    /// that exist only in the source say nothing about whether the destination changed.  The dense
+    /// restrict nevertheless required the two masks to be equal before it would report `Identity`.
+    #[test]
+    fn write_zipper_restrict_wider_source_is_identity() {
+        fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
+        fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
+
+        //Both roots are dense.  Every path in `dst` is prefixed by a path to a value in `src`, so
+        // the restriction keeps all of `dst`; `src`'s extra branches are irrelevant.
+        let mut dst = mk(&[(&[0], 1), (&[1], 2), (&[2], 3)]);
+        let before = vals(&dst);
+        let src = mk(&[(&[0], 0), (&[1], 0), (&[2], 0), (&[3], 0), (&[4], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), before);
+
+        //A restriction that really does drop a branch still reports it
+        let mut dst = mk(&[(&[0], 1), (&[1], 2), (&[2], 3)]);
+        let src = mk(&[(&[0], 0), (&[1], 0), (&[3], 0), (&[4], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(vals(&dst), vec![(vec![0], 1), (vec![1], 2)]);
+    }
+
+    /// `restrict` of a dense node against a node that can't be iterated as a dense one (a list or
+    /// a tiny node) walks the destination's entries.  An entry holding *both* a value and an
+    /// onward link, where the source has no value at that byte, loses its value -- the empty path
+    /// never validates -- but the identity flag was only cleared by the onward link's own result,
+    /// so an onward link that restricted to an identity made the whole node report `Identity` and
+    /// the dropped value stayed in the map.
+    #[test]
+    fn write_zipper_restrict_drops_value_beside_kept_child() {
+        fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
+        fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
+
+        //Build a dense root, then meet it down to the single byte-0 branch, which keeps the dense
+        // node type.  That branch holds a value (at `[0]`) beside an onward link (to `[0, 0]`).
+        let mut dst = mk(&[(&[0], 7), (&[0, 0], 1), (&[1], 2), (&[2], 3)]);
+        let filter = mk(&[(&[0], 0), (&[0, 0], 0), (&[5], 0), (&[6], 0)]);
+        { let mut wz = dst.write_zipper(); wz.meet_into(&filter.read_zipper(), false); }
+        assert_eq!(vals(&dst), vec![(vec![0], 7), (vec![0, 0], 1)]);
+
+        //`src` has no value at `[0]`, so `[0]` is not kept, while `[0, 0]` is
+        let src = mk(&[(&[0, 0], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        assert_eq!(vals(&dst), vec![(vec![0, 0], 1)]);
+        assert_eq!(st, AlgebraicStatus::Element);
+    }
 }
