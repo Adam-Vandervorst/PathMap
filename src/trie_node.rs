@@ -778,7 +778,11 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
             // prefix with the key -- typically a dangling path, which the lookup above reports as
             // "nothing found, everything covered" -- is not carried into the result, so claiming
             // `COUNTER_IDENT` would hand the caller `other` with the dangling path still in it.
-            let nothing_here = if other_node.node_key_overlap(keys[idx].0) == 0 {
+            //
+            //The same holds when `other_node` is itself empty: we only get here by following an
+            // onward link from a parent, so an empty `other_node` is a dangling path in `other`
+            // running along this key, and it does not survive the meet either.
+            let nothing_here = if !other_node.node_is_empty() && other_node.node_key_overlap(keys[idx].0) == 0 {
                 FatAlgebraicResult::new(COUNTER_IDENT, None)
             } else {
                 FatAlgebraicResult::none()

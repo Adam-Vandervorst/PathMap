@@ -3965,6 +3965,46 @@ mod tests {
         assert_eq!(all_locations(&dst), vec![(vec![], Some(0)), (vec![1], None), (vec![1, 0], Some(0))]);
     }
 
+    /// `pmeet_generic` must not claim `COUNTER_IDENT` for a key whose lookup in `other` runs into an
+    /// empty onward link: that is a dangling path in `other`, and the meet does not keep it.  Here the
+    /// DenseByteNode destination is met by enumerating the source LineListNode's payloads, and the
+    /// claimed identity used to hand back the destination with its dangling path intact.
+    #[test]
+    fn write_zipper_meet_into_drops_dangling_link_reached_through_lookup() {
+        // dst = { [0] dangling, [1, 1, 0] = 0 } (the [1] branch shared with src); src = { [0, 0, 0] = 0, [1, 1, 0] = 0 }
+        let mut dst = PathMap::<u64>::new();
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[1u8, 1, 0], 0);
+        src.set_val_at(&[0u8, 0, 0], 0);
+        let mut wz = dst.write_zipper();
+        let mut rz = src.read_zipper();
+        wz.join_into(&rz);
+        rz.descend_to_byte(1);
+        wz.graft_masked_branches(&rz, ByteMask::from_iter([3u8, 2, 0]), false);
+        rz.reset();
+        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[0u8]); probe.path_exists() }, true, "the graft should leave [0] dangling");
+        assert_eq!(wz.meet_into(&rz, false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![(vec![], None), (vec![1], None), (vec![1, 1], None), (vec![1, 1, 0], Some(0))]);
+
+        // A dangling path one level deeper: dst = { [0, 0] dangling, [1, 0] = 0 }
+        let mut dst = PathMap::<u64>::new();
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[2u8, 1, 0], 0);
+        src.set_val_at(&[2u8, 0, 0, 0, 0], 0);
+        src.set_val_at(&[], 0);
+        let mut wz = dst.write_zipper();
+        let rz = src.read_zipper_at_path(&[2u8]);
+        wz.graft(&rz);
+        wz.descend_to(&[0u8, 0]);
+        wz.remove_unmasked_branches(ByteMask::new(), false);
+        wz.reset();
+        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[0u8, 0]); probe.path_exists() }, true, "the removal should leave [0, 0] dangling");
+        assert_eq!(wz.meet_into(&rz, false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![(vec![], None), (vec![1], None), (vec![1, 0], Some(0))]);
+    }
+
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
     #[test]
     fn write_zipper_subtract_into_test1() {
