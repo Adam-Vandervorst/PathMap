@@ -2651,6 +2651,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
         if should_ascend {
             self.key.prefix_buf.truncate(temp_path.len());
+        } else if ascended {
+            //The loop above walked the node stack up to where pruning stopped, but the zipper has not
+            // moved.  Walk it back down towards the focus, as far as nodes still exist, or the stack
+            // and `prefix_idx` describe an ancestor while the path still names the focus, and the next
+            // write through the focus lands in the wrong node
+            self.descend_to_internal();
         }
 
         pruned_bytes
@@ -3855,6 +3861,52 @@ mod tests {
         assert_eq!(wz.subtract_into(&rz, false), AlgebraicStatus::Element);
         drop(wz);
         assert_eq!(all_locations(&dst), vec![(vec![], Some(0)), (vec![1], None), (vec![1, 0], Some(0))]);
+    }
+
+    /// `prune_path` does not move the zipper, but it used to leave the node stack where its upward
+    /// walk stopped.  When the focus sat in a child node -- as it does after a `graft` at the zipper's
+    /// root -- the stack then described an ancestor while the path still named the focus, and the next
+    /// write through the focus went to the wrong node: `get_val_or_set_mut` panicked on the value it
+    /// had just set.  `meet_into(.., true)` reached this through its own `prune_path`.
+    #[test]
+    fn write_zipper_write_after_prune_path_below_a_graft() {
+        let build = || {
+            let mut m0 = PathMap::<u64>::new();
+            let mut m1 = PathMap::<u64>::new();
+            m1.set_val_at(&[1u8, 0, 0, 0, 0], 7);
+            m0.create_path(&[0u8, 0]);
+            m1.create_path(&[1u8]);
+            (m0, m1)
+        };
+
+        // prune_path directly
+        let (mut m0, m1) = build();
+        {
+            let mut wz = m0.write_zipper_at_path(&[0u8, 0]);
+            let rz = m1.read_zipper_at_path(&[1u8]);
+            wz.graft(&rz);
+            wz.descend_last_byte();
+            wz.remove_branches(false);
+            wz.prune_path();
+            assert_eq!(wz.path(), &[0u8]);
+            assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
+            assert_eq!(wz.val(), Some(&3));
+        }
+        assert_eq!(all_locations(&m0), vec![(vec![], None), (vec![0], None), (vec![0, 0], None), (vec![0, 0, 0], Some(3))]);
+
+        // through meet_into with prune
+        let (mut m0, m1) = build();
+        {
+            let mut wz = m0.write_zipper_at_path(&[0u8, 0]);
+            let rz = m1.read_zipper_at_path(&[1u8]);
+            wz.graft(&rz);
+            wz.descend_last_byte();
+            wz.meet_into(&rz, true);
+            assert_eq!(wz.path(), &[0u8]);
+            assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
+            assert_eq!(wz.val(), Some(&3));
+        }
+        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
     }
 
     /// The meet rule, dangling paths included.
