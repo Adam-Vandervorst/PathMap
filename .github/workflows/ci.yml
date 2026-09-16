@@ -65,7 +65,7 @@ jobs:
     # and manual runs only; a push to master has nothing to compare against.
     needs: [test, fuzz]
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, linux, x64, bench]
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 300
     permissions:
       contents: read
