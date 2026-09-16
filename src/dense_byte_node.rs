@@ -1367,6 +1367,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
     }
 
     fn drop_head_dyn(&mut self, byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
+        debug_assert!(byte_cnt > 0);
         match self.values.len() {
             0 => { None },
             1 => {
