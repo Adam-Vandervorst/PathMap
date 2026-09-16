@@ -148,7 +148,6 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 /// * `skip:k0` — a degenerate `k = 0`.
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
-/// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 /// * `skip:off-root-prune` — a prune on a write zipper not rooted at the map
 ///   root, where the depth pruned is a function of internal node layout.
 /// * `skip:quarantined` — the op is disabled outright (op 54).
@@ -157,7 +156,6 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 pub const SKIP_ACT: &str = "skip:act";
 pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
-pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
 pub const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
 pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 
@@ -787,12 +785,10 @@ pub fn run_ops<R: ReadSource>(
                 }
                 43 => {
                     let p = get!(d.path(6));
-                    // `insert_prefix("")` destroys the subtrie in pathmap 0.3.1.
-                    if p.is_empty() {
-                        ("insert_prefix", SKIP_EMPTY_PATH.to_string())
-                    } else {
-                        ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
-                    }
+                    // The empty prefix was skipped while it destroyed the
+                    // subtrie (FINDINGS.md #4); fixed upstream, so it is
+                    // compared like any other prefix.
+                    ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
                 }
                 44 => {
                     let n = get!(d.modn(6));

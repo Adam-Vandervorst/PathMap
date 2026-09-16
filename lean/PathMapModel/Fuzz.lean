@@ -63,7 +63,6 @@ agree exactly or every input with a skip diverges.
 * `skip:k0` — a degenerate `k = 0`.
 * `skip:empty-focus` — the focus has nothing below it, where the op's behaviour
   is a function of node materialisation rather than trie state.
-* `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 * `skip:off-root-prune` — a prune on a write zipper not rooted at the map root,
   where the depth pruned is a function of internal node layout.
 * `skip:quarantined` — the op is disabled outright (op 54).
@@ -73,7 +72,6 @@ Each is recorded in FINDINGS.md and commented at its site. -/
 def skipAct : String := "skip:act"
 def skipK0 : String := "skip:k0"
 def skipEmptyFocus : String := "skip:empty-focus"
-def skipEmptyPath : String := "skip:empty-path"
 def skipOffRootPrune : String := "skip:off-root-prune"
 def skipQuarantined : String := "skip:quarantined"
 
@@ -444,13 +442,12 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit { s with wz := z } "join_k_path_into"
                  (if z.focusNodeIsEmpty then "?" else showBool r), d)
   | 43 => do let (p, d) ← d.path
-             -- `insert_prefix("")` destroys the subtrie in pathmap 0.3.1; see
-             -- `Zip.insertPrefix`.  Skipped so the known bug does not mask others.
-             if p.isEmpty then
-               some (emit s "insert_prefix" skipEmptyPath, d)
-             else
-               let (r, z) := s.wz.insertPrefix p
-               some (emit { s with wz := z } "insert_prefix" (showBool r), d)
+             -- The empty prefix was skipped while `make_parents_in(b"", node)`
+             -- discarded the node instead of doing nothing (FINDINGS.md #4).
+             -- That is fixed upstream, with a regression test of its own, so
+             -- the empty prefix is compared like any other.
+             let (r, z) := s.wz.insertPrefix p
+             some (emit { s with wz := z } "insert_prefix" (showBool r), d)
   | 44 => do let (n, d) ← d.mod 6
              let (r, z) := s.wz.removePrefix n
              some (emit { s with wz := z } "remove_prefix" (showBool r), d)

@@ -57,8 +57,6 @@ const SKIP_K0: &str = "skip:k0";
 /// The focus has nothing below it, where the op's behaviour is a function of
 /// node materialisation rather than of trie state.
 const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
-/// `insert_prefix("")`, which destroys the subtrie.
-const SKIP_EMPTY_PATH: &str = "skip:empty-path";
 /// A prune on a write zipper not rooted at the map root, where the depth pruned
 /// is a function of internal node layout.
 const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
@@ -581,13 +579,11 @@ fn step(s: &mut St, d: &mut Dec) -> Option<()> {
         }
         43 => {
             let p = d.path(6)?;
-            // `insert_prefix("")` destroys the subtrie in pathmap 0.3.1.
-            if p.is_empty() {
-                s.emit("insert_prefix", SKIP_EMPTY_PATH);
-            } else {
-                let r = s.wz.insert_prefix(&p);
-                s.emit("insert_prefix", show_bool(r));
-            }
+            // The empty prefix was skipped while it destroyed the subtrie
+            // (FINDINGS.md #4); fixed upstream, so it is compared like any
+            // other prefix.
+            let r = s.wz.insert_prefix(&p);
+            s.emit("insert_prefix", show_bool(r));
         }
         44 => {
             let n = d.modn(6)?;
