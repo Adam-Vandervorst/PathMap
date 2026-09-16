@@ -754,6 +754,22 @@ fn option_subtract_test() {
     assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(Some(())))), AlgebraicResult::None);
 }
 
+/// Subtracting a value that isn't there leaves the destination alone, and the integer placeholders
+/// have to say so with `Identity(SELF_IDENT)`.  Returning `Element(*self)` is the same value, but
+/// the node algebra propagates identity *masks*, not values, so an `Element` anywhere below a node
+/// forces the whole node -- and with it `subtract_into` -- to report `Element` for a trie that did
+/// not change.
+#[test]
+fn integer_subtract_is_self_identity() {
+    assert_eq!(3u64.psubtract(&5), AlgebraicResult::Identity(SELF_IDENT));
+    assert_eq!(3u64.psubtract(&3), AlgebraicResult::None);
+    assert_eq!(3u16.psubtract(&5), AlgebraicResult::Identity(SELF_IDENT));
+    assert_eq!(3u16.psubtract(&3), AlgebraicResult::None);
+    //The same, seen through `Option<V>`, which is what the co-free node payloads use
+    assert_eq!(Some(3u64).psubtract(&Some(5)), AlgebraicResult::Identity(SELF_IDENT));
+    assert_eq!(Some(3u64).psubtract(&Some(3)), AlgebraicResult::None);
+}
+
 // =-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-=
 // =-*   `Option<&V>`                                                                                 *-=
 
@@ -876,7 +892,7 @@ impl Lattice for u64 {
 impl DistributiveLattice for u64 {
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
         if self == other { AlgebraicResult::None }
-        else { AlgebraicResult::Element(*self) }
+        else { AlgebraicResult::Identity(SELF_IDENT) }
     }
 }
 
@@ -896,7 +912,7 @@ impl Lattice for u16 {
 impl DistributiveLattice for u16 {
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
         if self == other { AlgebraicResult::None }
-        else { AlgebraicResult::Element(*self) }
+        else { AlgebraicResult::Identity(SELF_IDENT) }
     }
 }
 
