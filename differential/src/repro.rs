@@ -208,8 +208,11 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             52 => "rz.to_next_val();  // to_next_get_val".to_string(),
             53 => { let n = g!(d.modn(4)); let m = g!(d.path_n(n)); let ru = g!(d.boolean());
                     format!("wz.graft_masked_branches(&rz, ByteMask::from_iter({}.iter().copied()), {ru});", rs_mask(&m)) }
-            54 => { let n = g!(d.modn(4)); let _m = g!(d.path_n(n)); let _ru = g!(d.boolean());
-                    "// graft_child_maps: quarantined by the harness (FINDINGS #15)".to_string() }
+            // As `do_graft_child_maps`: fed the source's own child subtries under the mask.
+            54 => { let n = g!(d.modn(4)); let m = g!(d.path_n(n)); let ru = g!(d.boolean());
+                    format!("{{ let m = ByteMask::from_iter({}.iter().copied()); \
+                             let maps: Vec<PathMap<u64>> = m.iter().map(|b| {{ let mut c = rz.clone(); c.descend_to_byte(b); c.make_map() }}).collect(); \
+                             wz.graft_child_maps(m, maps, {ru}); }}", rs_mask(&m)) }
             55 => { let p = g!(d.path(6));
                     format!("{{ let mut b = map1.read_zipper_at_path({}); b.descend_to({}); wz.meet_2(&rz, &b); }}",
                             rs_bytes(&r1), rs_bytes(&p)) }
