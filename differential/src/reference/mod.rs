@@ -128,6 +128,11 @@ mod tests {
     /// reason.
     #[test]
     fn model_does_not_touch_the_crate() {
+        // Spelled in halves so this file, which is itself part of the model
+        // directory and is scanned like the rest, does not match its own needle.
+        let crate_path = ["path", "map::"].concat();
+        let extern_crate = ["extern crate ", "pathmap"].concat();
+        let own_map = ["crate::reference::path", "map"].concat();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reference");
         let mut offenders = Vec::new();
         for entry in std::fs::read_dir(&dir).expect("src/reference must exist") {
@@ -144,8 +149,8 @@ mod tests {
                 }
                 // The model's *own* map module is also called `pathmap`, so
                 // strip its path before looking for the crate's.
-                let code = code.replace("crate::reference::pathmap", "");
-                if code.contains("pathmap::") || code.contains("extern crate pathmap") {
+                let code = code.replace(&own_map, "");
+                if code.contains(&crate_path) || code.contains(&extern_crate) {
                     offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
                 }
             }
