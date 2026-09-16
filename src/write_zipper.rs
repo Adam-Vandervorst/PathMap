@@ -188,6 +188,15 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Collapses all the paths below the zipper's focus by removing the leading `byte_cnt` bytes from
     /// each path and joins together all of the downstream subtries
     ///
+    /// ## Behavior
+    ///
+    /// GOAT, The below behavior is not what we want.  See https://github.com/Adam-Vandervorst/PathMap/issues/104
+    /// Replaces the downstream branches with the join of the subtries `byte_cnt` bytes below
+    /// the focus.  Paths that end in fewer than `byte_cnt` bytes are removed entirely.
+    /// Values at exactly `byte_cnt` bytes are also removed; only the
+    /// selected subtries' descendants are retained. The value at the focus is unchanged. A
+    /// `byte_cnt` of zero is an identity operation.
+    ///
     /// Returns `true` if the focus has at least one downstream continuation, otherwise returns `false`.
     ///
     /// NOTE: for legacy reasons, this operation is sometimes called `drop_head`
@@ -1870,13 +1879,17 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice {
         let result = match self.get_focus().into_option() {
             Some(mut self_node) => {
-                //An empty result means nothing remains below the focus: clear the branch rather than
-                // grafting an empty node (`graft_internal` requires a non-empty source)
-                let new_node = self_node.make_mut().drop_head_dyn(byte_cnt)
-                    .filter(|node| !node.as_tagged().node_is_empty());
-                let result = new_node.is_some();
-                self.graft_internal(new_node);
-                result
+                if byte_cnt > 0 {
+                    //An empty result means nothing remains below the focus: clear the branch rather than
+                    // grafting an empty node (`graft_internal` requires a non-empty source)
+                    let new_node = self_node.make_mut().drop_head_dyn(byte_cnt)
+                        .filter(|node| !node.as_tagged().node_is_empty());
+                    let result = new_node.is_some();
+                    self.graft_internal(new_node);
+                    result
+                } else {
+                    !self_node.as_tagged().node_is_empty()
+                }
             },
             None => { false }
         };
@@ -2956,6 +2969,24 @@ mod tests {
     use crate::trie_node::*;
     use crate::alloc::GlobalAlloc;
 
+    /// `PathMap::iter` exposes values but not dangling paths.  Check every value and, when a
+    /// test cares about dangling structure, its explicitly supplied path probes as well.
+    fn assert_map_unchanged<V>(before: &PathMap<V>, after: &PathMap<V>, path_probes: &[&[u8]])
+    where
+        V: Clone + Send + Sync + Unpin + PartialEq + core::fmt::Debug,
+    {
+        assert_eq!(after.val_count(), before.val_count(), "value count changed");
+        assert_eq!(
+            after.iter().map(|(key, value)| (key, value.clone())).collect::<Vec<_>>(),
+            before.iter().map(|(key, value)| (key, value.clone())).collect::<Vec<_>>(),
+            "map values changed",
+        );
+        for path in path_probes {
+            assert_eq!(after.path_exists_at(path), before.path_exists_at(path),
+                "path {path:?} changed existence");
+        }
+    }
+
     /// Removing a value that shares its key with the onward child must not
     /// leave a path-preserving sentinel behind: the node would then hold two
     /// onward children under one key, and the accessors disagree about which
@@ -3601,7 +3632,7 @@ mod tests {
         map.insert(b"", ());
         let ident_map = map.clone();
         assert_eq!(map.write_zipper().meet_into(&ident_map.read_zipper(), true), AlgebraicStatus::Identity);
-        assert_eq!(map.iter().count(), 3);
+        assert_map_unchanged(&ident_map, &map, &[]);
 
         //Validate meet with just_root keeps the root val and removes the rest
         let mut map = PathMap::new();
@@ -3696,9 +3727,10 @@ mod tests {
         map.insert(b"b", ());
         map.insert(b"a", ());
         map.insert(b"", ());
+        let before = map.clone();
         let empty_map = PathMap::new();
         assert_eq!(map.write_zipper().subtract_into(&empty_map.read_zipper(), true), AlgebraicStatus::Identity);
-        assert_eq!(map.iter().count(), 3);
+        assert_map_unchanged(&before, &map, &[]);
 
         //Validate subtract of just_root clears the root val
         let mut map = PathMap::new();
@@ -4252,6 +4284,72 @@ mod tests {
         drop(wz);
     }
 
+    /// Calling join_k_path_into(0) is an identity. But passing `prune = true` should still prune an already
+    /// dangling focus. Exercise the public zipper API against empty, singleton, dense, focused, off-trie,
+    /// and dangling cases so this property does not depend on a particular internal node representation.
+    #[test]
+    fn write_zipper_join_k_path_zero() {
+        fn assert_join_k_path_zero_behavior(source: PathMap<u64>, focus: &[u8], observed_paths: &[&[u8]])
+        {
+            for prune in [false, true] {
+                let mut expected = source.clone();
+                let expected_status = {
+                    let mut zipper = expected.write_zipper();
+                    zipper.descend_to(focus);
+                    let has_downstream = zipper.path_exists() && zipper.child_count() != 0;
+                    let focus_is_dangling = zipper.path_exists() && !zipper.is_val() && zipper.child_count() == 0;
+                    if prune && focus_is_dangling {
+                        zipper.prune_path();
+                    }
+                    has_downstream
+                };
+
+                let mut map = source.clone();
+                let actual_status = {
+                    let mut zipper = map.write_zipper();
+                    zipper.descend_to(focus);
+                    zipper.join_k_path_into(0, prune)
+                };
+
+                assert_eq!(actual_status, expected_status, "join_k_path_into(0, prune = {prune}) status");
+                assert_map_unchanged(&expected, &map, observed_paths);
+            }
+        }
+
+        // Empty maps and a root value have no downstream continuation.
+        assert_join_k_path_zero_behavior(PathMap::<u64>::new(), b"", &[b"".as_slice()]);
+        let mut root_value = PathMap::<u64>::new();
+        root_value.write_zipper().set_val(1);
+        assert_join_k_path_zero_behavior(root_value, b"", &[b"".as_slice()]);
+
+        // A single compressed path uses the sparse representation; several distinct first bytes
+        // exercise the dense representation.
+        let mut singleton = PathMap::<u64>::new();
+        singleton.set_val_at(b"ab", 1);
+        assert_join_k_path_zero_behavior(singleton, b"", &[b"a", b"ab"]);
+        let mut dense = PathMap::<u64>::new();
+        for (key, value) in [(b"ax".as_slice(), 1), (b"by", 2), (b"cz", 3), (b"dw", 4)] {
+            dense.set_val_at(key, value);
+        }
+        assert_join_k_path_zero_behavior(dense, b"", &[b"a", b"ax", b"b", b"by", b"c", b"cz", b"d", b"dw"]);
+
+        // The focus's value and its onward branches must both remain intact; nor may an off-trie
+        // focus alter an otherwise unrelated map.
+        let mut focused = PathMap::<u64>::new();
+        for (key, value) in [(b"p".as_slice(), 1), (b"pa", 2), (b"pbc", 3), (b"pbd", 4)] {
+            focused.set_val_at(key, value);
+        }
+        assert_join_k_path_zero_behavior(focused.clone(), b"p", &[b"p", b"pa", b"pb", b"pbc", b"pbd"]);
+        assert_join_k_path_zero_behavior(focused, b"missing", &[b"p", b"pa", b"pbc", b"pbd", b"missing"]);
+
+        // A dangling path below the focus survives, but pruning a dangling focus itself is the
+        // exception to zero-length identity: it is equivalent to `prune_path()`.
+        let mut dangling = PathMap::<u64>::new();
+        assert!(dangling.create_path(b"xyz"));
+        assert_join_k_path_zero_behavior(dangling.clone(), b"", &[b"x", b"xy", b"xyz"]);
+        assert_join_k_path_zero_behavior(dangling, b"xyz", &[b"x", b"xy", b"xyz"]);
+    }
+
     /// Tests a code path where a single PairNode could represent the trie before the drop_head, but now can't
     #[test]
     fn write_zipper_drop_head_test7() {
@@ -4394,17 +4492,14 @@ mod tests {
         let mut map = PathMap::<u64>::new();
         map.set_val_at(b"ab", 1);
         map.set_val_at(b"ac", 2);
+        let before = map.clone();
         assert!(map.write_zipper().insert_prefix(b""));
-        assert_eq!(
-            map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
-            vec![b"ab".to_vec(), b"ac".to_vec()]
-        );
+        assert_map_unchanged(&before, &map, &[]);
         let mut wz = map.write_zipper();
         wz.descend_to(b"a");
         assert!(wz.insert_prefix(b""));
         drop(wz);
-        assert_eq!(map.get(b"ab"), Some(&1));
-        assert_eq!(map.get(b"ac"), Some(&2));
+        assert_map_unchanged(&before, &map, &[]);
         assert_valid_trie(map.root());
     }
 
