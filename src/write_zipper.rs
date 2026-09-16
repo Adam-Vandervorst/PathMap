@@ -2326,9 +2326,26 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [WriteZipper::remove_unmasked_branches]
     pub fn remove_unmasked_branches(&mut self, mask: ByteMask, prune: bool) {
-        let mut focus_node = self.focus_stack.top_mut().unwrap();
         let node_key = self.key.node_key();
-        if node_key.len() > 0 {
+
+        //`get_child_mut` declines to hand out an empty child node, so a focus that sits at or
+        // below such a dangling stub never descends and lands in the `None` arm below, where the
+        // node would mistake the stub's own key for one of its branches.  (`LineListNode` asserts
+        // on exactly that.)  A stub has nothing below it, so there are no branches to filter, and
+        // the dangling path itself must survive.
+        let below_dangling_stub = node_key.len() > 0
+            && match self.focus_stack.top() {
+                Some(focus_node) => match focus_node.node_get_child(node_key) {
+                    Some((_consumed_bytes, child_node)) => child_node.is_empty(),
+                    None => false
+                },
+                None => false
+            };
+
+        let mut focus_node = self.focus_stack.top_mut().unwrap();
+        if below_dangling_stub {
+            //Nothing to do
+        } else if node_key.len() > 0 {
             match focus_node.node_get_child_mut(node_key) {
                 Some((consumed_bytes, child_node)) => {
                     if node_key.len() >= consumed_bytes {
@@ -5004,6 +5021,45 @@ mod tests {
 
         let mut wz = map.write_zipper_at_path(b"a:x");
         wz.remove_unmasked_branches(ByteMask::EMPTY, false);
+    }
+
+    /// `remove_unmasked_branches` with the focus on a dangling path.  A dangling path has no
+    /// branches below it, so the call must do nothing at all: the dangling path itself survives
+    /// (`prune` is `false`) and the rest of the trie is untouched.
+    ///
+    /// A dangling path is stored as an onward link to the empty-node sentinel, which
+    /// `get_child_mut` declines to hand out, so the zipper used to fail to descend through it and
+    /// hand the stub's own key to the focus node as if it were one of the node's branches.  In a
+    /// `LineListNode` that tripped a `debug_assert!(!self.is_child_ptr::<N>())`.
+    #[test]
+    fn write_zipper_test_remove_unmasked_branches_dangling_focus() {
+        //A LineListNode root: slot 0 is an onward link at [0], slot 1 the dangling stub at [1, 0]
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([0u8], 0);
+        map.set_val_at([0u8, 0], 1);
+        assert!(map.create_path([1u8, 0]));
+
+        //Focus exactly on the dangling path
+        let mut wz = map.write_zipper_at_path(&[1u8, 0]);
+        assert!(wz.path_exists());
+        wz.remove_unmasked_branches(ByteMask::EMPTY, false);
+        assert!(wz.path_exists());
+        drop(wz);
+
+        //Focus below the dangling path
+        let mut wz = map.write_zipper_at_path(&[1u8, 0, 7]);
+        wz.remove_unmasked_branches(ByteMask::EMPTY, false);
+        drop(wz);
+
+        //Nothing may have changed
+        assert_eq!(map.val_at([0u8]), Some(&0));
+        assert_eq!(map.val_at([0u8, 0]), Some(&1));
+        assert_eq!(map.val_at([1u8, 0]), None);
+        let mut rz = map.read_zipper();
+        rz.descend_to([1u8, 0]);
+        assert!(rz.path_exists());
+        drop(rz);
+        assert_eq!(map.val_count(), 2);
     }
 
     #[test]
