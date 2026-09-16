@@ -6,7 +6,7 @@ crate panic) while deleting bytes, so the result is a minimal reproducer.
 
     ./lean/shrink.py <input-file> [-o out.bin]
 """
-import argparse, os, re, subprocess, sys
+import argparse, os, re, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # PATHMAP_ORACLE / PATHMAP_TRACE / PATHMAP_ACT_TRACE override the defaults, for
@@ -21,7 +21,9 @@ ACT_RELEASE = os.environ.get("PATHMAP_ACT_TRACE") or os.path.join(ROOT, "target"
 ACT_DEBUG = os.path.join(ROOT, "target", "debug", "act_trace")
 TRACE = TRACE_RELEASE
 ORACLE_ARGS = []
-TMP = os.path.join(ROOT, "lean", ".shrink.bin")
+# Per process, in $TMPDIR: a shared fixed path let concurrent shrinks overwrite each
+# other's candidate inputs, so they shrank toward each other's bugs or none at all.
+TMP = os.path.join(tempfile.gettempdir(), "pathmap-shrink-%d.bin" % os.getpid())
 
 
 def signature(blob):
