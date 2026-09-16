@@ -2938,13 +2938,17 @@ where Storage: AsRef<[u8]>
     /// WARNING: This is not a cheap method. It may have an order-N cost
     fn val_count(&self) -> usize {
         timed_span!(ValueCount, COUNTERS);
+        //Count at and below the focus; stop once the walk leaves it
         let mut zipper = self.clone();
-        zipper.reset();
+        let focus: Vec<u8> = zipper.path().to_vec();
         let mut count = 0;
         if zipper.is_val() {
             count += 1;
         }
         while zipper.to_next_val() {
+            if !zipper.path().starts_with(&focus) {
+                break;
+            }
             count += 1;
         }
         count
@@ -4190,5 +4194,30 @@ mod tests {
         az.reset();
         assert_eq!(az.val(), None);
         assert!(!az.path_exists());
+    }
+    /// `val_count` counts from the focus, not the zipper root
+    #[test]
+    fn act_zipper_val_count_counts_from_the_focus() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(b"aa", 1);
+        m.insert(b"ab", 2);
+        m.insert(b"b", 3);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+        for path in [&b""[..], b"a", b"aa", b"ab", b"b", b"zz"] {
+            let mut az = t.read_zipper_u64();
+            let mut pz = m.read_zipper();
+            az.descend_to(path);
+            pz.descend_to(path);
+            assert_eq!(az.val_count(), pz.val_count(), "focus {path:?}");
+        }
+        //And from a zipper rooted below the map root
+        for path in [&b""[..], b"a", b"b"] {
+            let mut az = t.read_zipper_at_path_u64(b"a");
+            let mut pz = m.read_zipper_at_path(b"a");
+            az.descend_to(path);
+            pz.descend_to(path);
+            assert_eq!(az.val_count(), pz.val_count(), "root a, focus {path:?}");
+        }
     }
 }
