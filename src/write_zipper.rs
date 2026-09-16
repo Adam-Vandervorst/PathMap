@@ -4128,6 +4128,85 @@ mod tests {
         }
     }
 
+    /// A list node meets another node slot by slot, and each slot keeps the deepest prefix of its
+    /// key that the other side also has -- through onward links of any node type, and whether the
+    /// slot holds a value or an onward node.  The result must not depend on which side is the list
+    /// node, so every pair is checked in both orders.
+    #[test]
+    fn write_zipper_meet_into_list_keeps_shared_key_prefix() {
+        type Build = fn() -> PathMap<u64>;
+        type Locations = Vec<(Vec<u8>, Option<u64>)>;
+        let list_val: Build = || { let mut m = PathMap::new(); m.set_val_at(&[5u8, 6, 7], 1); m };
+        let list_child: Build = || { let mut m = PathMap::new(); m.set_val_at(&[5u8, 6, 7, 8, 9], 1); m };
+        let list_dangling: Build = || { let mut m = PathMap::new(); m.create_path(&[5u8, 6]); m };
+        let dense_dangling: Build = || { let mut m = PathMap::new(); for b in [1u8, 2, 3] { m.set_val_at(&[b], 3); } m.create_path(&[5u8, 6]); m };
+        let dense_branch: Build = || { let mut m = PathMap::new(); for b in [1u8, 2, 3] { m.set_val_at(&[b], 3); } m.set_val_at(&[5u8, 6, 0], 4); m };
+        let dense_value: Build = || { let mut m = PathMap::new(); for b in [1u8, 2, 3] { m.set_val_at(&[b], 3); } m.set_val_at(&[5u8, 6], 4); m };
+        assert_eq!(root_tag(&list_val()), LINE_LIST_NODE_TAG);
+        assert_eq!(root_tag(&dense_dangling()), DENSE_BYTE_NODE_TAG);
+
+        let upto_6: Locations = vec![(vec![], None), (vec![5], None), (vec![5, 6], None)];
+        let cases: [(&str, Build, Build, Locations); 7] = [
+            ("list value, dense dangling", list_val, dense_dangling, upto_6.clone()),
+            ("list value, dense branch", list_val, dense_branch, upto_6.clone()),
+            ("list value, dense value", list_val, dense_value, upto_6.clone()),
+            ("list child, dense branch", list_child, dense_branch, upto_6.clone()),
+            ("list child, list dangling", list_child, list_dangling, upto_6.clone()),
+            ("list value, list dangling", list_val, list_dangling, upto_6.clone()),
+            ("list dangling, dense value", list_dangling, dense_value, upto_6.clone()),
+        ];
+        let mut failures = vec![];
+        for (name, a, b, expected) in cases {
+            for (order, dst, src) in [("a,b", a, b), ("b,a", b, a)] {
+                let got_map = all_locations(&dst().meet(&src()));
+                let mut d = dst();
+                let status = d.write_zipper().meet_into(&src().read_zipper(), false);
+                let got = all_locations(&d);
+                let expected_status = if all_locations(&dst()) == expected { AlgebraicStatus::Identity } else { AlgebraicStatus::Element };
+                if got_map != expected || got != expected || status != expected_status {
+                    failures.push(format!("{name} ({order}): PathMap::meet {got_map:?}, meet_into {status:?} {got:?}; expected {expected_status:?} {expected:?}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// A meet with an equal trie reports `Identity`, also when the destination is a dense node and
+    /// the source a list node, so that the list node does the walking and must say exactly when the
+    /// result is all of the dense node.  Here one byte holds both a value and an onward node, which
+    /// the list node keeps in two slots under the same key.
+    #[test]
+    fn write_zipper_meet_into_dense_with_equal_list_is_identity() {
+        let build_list = || {
+            let mut m = PathMap::<u64>::new();
+            m.set_val_at(&[2u8], 9);
+            m.set_val_at(&[2u8, 1, 0], 7);
+            m.set_val_at(&[2u8, 2, 0], 8);
+            m
+        };
+        let build_dense = || {
+            let mut m = build_list();
+            for b in [1u8, 3] { m.set_val_at(&[b], 1); }
+            for b in [1u8, 3] { m.remove_val_at(&[b], true); }
+            m
+        };
+        assert_eq!(root_tag(&build_list()), LINE_LIST_NODE_TAG);
+        assert_eq!(root_tag(&build_dense()), DENSE_BYTE_NODE_TAG);
+        assert_eq!(all_locations(&build_dense()), all_locations(&build_list()));
+
+        let mut dst = build_dense();
+        assert_eq!(dst.write_zipper().meet_into(&build_list().read_zipper(), false), AlgebraicStatus::Identity);
+        assert_eq!(all_locations(&dst), all_locations(&build_list()));
+        let mut dst = build_list();
+        assert_eq!(dst.write_zipper().meet_into(&build_dense().read_zipper(), false), AlgebraicStatus::Identity);
+
+        // Anything more in the dense node is not in the result
+        let mut dst = build_dense();
+        dst.create_path(&[2u8, 3]);
+        assert_eq!(dst.write_zipper().meet_into(&build_list().read_zipper(), false), AlgebraicStatus::Element);
+        assert_eq!(all_locations(&dst), all_locations(&build_list()));
+    }
+
     /// `meet_into` never removes its focus: not when the focus value goes because the source has
     /// none, and not when nothing is left below it, with or without `prune`.  `prune` drops only the
     /// dangling paths below the focus.

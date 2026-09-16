@@ -149,33 +149,6 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
     }
     fn node_get_child_mut(&mut self, _key: &[u8]) -> Option<(usize, &mut TrieNodeODRc<V, A>)> { unreachable!() }
     fn node_replace_child(&mut self, _key: &[u8], _new_node: TrieNodeODRc<V, A>) { unreachable!() }
-    fn node_get_payloads<'node, 'res>(&'node self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'node, V, A>)]) -> bool {
-        if self.node_is_empty() {
-            return true
-        }
-        let mut requested_contained_item = false; // This node type only has one item
-        let self_key = self.key();
-        debug_assert!(results.len() >= keys.len());
-        for ((key, expect_val), (result_key_len, payload_ref)) in keys.into_iter().zip(results.into_iter()) {
-            if starts_with(key, self_key) {
-                let self_key_len = self_key.len();
-                if self.is_child_ptr() {
-                    if !*expect_val || self_key_len < key.len() {
-                        requested_contained_item = true;
-                        *result_key_len = self_key_len;
-                        *payload_ref = PayloadRef::Child(unsafe{ &*self.payload.child });
-                    }
-                } else {
-                    if *expect_val && self_key_len == key.len() {
-                        requested_contained_item = true;
-                        *result_key_len = self_key_len;
-                        *payload_ref = PayloadRef::Val(unsafe{ &**self.payload.val });
-                    }
-                }
-            }
-        }
-        requested_contained_item
-    }
     fn node_contains_val(&self, key: &[u8]) -> bool {
         if self.is_used_val() {
             let node_key = self.key();

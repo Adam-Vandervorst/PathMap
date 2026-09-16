@@ -425,36 +425,6 @@ impl<V> FatAlgebraicResult<V> {
     pub(crate) const fn new(identity_mask: u64, element: Option<V>) -> Self {
         Self {identity_mask, element}
     }
-    /// Converts an [AlgebraicResult] into a `FatAlgebraicResult`, assuming the source `result` was the
-    /// output of a binary operation (two arguments).
-    #[inline]
-    pub(crate) fn from_binary_op_result(result: AlgebraicResult<V>, a: &V, b: &V) -> Self
-        where V: Clone
-    {
-        match result {
-            AlgebraicResult::None => FatAlgebraicResult::none(),
-            AlgebraicResult::Element(v) => FatAlgebraicResult::element(v),
-            AlgebraicResult::Identity(mask) => {
-                debug_assert!(mask <= (SELF_IDENT | COUNTER_IDENT));
-                if mask & SELF_IDENT > 0 {
-                    FatAlgebraicResult::new(mask, Some(a.clone()))
-                } else {
-                    debug_assert_eq!(mask, COUNTER_IDENT);
-                    FatAlgebraicResult::new(mask, Some(b.clone()))
-                }
-            }
-        }
-    }
-    /// Maps a `FatAlgebraicResult<V>` to `FatAlgebraicResult<U>` by applying a function to a contained value
-    #[inline]
-    pub fn map<U, F>(self, f: F) -> FatAlgebraicResult<U>
-        where F: FnOnce(V) -> U,
-    {
-        FatAlgebraicResult::<U> {
-            identity_mask: self.identity_mask,
-            element: self.element.map(f)
-        }
-    }
     /// The result of an operation between non-none arguments that results in None
     #[inline(always)]
     pub(crate) const fn none() -> Self {
