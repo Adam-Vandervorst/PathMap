@@ -6533,4 +6533,52 @@ mod tests {
             assert_eq!(map.get_val_at(&[2u8, 2, 0, 2]), Some(&52), "{label}");
         }
     }
+
+
+    /// Every location in `map`, dangling ones included, with its value
+    fn all_locations(map: &PathMap<u64>) -> Vec<(Vec<u8>, Option<u64>)> {
+        let mut rz = map.read_zipper();
+        let mut locations = vec![];
+        loop {
+            locations.push((rz.path().to_vec(), rz.val().cloned()));
+            if !rz.to_next_step() { break }
+        }
+        locations
+    }
+
+    /// Dense `subtract_into` against a list or tiny node drops a dangling path the source reaches
+    #[test]
+    fn write_zipper_subtract_into_dense_drops_reached_dangling_path() {
+        // Empty onward link at [2]; the source (a LineListNode) reaches [2]
+        let mut dst = PathMap::<u64>::new();
+        for b in [1u8, 3, 4] { dst.set_val_at(&[b], 1); }
+        dst.create_path(&[2u8]);
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[2u8, 0, 1], 246);
+        let mut wz = dst.write_zipper();
+        assert_eq!(wz.subtract_into(&src.read_zipper(), false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![(vec![], None), (vec![1], Some(1)), (vec![3], Some(1)), (vec![4], Some(1))]);
+
+        // Dangling [2] from an empty meet; the source is a TinyRefNode
+        let mut dst = PathMap::<u64>::new();
+        dst.set_val_at(&[2u8, 0, 0, 0, 0], 0);
+        dst.set_val_at(&[0u8, 0, 0, 0, 0], 0);
+        dst.set_val_at(&[0u8], 0);
+        let mut srcs = PathMap::<u64>::new();
+        srcs.set_val_at(&[1u8, 2, 0], 0);
+        let mut wz = dst.write_zipper();
+        wz.descend_to_byte(2);
+        let ra = srcs.read_zipper_at_path(&[1u8]);
+        let rb = srcs.read_zipper_at_path(&[1u8, 0]);
+        assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None);
+        wz.reset();
+        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[2u8]); probe.path_exists() }, true, "the meet should leave [2] dangling");
+        assert_eq!(wz.subtract_into(&ra, false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![
+            (vec![], None), (vec![0], Some(0)), (vec![0, 0], None), (vec![0, 0, 0], None),
+            (vec![0, 0, 0, 0], None), (vec![0, 0, 0, 0, 0], Some(0)),
+        ]);
+    }
 }

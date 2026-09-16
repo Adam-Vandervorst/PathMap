@@ -463,10 +463,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     }
                 }
 
-                //If we ended up with a value or a link in the CF, insert it into a new node
+                //Keep the CF if it still has a value or link; otherwise the location, dangling or not, is gone
                 if new_cf.has_rec() || new_cf.has_val() {
                     new_node.mask.set_bit(key_byte);
                     new_node.values.push(new_cf);
+                } else {
+                    is_identity = false;
                 }
             } else {
                 new_node.mask.set_bit(key_byte);
