@@ -45,18 +45,38 @@
 //! `in_process`'s panic-hook dance.
 //!
 //! A *divergence* is reported the same way a panic is — by panicking — so AFL
-//! files it as a crash.  Replay one with the plain comparator, which prints the
+//! saves the input.  Replay one with the plain comparator, which prints the
 //! differing line rather than a backtrace:
 //!
 //! ```text
-//! target/release/in_process out/afl-out/default/crashes/id:000000*
-//! ./lean/differential.py out/afl-out/default/crashes/*   # KNOWN-table breakdown
+//! target/release/in_process out/afl-out/default/crashes/id:* out/afl-out/default/hangs/id:*
+//! ./lean/differential.py out/afl-out/default/crashes/* # KNOWN-table breakdown
 //! ```
 //!
-//! Note that `crashes/` will fill up with the *known* residual defects
-//! (`meet_keeps_dangling` and friends) within the first minute, because to this
-//! target they are indistinguishable from a new finding.  Triage is
-//! `differential.py`'s job: it owns the one `KNOWN` table.
+//! # Look in `hangs/` as well as `crashes/`
+//!
+//! Which of the two a divergence lands in is a property of the *machine*, not of
+//! the finding.  AFL decides "crashed" by reaping the child and reading its
+//! signal, and when `/proc/sys/kernel/core_pattern` is a pipe — apport, systemd
+//! -coredump, any distro default — the kernel hands the corpse to that helper
+//! first, so AFL's wait races the helper and times out instead.  It says so at
+//! startup ("To avoid having crashes misinterpreted as timeouts...") and
+//! `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` only silences the refusal to start.
+//!
+//! Measured here: a 180s run saved **0 crashes and 18 hangs**, and all 18 hangs
+//! replay through `in_process` as real divergences.  So always sweep both
+//! directories; a genuine timeout (an infinite loop in the crate, itself a
+//! finding) is then the input in `hangs/` that `in_process` does *not* flag.
+//!
+//! `echo core | sudo tee /proc/sys/kernel/core_pattern` (or `cargo afl
+//! system-config`) puts them back in `crashes/`, and needs root.
+//!
+//! # `crashes/` is not a list of new bugs
+//!
+//! It fills up with the *known* residual defects (`meet_keeps_dangling` and
+//! friends) within the first minute, because to this target they are
+//! indistinguishable from a new finding.  Triage is `differential.py`'s job: it
+//! owns the one `KNOWN` table.
 
 use differential::harness::run as crate_run;
 use differential::reference::fuzz::run as model_run;
