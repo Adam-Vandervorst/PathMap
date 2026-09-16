@@ -7246,4 +7246,82 @@ mod tests {
         assert_eq!(map0.path_exists_at(&[0u8]), false);
         assert_eq!(vals(&map0), vec![(vec![1], 0)]);
     }
+
+    /// A list node may hold a value and an onward child under the *same* key -- that is how a path
+    /// that both ends and continues is stored.  Emptying the child without pruning leaves the link
+    /// in place, and the slot is then carrying nothing at all: there is nothing below an empty
+    /// link, and the path it stands at is already there because of the value beside it.
+    ///
+    /// `subtract_into` and `meet_into` both drop such a slot, correctly -- a dangling path the
+    /// source reaches survives neither operation.  But dropping something that was carrying
+    /// nothing is not a change, and both used to rebuild the node around the surviving slot and
+    /// report `Element` for a destination holding exactly what it held before.
+    ///
+    /// The shadowing matters: an empty link under a key of its *own* really does take a path away
+    /// with it, and that is an `Element`.  Only a link sharing its key with the slot beside it is
+    /// invisible.
+    #[test]
+    fn write_zipper_shadowed_dangling_slot_is_identity() {
+        fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
+        fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
+
+        //`insert_prefix` puts a real onward node under `[0]`, a value is set beside it, and
+        // `remove_branches` then empties the node but leaves the link.  Both slots stand at `[0]`.
+        fn dst_with_shadowed_dangling() -> PathMap<u64> {
+            let seed = mk(&[(&[0, 0], 0)]);
+            let mut dst = PathMap::<u64>::new();
+            {
+                let mut wz = dst.write_zipper();
+                wz.graft(&seed.read_zipper());
+                wz.descend_to_byte(0);
+                wz.insert_prefix(&[0]);
+                wz.get_val_or_set_mut(1);
+                wz.remove_branches(false);
+            }
+            assert_eq!(vals(&dst), vec![(vec![0], 1)]);
+            dst
+        }
+
+        //Nothing of `src` collides with the value at `[0]`, so the subtraction takes nothing away
+        let mut dst = dst_with_shadowed_dangling();
+        let src = mk(&[(&[0, 0], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.subtract_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), vec![(vec![0], 1)]);
+
+        //The meet keeps the value at `[0]` and drops the dangling link, which changes nothing
+        let mut dst = dst_with_shadowed_dangling();
+        let src = mk(&[(&[0], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.meet_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), vec![(vec![0], 1)]);
+
+        //A subtraction that really does annihilate the value beside the dangling link still says so
+        let mut dst = dst_with_shadowed_dangling();
+        let src = mk(&[(&[0], 1)]);
+        let st = { let mut wz = dst.write_zipper(); wz.subtract_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::None);
+        assert_eq!(vals(&dst), vec![]);
+
+        //...and so does a meet that drops it
+        let mut dst = dst_with_shadowed_dangling();
+        let src = mk(&[(&[1], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.meet_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::None);
+        assert_eq!(vals(&dst), vec![]);
+
+        //An empty link that is *not* shadowed stands at a path of its own, `[0, 0]` here, and
+        // dropping it takes that path away -- a change, and still reported as one
+        let mut dst = mk(&[(&[0], 1), (&[0, 0], 2)]);
+        {
+            let empty = PathMap::<u64>::new();
+            let mut wz = dst.write_zipper_at_path(&[0, 0]);
+            wz.graft(&empty.read_zipper());
+        }
+        assert_eq!(vals(&dst), vec![(vec![0], 1)]);
+        let src = mk(&[(&[0, 0], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.subtract_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(vals(&dst), vec![(vec![0], 1)]);
+    }
 }
