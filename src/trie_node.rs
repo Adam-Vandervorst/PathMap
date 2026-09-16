@@ -773,20 +773,6 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
         } else {
             pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results, swapped);
 
-            //`other` holds no payload at this key, so the result has nothing here.  That equals
-            // `other` at this key only if `other` has no path along it at all.  A path that shares a
-            // prefix with the key -- typically a dangling path, which the lookup above reports as
-            // "nothing found, everything covered" -- is not carried into the result, so claiming
-            // `COUNTER_IDENT` would hand the caller `other` with the dangling path still in it.
-            //
-            //The same holds when `other_node` is itself empty: we only get here by following an
-            // onward link from a parent, so an empty `other_node` is a dangling path in `other`
-            // running along this key, and it does not survive the meet either.
-            let nothing_here = if !other_node.node_is_empty() && other_node.node_key_overlap(keys[idx].0) == 0 {
-                FatAlgebraicResult::new(COUNTER_IDENT, None)
-            } else {
-                FatAlgebraicResult::none()
-            };
             let result = match &self_payloads[idx].1 {
                 PayloadRef::Child(self_link) => {
                     match other_node.get_node_at_key(keys[idx].0).into_option() {
@@ -799,14 +785,20 @@ pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: 
                             FatAlgebraicResult::from_binary_op_result(result, self_link, &other_onward_node)
                                 .map(|child| ValOrChild::Child(child))
                         },
-                        //Nothing in `other` below this key -- whether or not `self` is dangling here.
-                        // A meet keeps only locations that lead to a surviving value, so a dangling
-                        // `self` path meeting a value in `other` also yields nothing.
-                        None => nothing_here,
+                        None => {
+                            //Check to see if we have a dangling path, because a dangling path meet with a value should result in a path, but no value
+                            if self_link.is_empty() && other_node.node_get_val(keys[idx].0).is_some() {
+                                FatAlgebraicResult::new(SELF_IDENT, Some(ValOrChild::Child(TrieNodeODRc::new_empty())))
+                            } else {
+                                FatAlgebraicResult::new(COUNTER_IDENT, None)
+                            }
+                        }
                     }
                 },
-                //If self_payload is a val and we didn't get a corresponding val, then this result is None
-                PayloadRef::Val(_self_val) => nothing_here,
+                PayloadRef::Val(_self_val) => {
+                    //If self_payload is a val and we didn't get a corresponding val, then this result is None
+                    FatAlgebraicResult::new(COUNTER_IDENT, None)
+                },
                 _ => unreachable!()
             };
             results[idx] = result;
@@ -1546,11 +1538,6 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
-            //An empty node (dangling path) meets to nothing, even with itself: the sentinel is
-            // shared, so this must come before the identity shortcut
-            if self.node_is_empty() || other.node_is_empty() {
-                return AlgebraicResult::None;
-            }
             if self.shared_node_id() == other.shared_node_id() {
                 return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
             }
@@ -2213,11 +2200,6 @@ mod tagged_node_ref {
         }
 
         pub fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
-            //An empty node (dangling path) meets to nothing, even with itself: the sentinel is
-            // shared, so this must come before the identity shortcut
-            if self.node_is_empty() || other.node_is_empty() {
-                return AlgebraicResult::None;
-            }
             if self.ptr == other.ptr {
                 return AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT);
             }
@@ -3322,10 +3304,7 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
     }
     #[inline]
     pub fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
-        if self.is_empty() || other.is_empty() {
-            //A dangling path survives no meet; see `EmptyNode::pmeet_dyn`
-            AlgebraicResult::None
-        } else if self.ptr_eq(other) {
+        if self.ptr_eq(other) {
             AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
         } else {
             self.as_tagged().pmeet_dyn(other.as_tagged())

@@ -135,10 +135,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn drop_head_dyn(&mut self, _byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
         None
     }
-    fn pmeet_dyn(&self, _other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
-        //A dangling path leads to no value, so it survives no meet.  (Reporting it as an
-        // identity kept the empty node -- and its path -- in every meet result.)
-        AlgebraicResult::None
+    fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
+        if other.node_is_empty() {
+            AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT)
+        } else {
+            AlgebraicResult::Identity(SELF_IDENT)
+        }
     }
     fn psubtract_dyn(&self, _other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: DistributiveLattice {
         AlgebraicResult::None

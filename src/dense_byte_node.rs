@@ -2024,9 +2024,12 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         rec_status.merge(val_status, true, true)
     }
     fn pmeet(&self, other: &OtherCf) -> AlgebraicResult<Self> {
-        //A dangling cofree (a path leading to no value) survives no meet
-        if (!self.has_rec() && !self.has_val()) || (!other.has_rec() && !other.has_val()) {
-            return AlgebraicResult::None
+        //If one or the other cofree is dangling, it's an identity result for the dangling cofree
+        let mut identity_flag = 0;
+        if !self.has_rec() && !self.has_val() {identity_flag = SELF_IDENT;}
+        if !other.has_rec() && !other.has_val() {identity_flag |= COUNTER_IDENT;}
+        if identity_flag > 0 {
+            return AlgebraicResult::Identity(identity_flag)
         }
 
         //Otherwise actually work with what the cofrees contain

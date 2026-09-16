@@ -514,8 +514,6 @@ mod tests {
         assert_eq!(map.val_at(&[0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]), None);
     }
 
-    /// A meet keeps a location only if it leads to a surviving value, so dangling paths on either
-    /// side never survive it -- whatever the branching factor of the nodes involved.
     #[test]
     fn map_meet_dangling_branching_factor_test1() {
         // Left contains a path without a split
@@ -528,17 +526,16 @@ mod tests {
         right.set_val_at([7u8, 2u8, 0u8], 20);
         right.create_path([7u8, 3u8]);
 
-        // A dangling path meets a value to nothing: the whole intersection is empty
         let intersection = left.meet(&right);
-        assert!(intersection.is_empty());
-        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true); //Should have had its value removed, but the path should remain
+        assert_eq!(intersection.val_at([7u8, 1u8, 0u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
 
         //Make sure the result is the same with the opposite operand order
         let intersection = right.meet(&left);
-        assert!(intersection.is_empty());
-        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8, 0u8]), true);
+        assert_eq!(intersection.val_at([7u8, 1u8, 0u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8, 0u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
 
@@ -551,43 +548,29 @@ mod tests {
         right.create_path([7u8, 3u8]);
 
         let intersection = left.meet(&right);
-        assert!(intersection.is_empty());
-        assert_eq!(intersection.path_exists_at([7u8, 1u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8]), true); //Should have had its value removed, but the path should remain
+        assert_eq!(intersection.val_at([7u8, 1u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
 
         //Make sure the result is the same with the opposite operand order
         let intersection = right.meet(&left);
-        assert!(intersection.is_empty());
-        assert_eq!(intersection.path_exists_at([7u8, 1u8]), false);
+        assert_eq!(intersection.path_exists_at([7u8, 1u8]), true);
+        assert_eq!(intersection.val_at([7u8, 1u8]), None);
         assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
         assert_eq!(intersection.path_exists_at([7u8, 3u8]), false);
-
-        // TEST 3.  A dangling path next to a surviving value is dropped; the value survives
-        let mut left: PathMap<u64> = PathMap::new();
-        left.set_val_at([7u8, 1u8], 10);
-        left.create_path([7u8, 2u8]);
-        let mut right: PathMap<u64> = PathMap::new();
-        right.set_val_at([7u8, 1u8], 10);
-        right.set_val_at([7u8, 2u8], 20);
-        for intersection in [left.meet(&right), right.meet(&left)] {
-            assert_eq!(intersection.val_count(), 1);
-            assert_eq!(intersection.path_exists_at([7u8, 1u8]), true);
-            assert_eq!(intersection.path_exists_at([7u8, 2u8]), false);
-        }
     }
 
     #[test]
     fn map_meet_dangling_branching_factor_test2() {
-        //Test 1: Path subsets.  Two dangling paths, one a prefix of the other, meet to nothing
+        //Test 1: Path subsets
         let mut left: PathMap<()> = PathMap::new();
         left.create_path(b"OneTwo");
         let mut right: PathMap<()> = PathMap::new();
         right.create_path(b"OneTwoThree");
 
         let intersection = left.meet(&right);
-        assert!(intersection.is_empty());
-        assert_eq!(intersection.path_exists_at(b"OneTwo"), false);
+        assert_eq!(intersection.path_exists_at(b"OneTwo"), true);
         assert_eq!(intersection.path_exists_at(b"OneTwoThree"), false);
         assert_eq!(intersection.path_exists_at(b"OneTwoT"), false);
     }
