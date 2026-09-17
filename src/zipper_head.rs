@@ -343,7 +343,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
         debug_assert_eq!(z.focus_stack.depth(), 1);
         z.focus_stack.to_root();
         let stack_root = z.focus_stack.root_mut().unwrap();
-        make_cell_node(stack_root);
+        make_cell_node(stack_root, z.alloc.clone());
         let root_val = z.root_val.as_mut().unwrap();
         return (stack_root, unsafe{ &mut **root_val })
     }
@@ -386,7 +386,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                     |node, key| {
                         let new_node = if key.len() > 0 {
                             if let Some(mut remaining) = node.take_node_at_key(key, false) {
-                                make_cell_node(&mut remaining);
+                                make_cell_node(&mut remaining, alloc.clone());
                                 remaining
                             } else {
                                 TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc)
@@ -419,8 +419,9 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
 
         //If the node on top of the stack is not a cell node, we need to upgrade it
         if !z.focus_stack.top().unwrap().is_cell_node() {
+            let alloc = z.alloc.clone();
             swap_top_node(&mut z.focus_stack, &z.key, |mut existing_node| {
-                make_cell_node(&mut existing_node);
+                make_cell_node(&mut existing_node, alloc);
                 existing_node
             });
         }
@@ -439,9 +440,9 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
         let mut node_ref = node.make_mut();
         let mut new_parent = match node_ref.take_node_at_key(remaining_key, false) {
             Some(downward_node) => downward_node,
-            None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc)
+            None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc.clone())
         };
-        make_cell_node(&mut new_parent);
+        make_cell_node(&mut new_parent, alloc.clone());
         let result = node_ref.node_set_branch(remaining_key, new_parent);
         match result {
             Ok(_) => { },
@@ -452,7 +453,7 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
         node = child_node;
     } else {
         //Otherwise just upgrade node
-        make_cell_node(node);
+        make_cell_node(node, alloc);
     }
     node
 }
@@ -1582,5 +1583,36 @@ mod tests {
         assert_eq!(map.get_val_at(&[1u8, 2, 4]), Some(&1));
         assert_eq!(map.get_val_at(&[1u8, 2, 5]), Some(&2));
         assert_eq!(map.get_val_at(&[1u8, 2, 3]), Some(&7));
+    }
+
+    /// Exclusive paths from a head whose focus node is the empty sentinel
+    #[test]
+    fn exclusive_path_over_empty_node() {
+        let setups: [fn(&mut PathMap<u64>); 3] = [
+            |m| { m.write_zipper_at_path(&[0u8, 0]).remove_branches(false); },
+            |m| { let e = PathMap::<u64>::new(); m.write_zipper_at_path(&[0u8, 0]).graft(&e.read_zipper()); },
+            |m| { m.write_zipper_at_path(&[0u8, 0]).take_map(false); },
+        ];
+        for (i, setup) in setups.iter().enumerate() {
+            for paths in [[&[][..], &[5u8][..]], [&[5u8, 6][..], &[][..]], [&[0u8, 0][..], &[1u8][..]]] {
+                let mut map = PathMap::<u64>::new();
+                map.set_val_at(&[0u8, 0, 1, 2], 9);
+                map.set_val_at(&[7u8], 9);
+                setup(&mut map);
+                {
+                    let mut wz = map.write_zipper_at_path(&[0u8, 0]);
+                    let zh = wz.zipper_head();
+                    for (n, p) in paths.iter().enumerate() {
+                        let mut w = zh.write_zipper_at_exclusive_path(p).unwrap();
+                        w.set_val(n as u64);
+                    }
+                }
+                assert_eq!(map.get(&[7u8]), Some(&9), "setup {i} {paths:?}");
+                for (n, p) in paths.iter().enumerate() {
+                    let full: Vec<u8> = [&[0u8, 0][..], p].concat();
+                    assert_eq!(map.get(&full), Some(&(n as u64)), "setup {i} {paths:?}");
+                }
+            }
+        }
     }
 }
