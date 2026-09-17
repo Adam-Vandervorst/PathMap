@@ -159,6 +159,10 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
 
     #[inline]
     fn focus_byte(&self) -> Option<u8> {
+        //The sources may be rooted at different paths, so at the root their bytes differ
+        if self.depth() == 0 {
+            return None;
+        }
         let byte = self.a.focus_byte();
         debug_assert_eq!(byte, self.b.focus_byte());
         byte
@@ -576,5 +580,22 @@ mod tests {
         let moved = oz.descend_until_observed(&mut observed);
         assert_eq!(moved, true);
         assert_eq!(observed, oz.path(), "observer must match the resulting path");
+    }
+
+    /// Sources rooted at different paths: no focus byte, and no sibling step, at the root
+    #[test]
+    fn overlay_sources_at_different_roots() {
+        use crate::zipper::ZipperIteration;
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 5][..], &[1, 6], &[2, 5, 1]] { a.set_val_at(p, 1); }
+        let mut z = OverlayZipper::new(a.read_zipper_at_path(&[1u8]), a.read_zipper_at_path(&[2u8]));
+        assert_eq!(z.focus_byte(), None);
+        assert_eq!(z.to_next_sibling_byte(), None);
+        assert_eq!(z.to_prev_sibling_byte(), None);
+        let mut steps = vec![];
+        while z.to_next_step() { steps.push(z.path().to_vec()); assert!(steps.len() < 16); }
+        assert_eq!(steps, vec![vec![5], vec![5, 1], vec![6]]);
+        let mut o = Vec::new();
+        while z.to_next_val_observed(&mut o) { assert_eq!(&o[..], z.path()); }
     }
 }
