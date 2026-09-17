@@ -876,6 +876,37 @@ mod tests {
         //                                          c-> List("aaa")
     }
 
+    /// `subtract` must keep a value when the other map only has a *longer* path through its location.
+    /// Needs a byte-node root on the left (a value-and-child key plus a second branch) and a line-node
+    /// root on the right; every smaller shape already worked.
+    #[test]
+    fn map_subtract_keeps_value_under_other_path() {
+        let mut a: PathMap<u64> = PathMap::new();
+        a.insert([0], 0);
+        a.insert([0, 0], 0);
+        a.insert([0, 0, 0], 0);
+        a.insert([1, 0, 0], 0);
+        let mut b: PathMap<u64> = PathMap::new();
+        b.insert([0, 0], 0);
+        b.insert([1, 0, 0], 0);
+
+        let diff = a.subtract(&b);
+        let paths: Vec<(Vec<u8>, u64)> = diff.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(paths, vec![(vec![0], 0), (vec![0, 0, 0], 0)]);
+
+        // and with distinct values, so the surviving value is visibly the left one
+        let mut a: PathMap<u64> = PathMap::new();
+        a.insert([0], 5);
+        a.insert([0, 0], 6);
+        a.insert([0, 0, 0], 7);
+        a.insert([1, 0, 0], 8);
+        let diff = a.subtract(&b);
+        assert_eq!(diff.val_at([0]), Some(&5));
+        assert_eq!(diff.val_at([0, 0]), Some(&6));   // 6 - 0 is Element(6) for u64
+        assert_eq!(diff.val_at([0, 0, 0]), Some(&7));
+        assert_eq!(diff.val_at([1, 0, 0]), Some(&8));
+    }
+
     #[test]
     fn map_insert_test() {
         let keys = [

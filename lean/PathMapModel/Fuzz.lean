@@ -60,25 +60,18 @@ agree exactly or every input with a skip diverges.
 * `skip:act` — the ACT read source cannot be a merge source
   (`ZipperInfallibleSubtries` is not implemented for it) or does not implement
   the trait the op needs.
-* `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root, where
-  the native read zipper escapes its own root.
 * `skip:k0` — a degenerate `k = 0`.
 * `skip:empty-focus` — the focus has nothing below it, where the op's behaviour
   is a function of node materialisation rather than trie state.
-* `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 * `skip:off-root-prune` — a prune on a write zipper not rooted at the map root,
   where the depth pruned is a function of internal node layout.
-* `skip:quarantined` — the op is disabled outright (op 54).
 
 Each is recorded in FINDINGS.md and commented at its site. -/
 
 def skipAct : String := "skip:act"
-def skipAtRoot : String := "skip:at-root"
 def skipK0 : String := "skip:k0"
 def skipEmptyFocus : String := "skip:empty-focus"
-def skipEmptyPath : String := "skip:empty-path"
 def skipOffRootPrune : String := "skip:off-root-prune"
-def skipQuarantined : String := "skip:quarantined"
 
 /-! ## Rendering -/
 
@@ -290,17 +283,16 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              let (r, s) := onTarget s t (fun z => z.ascendUntilBranch)
              some (emit s "ascend_until_branch" (toString r), d)
   | 11 => do let (t, d) ← d.mod 2
-             -- Skipped at the zipper root: `ReadZipper::to_next_sibling_byte`
-             -- escapes its own root there (see the notes in `Zip.toNextSiblingByte`).
-             if (getTarget s t).atRoot then some (emit s "to_next_sibling_byte" skipAtRoot, d)
-             else
-               let (r, s) := onTarget s t (fun z => z.toNextSiblingByte)
-               some (emit s "to_next_sibling_byte" (showByteOpt r), d)
+             -- Formerly skipped at the zipper root, where `ReadZipper::
+             -- to_next_sibling_byte` used to escape its own root
+             -- (FINDINGS.md #3).  That is fixed: the override now guards on
+             -- `at_root()`, returns `None` there and leaves `origin_path()`
+             -- alone, so the root case is compared like any other.
+             let (r, s) := onTarget s t (fun z => z.toNextSiblingByte)
+             some (emit s "to_next_sibling_byte" (showByteOpt r), d)
   | 12 => do let (t, d) ← d.mod 2
-             if (getTarget s t).atRoot then some (emit s "to_prev_sibling_byte" skipAtRoot, d)
-             else
-               let (r, s) := onTarget s t (fun z => z.toPrevSiblingByte)
-               some (emit s "to_prev_sibling_byte" (showByteOpt r), d)
+             let (r, s) := onTarget s t (fun z => z.toPrevSiblingByte)
+             some (emit s "to_prev_sibling_byte" (showByteOpt r), d)
   | 13 => do let (t, d) ← d.mod 2
              let (r, s) := onTarget s t (fun z => z.toNextStep)
              some (emit s "to_next_step" (showBool r), d)
@@ -407,6 +399,8 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 38 => do let (_pr, d) ← d.bool
              if s.act then some (emit s "meet_into" skipAct, d)
              else
+               -- `prune = true` is best-effort (nodes shared with the source may be
+               -- left unpruned; see `Zip.meetInto`), so only `prune = false` is compared.
                let (st, z) := s.wz.meetInto ops s.rz noPrune
                some (emit { s with wz := z } "meet_into" (toString st), d)
   | 39 => do let (_pr, d) ← d.bool
@@ -416,10 +410,13 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit { s with wz := z } "subtract_into" (toString st), d)
   | 40 => do if s.act then some (emit s "restrict" skipAct, d) else
              do
-               let leaky := s.wz.focusNodeIsEmpty
+               -- The status used to be masked to `?` at a focus with nothing
+               -- below it, as one of the node-materialisation leaks in
+               -- FINDINGS.md #8.  It is no longer: over 48M inputs, of which
+               -- roughly seven in eight reach this op with an empty focus, the
+               -- crate's status matches the spec every time.
                let (st, z) := s.wz.restrict ops s.rz
-               some (emit { s with wz := z } "restrict"
-                 (if leaky then "?" else toString st), d)
+               some (emit { s with wz := z } "restrict" (toString st), d)
              -- Skipped, not merely masked, when either side has nothing below
              -- its focus: there `restricting` branches on whether an empty node
              -- happens to be materialised, and the two branches differ in
@@ -439,22 +436,20 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              -- subtrie in pathmap 0.3.1; see `Zip.joinKPathInto`.
              if k == 0 then some (emit s "join_k_path_into" skipK0, d)
              else
-               -- The bool is another `AbstractNodeRef` leak: an empty node still
-               -- comes back as `Some(...)` from `into_option()` for some
-               -- representations, so `true` gets reported for a collapse that
-               -- produced nothing.  Compared only when something survived.
-               -- See FINDINGS.md #8.
+               -- The bool used to be masked to `?` when the collapse left an
+               -- empty focus, on the theory that it was another
+               -- `AbstractNodeRef` leak (FINDINGS.md #8).  Unmasked it tracks
+               -- the spec: over 64M inputs, with the mask firing on about two
+               -- calls in three, no `join_k_path_into` line differs.
                let (r, z) := s.wz.joinKPathInto ops k noPrune
-               some (emit { s with wz := z } "join_k_path_into"
-                 (if z.focusNodeIsEmpty then "?" else showBool r), d)
+               some (emit { s with wz := z } "join_k_path_into" (showBool r), d)
   | 43 => do let (p, d) ← d.path
-             -- `insert_prefix("")` destroys the subtrie in pathmap 0.3.1; see
-             -- `Zip.insertPrefix`.  Skipped so the known bug does not mask others.
-             if p.isEmpty then
-               some (emit s "insert_prefix" skipEmptyPath, d)
-             else
-               let (r, z) := s.wz.insertPrefix p
-               some (emit { s with wz := z } "insert_prefix" (showBool r), d)
+             -- The empty prefix was skipped while `make_parents_in(b"", node)`
+             -- discarded the node instead of doing nothing (FINDINGS.md #4).
+             -- That is fixed upstream, with a regression test of its own, so
+             -- the empty prefix is compared like any other.
+             let (r, z) := s.wz.insertPrefix p
+             some (emit { s with wz := z } "insert_prefix" (showBool r), d)
   | 44 => do let (n, d) ← d.mod 6
              let (r, z) := s.wz.removePrefix n
              some (emit { s with wz := z } "remove_prefix" (showBool r), d)
@@ -527,11 +522,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 54 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (ru, d) ← d.bool
              -- Fed the source's own child subtries, this must agree with
              -- `graft_masked_branches` on the same mask.
-             -- Skipped outright, not just in ACT mode: `graft_child_maps` is
-             -- broken three ways (FINDINGS.md #15) and the node representations
-             -- it leaves behind degrade the `AlgebraicStatus` that *later*
-             -- operations report, which would contaminate the whole run.
-             if true then some (emit s "graft_child_maps" skipQuarantined, d) else
+             if s.act then some (emit s "graft_child_maps" skipAct, d) else
              do
                let mask := ByteMask.ofList m
                let maps := mask.map (fun b => ([b], s.rz.trie.subtrie (s.rz.focus ++ [b])))

@@ -2668,17 +2668,14 @@ where Storage: AsRef<[u8]>
                 return start_len - self.path.len();
             }
 
-            match &self.cur_node {
-                Node::Line(line) => {
-                    if need_value && line.value.is_some() {
-                        return start_len - self.path.len();
-                    }
-                }
-                Node::Branch(node) => {
-                    if need_value && node.value.is_some() {
-                        return start_len - self.path.len();
-                    }
-                }
+            //The focus is now the deepest real ancestor of where we started, which is a strict
+            //ancestor, so it is a candidate stop in its own right.  It stops the ascent under
+            //exactly the conditions the rest of this method uses: a value here when `need_value`,
+            //or a branch.  Both have to be read off the *focus*, not off the node: a line node
+            //carries its value at its end, so `line.value` says nothing about a focus that sits
+            //partway into the line, and a line's interior always has exactly one child.
+            if (need_value && self.is_val()) || self.child_count() > 1 {
+                return start_len - self.path.len();
             }
         }
         while let Some(top_frame) = self.stack.last_mut() {
@@ -2772,6 +2769,39 @@ where Storage: AsRef<[u8]>
     }
 
     fn to_sibling(&mut self, next: bool) -> Option<u8> {
+        //An off-trie focus has no stack frame -- the stack holds real nodes, and a byte that is
+        //not in the trie has no node -- so the index-based path below cannot serve it and used to
+        //answer `None`.  That starves `to_next_step`, which is `ZipperIteration`'s default and
+        //moves by this method: from a non-existent focus that sorts before an existing sibling it
+        //would give up and reset rather than step to it.
+        //
+        //The sibling of a phantom byte is still well defined, because it is defined by the
+        //*parent's* children rather than by the focus: the next child byte strictly greater than
+        //the phantom one.  That only makes sense while the parent itself is real, so a focus more
+        //than one byte off the trie has no siblings -- its parent has no children at all.
+        if self.invalid > 0 {
+            if self.invalid > 1 {
+                return None;
+            }
+            let byte = *self.path.last()?;
+            if self.ascend_invalid(Some(1)) != 1 {
+                //The phantom byte is the zipper's root, so there is nothing to be a sibling of.
+                return None;
+            }
+            let mask = self.child_mask();
+            let target = if next { mask.next_bit(byte) } else { mask.prev_bit(byte) };
+            match target {
+                Some(t) => {
+                    self.descend_to_byte(t);
+                    return Some(t);
+                }
+                None => {
+                    //Documented to leave the zipper where it was when it does not move.
+                    self.descend_to_byte(byte);
+                    return None;
+                }
+            }
+        }
         let top_frame = self.stack.last().unwrap();
         if self.stack.len() <= 1 || top_frame.node_depth > 0 {
             // can't move to sibling at root, or along the path
@@ -2938,13 +2968,24 @@ where Storage: AsRef<[u8]>
     /// WARNING: This is not a cheap method. It may have an order-N cost
     fn val_count(&self) -> usize {
         timed_span!(ValueCount, COUNTERS);
+        //`ZipperMoving::val_count` counts the values at and below the *focus*.  This used to
+        // `reset()` first, so it counted the whole subtrie below the zipper's root and returned
+        // the same number wherever the focus was -- right only when the focus was at the root.
+        //
+        //`to_next_val` walks the zipper's entire subtrie, not just the part below the focus, so
+        // the walk has to stop when it leaves: depth-first order visits everything below the
+        // focus before anything outside it, so the first path that no longer starts with the
+        // focus ends the count.
         let mut zipper = self.clone();
-        zipper.reset();
+        let focus: Vec<u8> = zipper.path().to_vec();
         let mut count = 0;
         if zipper.is_val() {
             count += 1;
         }
         while zipper.to_next_val() {
+            if !zipper.path().starts_with(&focus) {
+                break;
+            }
             count += 1;
         }
         count
@@ -4190,5 +4231,134 @@ mod tests {
         az.reset();
         assert_eq!(az.val(), None);
         assert!(!az.path_exists());
+    }
+    /// `ACTZipper::val_count` opened with `reset()`, so it counted the values below
+    /// the zipper's *root* whatever the focus was, and was right only at the root.
+    /// `ZipperValues::val_count` counts at and below the focus.
+    #[test]
+    fn act_zipper_val_count_counts_from_the_focus() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(b"aa", 1);
+        m.insert(b"ab", 2);
+        m.insert(b"b", 3);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+        for path in [&b""[..], b"a", b"aa", b"ab", b"b", b"zz"] {
+            let mut az = t.read_zipper_u64();
+            let mut pz = m.read_zipper();
+            az.descend_to(path);
+            pz.descend_to(path);
+            assert_eq!(az.val_count(), pz.val_count(), "focus {path:?}");
+        }
+        //And from a zipper rooted below the map root
+        for path in [&b""[..], b"a", b"b"] {
+            let mut az = t.read_zipper_at_path_u64(b"a");
+            let mut pz = m.read_zipper_at_path(b"a");
+            az.descend_to(path);
+            pz.descend_to(path);
+            assert_eq!(az.val_count(), pz.val_count(), "root a, focus {path:?}");
+        }
+    }
+
+    /// `ACTZipper::to_sibling` worked entirely off the node stack, which holds real
+    /// nodes, so a focus one byte off the trie had no frame and the method answered
+    /// `None`.  That starved `to_next_step`, which moves by it: from a non-existent
+    /// focus sorting before an existing sibling it gave up instead of stepping to it,
+    /// and whole subtrees went unvisited.  The sibling of a phantom byte is defined by
+    /// the parent's children, so it exists while the parent is real.
+    #[test]
+    fn act_zipper_sibling_step_from_an_off_trie_focus() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        { let mut w = m.write_zipper(); w.set_val(38); }
+        m.insert(&[1u8], 5);
+        m.insert(&[1u8, 0, 2], 22);
+        m.insert(&[3u8], 7);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+
+        //One byte off the trie, with a sibling on either side
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[2u8]);
+        assert!(!az.path_exists());
+        assert_eq!(az.to_next_sibling_byte(), Some(3));
+        assert_eq!(az.path(), &[3u8]);
+        assert_eq!(az.val(), Some(&7));
+        az.ascend(1);
+        az.descend_to(&[2u8]);
+        assert_eq!(az.to_prev_sibling_byte(), Some(1));
+        assert_eq!(az.path(), &[1u8]);
+        assert_eq!(az.val(), Some(&5));
+
+        //No sibling on that side: the zipper stays where it was
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[0u8]);
+        assert_eq!(az.to_prev_sibling_byte(), None);
+        assert_eq!(az.path(), &[0u8]);
+        assert!(!az.path_exists());
+        assert_eq!(az.to_next_sibling_byte(), Some(1));
+
+        //Two bytes off the trie: the parent is not real, so there is no sibling
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[2u8, 0]);
+        assert_eq!(az.to_next_sibling_byte(), None);
+        assert_eq!(az.path(), &[2u8, 0]);
+
+        //`to_next_step` from an off-trie focus visits what follows it
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[0u8]);
+        let mut seen = Vec::new();
+        while az.to_next_step() { seen.push(az.path().to_vec()); }
+        assert_eq!(seen, vec![vec![1u8], vec![1, 0], vec![1, 0, 2], vec![3]]);
+    }
+
+    /// `ascend_to_branch`, behind `ascend_until` and `ascend_until_branch`, ascends the
+    /// non-existent tail of the path first and then has to decide whether the real ancestor it
+    /// lands on already stops the ascent.  It read that off the *node* rather than off the
+    /// focus: it took a line node's `value`, which sits at the line's end, for a value at a
+    /// focus partway into the line, and it never considered branching at all.  So from an
+    /// off-trie focus the ascent stopped short of the first real value or branch whenever the
+    /// deepest real ancestor sat mid-line in a line that ends in a value, and ran a byte past
+    /// that ancestor whenever it was a branch.
+    #[test]
+    fn act_zipper_ascend_until_from_an_off_trie_focus() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(&[1u8, 2, 3, 4], 11); //a line under 01, its value at the line's end
+        m.insert(&[5u8, 2], 22);       //a branch at 05, two children, no value
+        m.insert(&[5u8, 6], 33);
+        m.insert(&[7u8], 44);          //a value at 07, which branches below it as well
+        m.insert(&[7u8, 8], 55);
+        m.insert(&[7u8, 9], 66);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+
+        let off_trie: [&[u8]; 9] = [&[1, 2, 9], &[1, 2, 3, 9], &[1, 2, 3, 4, 9], &[1, 9, 9],
+            &[5, 9], &[5, 2, 9], &[7, 9, 9], &[7, 8, 9, 9], &[9]];
+        for root in [&[][..], &[1u8], &[1, 2], &[7]] {
+            for focus in off_trie {
+                if !focus.starts_with(root) { continue }
+                let focus = &focus[root.len()..];
+                for need_value in [false, true] {
+                    let mut az = t.read_zipper_at_path_u64(root);
+                    let mut pz = m.read_zipper_at_path(root);
+                    assert_eq!(az.descend_to(focus), pz.descend_to(focus));
+                    assert!(!az.path_exists() && !pz.path_exists(), "{root:?} {focus:?}");
+                    let (a, p) = if need_value {
+                        (az.ascend_until(), pz.ascend_until())
+                    } else {
+                        (az.ascend_until_branch(), pz.ascend_until_branch())
+                    };
+                    assert_eq!(a, p, "root {root:?} focus {focus:?} need_value {need_value}");
+                    assert_eq!(az.path(), pz.path(), "root {root:?} focus {focus:?}");
+                    //Whether the frame still agrees with the path the ascent left the zipper
+                    //at only shows on the next move, so look at the focus and then move
+                    assert_eq!(az.path_exists(), pz.path_exists(), "{root:?} {focus:?}");
+                    assert_eq!(az.val(), pz.val(), "{root:?} {focus:?}");
+                    assert_eq!(az.child_count(), pz.child_count(), "{root:?} {focus:?}");
+                    assert_eq!(az.descend_first_byte(), pz.descend_first_byte(), "{root:?} {focus:?}");
+                    assert_eq!(az.path(), pz.path(), "{root:?} {focus:?} after descend");
+                    assert_eq!(az.val(), pz.val(), "{root:?} {focus:?} after descend");
+                }
+            }
+        }
     }
 }

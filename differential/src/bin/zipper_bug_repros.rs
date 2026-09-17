@@ -92,7 +92,18 @@ fn run(name: &str) {
 
             let mut empty = PathMap::<u64>::new();
             let st = { let mut w = empty.write_zipper(); w.join_into(&rz) };
-            println!("  into EMPTY dst    -> {st:?}; dst = {}   <-- source lost", vals(&empty));
+            println!("  into EMPTY dst    -> {st:?}; dst = {}", vals(&empty));
+
+            // The form that outlived the empty-destination fix: a dense destination that already
+            // holds everything under the source's mid-key focus was *replaced* by the source.
+            let mut dense = PathMap::<u64>::new();
+            for i in 0..4u8 { dense.insert(&[i], i as u64); }
+            let mut src2 = PathMap::<u64>::new();
+            src2.insert(&[0u8, 0, 0], 0);
+            let mut rz2 = src2.read_zipper();
+            rz2.descend_to(&[0u8, 0]);
+            let st = { let mut w = dense.write_zipper(); w.join_into(&rz2) };
+            println!("  DENSE dst u mid-key src -> {st:?}; dst = {}   (expect Identity, 4 values)", vals(&dense));
 
             let mut nonempty = PathMap::<u64>::new();
             nonempty.insert(&[9u8], 5);

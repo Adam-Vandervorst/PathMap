@@ -7,6 +7,7 @@ traces.  All of them decode the same bytes with the same rules; see
 
     lean/.lake/build/bin/pathmap-oracle     the Lean model  (always)
     target/*/pathmap_trace                 the real crate  (default)
+    target/*/reference                     the Rust model  (--model)
     target/*/act_trace                     ACT read source (--act)
 
 Each child is spawned once with `--server` and stays resident, taking inputs as
@@ -17,6 +18,14 @@ cost about 5x the runtime and left `/tmp/pathmap-diff-*` behind forever.  Only a
 
     ./lean/differential.py corpus/*                # check a corpus
     ./lean/differential.py --random 500            # generate and check
+    ./lean/differential.py --model --random 500    # check the Rust port
+
+`--model` is the acceptance test for `differential/src/reference/`: it compares
+two independent transcriptions of the same specification, in different
+languages, with the crate not involved at all.  So the KNOWN table below does not
+apply -- every divergence is a bug in one of the two models, and none may be
+tolerated.  Once it is clean, `target/release/in_process` compares the Rust model
+against the crate in one process, with no pipes, about 4x faster.
 """
 import argparse
 import multiprocessing
@@ -41,6 +50,12 @@ ACT_CANDIDATES = [os.environ.get("PATHMAP_ACT_TRACE", "")] + [
     os.path.join(ROOT, "target", "release", "act_trace"),
     os.path.join(ROOT, "target", "debug", "act_trace"),
 ]
+# The Rust port of the Lean model (differential/src/reference/), driven by
+# `--model`.  Its trace front end is `differential/src/bin/reference.rs`.
+MODEL_CANDIDATES = [os.environ.get("PATHMAP_REFERENCE", "")] + [
+    os.path.join(ROOT, "target", "release", "reference"),
+    os.path.join(ROOT, "target", "debug", "reference"),
+]
 # Seconds a single input may take.  Measured over 2000 random programs against
 # the real crate, the non-hanging ones run in p50 0.19ms / p100 1.21ms, so this
 # is ~1600x the worst legitimate case and still cuts the cost of a hang by 15x
@@ -48,10 +63,18 @@ ACT_CANDIDATES = [os.environ.get("PATHMAP_ACT_TRACE", "")] + [
 TIMEOUT = 2.0
 
 
-def find_trace_bin(act):
-    for c in (ACT_CANDIDATES if act else TRACE_CANDIDATES):
+def find_trace_bin(act, model=False):
+    if model:
+        candidates = MODEL_CANDIDATES
+    elif act:
+        candidates = ACT_CANDIDATES
+    else:
+        candidates = TRACE_CANDIDATES
+    for c in candidates:
         if c and os.path.exists(c):
             return c
+    if model:
+        sys.exit("build the Rust model first: cargo build --release -p differential")
     if act:
         sys.exit("build the ACT side first: "
                  "cargo build --release -p differential")
@@ -215,6 +238,12 @@ KNOWN = [
     (["join_into"],
      "join_into() drops the source subtrie when the destination map is empty "
      "[join_into_empty_dst]"),
+    # Tested before the write-zipper entry below, which keys on the bare op name
+    # and was claiming these: here the write zipper is identical on both sides
+    # and only the ACT read zipper moved, so finding 9 cannot be the cause.
+    (["ascend_until", "ACT-READ-ZIPPER-ONLY"],
+     "ACTZipper::ascend_until()/ascend_until_branch() report a different ascent "
+     "than the model, usually one byte short [act: ascend_until_short]"),
     (["ascend_until"],
      "ascend_until()/ascend_until_branch() corrupt a write zipper rooted at a "
      "node boundary [ascend_until_wz]"),
@@ -391,6 +420,20 @@ def divergence_shape(a, b):
     return None
 
 
+def read_zipper_only(a, b):
+    """Do these differ only in the read zipper, leaving the write zipper equal?
+
+    In `--act` mode the read zipper is the ArenaCompactTree one and the write
+    zipper is still a `PathMap` one, so this separates an ACT read-side defect
+    from a write-side defect that the same operation would also report.
+    """
+    if any(" W=" not in t or " R=" not in t for t in (a, b)):
+        return False
+    w = lambda t: t.split(" W=", 1)[1].split(" R=", 1)[0]
+    r = lambda t: t.split(" R=", 1)[1]
+    return w(a) == w(b) and r(a) != r(b)
+
+
 def act_valcount_only(a, b):
     """Do these two trace lines differ *only* in the read zipper's val_count?
 
@@ -430,6 +473,8 @@ def compare(blob, oracle, other, other_label, act=False):
     for i, (a, b) in enumerate(zip(lean, real)):
         if a != b:
             tags = ["ACT-VALCOUNT-ONLY"] if act and act_valcount_only(a, b) else []
+            if act and read_zipper_only(a, b):
+                tags.append("ACT-READ-ZIPPER-ONLY")
             shape = divergence_shape(a, b)
             if shape:
                 tags.append(shape)
@@ -582,6 +627,9 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--act", action="store_true",
                     help="use an ArenaCompactTree as the read source")
+    ap.add_argument("--model", action="store_true",
+                    help="compare the Lean model against the Rust model "
+                         "(differential/src/reference/) instead of against the crate")
     ap.add_argument("-j", "--jobs", type=int, default=1,
                     help="run this many worker processes in parallel "
                          "(each owns its own pair of children)")
@@ -592,8 +640,8 @@ def main():
     args = ap.parse_args()
     TIMEOUT = args.timeout
 
-    trace_bin = find_trace_bin(args.act)
-    other_label = "crate"
+    trace_bin = find_trace_bin(args.act, args.model)
+    other_label = "rust" if args.model else "crate"
 
     # Inputs are produced by an `InputSource`, in whichever worker picks the
     # index up -- see the class docs.  Nothing is written to disk and no blob is
@@ -610,7 +658,7 @@ def main():
     n_inputs = len(source)
 
     oracle_argv = [ORACLE] + (["--act"] if args.act else [])
-    other_argv = [trace_bin]
+    other_argv = [trace_bin] + (["--act"] if (args.act and args.model) else [])
     faildir = []          # created on first failure only
 
     def save(idx):
@@ -637,7 +685,9 @@ def main():
             if args.verbose:
                 print("ok   %s" % name)
             return False
-        note = classify(msg)
+        # Model against model: the KNOWN table is a list of *crate* defects, and
+        # the crate is not involved.  Every divergence is new.
+        note = None if args.model else classify(msg)
         if note:
             known[note] = known.get(note, 0) + 1
             if args.verbose:

@@ -416,18 +416,29 @@ pub trait ZipperMoving: Zipper {
     /// where the index passed is 1 more than the index of the current focus position.
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let cur_byte = self.focus_byte()?;
+        //The focus is allowed to sit on a path that isn't in the trie, and such a focus still has
+        // well-defined siblings because the siblings come from the parent's `child_mask`.  Remember
+        // whether the focus exists, so the no-sibling arm can check it restores exactly what it found.
+        #[cfg(debug_assertions)]
+        let focus_existed = self.path_exists();
         if !self.ascend_byte() {
             return None
         }
         let mask = self.child_mask();
         match mask.next_bit(cur_byte) {
             Some(byte) => {
+                //`byte` came out of the parent's `child_mask`, so the sibling we land on exists
                 self.descend_to_byte(byte);
                 debug_assert!(self.path_exists());
                 Some(byte)
             },
             None => {
+                //There is no next sibling, so the focus goes back exactly where it started.  That
+                // location need not be an existing path, so all we can check is that putting it
+                // back didn't change whether it exists.
                 self.descend_to_byte(cur_byte);
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(self.path_exists(), focus_existed);
                 None
             }
         }
@@ -442,19 +453,27 @@ pub trait ZipperMoving: Zipper {
     /// where the index passed is 1 less than the index of the current focus position.
     fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         let cur_byte = self.focus_byte()?;
+        //See the note in `to_next_sibling_byte`; the focus may legitimately be off the trie
+        #[cfg(debug_assertions)]
+        let focus_existed = self.path_exists();
         if !self.ascend_byte() {
             return None
         }
         let mask = self.child_mask();
         match mask.prev_bit(cur_byte) {
             Some(byte) => {
+                //`byte` came out of the parent's `child_mask`, so the sibling we land on exists
                 self.descend_to_byte(byte);
                 debug_assert!(self.path_exists());
                 Some(byte)
             },
             None => {
+                //There is no previous sibling, so the focus goes back exactly where it started.
+                // That location need not be an existing path, so all we can check is that putting
+                // it back didn't change whether it exists.
                 self.descend_to_byte(cur_byte);
-                debug_assert!(self.path_exists());
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(self.path_exists(), focus_existed);
                 None
             }
         }
@@ -6401,6 +6420,76 @@ mod tests {
         assert_eq!(z.to_prev_sibling_byte(), None);
     }
 
+    /// A sibling step from a focus that is not in the trie.  `descend_to` an absent path is
+    /// legal and leaves `path_exists()` false, and the siblings of that focus are still well
+    /// defined because they come from the parent's `child_mask`.  The `ZipperMoving` default
+    /// `to_prev_sibling_byte` asserted `path_exists()` on the arm that finds no previous
+    /// sibling and puts the focus back where it started, so every write zipper (which takes the
+    /// default impl) panicked in a debug build instead of returning `None`.  `to_next_sibling_byte`
+    /// had no assert on its matching arm and so answered correctly; both are checked here.
+    #[test]
+    fn sibling_step_from_a_focus_that_does_not_exist() {
+        //The shrunk fuzz case: an empty map, so the root's child mask is empty
+        let mut empty = PathMap::<u64>::new();
+        let mut wz = empty.write_zipper();
+        wz.descend_to(&[0u8]);
+        assert!(!wz.path_exists());
+        assert_eq!(wz.to_prev_sibling_byte(), None);
+        assert_eq!(wz.path(), &[0u8]);
+        assert!(!wz.path_exists());
+        assert_eq!(wz.to_next_sibling_byte(), None);
+        assert_eq!(wz.path(), &[0u8]);
+        drop(wz);
+
+        let mut map = PathMap::<u64>::new();
+        map.insert(&[1u8, 3], 13);
+        map.insert(&[1u8, 5], 15);
+        map.insert(&[7u8], 7);
+
+        //A focus that is missing from an existing parent answers from the parent's children:
+        // `None` when nothing lies to that side, and the real neighbour when something does
+        for (byte, prev, next) in [(2u8, None, Some(3u8)), (4, Some(3), Some(5)), (6, Some(5), None)] {
+            let mut wz = map.write_zipper_at_path(&[1u8]);
+            wz.descend_to(&[byte]);
+            assert!(!wz.path_exists(), "byte {byte}");
+            assert_eq!(wz.to_prev_sibling_byte(), prev, "byte {byte}");
+            //A step that moved landed on a real sibling; one that didn't left the focus off-trie
+            assert_eq!(wz.path_exists(), prev.is_some(), "byte {byte}");
+            assert_eq!(wz.path(), &[prev.unwrap_or(byte)], "byte {byte}");
+            drop(wz);
+
+            let mut wz = map.write_zipper_at_path(&[1u8]);
+            wz.descend_to(&[byte]);
+            assert_eq!(wz.to_next_sibling_byte(), next, "byte {byte}");
+            drop(wz);
+
+            //The read zipper's native impls must agree with the write zipper's default impls
+            let mut rz = map.read_zipper_at_path(&[1u8]);
+            rz.descend_to(&[byte]);
+            assert!(!rz.path_exists(), "byte {byte}");
+            assert_eq!(rz.to_prev_sibling_byte(), prev, "byte {byte}");
+            let mut rz = map.read_zipper_at_path(&[1u8]);
+            rz.descend_to(&[byte]);
+            assert_eq!(rz.to_next_sibling_byte(), next, "byte {byte}");
+        }
+
+        //A focus whose parent is itself missing has no siblings at all, and the failed step
+        // must leave the focus exactly where it was
+        let mut wz = map.write_zipper();
+        wz.descend_to(&[9u8, 9]);
+        assert!(!wz.path_exists());
+        assert_eq!(wz.to_prev_sibling_byte(), None);
+        assert_eq!(wz.path(), &[9u8, 9]);
+        assert_eq!(wz.to_next_sibling_byte(), None);
+        assert_eq!(wz.path(), &[9u8, 9]);
+        assert!(!wz.path_exists());
+        //...and the zipper is still usable afterwards
+        wz.ascend(2);
+        assert_eq!(wz.to_next_sibling_byte(), None);
+        wz.descend_to(&[7u8]);
+        assert_eq!(wz.val(), Some(&7));
+    }
+
     /// Tests iteration behavior of to_next_val implementations, comparing the default impl
     /// against the native imple, and a third run that interleaves calls to each
     #[test]
@@ -6592,6 +6681,30 @@ mod tests {
         assert!(!z.to_next_val());
         assert!(z.to_next_step());                          // fad58f4: false
         assert_eq!(z.path(), &[3]);
+    }
+
+    /// A location holding both a value and a child is stored in a list node as two slots with the same
+    /// key.  Stepping to it as the *previous* sibling looked for the onward child only in the slot
+    /// whose byte it found first, which can be the value slot, so the zipper landed on the location
+    /// without its node: `child_count` said 0 and nothing below could be reached.
+    #[test]
+    fn read_zipper_prev_sibling_onto_a_value_and_child_location() {
+        let mut m = PathMap::<u64>::new();
+        m.set_val_at(&[2u8, 0], 0);
+        m.set_val_at(&[2u8, 1], 0);
+        m.set_val_at(&[2u8], 0);
+        for start in [&[3u8][..], &[9u8]] {
+            let mut z = m.read_zipper();
+            z.descend_to(start);
+            assert!(!z.path_exists());
+            assert_eq!(z.to_prev_sibling_byte(), Some(2), "from {start:?}");
+            assert_eq!(z.path(), &[2u8]);
+            assert_eq!(z.val(), Some(&0));
+            assert_eq!(z.child_count(), 2, "from {start:?}");
+            assert_eq!(z.child_mask().iter().collect::<Vec<_>>(), vec![0u8, 1]);
+            assert_eq!(z.descend_first_byte(), Some(0), "from {start:?}");
+            assert_eq!(z.path(), &[2u8, 0]);
+        }
     }
 
     #[test]

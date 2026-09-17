@@ -7,3 +7,26 @@ description = "The Rust side of the differential fuzzing harness for pathmap's z
 
 [dependencies]
 pathmap = { path = "..", features = ["arena_compact"] }
+# `crash_fuzz` attributes segfaults and aborts to an input from a signal handler.
+libc = "0.2"
+# Only for `bin/afl_differential.rs`, behind the `afl` feature, so a plain
+# `cargo build -p differential` neither needs it nor builds it.  See that file.
+afl = { version = "0.18", optional = true }
+
+[features]
+afl = ["dep:afl"]
+
+# Coverage-guided front end for the in-process comparator.  Declared explicitly
+# rather than left to src/bin autodiscovery so it can carry `required-features`:
+# without it, `cargo build -p differential` would try to compile a file that
+# needs the `afl` crate.  Build it with `cargo afl build`, not `cargo build` --
+# the instrumentation is a rustc flag `cargo afl` sets.
+[[bin]]
+name = "afl_differential"
+path = "src/bin/afl_differential.rs"
+required-features = ["afl"]
+
+[[bin]]
+name = "afl_crash"
+path = "src/bin/afl_crash.rs"
+required-features = ["afl"]

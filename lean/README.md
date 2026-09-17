@@ -331,11 +331,22 @@ skips diverges:
 |---|---|
 | `skip:k0` | `meet_k_path_into(0)`, `join_k_path_into(0)`, `descend_first_k_path(0)` / `to_next_k_path(0)` — degenerate; the first two should be the identity and destroy the subtrie, the last reports success without moving, forever. |
 | `skip:empty-focus` | `meet_k_path_into` with no children (it does not terminate), and `restricting` when either side has nothing below its focus (the two branches differ in *effect*, not just in the reported bool). |
-| `skip:empty-path` | `insert_prefix("")` — should be the identity, destroys the subtrie. |
-| `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native read zipper leaves its own root there. |
 | `skip:off-root-prune` | `prune_path` / `prune_ascend`, and the `prune` flag on every other operation, for a write zipper not rooted at the map root — the depth pruned is a function of internal node layout, so there is nothing to specify. |
-| `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
 | `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
+
+#### Suppressions that have been lifted
+
+A skip is only worth keeping while the defect behind it is live.  These were
+re-tested against the current crate, found stale, and removed — the operation is
+now compared like any other.  Each was A/B'd by lifting the guard on all three
+sides at once and re-running the same sweeps: the divergence report has to come
+back unchanged, since a fixed operation changes no state.
+
+| token | why it is gone |
+|---|---|
+| `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root (FINDINGS.md #3).  The override now guards on `at_root()`: it returns `None` and leaves `origin_path()` alone, for a read zipper and a write zipper alike, whether or not the root exists.  A/B over 64M inputs (20M at maxlen 120, 20M at 300 and 8M at 600 in crate mode, 8M each at 300/600 in ACT mode) reproduced the baseline divergence report byte for byte, with no `ESCAPED-ROOT` anywhere. |
+| `skip:empty-path` | `insert_prefix("")` (FINDINGS.md #4).  Fixed upstream, with the regression test `write_zipper_insert_prefix_empty_is_identity`.  Directly: over seven trie shapes (empty, root value only, one line, branchy, wide, dangling, grafted), at the map root and at a non-root focus, `insert_prefix(&[])` leaves the trie untouched and returns exactly what the model's `focusNodeIsEmpty` rule predicts.  Same 64M-input A/B, again byte for byte identical. |
+| `skip:quarantined` | `graft_child_maps` (op 54), the only op it ever named, was un-quarantined when its bug was fixed.  The token outlived it as a definition with no call site on any of the three sides — the Rust one needed `#[allow(dead_code)]` to compile.  Removed rather than kept: a vocabulary entry nothing can emit invites the next reader to keep a live suppression alive by analogy with it. |
 
 Naming these turned up an ordering bug the bare token had hidden: for
 `restricting` the model tested ACT mode first and the harness tested the empty
@@ -348,11 +359,24 @@ the harness's order.
 `k_path_internal` carries iteration state and `pathmap`'s own debug assertions
 flag calling it cold.
 
-Five return values are compared as `?` when the focus has no descendants
-(`remove_branches`, `join_map_into`, `restrict`, `restricting`, `take_map`):
-they report on whether an empty node happens to be materialised at the focus,
-which is representation state rather than trie state.  The *effects* are still
-compared in full.
+Three return values are compared as `?` when the focus has no descendants
+(`remove_branches`, `join_map_into`, `take_map`): they report on whether an
+empty node happens to be materialised at the focus, which is representation
+state rather than trie state.  The *effects* are still compared in full.  Each
+was re-tested by unmasking it alone and re-running the sweeps, and each diverges
+on roughly one input in eight the moment the mask comes off, which is what keeps
+it.
+
+`restrict` and `join_k_path_into` were on that list and are not any more.
+Unmasked, both match the specification over the whole sweep — 20M inputs at
+maxlen 120, 20M at 300, 8M at 600, and for `join_k_path_into` 8M each at
+300/600 in ACT mode as well; `restrict` is `skip:act`, so ACT says nothing
+about it.  Neither is a branch that never runs: tracing 1500 inputs, the mask
+fired on 824 of 947 `restrict` calls and 678 of 1003 `join_k_path_into` calls,
+which puts the sweeps at roughly 26M and 29M formerly-masked returns actually
+compared.  That is evidence the materialisation leak does not reach these two,
+not a proof that it cannot; each was lifted in its own commit so it can be put
+back alone.
 
 ## The blind-zipper contract
 
