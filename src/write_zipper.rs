@@ -6373,6 +6373,21 @@ mod tests {
         assert_eq!(dst.get_val_at(b"root:z:old_z"), Some(&26));
     }
 
+    /// Joining child slots whose onward nodes are empty, as left by dropped head writers
+    #[test]
+    fn join_k_path_into_empty_child_nodes() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0, 0], 1);
+        {
+            let zh = map.zipper_head();
+            let _w0 = zh.write_zipper_at_exclusive_path(&[0, 2]).unwrap();
+            let _w1 = zh.write_zipper_at_exclusive_path(&[1, 2]).unwrap();
+        }
+        map.write_zipper().join_k_path_into(1, false);
+        assert_eq!(map.get_val_at(&[0]), Some(&1));
+        assert_eq!(map.val_count(), 1);
+    }
+
     #[test]
     fn write_zipper_graft_masked_branches_test4() {
         // Upper bound 0: remove_unset=true with an empty mask.
