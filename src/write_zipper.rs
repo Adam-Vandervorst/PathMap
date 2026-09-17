@@ -6774,6 +6774,21 @@ mod tests {
     /// (absent, or a dangling path) therefore empties an existing branch -- which then survives
     /// as a dangling path, exactly as after `graft` of an empty source -- and leaves an absent
     /// branch absent.  `remove_unset` removes the unset branches outright first.
+    /// Joining child slots whose onward nodes are empty, as left by dropped head writers
+    #[test]
+    fn join_k_path_into_empty_child_nodes() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0, 0], 1);
+        {
+            let zh = map.zipper_head();
+            let _w0 = zh.write_zipper_at_exclusive_path(&[0, 2]).unwrap();
+            let _w1 = zh.write_zipper_at_exclusive_path(&[1, 2]).unwrap();
+        }
+        map.write_zipper().join_k_path_into(1, false);
+        assert_eq!(map.get_val_at(&[0]), Some(&1));
+        assert_eq!(map.val_count(), 1);
+    }
+
     /// `graft_child_maps` and `graft_masked_branches` below a root path too long for one node key
     #[test]
     fn graft_child_maps_long_root() {

@@ -2148,8 +2148,9 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
                         AlgebraicResult::None => {
                             //Both nodes hold a dangling path (no value, no onward node) at this byte, e.g. after
                             // `remove_branches(prune = false)`; it stays dangling in the join and is an identity for both
-                            debug_assert!(!lv.has_rec() && !lv.has_val());
-                            debug_assert!(!rv.has_rec() && !rv.has_val());
+                            // An empty onward node counts as dangling too
+                            debug_assert!(!lv.has_val() && lv.rec().map_or(true, |n| n.as_tagged().node_is_empty()));
+                            debug_assert!(!rv.has_val() && rv.rec().map_or(true, |n| n.as_tagged().node_is_empty()));
                             unsafe { new_v.get_unchecked_mut(c).write(Cf::new(None, None)) };
                         },
                         AlgebraicResult::Identity(mask) => {
