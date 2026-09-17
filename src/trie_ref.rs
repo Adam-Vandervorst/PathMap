@@ -452,7 +452,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for TrieRefBor
     }
     fn is_shared(&self) -> bool {
         match self.focus_node {
-            Some(node) => self.node_key().is_empty() && node.refcount() > 1,
+            Some(node) => self.node_key().is_empty() && !node.is_empty() && node.refcount() > 1,
             None => false,
         }
     }
@@ -779,7 +779,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for TrieRefOwn
     }
     fn is_shared(&self) -> bool {
         match &self.focus_node {
-            Some(node) => self.node_key().is_empty() && node.refcount() > 1,
+            Some(node) => self.node_key().is_empty() && !node.is_empty() && node.refcount() > 1,
             None => false
         }
     }
@@ -1464,5 +1464,28 @@ mod tests {
         rz.descend_to(&[7u8; 60]);
         assert_eq!(rz.val_at(&[1u8]), None);
         assert_eq!(rz.val_at(&[7u8; 60]), None);
+    }
+
+    /// `is_shared` where the focus is the empty sentinel node
+    #[test]
+    fn trie_ref_is_shared_on_empty_node() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[1u8], 1);
+        map.remove_val_at(&[1u8], false);
+        let empty = PathMap::<u64>::new();
+        for m in [&map, &empty] {
+            for path in [&[][..], &[1u8][..]] {
+                let t = m.trie_ref_at_path(path);
+                let _ = (t.is_shared(), t.shared_node_id());
+            }
+        }
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[2u8, 3], 1);
+        {
+            let mut wz = src.write_zipper_at_path(&[2u8]);
+            wz.remove_branches(false);
+        }
+        let t = src.trie_ref_at_path(&[2u8]);
+        let _ = (t.is_shared(), t.shared_node_id());
     }
 }
