@@ -74,6 +74,9 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping>
         Mapping: for<'a> Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>,
 {
     fn to_sibling(&mut self, next: bool) -> bool {
+        if self.at_root() {
+            return false;
+        }
         let path = self.path();
         let Some(&last) = path.last() else {
             return false;
@@ -391,4 +394,16 @@ use super::{OverlayZipper};
             )
         }
     );
+    #[test]
+    fn overlay_sources_at_different_roots() {
+        use crate::zipper::ZipperMoving;
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 5][..], &[1, 6], &[2, 5, 1]] { a.set_val_at(p, 1); }
+        let mut z = OverlayZipper::new(a.read_zipper_at_path(&[1u8]), a.read_zipper_at_path(&[2u8]));
+        assert!(!z.to_next_sibling_byte());
+        assert!(!z.to_prev_sibling_byte());
+        let mut steps = vec![];
+        while z.to_next_step() { steps.push(z.path().to_vec()); assert!(steps.len() < 16); }
+        assert_eq!(steps, vec![vec![5], vec![5, 1], vec![6]]);
+    }
 }
