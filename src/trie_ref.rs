@@ -101,7 +101,7 @@ fn trie_ref_from_key_and_path_in<'a, 'paths, V, A, R, RootValF, BuildF, InvalidF
     mut node: &'a TrieNodeODRc<V, A>,
     root_val_f: RootValF,
     node_key: &'paths [u8],
-    mut path: &'paths [u8],
+    path: &'paths [u8],
     alloc: A,
     build: BuildF,
     invalid: InvalidF,
@@ -115,31 +115,28 @@ where
 {
     // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`.
     let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
+    let heap_key: Vec<u8>;
+    let mut path: &[u8] = path;
 
     let node_key_len = node_key.len();
     let path_len = path.len();
 
     // Copy the existing node key and the first chunk of the path into the temporary buffer, then try to descend one step.
     if node_key_len > 0 && path_len > 0 {
-        let next_node_path = unsafe {
-            // SAFETY: `temp_key_buf` has capacity for `MAX_NODE_KEY_BYTES` bytes. We copy exactly
-            // `node_key_len` bytes from `node_key`, which is a valid slice, then append at most the
-            // remaining buffer capacity from the valid slice `path`. Both destination ranges are
-            // within the stack buffer and do not overlap the sources.
-            let src_ptr = node_key.as_ptr();
-            let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
-            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
-
-            let remaining_len = (MAX_NODE_KEY_BYTES - node_key_len).min(path_len);
-            let src_ptr = path.as_ptr();
-            let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>().add(node_key_len);
-            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, remaining_len);
-
-            let total_buf_len = node_key_len + remaining_len;
-            // SAFETY: The first `total_buf_len` bytes of `temp_key_buf` were initialized by the
-            // copies above, and `total_buf_len <= MAX_NODE_KEY_BYTES`, so this slice is valid for
-            // reads for the duration of this function.
-            core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
+        let next_node_path: &[u8] = if node_key_len + path_len <= MAX_NODE_KEY_BYTES {
+            unsafe {
+                // SAFETY: `temp_key_buf` holds `MAX_NODE_KEY_BYTES` bytes and we copy
+                // `node_key_len + path_len <= MAX_NODE_KEY_BYTES` bytes from two valid slices into it,
+                // so the resulting slice is initialized and in bounds.
+                let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
+                core::ptr::copy_nonoverlapping(node_key.as_ptr(), dst_ptr, node_key_len);
+                core::ptr::copy_nonoverlapping(path.as_ptr(), dst_ptr.add(node_key_len), path_len);
+                core::slice::from_raw_parts(dst_ptr, node_key_len + path_len)
+            }
+        } else {
+            //Too long for the stack buffer
+            heap_key = [node_key, path].concat();
+            &heap_key
         };
 
         match node.as_tagged().node_get_child(next_node_path) {
@@ -1447,5 +1444,25 @@ mod tests {
 
         assert!(!trie_ref.is_shared());
         assert_eq!(trie_ref.shared_node_id(), None);
+    }
+
+    /// `val_at` and `trie_ref_at_path` where the focus key plus the path are longer than a node key
+    #[test]
+    fn trie_ref_long_node_key_and_path() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8; 70], 5);
+        map.set_val_at(&[1u8], 6);
+        for (focus, rest) in [(10usize, 60usize), (30, 40), (47, 23), (69, 1)] {
+            let mut rz = map.read_zipper();
+            rz.descend_to(&vec![0u8; focus]);
+            assert_eq!(rz.val_at(&vec![0u8; rest]), Some(&5), "{focus}+{rest}");
+            assert_eq!(rz.trie_ref_at_path(&vec![0u8; rest]).val(), Some(&5), "{focus}+{rest}");
+            assert_eq!(rz.val_at(&vec![0u8; rest + 1]), None, "{focus}+{rest}");
+        }
+        //A focus far below anything in the trie
+        let mut rz = map.read_zipper();
+        rz.descend_to(&[7u8; 60]);
+        assert_eq!(rz.val_at(&[1u8]), None);
+        assert_eq!(rz.val_at(&[7u8; 60]), None);
     }
 }
