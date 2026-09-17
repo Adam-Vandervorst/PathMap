@@ -148,6 +148,14 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
             self.enroll_next_factor();
         }
     }
+    /// The secondary factor whose root node is the focus, if any.  Its node is not a child of the
+    /// node above it, so the core zipper can't look it up.
+    fn factor_root(&self) -> Option<&TrieRef<'trie, V, A>> {
+        match self.factor_paths.last() {
+            Some(&start) if start == self.depth() => self.secondaries.get(self.factor_paths.len() - 1),
+            _ => None
+        }
+    }
     /// Internal method to make sure `self.factor_paths` is correct after an ascend method
     #[inline]
     fn fix_after_ascend(&mut self) {
@@ -362,8 +370,19 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZipper<'_, '_, V, A> {
-    fn shared_node_id(&self) -> Option<u64> { self.z.shared_node_id() }
-    fn is_shared(&self) -> bool { self.z.is_shared() }
+    fn shared_node_id(&self) -> Option<u64> {
+        match self.factor_root() {
+            Some(_) if self.z.is_val() => None,
+            Some(factor) => factor.shared_node_id(),
+            None => self.z.shared_node_id(),
+        }
+    }
+    fn is_shared(&self) -> bool {
+        match self.factor_root() {
+            Some(factor) => factor.is_shared(),
+            None => self.z.is_shared(),
+        }
+    }
 }
 
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ProductZipper<'_, 'trie, V, A> {
@@ -1975,6 +1994,24 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
     });
+
+    /// `is_shared` and `shared_node_id` across factor boundaries
+    #[test]
+    fn product_zipper_is_shared_across_factors() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { a.set_val_at(p, 7); }
+        let b = a.clone();
+        let mut z = ProductZipper::new(a.read_zipper_at_path(&[1u8, 2, 1]), [b.read_zipper()]);
+        let mut factor_roots = 0;
+        while z.to_next_step() {
+            let _ = (z.is_shared(), z.shared_node_id());
+            if z.factor_root().is_some() {
+                factor_roots += 1;
+                assert!(z.is_shared(), "{:?}", z.path());
+            }
+        }
+        assert!(factor_roots > 0);
+    }
 }
 
 //POSSIBLE FUTURE DIRECTION:
