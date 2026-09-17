@@ -734,14 +734,11 @@ impl<V: Clone + Send + Sync, A: Allocator> CellByteNode<V, A> {
         }
         let cf = self.get_mut(k).unwrap();
         let (rec, val) = cf.both_mut_refs();
-        let rec = match rec {
-            Some(rec) => rec,
-            None => {
-                *rec = Some(TrieNodeODRc::new_allocated_in(0, 0, alloc));
-                rec.as_mut().unwrap()
-            }
-        };
-        (rec, val)
+        //A zipper can't be rooted at the empty sentinel, so an emptied link gets a real node too
+        if rec.as_ref().map_or(true, |rec| rec.is_empty()) {
+            *rec = Some(TrieNodeODRc::new_allocated_in(0, 0, alloc));
+        }
+        (rec.as_mut().unwrap(), val)
     }
 }
 
