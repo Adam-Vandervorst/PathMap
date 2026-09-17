@@ -1584,4 +1584,25 @@ mod tests {
         assert_eq!(map.val_count(), 7);
     }
 
+    /// `get_trie_ref`, `get_focus` and forks from a head's read zipper, which owns its root node
+    #[test]
+    fn head_read_zipper_trie_refs() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 3], &[0]] { map.set_val_at(p, 7); }
+        let zh = map.zipper_head();
+        for path in [&[][..], &[1u8], &[1u8, 2], &[9u8]] {
+            let mut rz = zh.read_zipper_at_path(path).unwrap();
+            for step in [&[][..], &[2u8], &[2u8, 1]] {
+                rz.reset();
+                rz.descend_to(step);
+                let tr = rz.get_trie_ref();
+                assert_eq!(tr.val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(tr.child_mask(), rz.child_mask(), "{path:?} {step:?}");
+                let _ = rz.get_focus();
+                let fork = rz.fork_read_zipper();
+                assert_eq!(fork.get_trie_ref().val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(fork.trie_ref_at_path(&[0u8]).val(), rz.val_at(&[0u8]), "{path:?} {step:?}");
+            }
+        }
+    }
 }
