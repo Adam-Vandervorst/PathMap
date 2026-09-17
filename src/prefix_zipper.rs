@@ -558,7 +558,7 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
     }
 
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
-        if self.position.is_invalid() {
+        if k == 0 || self.position.is_invalid() {
             return false;
         }
         //The prefix is a single forced path, so the bytes it contributes always exist and never
@@ -953,5 +953,26 @@ mod tests {
         assert_eq!(rz.path(), b"prefix");
         //...so `descend_until` must report that it moved
         assert_eq!(moved, true);
+    }
+
+    /// `descend_first_k_path(0)` returns `false` without moving, wherever the focus is
+    #[test]
+    fn prefix_zipper_descend_first_k_path_zero() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0x22u8], 1);
+        map.set_val_at(&[0x22u8, 1], 2);
+        let mut z = PrefixZipper::new(&[2u8, 3][..], map.read_zipper());
+        for setup in 0..4 {
+            z.reset();
+            match setup {
+                0 => {},
+                1 => { z.descend_to_byte(2); },
+                2 => { z.descend_to_byte(2); z.descend_last_path(); z.descend_last_path(); },
+                _ => { z.descend_to(&[2u8, 3, 0x22]); },
+            }
+            let path = z.path().to_vec();
+            assert!(!z.descend_first_k_path(0), "setup {setup}");
+            assert_eq!(z.path(), &path[..], "setup {setup}");
+        }
     }
 }
