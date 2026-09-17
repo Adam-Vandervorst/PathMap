@@ -532,6 +532,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        //`focus_byte` is unspecified at the root, and the root has no siblings
+        if self.depth() == 0 {
+            return None;
+        }
         let byte = self.focus_byte()?;
         let ascended = self.ascend(1);
         debug_assert_eq!(ascended, 1, "must ascend");
@@ -2062,6 +2066,22 @@ mod tests {
                 let _ = (z.is_shared(), z.child_mask(), z.descend_first_byte(), z.is_shared());
             }
         }
+    }
+
+    /// Sibling steps and value walks at the root of a `ProductZipperG` whose primary is rooted below the map root
+    #[test]
+    fn product_zipper_g_sibling_step_at_root() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[2u8, 3, 2, 1, 0, 7][..], &[2, 3, 2, 1, 0, 8, 1], &[9]] { a.set_val_at(p, 1); }
+        let b = a.clone();
+        let mut z = ProductZipperG::new(a.read_zipper_at_path(&[2u8, 3, 2, 1, 0]), [b.read_zipper()]);
+        assert_eq!(z.to_next_sibling_byte(), None);
+        assert_eq!(z.to_prev_sibling_byte(), None);
+        assert_eq!(z.path(), &[] as &[u8]);
+        let mut n = 0;
+        while z.to_next_val() { n += 1; assert!(n < 100); }
+        assert!(n > 0);
+        assert_eq!(z.path(), &[] as &[u8]);
     }
 
     /// `is_shared` and `shared_node_id` across factor boundaries

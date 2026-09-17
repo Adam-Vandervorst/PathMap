@@ -161,6 +161,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        //`focus_byte` is unspecified at the root, and the root has no siblings
+        if self.depth() == 0 {
+            return None;
+        }
         let byte = self.focus_byte()?;
         let ascended = self.ascend(1);
         debug_assert_eq!(ascended, 1, "must ascend");
@@ -567,5 +571,21 @@ ruberruber
 rubiconrubicon
 rubicundusrubicundus
 ")
+    }
+
+    /// Sibling steps at the root when the primary is rooted below the map root
+    #[test]
+    fn dependent_product_zipper_sibling_step_at_root() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 0, 2, 7][..], &[1, 0, 2, 8], &[9]] { a.set_val_at(p, 1); }
+        let mut z = DependentProductZipperG::new_enroll(a.read_zipper_at_path(&[1u8, 0, 2]), (), |_, _, _| ((), None::<ReadZipperOwned<u64>>));
+        assert_eq!(z.to_next_sibling_byte(), None);
+        assert_eq!(z.to_prev_sibling_byte(), None);
+        assert_eq!(z.descend_first_byte(), Some(7));
+        assert_eq!(z.to_next_sibling_byte(), Some(8));
+        z.reset();
+        let mut n = 0;
+        while z.to_next_val() { n += 1; assert!(n < 100); }
+        assert_eq!(n, 2);
     }
 }
