@@ -407,6 +407,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 38 => do let (_pr, d) ← d.bool
              if s.act then some (emit s "meet_into" skipAct, d)
              else
+               -- `prune = true` is best-effort, so only `prune = false` is compared
                let (st, z) := s.wz.meetInto ops s.rz noPrune
                some (emit { s with wz := z } "meet_into" (toString st), d)
   | 39 => do let (_pr, d) ← d.bool

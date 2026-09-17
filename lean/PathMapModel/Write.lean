@@ -328,9 +328,8 @@ def joinIntoTake (src : Zip V) (prune : Bool) : AlgStatus × Zip V × Zip V :=
 
 /-- `ZipperWriting::meet_into`: intersect the focus's subtrie with the source's.
 
-The value step runs first and can prune the focus out from under the node step.
-A meet drops every dangling path, since a location only survives if it leads to
-a surviving value. -/
+Below the focus the result is `PathMap.meet`, or `PathMap.meetPruned` with `prune`
+(best-effort in `pathmap`, not compared).  The focus is never removed. -/
 def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
   let (valStatus, valWasNone, z1) :=
     match z.val, src.val with
@@ -339,26 +338,20 @@ def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
         (AlgStatus.ofValRes r, false,
           match r.resolve sv ov with
           | some v => (z.setVal v).2
-          | none => (z.removeVal prune).2)
+          | none => (z.removeVal false).2)
     | none, some _ => (AlgStatus.none, true, z)
-    | some _, none => (AlgStatus.none, false, (z.removeVal prune).2)
+    | some _, none => (AlgStatus.none, false, (z.removeVal false).2)
     | none, none => (AlgStatus.none, true, z)
   let selfB := z1.focusNode
   let srcB := src.focusNode
   if selfB.isEmptyMap then
     (AlgStatus.merge .none valStatus true valWasNone, z1)
   else if srcB.isEmptyMap then
-    let z2 := z1.withTrie (z1.trie.removeBelow z1.focus)
-    let z3 := if prune then (z2.prunePath).2 else z2
-    (AlgStatus.merge .none valStatus false valWasNone, z3)
+    (AlgStatus.merge .none valStatus false valWasNone, z1.withTrie (z1.trie.removeBelow z1.focus))
   else
-    let r := PathMap.meet ops selfB srcB
+    let r := if prune then PathMap.meetPruned ops selfB srcB else PathMap.meet ops selfB srcB
     let st := nodeStatus ops selfB r
-    let z2 :=
-      if st == .identity then z1
-      else
-        let zg := z1.withTrie (z1.trie.graftBelow z1.focus r)
-        if st == .none && prune then (zg.prunePath).2 else zg
+    let z2 := if st == .identity then z1 else z1.withTrie (z1.trie.graftBelow z1.focus r)
     (AlgStatus.merge st valStatus false valWasNone, z2)
 
 /-- `ZipperWriting::subtract_into`: remove the source's subtrie from the focus's.
@@ -396,7 +389,7 @@ def subtractInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
     (AlgStatus.merge st valStatus false valWasNone, z2)
 
 /-- `ZipperWriting::meet_2`: meet two *source* subtries and write the result at
-the focus.
+the focus, as `PathMap.meet`.
 
 Two things separate this from `meet_into`.  It does not consult what is already
 at the focus, so — as the implementation notes — it never reports `Identity`,
@@ -486,9 +479,10 @@ def meetKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
       match acc with
       | none => some m
       | some a => some (PathMap.meet ops a m)) none
-  match result with
-  | some m => if m.isEmptyMap then (false, (z.removeBranches prune).2) else (true, z.graftMap m)
-  | none => (false, (z.removeBranches prune).2)
+  -- `prune` drops dangling paths below the focus
+  match result.map fun m => if prune then m.dropDangling else m with
+  | some m => if m.isEmptyMap then (false, (z.removeBranches false).2) else (true, z.graftMap m)
+  | none => (false, (z.removeBranches false).2)
 
 end Zip
 end PathMapModel

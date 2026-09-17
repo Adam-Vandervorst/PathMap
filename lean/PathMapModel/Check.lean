@@ -147,6 +147,9 @@ def dropT1Result : T := ((zipAt dropT1 [0x31,0x32,0x33,0x3a] []).joinKPathInto o
 #guard fixtures.all (joinIdem ops)
 #guard fixtures.all (fun a => fixtures.all (fun b => fixtures.all (joinAssoc ops a b)))
 #guard fixtures.all (meetIdemOnVals ops)
+#guard fixtures.all (meetIdem ops)
+#guard fixtures.all (meetPrunedIdem ops)
+#guard fixtures.all (fun a => fixtures.all (meetCommOnPaths ops a))
 #guard fixtures.all (subSelfEmptyVals ops)
 #guard fixtures.all (restrictSelf ops)
 

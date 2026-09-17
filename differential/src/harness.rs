@@ -747,7 +747,8 @@ pub fn run_ops<R: ReadSource>(
                     ("join_map_into", s)
                 }
                 38 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    // `prune = true` is best-effort, so only `prune = false` is compared
+                    let _pr = get!(d.boolean());
                     ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, no_prune)))
                 }
                 39 => {
@@ -823,7 +824,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 46 => {
                     let k = get!(d.modn(4));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let _pr = get!(d.boolean()); // decoded for stream alignment; see op 38
                     // `meet_k_path_into` spins forever when the focus has no
                     // children, and escapes the focus subtree when k == 0.
                     // See `Zip.meetKPathUnspecified`.
