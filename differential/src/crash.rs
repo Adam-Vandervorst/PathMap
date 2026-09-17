@@ -191,6 +191,7 @@ fn path(d: &mut Dec) -> Option<Vec<u8>> {
 fn short_path(d: &mut Dec) -> Option<Vec<u8>> {
     let mut p = path(d)?;
     p.truncate(8);
+    note!("  short_path {}", hex_path(&p));
     Some(p)
 }
 
@@ -210,7 +211,9 @@ fn mask(d: &mut Dec) -> Option<ByteMask> {
 }
 
 fn val<V: CrashValue>(d: &mut Dec) -> Option<V> {
-    Some(V::from_byte(d.u8()?))
+    let b = d.u8()?;
+    note!("  val {b}");
+    Some(V::from_byte(b))
 }
 
 /// Result of a map-level lattice operation, as a map.
@@ -390,7 +393,9 @@ where
 /// zipper, and iteration that hands them out.
 macro_rules! ro_extras {
     ($d:expr, $z:expr) => {{
-        match $d.modn(4)? {
+        let __e = $d.modn(4)?;
+        note!("ro_extras {__e}");
+        match __e {
             0 => { let _ = $z.get_val().cloned(); }
             1 => { let p = path($d)?; let _ = $z.get_val_at(&p).cloned(); }
             2 => { let mut n = 0; while n < WALK && $z.to_next_get_val().is_some() { n += 1; } }
@@ -403,7 +408,9 @@ macro_rules! ro_extras {
 /// focus borrowing, forks, trie refs, buffer management.
 macro_rules! sub_extras {
     ($d:expr, $steps:expr, $z:expr) => {{
-        match $d.modn(12)? {
+        let __e = $d.modn(12)?;
+        note!("sub_extras {__e}");
+        match __e {
             0 => { let w = $z.witness(); let _ = $z.get_val_with_witness(&w).cloned(); }
             1 => {
                 let w = $z.witness();
@@ -457,7 +464,7 @@ where
     V: CrashValue,
     W: ZipperWriting<V> + ZipperMoving + ZipperPath + ZipperValues<V>,
 {
-    let src = |d: &mut Dec| -> Option<&PathMap<V>> { Some(&srcs[d.modn(NMAPS)?]) };
+    let src = |d: &mut Dec| -> Option<&PathMap<V>> { let i = d.modn(NMAPS)?; note!("  src map {i}"); Some(&srcs[i]) };
     let op = d.modn(40)?;
     note!("write {op} at {}", hex_path(z.path()));
     // Growth is refused below an oversized focus; everything else still runs.
@@ -495,11 +502,12 @@ where
             let s = src(d)?.clone();
             let p = short_path(d)?;
             let pr = d.boolean()?;
+            note!("  pr={pr}");
             let mut sw = s.into_write_zipper(&p);
             let _ = z.join_into_take(&mut sw, pr);
             let _ = sw.into_map().val_count();
         }
-        20 => { let k = kpath_k(d, 6)?; let pr = d.boolean()?; let _ = z.join_k_path_into(k, pr); }
+        20 => { let k = kpath_k(d, 6)?; let pr = d.boolean()?; note!("  k={k} pr={pr}"); let _ = z.join_k_path_into(k, pr); }
         21 => {
             let k = d.modn(6)?;
             let pr = d.boolean()?;
@@ -568,6 +576,19 @@ fn snapshot<V: CrashValue>(maps: &[PathMap<V>; NMAPS]) -> [PathMap<V>; NMAPS] {
 // Episodes: one zipper kind, created, driven, dropped
 // ---------------------------------------------------------------------------
 
+/// Traces the paths holding values in each map.
+fn note_maps<V: CrashValue>(maps: &[PathMap<V>; NMAPS]) {
+    if *TRACE.get_or_init(|| std::env::var_os("CRASH_TRACE").is_some()) {
+        for (i, mp) in maps.iter().enumerate() {
+            let mut rz = mp.read_zipper();
+            let mut ps = vec![];
+            if rz.is_val() { ps.push("_".to_string()); }
+            while rz.to_next_val() { ps.push(hex_path(rz.path())); }
+            note!("  map {i}: {}", ps.join(" "));
+        }
+    }
+}
+
 fn read_episode<V: CrashValue>(d: &mut Dec, st: &mut State<V>) -> Option<()> {
     let m = d.modn(NMAPS)?;
     let p = short_path(d)?;
@@ -575,6 +596,7 @@ fn read_episode<V: CrashValue>(d: &mut Dec, st: &mut State<V>) -> Option<()> {
     let steps = &mut st.steps;
     let __kind = d.modn(12)?;
     note!("read episode {__kind} map {m} at {}", hex_path(&p));
+    note_maps(&st.maps);
     match __kind {
         0 => {
             let mut z = map.read_zipper_at_path(&p);
@@ -637,16 +659,22 @@ fn read_episode<V: CrashValue>(d: &mut Dec, st: &mut State<V>) -> Option<()> {
         }
         6 => {
             // Secondary factors are map-root zippers: see KNOWN_PRECONDITIONS.
-            let others: Vec<PathMap<V>> = (0..d.modn(4)?).map(|_| d.modn(NMAPS).map(|i| st.maps[i].clone())).collect::<Option<_>>()?;
-            let more = st.maps[d.modn(NMAPS)?].clone();
+            let pick: Vec<usize> = (0..d.modn(4)?).map(|_| d.modn(NMAPS)).collect::<Option<_>>()?;
+            let others: Vec<PathMap<V>> = pick.iter().map(|&i| st.maps[i].clone()).collect();
+            let more_i = d.modn(NMAPS)?;
+            note!("  product factors {pick:?}, more {more_i}");
+            let more = st.maps[more_i].clone();
             let steps = &mut st.steps;
             let mut z = ProductZipper::new(map.read_zipper_at_path(&p), others.iter().map(|o| o.read_zipper()));
             if d.boolean()? {
+                note!("  new_factors");
                 z.new_factors([more.read_zipper()]);
             }
             for _ in 0..d.modn(8)? {
                 tick(steps)?;
-                match d.modn(4)? {
+                let __c = d.modn(4)?;
+                note!("  product op {__c} at {}", hex_path(z.path()));
+                match __c {
                     0 => { let _ = (z.focus_factor(), z.factor_count(), z.path_indices().len()); }
                     1 => { let w = z.witness(); let _ = z.get_val_with_witness(&w).cloned(); }
                     2 => { let _ = (z.is_shared(), z.shared_node_id(), z.origin_path().len()); }
@@ -743,6 +771,7 @@ fn write_episode<V: CrashValue>(d: &mut Dec, st: &mut State<V>) -> Option<()> {
     let State { maps, steps } = st;
     let __kind = d.modn(7)?;
     note!("write episode {__kind} map {m} at {}", hex_path(&p));
+    note_maps(maps);
     match __kind {
         0 => {
             let mut z = maps[m].write_zipper_at_path(&p);
@@ -815,16 +844,19 @@ where
     let mut w1 = zh.write_zipper_at_exclusive_path(&paths[1]).ok();
     let mut r0 = zh.read_zipper_at_path(&paths[2]).ok();
     let mut r1 = zh.read_zipper_at_borrowed_path(&paths[2]).ok();
+    note!("  head zippers: w0 {} {}, w1 {} {}, r0/r1 {} {} {}", hex_path(&paths[0]), w0.is_some(), hex_path(&paths[1]), w1.is_some(), hex_path(&paths[2]), r0.is_some(), r1.is_some());
     let n = d.modn(EPISODE_STEPS)?;
     for _ in 0..n {
         tick(steps)?;
-        match d.modn(7)? {
+        let __which = d.modn(7)?;
+        note!("  head step {__which}");
+        match __which {
             0 => if let Some(z) = w0.as_mut() { write_step(d, z, srcs)? },
             1 => if let Some(z) = w1.as_mut() { write_step(d, z, srcs)? },
             2 => if let Some(z) = r0.as_mut() { iter_step(d, z)? },
             3 => if let Some(z) = r1.as_mut() { if d.boolean()? { sub_extras!(d, steps, z) } else { iter_step(d, z)? } },
-            4 => { drop(w0.take()); let q = short_path(d)?; w0 = zh.write_zipper_at_exclusive_path(&q).ok(); }
-            5 => { drop(r0.take()); let q = short_path(d)?; r0 = zh.read_zipper_at_path(&q).ok(); }
+            4 => { drop(w0.take()); let q = short_path(d)?; w0 = zh.write_zipper_at_exclusive_path(&q).ok(); note!("  w0 = {} {}", hex_path(&q), w0.is_some()); }
+            5 => { drop(r0.take()); let q = short_path(d)?; r0 = zh.read_zipper_at_path(&q).ok(); note!("  r0 = {} {}", hex_path(&q), r0.is_some()); }
             _ => { w1 = None; r1 = None; }
         }
     }
@@ -1037,6 +1069,7 @@ fn seed<V: CrashValue>(d: &mut Dec) -> Option<State<V>> {
         for _ in 0..d.modn(12)? {
             let p = path(d)?;
             let v = val(d)?;
+            note!("seed map {m}: {} = {v:?}", hex_path(&p));
             st.maps[m].set_val_at(&p, v);
         }
     }

@@ -416,8 +416,17 @@ fn supervise(args: &Args, source: Source) {
                 None => eprintln!("  could not locate"),
             }
         }
+        for c in r.crashes.iter_mut().filter(|c| (c.kind == "signal" || c.kind == "abort") && c.idx != usize::MAX) {
+            //Threads share one heap, so memory corrupted by one input can abort another.  Only
+            // blame an input that fails on its own.
+            let alone = run_child(args, c.idx, c.idx + 1, 1, &[], false);
+            if alone.completed {
+                eprintln!("  input {} runs clean alone; not attributing the {}", c.idx, c.kind);
+                c.kind = format!("{} (not reproduced alone)", c.kind);
+            }
+        }
         let progressed = !r.crashes.is_empty() || r.completed;
-        for c in r.crashes.iter().filter(|c| c.kind != "panic" && c.kind != "hang" && c.idx != usize::MAX) {
+        for c in r.crashes.iter().filter(|c| (c.kind == "signal" || c.kind == "abort") && c.idx != usize::MAX) {
             // The child saves what its hooks report; a signal or an abort leaves it to us.
             if let Some(dir) = &save {
                 let _ = std::fs::create_dir_all(dir);
