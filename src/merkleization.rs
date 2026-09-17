@@ -64,7 +64,8 @@ pub(crate) fn merkleize_impl<V, A>(
         it = next;
         path.hash(&mut hasher);
         let (child_hash, replace);
-        if let Some(child) = child {
+        //An empty child (a dangling path) has nothing to share, and can't be replaced in its parent
+        if let Some(child) = child.filter(|child| !child.is_empty()) {
             (child_hash, replace) = merkleize_impl(counters, memo, child, val);
             if let Some(replace) = replace {
                 let node = replacement.get_or_insert_with(|| {
@@ -135,5 +136,19 @@ mod tests {
             eprintln!("after:");
             eprintln!("```mermaid\n{}```", std::str::from_utf8(&after).unwrap());
         }
+    }
+
+    /// Several dangling paths, which are links to the empty node
+    #[test]
+    fn merkleize_with_dangling_paths() {
+        use crate::zipper::*;
+        let mut map = crate::PathMap::<u64>::new();
+        for p in [&[1u8, 1, 5][..], &[2, 2, 5], &[3, 3, 5], &[4]] { map.set_val_at(p, 1); }
+        for p in [&[1u8, 1, 7][..], &[2, 2, 7], &[3, 3, 7], &[1, 9], &[2, 9]] { map.create_path(p); }
+        let before: Vec<Vec<u8>> = { let mut z = map.read_zipper(); let mut v = vec![]; while z.to_next_step() { v.push(z.path().to_vec()) } v };
+        let _ = map.merkleize();
+        let after: Vec<Vec<u8>> = { let mut z = map.read_zipper(); let mut v = vec![]; while z.to_next_step() { v.push(z.path().to_vec()) } v };
+        assert_eq!(before, after);
+        assert_eq!(map.val_count(), 4);
     }
 }
