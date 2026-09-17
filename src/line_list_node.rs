@@ -1781,52 +1781,6 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         debug_assert!(consumed_bytes == key.len());
         *child_node = new_node;
     }
-    fn node_get_payloads<'node, 'res>(&'node self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'node, V, A>)]) -> bool {
-        let mut slot_0_requested = !self.is_used::<0>();
-        let mut slot_1_requested = !self.is_used::<1>();
-        let (node_key_0, node_key_1) = self.get_both_keys();
-
-        debug_assert!(results.len() >= keys.len());
-        for ((key, expect_val), (result_key_len, payload_ref)) in keys.into_iter().zip(results.iter_mut()) {
-            if self.is_used::<0>() {
-                if starts_with(key, node_key_0) {
-                    let node_key_len = node_key_0.len();
-                    if self.is_child_ptr::<0>() {
-                        if !*expect_val || node_key_len < key.len() {
-                            slot_0_requested = true;
-                            *result_key_len = node_key_len;
-                            *payload_ref = PayloadRef::Child(unsafe{ &*self.val_or_child0.child });
-                        }
-                    } else {
-                        if *expect_val && node_key_len == key.len() {
-                            slot_0_requested = true;
-                            *result_key_len = node_key_len;
-                            *payload_ref = PayloadRef::Val(unsafe{ &**self.val_or_child0.val });
-                        }
-                    }
-                }
-            }
-            if self.is_used::<1>() {
-                if starts_with(key, node_key_1) {
-                    let node_key_len = node_key_1.len();
-                    if self.is_child_ptr::<1>() {
-                        if !*expect_val || node_key_len < key.len() {
-                            slot_1_requested = true;
-                            *result_key_len = node_key_len;
-                            *payload_ref = PayloadRef::Child(unsafe{ &*self.val_or_child1.child });
-                        }
-                    } else {
-                        if *expect_val && node_key_len == key.len() {
-                            slot_1_requested = true;
-                            *result_key_len = node_key_len;
-                            *payload_ref = PayloadRef::Val(unsafe{ &**self.val_or_child1.val });
-                        }
-                    }
-                }
-            }
-        }
-        slot_0_requested && slot_1_requested
-    }
     fn node_contains_val(&self, key: &[u8]) -> bool {
         self.contains_val(key)
     }
@@ -2945,58 +2899,129 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     pub(crate) fn pmeet_dyn_oriented(&self, other: TaggedNodeRef<V, A>, swapped: bool) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
         debug_assert!(validate_node(self));
 
-        let mut self_payloads_buf: [(&[u8], PayloadRef<V, A>); 2] = [(&[], PayloadRef::None); 2];
-
         //A shadowed dangling slot carries nothing, so skip it
-        let skipped = if self.slot_is_shadowed_dangling(0) {
-            Some(0)
-        } else if self.slot_is_shadowed_dangling(1) {
-            Some(1)
+        let (use0, use1) = match self.used_slot_count() {
+            0 => return AlgebraicResult::None,
+            1 => (true, false),
+            _ => {
+                if self.slot_is_shadowed_dangling(0) {
+                    (false, true)
+                } else if self.slot_is_shadowed_dangling(1) {
+                    (true, false)
+                } else {
+                    (true, true)
+                }
+            }
+        };
+        let (key0, key1) = self.get_both_keys();
+
+        let out0 = if use0 {
+            meet_list_slot(key0, unsafe{ self.payload_in_slot::<0>() }, other, swapped)
         } else {
-            None
+            (true, true, SlotMeet::Skipped)
         };
-
-        let self_slot_count = self.used_slot_count();
-        let self_payloads = match (self_slot_count, skipped) {
-            (0, _) => return AlgebraicResult::None,
-            (_, Some(0)) => {
-                let key = unsafe{ self.key_unchecked::<1>() };
-                let payload = unsafe{ self.payload_in_slot::<1>() };
-                self_payloads_buf[0] = (key, payload);
-                &self_payloads_buf[..1]
-            },
-            (1, _) | (_, Some(1)) => {
-                let key = unsafe{ self.key_unchecked::<0>() };
-                let payload = unsafe{ self.payload_in_slot::<0>() };
-                self_payloads_buf[0] = (key, payload);
-                &self_payloads_buf[..1]
-            },
-            (2, None) => {
-                let (key0, key1) = self.get_both_keys();
-                let payload0 = unsafe{ self.payload_in_slot::<0>() };
-                let payload1 = unsafe{ self.payload_in_slot::<1>() };
-                self_payloads_buf[0] = (key0, payload0);
-                self_payloads_buf[1] = (key1, payload1);
-                &self_payloads_buf[..2]
-            },
-            _ => unsafe{ unreachable_unchecked() }
+        let out1 = if use1 {
+            meet_list_slot(key1, unsafe{ self.payload_in_slot::<1>() }, other, swapped)
+        } else {
+            (true, true, SlotMeet::Skipped)
         };
+        if out0.2.is_nothing() && out1.2.is_nothing() {
+            return AlgebraicResult::None
+        }
 
-        pmeet_generic::<2, V, A, _>(self_payloads, other, swapped, |payloads| {
-            debug_assert_eq!(payloads.len(), self_payloads.len());
-            //With a slot skipped, the single result belongs to the slot that stayed in, and the
-            // skipped one is dropped -- which is what the meet would have done with it anyway.
-            let (slot0_payload, slot1_payload) = match skipped {
-                Some(0) => (None, payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into())),
-                Some(_) => (payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into()), None),
-                None => (
-                    payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into()),
-                    payloads.get_mut(1).and_then(|p| core::mem::take(p)).map(|p| p.into()),
-                ),
+        let mut mask = 0;
+        if out0.0 && out1.0 {
+            mask |= SELF_IDENT;
+        }
+        if swapped && out0.1 && out1.1 {
+            let slots = [
+                if use0 { Some((key0, self.is_child_ptr::<0>(), out0.2.reach(key0.len()))) } else { None },
+                if use1 { Some((key1, self.is_child_ptr::<1>(), out1.2.reach(key1.len()))) } else { None },
+            ];
+            if meet_other_within_slots(other, &slots) {
+                mask |= COUNTER_IDENT;
+            }
+        }
+        if mask > 0 {
+            return AlgebraicResult::Identity(mask)
+        }
+
+        //Build the result from what each slot contributes
+        let mut items: [Option<(&[u8], ValOrChild<V, A>)>; 2] = [
+            out0.2.into_item(key0, || self.clone_payload::<0>().unwrap()),
+            out1.2.into_item(key1, || self.clone_payload::<1>().unwrap()),
+        ];
+        //Drop a dangling item the other item covers, keeping the node valid
+        for i in 0..2 {
+            let j = 1 - i;
+            let redundant = match (&items[i], &items[j]) {
+                (Some((key_i, ValOrChild::Child(child_i))), Some((key_j, payload_j))) if child_i.as_tagged().node_is_empty() && key_j.starts_with(key_i) => {
+                    let j_dangling = matches!(payload_j, ValOrChild::Child(child_j) if child_j.as_tagged().node_is_empty());
+                    key_j.len() > key_i.len() || !j_dangling || i > j
+                },
+                _ => false
             };
-            let new_node = self.clone_with_updated_payloads(slot0_payload, slot1_payload).unwrap();
-            TrieNodeODRc::new_in(new_node, self.alloc.clone())
-        })
+            if redundant {
+                items[i] = None;
+            }
+        }
+        let mut new_node = Self::new_in(self.alloc.clone());
+        let [item0, item1] = items;
+        match (item0, item1) {
+            (Some((key0, payload0)), Some((key1, payload1))) => {
+                unsafe{ new_node.set_payload_owned::<0>(key0, payload0); }
+                unsafe{ new_node.set_payload_owned::<1>(key1, payload1); }
+            },
+            (Some((key, payload)), None) | (None, Some((key, payload))) => {
+                unsafe{ new_node.set_payload_owned::<0>(key, payload); }
+            },
+            (None, None) => unreachable!()
+        }
+        debug_assert!(validate_node(&new_node));
+        AlgebraicResult::Element(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
+    }
+
+    /// See [node_drop_dangling]
+    pub(crate) fn drop_dangling(&self, src: Option<TaggedNodeRef<V, A>>) -> DropDangling<V, A> {
+        let (key0, key1) = self.get_both_keys();
+        let slot_result = |key: &[u8], is_child: bool, child: fn(&Self) -> &TrieNodeODRc<V, A>| {
+            if is_child {
+                node_drop_dangling(child(self), meet_src_child(src, key))
+            } else {
+                DropDangling::Unchanged
+            }
+        };
+        let result0 = if self.is_used::<0>() {
+            slot_result(key0, self.is_child_ptr::<0>(), |node| unsafe{ node.child_in_slot::<0>() })
+        } else {
+            DropDangling::Empty
+        };
+        let result1 = if self.is_used::<1>() {
+            slot_result(key1, self.is_child_ptr::<1>(), |node| unsafe{ node.child_in_slot::<1>() })
+        } else {
+            DropDangling::Empty
+        };
+        let is_unchanged = |result: &DropDangling<V, A>, used: bool| matches!(result, DropDangling::Unchanged) || (!used && matches!(result, DropDangling::Empty));
+        if is_unchanged(&result0, self.is_used::<0>()) && is_unchanged(&result1, self.is_used::<1>()) {
+            return DropDangling::Unchanged
+        }
+        let payload = |result: DropDangling<V, A>, slot: usize| match result {
+            DropDangling::Unchanged => if slot == 0 { self.clone_payload::<0>() } else { self.clone_payload::<1>() },
+            DropDangling::Empty => None,
+            DropDangling::New(node) => Some(ValOrChild::Child(node)),
+        };
+        let mut new_node = Self::new_in(self.alloc.clone());
+        match (payload(result0, 0), payload(result1, 1)) {
+            (Some(payload0), Some(payload1)) => {
+                unsafe{ new_node.set_payload_owned::<0>(key0, payload0); }
+                unsafe{ new_node.set_payload_owned::<1>(key1, payload1); }
+            },
+            (Some(payload), None) => unsafe{ new_node.set_payload_owned::<0>(key0, payload); },
+            (None, Some(payload)) => unsafe{ new_node.set_payload_owned::<0>(key1, payload); },
+            (None, None) => return DropDangling::Empty,
+        }
+        debug_assert!(validate_node(&new_node));
+        DropDangling::New(TrieNodeODRc::new_in(new_node, self.alloc.clone()))
     }
 
     /// Part of the implementation of methods the remove subtries from a node
