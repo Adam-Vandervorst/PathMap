@@ -265,16 +265,24 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         moved
     }
     fn to_next_sibling_byte(&mut self) -> bool {
-        if self.factor_paths.last().cloned().unwrap_or(0) == self.path().len() {
+        if self.path().is_empty() { return false }
+        //Stepping sideways leaves a factor entered at this depth.
+        if self.factor_paths.last().copied() == Some(self.path().len()) {
             self.factor_paths.pop();
+            self.z.deregularize();
+            self.z.regularize();
         }
         let moved = self.z.to_next_sibling_byte();
         self.ensure_descend_next_factor();
         moved
     }
     fn to_prev_sibling_byte(&mut self) -> bool {
-        if self.factor_paths.last().cloned().unwrap_or(0) == self.path().len() {
+        if self.path().is_empty() { return false }
+        //Stepping sideways leaves a factor entered at this depth.
+        if self.factor_paths.last().copied() == Some(self.path().len()) {
             self.factor_paths.pop();
+            self.z.deregularize();
+            self.z.regularize();
         }
         let moved = self.z.to_prev_sibling_byte();
         self.ensure_descend_next_factor();
@@ -1827,6 +1835,45 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
     });
+
+    /// A failed sibling step at the root of a factor stays in that factor
+    #[test]
+    fn product_zipper_no_sibling_at_factor_root() {
+        let mut a = PathMap::<u64>::new();
+        a.set_val_at(&[0u8, 0], 1);
+        let mut b = PathMap::<u64>::new();
+        b.set_val_at(&[5u8], 2);
+        for prev in [false, true] {
+            let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+            assert!(z.to_next_val());
+            assert_eq!(z.path(), &[0, 0]);
+            let moved = if prev { z.to_prev_sibling_byte() } else { z.to_next_sibling_byte() };
+            assert!(!moved);
+            assert_eq!(z.child_count(), 1);
+            assert!(z.to_next_val());
+            assert_eq!((z.path(), z.val()), (&[0u8, 0, 5][..], Some(&2)));
+        }
+    }
+
+    /// Sibling steps out of a factor entered below an empty node, as a dropped head writer leaves
+    #[test]
+    fn product_zipper_k_path_past_empty_node() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[0u8][..], &[0, 0, 0], &[1]] { a.set_val_at(p, 0); }
+        {
+            let zh = a.zipper_head();
+            zh.write_zipper_at_exclusive_path(&[1u8, 0]).unwrap().set_val(0);
+            let _w = zh.write_zipper_at_exclusive_path(&[0u8, 0, 0, 0]).unwrap();
+        }
+        let b = a.clone();
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+        let mut paths = vec![];
+        if z.descend_first_k_path(3) {
+            paths.push(z.path().to_vec());
+            while paths.len() < 64 && z.to_next_k_path(3) { paths.push(z.path().to_vec()); }
+        }
+        assert!(paths.iter().all(|p| p.len() == 3), "{paths:?}");
+    }
 }
 
 //POSSIBLE FUTURE DIRECTION:
