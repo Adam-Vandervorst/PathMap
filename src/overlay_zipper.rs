@@ -215,7 +215,7 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
                 self.a.ascend(depth_a - depth_o);
                 depth_o
             } else {
-                self.a.descend_to(&path[depth_o..depth_a]);
+                self.b.descend_to(&path[depth_o..depth_a]);
                 depth_a
             }
         } else {
@@ -597,5 +597,22 @@ mod tests {
         assert_eq!(steps, vec![vec![5], vec![5, 1], vec![6]]);
         let mut o = Vec::new();
         while z.to_next_val_observed(&mut o) { assert_eq!(&o[..], z.path()); }
+    }
+
+    /// `descend_to_val` keeps both sources at the same place when the second one stops first
+    #[test]
+    fn overlay_descend_to_val_second_stops_first() {
+        let mut a = PathMap::<u64>::new();
+        a.set_val_at(&[1u8, 2, 3], 1);
+        let mut b = PathMap::<u64>::new();
+        b.set_val_at(&[1u8, 7], 2);
+        for (x, y) in [(&a, &b), (&b, &a)] {
+            let mut z = OverlayZipper::new(x.read_zipper(), y.read_zipper());
+            assert_eq!(z.descend_to_val(&[1u8, 2, 3, 4, 5]), 3);
+            assert_eq!(z.depth(), 3);
+            assert_eq!(z.path(), &[1u8, 2, 3]);
+            assert_eq!(z.ascend(3), 3);
+            assert_eq!(z.depth(), 0);
+        }
     }
 }
