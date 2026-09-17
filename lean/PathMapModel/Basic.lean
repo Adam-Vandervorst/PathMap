@@ -40,8 +40,8 @@ inductive ValRes (V : Type) where
 These return `ValRes` rather than plain values because `pathmap` reports
 `AlgebraicStatus` to the caller, and the status depends on *which constructor*
 the value operation returned, not on whether the value changed.  `u64`'s
-`psubtract`, for instance, returns `Element(*self)` — an `Element` status even
-though the stored value is unchanged. -/
+`pjoin`, for instance, returns `Identity(SELF_IDENT)` rather than `Element` of
+the value it selected, so a join reports that nothing changed. -/
 structure ValOps (V : Type) where
   /-- `Lattice::pjoin` -/
   pjoin : V → V → ValRes V
@@ -63,12 +63,12 @@ def ValRes.resolve {V : Type} : ValRes V → V → V → Option V
 Both `pjoin` and `pmeet` return `Identity(SELF_IDENT)`: they are *left-biased
 projections* that ignore the counterpart value entirely.  `psubtract`
 annihilates only when the two values are equal, and otherwise returns
-`Element(*self)`.  This is the instance the differential fuzz target uses, so
-the model reproduces it exactly rather than assuming a "real" lattice. -/
+`Identity(SELF_IDENT)`.  This is the instance the differential fuzz target uses,
+so the model reproduces it exactly rather than assuming a "real" lattice. -/
 def u64Ops : ValOps UInt64 where
   pjoin _ _ := .identity true false
   pmeet _ _ := .identity true false
-  psub a b := if a == b then .none else .elem a
+  psub a b := if a == b then .none else .identity true false
   beq a b := a == b
 
 /-! ## Prefix order -/

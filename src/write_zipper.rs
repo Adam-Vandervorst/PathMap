@@ -6672,4 +6672,25 @@ mod tests {
         }
         assert_eq!(keys(&m), ["cx", "cy", "d"]);
     }
+
+    /// `subtract_into` with only unequal values is `Identity`
+    #[test]
+    fn write_zipper_subtract_into_unequal_values_is_identity() {
+        fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
+        fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
+
+        let mut dst = mk(&[(&[0], 1), (&[0, 0], 2), (&[1], 3), (&[2], 4)]);
+        let before = vals(&dst);
+        let src = mk(&[(&[0], 9), (&[0, 0], 9), (&[1], 9), (&[2], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.subtract_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), before);
+
+        //Equal values still annihilate
+        let mut dst = mk(&[(&[0], 1), (&[0, 0], 2), (&[1], 3), (&[2], 4)]);
+        let src = mk(&[(&[0], 9), (&[0, 0], 2), (&[1], 9), (&[2], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.subtract_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(vals(&dst), vec![(vec![0], 1), (vec![1], 3), (vec![2], 4)]);
+    }
 }

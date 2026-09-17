@@ -754,6 +754,18 @@ fn option_subtract_test() {
     assert_eq!(Some(Some(Some(()))).psubtract(&Some(Some(Some(())))), AlgebraicResult::None);
 }
 
+/// Subtracting a different value changes nothing, so it's `Identity`
+#[test]
+fn integer_subtract_is_self_identity() {
+    assert_eq!(3u64.psubtract(&5), AlgebraicResult::Identity(SELF_IDENT));
+    assert_eq!(3u64.psubtract(&3), AlgebraicResult::None);
+    assert_eq!(3u16.psubtract(&5), AlgebraicResult::Identity(SELF_IDENT));
+    assert_eq!(3u16.psubtract(&3), AlgebraicResult::None);
+    //Through `Option<V>`, as co-free payloads use
+    assert_eq!(Some(3u64).psubtract(&Some(5)), AlgebraicResult::Identity(SELF_IDENT));
+    assert_eq!(Some(3u64).psubtract(&Some(3)), AlgebraicResult::None);
+}
+
 // =-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-==-**-=
 // =-*   `Option<&V>`                                                                                 *-=
 
@@ -867,7 +879,7 @@ impl Lattice for u64 {
 impl DistributiveLattice for u64 {
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
         if self == other { AlgebraicResult::None }
-        else { AlgebraicResult::Element(*self) }
+        else { AlgebraicResult::Identity(SELF_IDENT) }
     }
 }
 
@@ -887,7 +899,7 @@ impl Lattice for u16 {
 impl DistributiveLattice for u16 {
     fn psubtract(&self, other: &Self) -> AlgebraicResult<Self> {
         if self == other { AlgebraicResult::None }
-        else { AlgebraicResult::Element(*self) }
+        else { AlgebraicResult::Identity(SELF_IDENT) }
     }
 }
 
