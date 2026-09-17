@@ -2454,13 +2454,17 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         } else {
             self.in_zipper_mut_static_result(
                 |focus_node, partial_key| {
-                    let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
-                    key_buf[0..partial_key.len()].copy_from_slice(partial_key);
-                    //GOAT, currently this will panic if the path is too long to fit in the buffer, which means this internal API
-                    // isn't suitable for general-purpose path-based ops yet, but we're using it to deal with single-byte ops
-                    key_buf[partial_key.len()..partial_key.len()+path.len()].copy_from_slice(path);
-                    let full_key = &key_buf[0..partial_key.len()+path.len()];
-                    node_f(focus_node, full_key)
+                    let full_len = partial_key.len() + path.len();
+                    if full_len <= MAX_NODE_KEY_BYTES {
+                        let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
+                        key_buf[0..partial_key.len()].copy_from_slice(partial_key);
+                        key_buf[partial_key.len()..full_len].copy_from_slice(path);
+                        node_f(focus_node, &key_buf[0..full_len])
+                    } else {
+                        //Too long for the stack buffer
+                        let full_key = [partial_key, path].concat();
+                        node_f(focus_node, &full_key)
+                    }
                 },
                 retry_f
             )
@@ -6130,6 +6134,36 @@ mod tests {
             wz.graft_masked_branches(&o.read_zipper(), mask(b"abd"), false);
         }
         assert_eq!(keys(&m), ["cax", "cbx", "cdx", "d"]);
+    }
+
+    /// `graft_child_maps` and `graft_masked_branches` below a root path too long for one node key
+    #[test]
+    fn graft_child_maps_long_root() {
+        for root_len in [47usize, 48, 60, 200] {
+            let root = vec![0u8; root_len];
+            let mut map = PathMap::<u64>::new();
+            {
+                let mut wz = map.write_zipper_at_path(&root);
+                wz.graft_child_maps(ByteMask::from_iter([1u8, 3]), [PathMap::single([2u8], 5), PathMap::single([], 6)], false);
+            }
+            let mut want = root.clone();
+            want.extend([1u8, 2]);
+            assert_eq!(map.get_val_at(&want), Some(&5), "root {root_len}");
+            want.truncate(root_len);
+            want.push(3);
+            assert_eq!(map.get_val_at(&want).is_some(), cfg!(feature = "graft_root_vals"), "root {root_len}");
+
+            let mut src = PathMap::<u64>::new();
+            src.set_val_at([4u8, 4], 9);
+            let mut map = PathMap::<u64>::new();
+            {
+                let mut wz = map.write_zipper_at_path(&root);
+                wz.graft_masked_branches(&src.read_zipper(), ByteMask::from_iter([4u8]), false);
+            }
+            let mut want = root.clone();
+            want.extend([4u8, 4]);
+            assert_eq!(map.get_val_at(&want), Some(&9), "root {root_len}");
+        }
     }
 
     #[test]
