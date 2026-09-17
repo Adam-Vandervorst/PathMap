@@ -2016,7 +2016,7 @@ pub(crate) mod read_zipper_core {
             PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
         }
         fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
-            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent_borrowed(), || self.val(), self.node_key(), b"", self.alloc.clone()).into()
+            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent(), || self.val(), self.node_key(), b"", self.alloc.clone()).into()
         }
         fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
             self.get_focus_at([])
