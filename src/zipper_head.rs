@@ -368,7 +368,11 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                 let cell_node = end_node.make_mut().into_cell_node().unwrap();
                 let (exclusive_node, val) = cell_node.prepare_cf(last_path_byte);
 
+                //With an empty `path`, the popped byte was the zipper's own; put it back
                 z.key.prefix_buf.truncate(original_path_len);
+                if z.key.prefix_buf.len() < original_path_len {
+                    z.key.prefix_buf.push(last_path_byte);
+                }
 
                 return (exclusive_node, val)
             },
@@ -409,6 +413,9 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
     } else {
         //CASE 4
         z.key.prefix_buf.truncate(original_path_len);
+        if z.key.prefix_buf.len() < original_path_len {
+            z.key.prefix_buf.push(last_path_byte);
+        }
 
         //If the node on top of the stack is not a cell node, we need to upgrade it
         if !z.focus_stack.top().unwrap().is_cell_node() {
@@ -1493,5 +1500,43 @@ mod tests {
         assert_eq!(rz.path_exists(), false);
         assert_eq!(rz.is_val(), false);
         drop(rz);
+    }
+
+    /// An exclusive zipper at the head's own root, requested more than once, from a head whose
+    /// root sits partway into a node
+    #[test]
+    fn exclusive_path_at_head_root_twice() {
+        let sample = || {
+            let mut m = PathMap::<u64>::new();
+            for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { m.set_val_at(p, 7); }
+            m
+        };
+
+        let zh = sample().into_zipper_head(&[1u8]);
+        for (path, v) in [(&[][..], 1), (&[9u8][..], 2), (&[][..], 3)] {
+            let mut wz = zh.write_zipper_at_exclusive_path(path).unwrap();
+            wz.descend_to(&[5u8]);
+            wz.set_val(v);
+        }
+        let map = zh.into_map();
+        assert_eq!(map.get_val_at(&[1u8, 5]), Some(&3));
+        assert_eq!(map.get_val_at(&[1u8, 9, 5]), Some(&2));
+        assert_eq!(map.get_val_at(&[1u8, 2, 1, 0]), Some(&7));
+        assert_eq!(map.val_count(), 7);
+
+        let mut map = sample();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(&[1u8]);
+            let zh = wz.zipper_head();
+            for (path, v) in [(&[][..], 1), (&[][..], 2), (&[9u8][..], 3)] {
+                let mut child = zh.write_zipper_at_exclusive_path(path).unwrap();
+                child.descend_to(&[5u8]);
+                child.set_val(v);
+            }
+        }
+        assert_eq!(map.get_val_at(&[1u8, 5]), Some(&2));
+        assert_eq!(map.get_val_at(&[1u8, 9, 5]), Some(&3));
+        assert_eq!(map.val_count(), 7);
     }
 }
