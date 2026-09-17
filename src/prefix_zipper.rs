@@ -122,6 +122,9 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
     /// Returns `true` if the focus moved.  The descended bytes are appended to this zipper's path
     /// buffer and reported to `obs`.  Does nothing if the focus is already within the source.
     fn consume_prefix<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        if !self.source.path_exists() {
+            return false;
+        }
         match self.position.prefixed_depth() {
             Some(prefixed_depth) => {
                 let prefix_rest = &self.prefix[self.origin_depth + prefixed_depth..];
@@ -331,7 +334,9 @@ impl<'prefix, Z> Zipper for PrefixZipper<'prefix, Z>
 {
     fn path_exists(&self) -> bool {
         match self.position {
-            PrefixPos::Prefix {..} => true,
+            //The source stays at its root while the focus is in the prefix, and the prefix only
+            // exists if the source's root does
+            PrefixPos::Prefix {..} => self.source.path_exists(),
             PrefixPos::PrefixOff {..} => false,
             PrefixPos::Source => self.source.path_exists(),
         }
@@ -344,17 +349,18 @@ impl<'prefix, Z> Zipper for PrefixZipper<'prefix, Z>
     }
     fn child_count(&self) -> usize {
         match self.position {
-            PrefixPos::Prefix {..} => 1,
+            PrefixPos::Prefix {..} => self.source.path_exists() as usize,
             PrefixPos::PrefixOff {..} => 0,
             PrefixPos::Source => self.source.child_count(),
         }
     }
     fn child_mask(&self) -> ByteMask {
         match self.position {
-            PrefixPos::Prefix { valid } => {
+            PrefixPos::Prefix { valid } if self.source.path_exists() => {
                 let byte = self.prefix[self.origin_depth + valid];
                 ByteMask::from(byte)
             },
+            PrefixPos::Prefix {..} => ByteMask::EMPTY,
             PrefixPos::PrefixOff {..} => ByteMask::EMPTY,
             PrefixPos::Source => self.source.child_mask(),
         }
@@ -404,7 +410,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
         if let PrefixPos::Prefix { valid } = &self.position {
             let valid = *valid;
             let rest_prefix = &self.prefix[self.origin_depth + valid..];
-            let overlap = find_prefix_overlap(rest_prefix, path);
+            let overlap = if self.source.path_exists() { find_prefix_overlap(rest_prefix, path) } else { 0 };
             path = &path[overlap..];
             self.set_valid(valid + overlap);
             descended += overlap;
@@ -558,7 +564,7 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
     }
 
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
-        if k == 0 || self.position.is_invalid() {
+        if k == 0 || self.position.is_invalid() || !self.source.path_exists() {
             return false;
         }
         //The prefix is a single forced path, so the bytes it contributes always exist and never
@@ -974,5 +980,35 @@ mod tests {
             assert!(!z.descend_first_k_path(0), "setup {setup}");
             assert_eq!(z.path(), &path[..], "setup {setup}");
         }
+    }
+
+    /// A prefix in front of a source rooted at a missing path doesn't exist either
+    #[test]
+    fn prefix_zipper_over_missing_source() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8], 1);
+        let mut z = PrefixZipper::new(&[0u8, 7][..], map.read_zipper_at_path(&[5u8]));
+        assert!(!z.path_exists());
+        assert_eq!(z.child_count(), 0);
+        assert_eq!(z.descend_first_byte(), None);
+        assert!(!z.to_next_step());
+        assert!(!z.to_next_val());
+        assert!(!z.descend_until());
+        assert!(!z.descend_first_k_path(1));
+        assert_eq!(z.path(), &[] as &[u8]);
+        assert_eq!(z.descend_to_existing(&[0u8, 7]), 0);
+        z.descend_to(&[0u8]);
+        assert!(!z.path_exists());
+        assert_eq!(z.descend_first_byte(), None);
+
+        //With the source present the prefix exists as before
+        let mut z = PrefixZipper::new(&[0u8, 7][..], map.read_zipper());
+        assert!(z.path_exists());
+        assert_eq!(z.descend_first_byte(), Some(0));
+        assert!(z.path_exists());
+        let mut steps = vec![];
+        z.reset();
+        while z.to_next_step() { steps.push(z.path().to_vec()); }
+        assert_eq!(steps, vec![vec![0], vec![0, 7], vec![0, 7, 0]]);
     }
 }
