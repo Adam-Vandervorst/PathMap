@@ -1511,10 +1511,13 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyP
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTracked<'a, 'path, V, A> {
-    /// See [ReadZipperCore::new_with_node_and_path]
-    pub(crate) fn new_with_node_and_path_in(root_node: &'a TrieNodeODRc<V, A>, owned_root: bool, path: &'path [u8], root_prefix_len: usize, root_key_start: usize, root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
-        let core = ReadZipperCore::new_with_node_and_path_in(root_node, owned_root, path, root_prefix_len, root_key_start, root_val, alloc);
-        Self { z: core, tracker }
+    /// See [ReadZipperCore::new_isolated_in]
+    pub(crate) fn new_isolated_in(root_node: &'a TrieNodeODRc<V, A>, path: &'path [u8], root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
+        Self { z: ReadZipperCore::new_isolated_in(root_node, path, root_val, alloc), tracker }
+    }
+    /// See [ReadZipperCore::new_isolated_cloned_path_in]
+    pub(crate) fn new_isolated_cloned_path_in(root_node: &'a TrieNodeODRc<V, A>, path: &[u8], root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
+        Self { z: ReadZipperCore::new_isolated_cloned_path_in(root_node, path, root_val, alloc), tracker }
     }
     /// See [ReadZipperCore::new_with_node_and_cloned_path]
     pub(crate) fn new_with_node_and_cloned_path_in(root_node: &'a TrieNodeODRc<V, A>, owned_root: bool, path: &[u8], root_prefix_len: usize, root_key_start: usize, root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
@@ -2647,11 +2650,11 @@ pub(crate) mod read_zipper_core {
                     let (_key_len, focus_node) = parent.node_get_child(self.parent_key()).unwrap();
                     !focus_node.is_empty() && focus_node.refcount() > 1
                 } else {
-                    match &self.root_node {
-                        OwnedOrBorrowed::Owned(root) => !root.is_empty() && root.refcount() > 1,
-                        OwnedOrBorrowed::Borrowed(root) => !root.is_empty() && root.refcount() > 1,
-                        OwnedOrBorrowed::None => false,
-                    }
+                    let focus = match &self.root_node {
+                        OwnedOrBorrowed::None => return false,
+                        _ => self.focus_parent(),
+                    };
+                    !focus.is_empty() && focus.refcount() > 1
                 }
             }
         }
@@ -2820,6 +2823,42 @@ pub(crate) mod read_zipper_core {
             new_zipper.make_static_path()
         }
 
+        /// Like [Self::new_with_node_and_path_in] with an owned root, but the root is a private node holding
+        /// only the entry at `path`.  A ZipperHead reader must not share a node that live writers point into
+        pub(crate) fn new_isolated_in(root_node: &'a TrieNodeODRc<V, A>, path: &'path [u8], root_val: Option<&'a V>, alloc: A) -> Self {
+            let Some((&last, parent_path)) = path.split_last() else {
+                return Self::new_with_node_and_path_in(root_node, true, path, 0, 0, root_val, alloc)
+            };
+            let (parent, key, _) = node_along_path(root_node, parent_path, None, false);
+            let mut entry_key = key.to_vec();
+            entry_key.push(last);
+            let parent = parent.as_tagged();
+            let mut root = TrieNodeODRc::new_in(crate::dense_byte_node::DenseByteNode::new_in(alloc.clone()), alloc.clone());
+            let val = parent.node_get_val(&entry_key).cloned();
+            let child = parent.get_node_at_key(&entry_key).into_option();
+            let dangling = val.is_none() && child.is_none() && parent.node_contains_partial_key(&entry_key);
+            if let Some(val) = val {
+                if let Err(n) = root.make_mut().node_set_val(&[last], val) { root = n }
+            }
+            if let Some(child) = child {
+                if let Err(n) = root.make_mut().node_set_branch(&[last], child) { root = n }
+            }
+            if dangling {
+                if let Err(n) = root.make_mut().node_create_dangling(&[last]) { root = n }
+            }
+            //The root value is read from `root`, via `root_parent_key_start`
+            Self::new_with_node_and_path_internal_in(OwnedOrBorrowed::Owned(root), path, path.len() - 1, None, alloc)
+        }
+        /// Same as [Self::new_isolated_in], but with a `'static` path
+        pub(crate) fn new_isolated_cloned_path_in(root_node: &'a TrieNodeODRc<V, A>, path: &[u8], root_val: Option<&'a V>, alloc: A) -> ReadZipperCore<'a, 'static, V, A> {
+            let mut new_zipper = ReadZipperCore::<'a, '_, V, A>::new_isolated_in(root_node, path, root_val, alloc);
+            new_zipper.prefix_buf = Vec::with_capacity(EXPECTED_PATH_LEN);
+            new_zipper.prefix_buf.extend(path);
+            new_zipper.origin_path = SliceOrLen::new_owned(path.len());
+            new_zipper.ancestors = Vec::with_capacity(EXPECTED_DEPTH);
+            new_zipper.make_static_path()
+        }
+
         /// Makes a version of `self` that has an allocated path buffer and a `'static`` path lifetime
         #[inline]
         pub(crate) fn make_static_path(mut self) -> ReadZipperCore<'a, 'static, V, A> {
@@ -2902,7 +2941,12 @@ pub(crate) mod read_zipper_core {
                     // we currently share the same implementation between `val()` and `get_val()` because the only difference is the return
                     // lifetime, and the current ZipperHead implementation is actually ok with referencing the value in the root of the ZipperHead.
                     // debug_assert!(self.root_node.is_borrowed());
-                    self.root_val
+                    if self.root_val.is_some() || self.root_parent_key_start == usize::MAX || !self.root_node.is_owned() {
+                        self.root_val
+                    } else {
+                        //SAFETY: see the note on this method
+                        self.root_node.as_ref().as_tagged().node_get_val(self.root_node_key()).map(|v| unsafe{ &*(v as *const V) })
+                    }
                 }
             }
         }
@@ -3030,6 +3074,10 @@ pub(crate) mod read_zipper_core {
             let parent_key = self.parent_key();
             if parent_key.len() == 0 {
                 return self.root_node.as_ref()
+            }
+            if self.ancestors.is_empty() {
+                //At the root, with the focus on a child of the root node
+                return self.root_node.as_ref().as_tagged().node_get_child(parent_key).unwrap().1
             }
             self.focus_parent_borrowed()
         }
@@ -3253,8 +3301,10 @@ pub(crate) mod read_zipper_core {
             } else {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
                     parent.node_contains_val(self.parent_key())
-                } else {
+                } else if self.root_val.is_some() || self.root_parent_key_start == usize::MAX || !self.root_node.is_owned() {
                     self.root_val.is_some()
+                } else {
+                    self.root_node.as_ref().as_tagged().node_contains_val(self.root_node_key())
                 }
             }
         }
@@ -3341,6 +3391,8 @@ pub(crate) mod read_zipper_core {
             if self.prefix_buf.len() > 0 {
                 let key_start = if self.ancestors.len() > 1 {
                     unsafe{ self.ancestors.get_unchecked(self.ancestors.len()-2) }.2
+                } else if self.ancestors.is_empty() && self.root_parent_key_start != usize::MAX {
+                    self.root_parent_key_start
                 } else {
                     self.root_key_start
                 };

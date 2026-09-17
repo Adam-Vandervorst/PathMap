@@ -209,7 +209,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             // logic makes sure conflicting paths aren't permitted, so we should not get aliased &mut borrows
             let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
             let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
-            let new_zipper = ReadZipperTracked::new_with_node_and_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker);
+            let new_zipper = ReadZipperTracked::new_isolated_in(root_node, path, root_val, z.alloc.clone(), zipper_tracker);
             Ok(new_zipper)
         })
     }
@@ -229,7 +229,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             #[cfg(not(debug_assertions))]
             let zipper_tracker = None;
 
-            ReadZipperTracked::new_with_node_and_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker)
+            ReadZipperTracked::new_isolated_in(root_node, path, root_val, z.alloc.clone(), zipper_tracker)
         })
     }
     fn read_zipper_at_path<'a, K: AsRef<[u8]>>(&'a self, path: K) -> Result<ReadZipperTracked<'a, 'static, V, A>, Conflict> where 'trie: 'a {
@@ -242,7 +242,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
             let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
 
-            let new_zipper = ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), Some(zipper_tracker));
+            let new_zipper = ReadZipperTracked::new_isolated_cloned_path_in(root_node, path, root_val, z.alloc.clone(), Some(zipper_tracker));
             Ok(new_zipper)
         })
     }
@@ -263,7 +263,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             #[cfg(not(debug_assertions))]
             let zipper_tracker = None;
 
-            ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker)
+            ReadZipperTracked::new_isolated_cloned_path_in(root_node, path, root_val, z.alloc.clone(), zipper_tracker)
         })
     }
     fn write_zipper_at_exclusive_path<'a, K: AsRef<[u8]>>(&'a self, path: K) -> Result<WriteZipperTracked<'a, 'static, V, A>, Conflict> where 'trie: 'a {
@@ -1562,6 +1562,28 @@ mod tests {
         assert_eq!(map.get_val_at(&[1u8, 2, 4]), Some(&1));
         assert_eq!(map.get_val_at(&[1u8, 2, 5]), Some(&2));
         assert_eq!(map.get_val_at(&[1u8, 2, 3]), Some(&7));
+    }
+
+    /// A reader must not hold a node that live writers point into
+    #[test]
+    fn head_reader_beside_live_writers() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8, 0], 1);
+        let zh = map.into_zipper_head(&[]);
+        {
+            let mut w1 = zh.write_zipper_at_exclusive_path(&[0x11u8]).unwrap();
+            //Not in the trie, so it used to hold the root node, which the next writer then copied
+            let r0 = zh.read_zipper_at_path(&[0x22u8, 0, 0]).unwrap();
+            let w0 = zh.write_zipper_at_exclusive_path(&[0u8]).unwrap();
+            assert!(!r0.path_exists());
+            drop(r0);
+            w1.set_val(5);
+            drop(w0);
+            drop(w1);
+        }
+        let map = zh.into_map();
+        assert_eq!(map.get_val_at(&[0x11u8]), Some(&5));
+        assert_eq!(map.get_val_at(&[0u8, 0]), Some(&1));
     }
 
     /// `get_trie_ref`, `get_focus` and forks from a head's read zipper, which owns its root node
