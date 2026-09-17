@@ -183,8 +183,22 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.z.reset()
     }
     fn val_count(&self) -> usize {
-        debug_assert!(self.focus_factor() == self.factor_count() - 1);
-        self.z.val_count()
+        //Values below the focus can be spread over later factors, so walk a copy of the zipper
+        let mut walker = ProductZipper {
+            z: self.z.clone(),
+            secondaries: self.secondaries.clone(),
+            factor_paths: self.factor_paths.clone(),
+            source_zippers: Vec::new(),
+        };
+        let focus = self.path();
+        let mut count = self.is_val() as usize;
+        while walker.to_next_val() {
+            if walker.path().len() <= focus.len() || !walker.path().starts_with(focus) {
+                break
+            }
+            count += 1;
+        }
+        count
     }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
         let k = k.as_ref();
@@ -1994,6 +2008,31 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
     });
+
+    /// `val_count` counts the values below the focus in every later factor
+    #[test]
+    fn product_zipper_val_count_in_every_factor() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 2][..], &[1u8], &[3u8]] { a.set_val_at(p, 1); }
+        let mut b = PathMap::<u64>::new();
+        for p in [&[4u8][..], &[4u8, 5], &[6u8]] { b.set_val_at(p, 2); }
+        let mut c = PathMap::<u64>::new();
+        for p in [&[7u8][..], &[8u8, 9]] { c.set_val_at(p, 3); }
+
+        //Every value path in the product, from a full walk
+        let mut all = vec![];
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
+        while z.to_next_val() { all.push(z.path().to_vec()); }
+        assert!(!all.is_empty());
+
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
+        loop {
+            let focus = z.path().to_vec();
+            let expected = all.iter().filter(|p| p.starts_with(&focus)).count();
+            assert_eq!(z.val_count(), expected, "{focus:?}");
+            if !z.to_next_step() { break }
+        }
+    }
 
     /// `is_shared` and `shared_node_id` across factor boundaries
     #[test]
