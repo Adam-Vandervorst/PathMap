@@ -184,6 +184,7 @@ fn path(d: &mut Dec) -> Option<Vec<u8>> {
             _ => b,
         });
     }
+    note!("  path {}", hex_path(&v));
     Some(v)
 }
 
@@ -207,6 +208,7 @@ fn mask(d: &mut Dec) -> Option<ByteMask> {
     for _ in 0..n {
         m.set_bit(byte(d)?);
     }
+    note!("  mask {:?}", m.iter().collect::<Vec<u8>>());
     Some(m)
 }
 
@@ -474,7 +476,7 @@ where
     }
     match op {
         0 => { let v = val(d)?; let _ = z.set_val(v); }
-        1 => { let pr = d.boolean()?; let _ = z.remove_val(pr); }
+        1 => { let pr = d.boolean()?; note!("  pr={pr}"); let _ = z.remove_val(pr); }
         2 => { let v = val(d)?; if let Some(slot) = z.get_val_mut() { *slot = v; } }
         3 => { let v = val(d)?; let _ = z.get_val_or_set_mut(v).clone(); }
         4 => { let v = val(d)?; let _ = z.get_val_or_set_mut_with(|| v).clone(); }
@@ -529,7 +531,7 @@ where
             }
         }
         27 => { let m = mask(d)?; let pr = d.boolean()?; z.remove_unmasked_branches(m, pr); }
-        28 => { let s = src(d)?; let p = short_path(d)?; let m = mask(d)?; let ru = d.boolean()?; z.graft_masked_branches(&s.read_zipper_at_path(&p), m, ru); }
+        28 => { let s = src(d)?; let p = short_path(d)?; let m = mask(d)?; let ru = d.boolean()?; note!("  ru={ru}"); z.graft_masked_branches(&s.read_zipper_at_path(&p), m, ru); }
         29 => {
             let s = src(d)?;
             let m = mask(d)?;
@@ -583,7 +585,10 @@ fn note_maps<V: CrashValue>(maps: &[PathMap<V>; NMAPS]) {
             let mut rz = mp.read_zipper();
             let mut ps = vec![];
             if rz.is_val() { ps.push("_".to_string()); }
-            while rz.to_next_val() { ps.push(hex_path(rz.path())); }
+            //Values, and the ends of dangling paths marked `~`
+            while ps.len() < 64 && rz.to_next_step() {
+                if rz.is_val() { ps.push(hex_path(rz.path())) } else if rz.child_count() == 0 { ps.push(format!("{}~", hex_path(rz.path()))) }
+            }
             note!("  map {i}: {}", ps.join(" "));
         }
     }
