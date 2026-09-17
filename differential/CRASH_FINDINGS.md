@@ -2,14 +2,35 @@
 
 Failures `crash_fuzz` found in `pathmap` on 2026-09-16, at commit `7c61024` on
 `fuzz-fixes-v2`.  The op table is `differential/src/crash.rs`; see
-`differential/src/bin/crash_fuzz.rs` for the runner.  Nothing here has been
-fixed.
+`differential/src/bin/crash_fuzz.rs` for the runner.  The sites below are as
+found; see "Fixed on `fuzz-fixes-v3`" for where they stand now.
 
 Each finding is an input that makes the crate panic, fail a debug assertion,
 abort, segfault or hang **through its public API**, with every documented
 precondition met.  Calls the crate documents as panicking, stubs, and failures
 already known from the differential work are steered around unless
 `--include-known` is passed; they are listed at the end.
+
+## Fixed on `fuzz-fixes-v3`
+
+No site outside "Known failures" reproduces on `fuzz-fixes-v3` (fixes on
+`fuzz-fixes-v2` and `v3`, each with a test that fails without it).  These
+turned up only once the earlier ones were gone:
+
+- A `ZipperHead` reader cloned an ancestor node, so the next exclusive writer
+  copied that node and left live writers pointing into the old copy
+  (use-after-free).  Readers now own a private root holding only their entry.
+  This was behind findings 3, 4 and 8 and the "Lock is missing" panic in
+  `zipper_tracking.rs`.
+- `PrefixZipper::fork_read_zipper` always forked from the prefix start.
+- `ProductZipper` sibling steps that fail at a factor root lost the factor.
+- `TrieRef::is_shared` read the refcount of the empty sentinel.
+- Joins of two empty child nodes under one key: a dense-node debug assertion
+  and a list node left with two onward children.
+
+After the fixes, with the debug-assertion build and known failures steered
+around: 0 failures in 4M inputs (seed 36) and in 8M inputs with `--maxlen
+2000` (seed 39).  With `--include-known`, only the known failures remain.
 
 ## How the surveys were run
 
