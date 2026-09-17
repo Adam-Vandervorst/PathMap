@@ -136,7 +136,7 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
     /// `product_zipper_test4` for more discussion.
     #[inline]
     fn ensure_descend_next_factor(&mut self) {
-        if self.factor_paths.len() < self.secondaries.len() && self.z.child_count() == 0 {
+        if self.factor_paths.len() < self.secondaries.len() && self.z.child_count() == 0 && self.z.path_exists() {
 
             //We don't want to push the same factor on the stack twice
             if let Some(factor_path_len) = self.factor_paths.last() {
@@ -274,7 +274,8 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         moved
     }
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
-        if self.factor_paths.last().cloned().unwrap_or(0) == self.depth() {
+        //Stepping sideways leaves a factor entered at this depth, but at the root there's no sideways
+        if self.depth() > 0 && self.factor_paths.last().cloned() == Some(self.depth()) {
             self.factor_paths.pop();
         }
         let moved = self.z.to_next_sibling_byte();
@@ -282,7 +283,8 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         moved
     }
     fn to_prev_sibling_byte(&mut self) -> Option<u8> {
-        if self.factor_paths.last().cloned().unwrap_or(0) == self.depth() {
+        //Stepping sideways leaves a factor entered at this depth, but at the root there's no sideways
+        if self.depth() > 0 && self.factor_paths.last().cloned() == Some(self.depth()) {
             self.factor_paths.pop();
         }
         let moved = self.z.to_prev_sibling_byte();
@@ -1994,6 +1996,34 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
     });
+
+    /// k-path walks and sibling steps keep factor bookkeeping in step with the core zipper, including
+    /// with a primary rooted at a missing path or at a leaf
+    #[test]
+    fn product_zipper_k_path_walk_from_the_root() {
+        let mut a = PathMap::<()>::new();
+        for p in [&[2u8, 2, 0, 0][..], &[0xe7]] { a.set_val_at(p, ()); }
+        let b = a.clone();
+        for root in [&[0xaau8, 0x77][..], &[0xe7u8][..], &[][..]] {
+            for k in 1..4 {
+                let mut z = ProductZipper::new(a.read_zipper_at_path(root), [b.read_zipper()]);
+                let mut paths = vec![];
+                if z.descend_first_k_path(k) {
+                    paths.push(z.path().to_vec());
+                    while paths.len() < 64 && z.to_next_k_path(k) { paths.push(z.path().to_vec()); }
+                }
+                assert_eq!(z.path(), &[] as &[u8], "{root:?} k={k}");
+                let _ = (z.is_shared(), z.shared_node_id(), z.child_mask());
+                assert!(paths.iter().all(|p| p.len() == k), "{root:?} k={k}: {paths:?}");
+                if root == &[0xaau8, 0x77][..] {
+                    assert!(paths.is_empty(), "a missing primary has no paths: {paths:?}");
+                }
+                let mut z = ProductZipper::new(a.read_zipper_at_path(root), [b.read_zipper()]);
+                let _ = (z.to_next_sibling_byte(), z.to_prev_sibling_byte());
+                let _ = (z.is_shared(), z.child_mask(), z.descend_first_byte(), z.is_shared());
+            }
+        }
+    }
 
     /// `is_shared` and `shared_node_id` across factor boundaries
     #[test]
