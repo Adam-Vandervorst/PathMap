@@ -416,18 +416,29 @@ pub trait ZipperMoving: Zipper {
     /// where the index passed is 1 more than the index of the current focus position.
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let cur_byte = self.focus_byte()?;
+        //The focus is allowed to sit on a path that isn't in the trie, and such a focus still has
+        // well-defined siblings because the siblings come from the parent's `child_mask`.  Remember
+        // whether the focus exists, so the no-sibling arm can check it restores exactly what it found.
+        #[cfg(debug_assertions)]
+        let focus_existed = self.path_exists();
         if !self.ascend_byte() {
             return None
         }
         let mask = self.child_mask();
         match mask.next_bit(cur_byte) {
             Some(byte) => {
+                //`byte` came out of the parent's `child_mask`, so the sibling we land on exists
                 self.descend_to_byte(byte);
                 debug_assert!(self.path_exists());
                 Some(byte)
             },
             None => {
+                //There is no next sibling, so the focus goes back exactly where it started.  That
+                // location need not be an existing path, so all we can check is that putting it
+                // back didn't change whether it exists.
                 self.descend_to_byte(cur_byte);
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(self.path_exists(), focus_existed);
                 None
             }
         }
@@ -442,19 +453,27 @@ pub trait ZipperMoving: Zipper {
     /// where the index passed is 1 less than the index of the current focus position.
     fn to_prev_sibling_byte(&mut self) -> Option<u8> {
         let cur_byte = self.focus_byte()?;
+        //See the note in `to_next_sibling_byte`; the focus may legitimately be off the trie
+        #[cfg(debug_assertions)]
+        let focus_existed = self.path_exists();
         if !self.ascend_byte() {
             return None
         }
         let mask = self.child_mask();
         match mask.prev_bit(cur_byte) {
             Some(byte) => {
+                //`byte` came out of the parent's `child_mask`, so the sibling we land on exists
                 self.descend_to_byte(byte);
                 debug_assert!(self.path_exists());
                 Some(byte)
             },
             None => {
+                //There is no previous sibling, so the focus goes back exactly where it started.
+                // That location need not be an existing path, so all we can check is that putting
+                // it back didn't change whether it exists.
                 self.descend_to_byte(cur_byte);
-                debug_assert!(self.path_exists());
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(self.path_exists(), focus_existed);
                 None
             }
         }
@@ -1117,6 +1136,8 @@ fn k_path_default_internal<Z: ZipperMoving + ?Sized, Obs: PathObserver>(z: &mut 
                 if z.depth() == base_idx + k { return true }
             }
         }
+        //Back at the base: nothing (more) below it, and its own siblings are out of bounds
+        if z.depth() == base_idx { return false }
         //A sibling step replaces the last byte rather than adding one, so the observer sees the old
         //byte retracted before the new one arrives
         if let Some(byte) = z.to_next_sibling_byte() {
@@ -1490,10 +1511,13 @@ impl<'a, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ZipperReadOnlyP
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTracked<'a, 'path, V, A> {
-    /// See [ReadZipperCore::new_with_node_and_path]
-    pub(crate) fn new_with_node_and_path_in(root_node: &'a TrieNodeODRc<V, A>, owned_root: bool, path: &'path [u8], root_prefix_len: usize, root_key_start: usize, root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
-        let core = ReadZipperCore::new_with_node_and_path_in(root_node, owned_root, path, root_prefix_len, root_key_start, root_val, alloc);
-        Self { z: core, tracker }
+    /// See [ReadZipperCore::new_isolated_in]
+    pub(crate) fn new_isolated_in(root_node: &'a TrieNodeODRc<V, A>, path: &'path [u8], root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
+        Self { z: ReadZipperCore::new_isolated_in(root_node, path, root_val, alloc), tracker }
+    }
+    /// See [ReadZipperCore::new_isolated_cloned_path_in]
+    pub(crate) fn new_isolated_cloned_path_in(root_node: &'a TrieNodeODRc<V, A>, path: &[u8], root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
+        Self { z: ReadZipperCore::new_isolated_cloned_path_in(root_node, path, root_val, alloc), tracker }
     }
     /// See [ReadZipperCore::new_with_node_and_cloned_path]
     pub(crate) fn new_with_node_and_cloned_path_in(root_node: &'a TrieNodeODRc<V, A>, owned_root: bool, path: &[u8], root_prefix_len: usize, root_key_start: usize, root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
@@ -1997,7 +2021,7 @@ pub(crate) mod read_zipper_core {
             PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
         }
         fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
-            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent_borrowed(), || self.val(), self.node_key(), b"", self.alloc.clone()).into()
+            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent(), || self.val(), self.node_key(), b"", self.alloc.clone()).into()
         }
         fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
             self.get_focus_at([])
@@ -2584,7 +2608,8 @@ pub(crate) mod read_zipper_core {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
                     parent.node_get_val(self.parent_key())
                 } else {
-                    if self.root_val.is_some() {
+                    if self.root_val.is_some() || self.root_parent_key_start == usize::MAX {
+                        //No parent key: the zipper root is the root node itself, and its value is `root_val`
                         self.root_val
                     } else {
                         //We know the node in the witness and the node in self.root_node are the same,
@@ -2625,11 +2650,11 @@ pub(crate) mod read_zipper_core {
                     let (_key_len, focus_node) = parent.node_get_child(self.parent_key()).unwrap();
                     !focus_node.is_empty() && focus_node.refcount() > 1
                 } else {
-                    match &self.root_node {
-                        OwnedOrBorrowed::Owned(root) => !root.is_empty() && root.refcount() > 1,
-                        OwnedOrBorrowed::Borrowed(root) => !root.is_empty() && root.refcount() > 1,
-                        OwnedOrBorrowed::None => false,
-                    }
+                    let focus = match &self.root_node {
+                        OwnedOrBorrowed::None => return false,
+                        _ => self.focus_parent(),
+                    };
+                    !focus.is_empty() && focus.refcount() > 1
                 }
             }
         }
@@ -2798,6 +2823,42 @@ pub(crate) mod read_zipper_core {
             new_zipper.make_static_path()
         }
 
+        /// Like [Self::new_with_node_and_path_in] with an owned root, but the root is a private node holding
+        /// only the entry at `path`.  A ZipperHead reader must not share a node that live writers point into
+        pub(crate) fn new_isolated_in(root_node: &'a TrieNodeODRc<V, A>, path: &'path [u8], root_val: Option<&'a V>, alloc: A) -> Self {
+            let Some((&last, parent_path)) = path.split_last() else {
+                return Self::new_with_node_and_path_in(root_node, true, path, 0, 0, root_val, alloc)
+            };
+            let (parent, key, _) = node_along_path(root_node, parent_path, None, false);
+            let mut entry_key = key.to_vec();
+            entry_key.push(last);
+            let parent = parent.as_tagged();
+            let mut root = TrieNodeODRc::new_in(crate::dense_byte_node::DenseByteNode::new_in(alloc.clone()), alloc.clone());
+            let val = parent.node_get_val(&entry_key).cloned();
+            let child = parent.get_node_at_key(&entry_key).into_option();
+            let dangling = val.is_none() && child.is_none() && parent.node_contains_partial_key(&entry_key);
+            if let Some(val) = val {
+                if let Err(n) = root.make_mut().node_set_val(&[last], val) { root = n }
+            }
+            if let Some(child) = child {
+                if let Err(n) = root.make_mut().node_set_branch(&[last], child) { root = n }
+            }
+            if dangling {
+                if let Err(n) = root.make_mut().node_create_dangling(&[last]) { root = n }
+            }
+            //The root value is read from `root`, via `root_parent_key_start`
+            Self::new_with_node_and_path_internal_in(OwnedOrBorrowed::Owned(root), path, path.len() - 1, None, alloc)
+        }
+        /// Same as [Self::new_isolated_in], but with a `'static` path
+        pub(crate) fn new_isolated_cloned_path_in(root_node: &'a TrieNodeODRc<V, A>, path: &[u8], root_val: Option<&'a V>, alloc: A) -> ReadZipperCore<'a, 'static, V, A> {
+            let mut new_zipper = ReadZipperCore::<'a, '_, V, A>::new_isolated_in(root_node, path, root_val, alloc);
+            new_zipper.prefix_buf = Vec::with_capacity(EXPECTED_PATH_LEN);
+            new_zipper.prefix_buf.extend(path);
+            new_zipper.origin_path = SliceOrLen::new_owned(path.len());
+            new_zipper.ancestors = Vec::with_capacity(EXPECTED_DEPTH);
+            new_zipper.make_static_path()
+        }
+
         /// Makes a version of `self` that has an allocated path buffer and a `'static`` path lifetime
         #[inline]
         pub(crate) fn make_static_path(mut self) -> ReadZipperCore<'a, 'static, V, A> {
@@ -2880,7 +2941,12 @@ pub(crate) mod read_zipper_core {
                     // we currently share the same implementation between `val()` and `get_val()` because the only difference is the return
                     // lifetime, and the current ZipperHead implementation is actually ok with referencing the value in the root of the ZipperHead.
                     // debug_assert!(self.root_node.is_borrowed());
-                    self.root_val
+                    if self.root_val.is_some() || self.root_parent_key_start == usize::MAX || !self.root_node.is_owned() {
+                        self.root_val
+                    } else {
+                        //SAFETY: see the note on this method
+                        self.root_node.as_ref().as_tagged().node_get_val(self.root_node_key()).map(|v| unsafe{ &*(v as *const V) })
+                    }
                 }
             }
         }
@@ -3008,6 +3074,10 @@ pub(crate) mod read_zipper_core {
             let parent_key = self.parent_key();
             if parent_key.len() == 0 {
                 return self.root_node.as_ref()
+            }
+            if self.ancestors.is_empty() {
+                //At the root, with the focus on a child of the root node
+                return self.root_node.as_ref().as_tagged().node_get_child(parent_key).unwrap().1
             }
             self.focus_parent_borrowed()
         }
@@ -3231,8 +3301,10 @@ pub(crate) mod read_zipper_core {
             } else {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
                     parent.node_contains_val(self.parent_key())
-                } else {
+                } else if self.root_val.is_some() || self.root_parent_key_start == usize::MAX || !self.root_node.is_owned() {
                     self.root_val.is_some()
+                } else {
+                    self.root_node.as_ref().as_tagged().node_contains_val(self.root_node_key())
                 }
             }
         }
@@ -3319,6 +3391,8 @@ pub(crate) mod read_zipper_core {
             if self.prefix_buf.len() > 0 {
                 let key_start = if self.ancestors.len() > 1 {
                     unsafe{ self.ancestors.get_unchecked(self.ancestors.len()-2) }.2
+                } else if self.ancestors.is_empty() && self.root_parent_key_start != usize::MAX {
+                    self.root_parent_key_start
                 } else {
                     self.root_key_start
                 };
@@ -3388,6 +3462,41 @@ pub(crate) mod read_zipper_core {
 
         pub(crate) fn into_path(self) -> Vec<u8> {
             self.prefix_buf
+        }
+    }
+
+    /// The default k-path walk ends when there is nothing below its base, and `k = 0` returns `false`
+    #[test]
+    fn default_k_path_walk_at_a_leaf() {
+        use crate::zipper::ProductZipperG;
+        let mut leaf = PathMap::<u64>::new();
+        leaf.set_val_at(&[1u8], 1);
+        let empty = PathMap::<u64>::new();
+        for (map, path) in [(&empty, &[][..]), (&leaf, &[1u8][..]), (&leaf, &[][..])] {
+            for k in 0..3 {
+                let mut z = ProductZipperG::new(map.read_zipper(), [empty.read_zipper()]);
+                z.descend_to(path);
+                let found = z.descend_first_k_path(k);
+                assert_eq!(found, map.val_count() > 0 && path.is_empty() && k == 1, "{path:?} k={k}");
+                if !found {
+                    assert_eq!(z.path(), path, "{path:?} k={k}");
+                }
+            }
+        }
+    }
+
+    /// `get_val_with_witness` agrees with `val` on owned read zippers, including at a root without a value
+    #[test]
+    fn read_zipper_owned_get_val_with_witness() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[1u8][..], &[1, 2], &[3, 4, 5]] { map.set_val_at(p, p.len() as u64); }
+        for root in [&[][..], &[1u8], &[3u8], &[3u8, 4], &[9u8]] {
+            let mut z = map.clone().into_read_zipper(root);
+            loop {
+                let w = z.witness();
+                assert_eq!(z.get_val_with_witness(&w), z.val(), "{root:?} {:?}", z.path());
+                if !z.to_next_step() { break }
+            }
         }
     }
 
@@ -6401,6 +6510,76 @@ mod tests {
         assert_eq!(z.to_prev_sibling_byte(), None);
     }
 
+    /// A sibling step from a focus that is not in the trie.  `descend_to` an absent path is
+    /// legal and leaves `path_exists()` false, and the siblings of that focus are still well
+    /// defined because they come from the parent's `child_mask`.  The `ZipperMoving` default
+    /// `to_prev_sibling_byte` asserted `path_exists()` on the arm that finds no previous
+    /// sibling and puts the focus back where it started, so every write zipper (which takes the
+    /// default impl) panicked in a debug build instead of returning `None`.  `to_next_sibling_byte`
+    /// had no assert on its matching arm and so answered correctly; both are checked here.
+    #[test]
+    fn sibling_step_from_a_focus_that_does_not_exist() {
+        //The shrunk fuzz case: an empty map, so the root's child mask is empty
+        let mut empty = PathMap::<u64>::new();
+        let mut wz = empty.write_zipper();
+        wz.descend_to(&[0u8]);
+        assert!(!wz.path_exists());
+        assert_eq!(wz.to_prev_sibling_byte(), None);
+        assert_eq!(wz.path(), &[0u8]);
+        assert!(!wz.path_exists());
+        assert_eq!(wz.to_next_sibling_byte(), None);
+        assert_eq!(wz.path(), &[0u8]);
+        drop(wz);
+
+        let mut map = PathMap::<u64>::new();
+        map.insert(&[1u8, 3], 13);
+        map.insert(&[1u8, 5], 15);
+        map.insert(&[7u8], 7);
+
+        //A focus that is missing from an existing parent answers from the parent's children:
+        // `None` when nothing lies to that side, and the real neighbour when something does
+        for (byte, prev, next) in [(2u8, None, Some(3u8)), (4, Some(3), Some(5)), (6, Some(5), None)] {
+            let mut wz = map.write_zipper_at_path(&[1u8]);
+            wz.descend_to(&[byte]);
+            assert!(!wz.path_exists(), "byte {byte}");
+            assert_eq!(wz.to_prev_sibling_byte(), prev, "byte {byte}");
+            //A step that moved landed on a real sibling; one that didn't left the focus off-trie
+            assert_eq!(wz.path_exists(), prev.is_some(), "byte {byte}");
+            assert_eq!(wz.path(), &[prev.unwrap_or(byte)], "byte {byte}");
+            drop(wz);
+
+            let mut wz = map.write_zipper_at_path(&[1u8]);
+            wz.descend_to(&[byte]);
+            assert_eq!(wz.to_next_sibling_byte(), next, "byte {byte}");
+            drop(wz);
+
+            //The read zipper's native impls must agree with the write zipper's default impls
+            let mut rz = map.read_zipper_at_path(&[1u8]);
+            rz.descend_to(&[byte]);
+            assert!(!rz.path_exists(), "byte {byte}");
+            assert_eq!(rz.to_prev_sibling_byte(), prev, "byte {byte}");
+            let mut rz = map.read_zipper_at_path(&[1u8]);
+            rz.descend_to(&[byte]);
+            assert_eq!(rz.to_next_sibling_byte(), next, "byte {byte}");
+        }
+
+        //A focus whose parent is itself missing has no siblings at all, and the failed step
+        // must leave the focus exactly where it was
+        let mut wz = map.write_zipper();
+        wz.descend_to(&[9u8, 9]);
+        assert!(!wz.path_exists());
+        assert_eq!(wz.to_prev_sibling_byte(), None);
+        assert_eq!(wz.path(), &[9u8, 9]);
+        assert_eq!(wz.to_next_sibling_byte(), None);
+        assert_eq!(wz.path(), &[9u8, 9]);
+        assert!(!wz.path_exists());
+        //...and the zipper is still usable afterwards
+        wz.ascend(2);
+        assert_eq!(wz.to_next_sibling_byte(), None);
+        wz.descend_to(&[7u8]);
+        assert_eq!(wz.val(), Some(&7));
+    }
+
     /// Tests iteration behavior of to_next_val implementations, comparing the default impl
     /// against the native imple, and a third run that interleaves calls to each
     #[test]
@@ -6592,6 +6771,30 @@ mod tests {
         assert!(!z.to_next_val());
         assert!(z.to_next_step());                          // fad58f4: false
         assert_eq!(z.path(), &[3]);
+    }
+
+    /// A location holding both a value and a child is stored in a list node as two slots with the same
+    /// key.  Stepping to it as the *previous* sibling looked for the onward child only in the slot
+    /// whose byte it found first, which can be the value slot, so the zipper landed on the location
+    /// without its node: `child_count` said 0 and nothing below could be reached.
+    #[test]
+    fn read_zipper_prev_sibling_onto_a_value_and_child_location() {
+        let mut m = PathMap::<u64>::new();
+        m.set_val_at(&[2u8, 0], 0);
+        m.set_val_at(&[2u8, 1], 0);
+        m.set_val_at(&[2u8], 0);
+        for start in [&[3u8][..], &[9u8]] {
+            let mut z = m.read_zipper();
+            z.descend_to(start);
+            assert!(!z.path_exists());
+            assert_eq!(z.to_prev_sibling_byte(), Some(2), "from {start:?}");
+            assert_eq!(z.path(), &[2u8]);
+            assert_eq!(z.val(), Some(&0));
+            assert_eq!(z.child_count(), 2, "from {start:?}");
+            assert_eq!(z.child_mask().iter().collect::<Vec<_>>(), vec![0u8, 1]);
+            assert_eq!(z.descend_first_byte(), Some(0), "from {start:?}");
+            assert_eq!(z.path(), &[2u8, 0]);
+        }
     }
 
     #[test]

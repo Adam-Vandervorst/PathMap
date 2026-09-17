@@ -5,7 +5,6 @@ use core::ptr::NonNull;
 use std::collections::HashMap;
 use dyn_clone::*;
 use local_or_heap::LocalOrHeap;
-use arrayvec::ArrayVec;
 
 use crate::utils::ByteMask;
 use crate::alloc::Allocator;
@@ -72,35 +71,6 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// cheaper, but it is adequate for the places that call it
     fn node_replace_child(&mut self, key: &[u8], new_node: TrieNodeODRc<V, A>);
 
-    /// Retrieves multiple values or child links from the node, associated with elements from `keys`,
-    /// and places them into the respective element in `results`
-    ///
-    /// The `bool` in `keys` indicates whether a value is expected at the requested key.  `true` will be
-    /// passed to indicate a **value**. (WARNING: This is different from the convention in some node types)
-    ///
-    /// If a node contains both an onward link and a value at the same key, the `bool` specifies which to
-    /// return; however, a node may be returned for a requested value, if the path to the node is a prefix
-    /// to the path to the requested value.  This is because the value may live within a child node.  On
-    /// the other hand, a value will only be returned if it is an exact match with the key provided.
-    ///
-    /// The `usize` in `results` functions the same way as the returned `usize` in [TrieNode::node_get_child],
-    /// to indicate the number of key bytes matched by the key contained within the node.
-    ///
-    /// The implementation may assume `keys` will be in sorted order, and `false` sorts before `true` if
-    /// both a value and a node at the same key are requested.
-    ///
-    /// Returns `true` if the requested `keys` completely enumerate the set of elements contained within
-    /// the node, or `false` if the node contains additional elements that were not requested
-    ///
-    /// If a result is not found for a given key, the implementation does not guarantee the corresponding
-    /// element in `results` will be set to [`PayloadRef::None`], therefore the caller should init `results`
-    /// to default values.
-    ///
-    /// Panics if `keys.len() > results.len()`
-    ///
-    /// NOTE: It perfectly fine for multiple keys to share a prefix, and sometimes that means multiple
-    /// results will be identical if the node represents only the prefix portion of the key.
-    fn node_get_payloads<'node, 'res>(&'node self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'node, V, A>)]) -> bool;
 
     /// Returns `true` if the node contains a value at the specified key, otherwise returns `false`
     ///
@@ -526,32 +496,6 @@ impl<V: Clone + Send + Sync, A: Allocator> Default for PayloadRef<'_, V, A> {
     }
 }
 
-impl<'a, V: Clone + Send + Sync, A: Allocator> PayloadRef<'a, V, A> {
-    pub fn is_none(&self) -> bool {
-        match self {
-            Self::None => true,
-            _ => false
-        }
-    }
-    pub fn is_val(&self) -> bool {
-        match self {
-            Self::Val(_) => true,
-            _ => false
-        }
-    }
-    pub fn child(&self) -> &'a TrieNodeODRc<V, A> {
-        match self {
-            Self::Child(child) => child,
-            _ => panic!()
-        }
-    }
-    pub fn val(&self) -> &'a V {
-        match self {
-            Self::Val(val) => val,
-            _ => panic!()
-        }
-    }
-}
 
 #[derive(Clone)]
 pub(crate) enum ValOrChild<V: Clone + Send + Sync, A: Allocator> {
@@ -630,53 +574,236 @@ impl<V: Clone + Send + Sync, A: Allocator> ValOrChildUnion<V, A> {
     }
 }
 
-/// An implementation of pmeet_dyn that should be correct for any two node types, Although it
-/// certainly won't be optimally efficient.
+/// Where `key` lands in `node`: follows the onward links that cover a strict prefix of `key`, and
+/// returns the node that holds the rest of the key, together with that rest (never empty)
+#[inline]
+pub(crate) fn meet_locate_key<'n, 'k, V: Clone + Send + Sync, A: Allocator>(mut node: TaggedNodeRef<'n, V, A>, mut key: &'k [u8]) -> (TaggedNodeRef<'n, V, A>, &'k [u8]) {
+    debug_assert!(key.len() > 0);
+    while let Some((consumed, child)) = node.node_get_child(key) {
+        if consumed >= key.len() {
+            break
+        }
+        node = child.as_tagged();
+        key = &key[consumed..];
+    }
+    (node, key)
+}
+
+/// The onward node exactly at `key` in `src`, if there is one
+#[inline]
+pub(crate) fn meet_src_child<'a, V: Clone + Send + Sync, A: Allocator>(src: Option<TaggedNodeRef<'a, V, A>>, key: &[u8]) -> Option<TaggedNodeRef<'a, V, A>> {
+    let (node, rest) = meet_locate_key(src?, key);
+    match node.node_get_child(rest) {
+        Some((consumed, child)) if consumed == rest.len() => Some(child.as_tagged()),
+        _ => None
+    }
+}
+
+/// The outcome of [node_drop_dangling]
+pub(crate) enum DropDangling<V: Clone + Send + Sync, A: Allocator> {
+    /// The node is kept as it is
+    Unchanged,
+    /// No value is left below the node's root
+    Empty,
+    /// The node with its dangling paths dropped
+    New(TrieNodeODRc<V, A>),
+}
+
+/// Drops the dangling paths below the root of `node`, keeping only the locations on the way to a
+/// value.  `src` is the node standing at the same location in the source of a pruned meet: a node
+/// shared with it is skipped rather than walked, so a dangling path inside a shared node survives.
+pub(crate) fn node_drop_dangling<V: Clone + Send + Sync, A: Allocator>(node: &TrieNodeODRc<V, A>, src: Option<TaggedNodeRef<V, A>>) -> DropDangling<V, A> {
+    let tagged = node.as_tagged();
+    if tagged.node_is_empty() {
+        return DropDangling::Empty
+    }
+    if let Some(src) = src {
+        if tagged.shared_node_id() == src.shared_node_id() {
+            return DropDangling::Unchanged
+        }
+    }
+    match tagged.tag() {
+        DENSE_BYTE_NODE_TAG => unsafe{ tagged.as_dense_unchecked() }.drop_dangling(src),
+        LINE_LIST_NODE_TAG => unsafe{ tagged.as_list_unchecked() }.drop_dangling(src),
+        CELL_BYTE_NODE_TAG => unsafe{ tagged.as_cell_unchecked() }.drop_dangling(src),
+        _ => unreachable!()
+    }
+}
+
+/// The number of branches below `key` in the trie rooted at `node`
+fn meet_count_branches_at<V: Clone + Send + Sync, A: Allocator>(node: TaggedNodeRef<V, A>, key: &[u8]) -> usize {
+    if key.is_empty() {
+        return node.count_branches(&[])
+    }
+    let (node, rest) = meet_locate_key(node, key);
+    match node.node_get_child(rest) {
+        Some((consumed, child)) if consumed == rest.len() => child.as_tagged().count_branches(&[]),
+        _ => node.count_branches(rest)
+    }
+}
+
+/// What one slot of a list node contributes to a meet; see [meet_list_slot]
+pub(crate) enum SlotMeet<V: Clone + Send + Sync, A: Allocator> {
+    /// The slot was left out of the meet
+    Skipped,
+    /// Not even the first byte of the slot's key exists in the other operand
+    Nothing,
+    /// The slot's own payload, unchanged
+    Keep,
+    /// A value at the slot's key
+    Val(V),
+    /// An onward node at the slot's key
+    Child(TrieNodeODRc<V, A>),
+    /// A dangling path along the first `n` bytes of the slot's key
+    Dangling(usize),
+}
+
+impl<V: Clone + Send + Sync, A: Allocator> SlotMeet<V, A> {
+    #[inline]
+    pub(crate) fn is_nothing(&self) -> bool {
+        matches!(self, Self::Nothing | Self::Skipped)
+    }
+    /// How many bytes of the slot's key exist in the result
+    #[inline]
+    pub(crate) fn reach(&self, key_len: usize) -> usize {
+        match self {
+            Self::Skipped | Self::Nothing => 0,
+            Self::Dangling(n) => *n,
+            _ => key_len
+        }
+    }
+    /// The key and payload of the contribution; `keep` supplies the slot's own payload
+    #[inline]
+    pub(crate) fn into_item<'k, F: FnOnce() -> ValOrChild<V, A>>(self, key: &'k [u8], keep: F) -> Option<(&'k [u8], ValOrChild<V, A>)> {
+        match self {
+            Self::Skipped | Self::Nothing => None,
+            Self::Keep => Some((key, keep())),
+            Self::Val(val) => Some((key, ValOrChild::Val(val))),
+            Self::Child(node) => Some((key, ValOrChild::Child(node))),
+            Self::Dangling(n) => Some((&key[..n], ValOrChild::Child(TrieNodeODRc::new_empty()))),
+        }
+    }
+}
+
+/// Meets one slot of a list node, `payload` at `key`, against `other`, following the rule that a
+/// location survives exactly when both operands have it, and a value exactly when both hold one.
 ///
-/// WARNING: just like [TrieNode::node_get_payloads], the keys in `self_payloads` must be in
-/// sorted order.
-//
-//NOTE: I have confirmed that this function behaves no more conservatively than the function it replaced.
-// In other words, I have confirmed that, in tests where the old function was behaving correctly, this
-// function returns *identical* results.  Furthermore those same tests are the ones where the 20% slowdown
-// was observed.  Therefore the the ~20% slowdown is simply the higher overheads of this generic function.
-//
-//The next port of call for optimization is probably to remove the recursion
-pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT: usize, V, A: Allocator, MergeF>(self_payloads: &[(&[u8], PayloadRef<V, A>)], other: TaggedNodeRef<V, A>, merge_f: MergeF) -> AlgebraicResult<TrieNodeODRc<V, A>>
-    where
-    MergeF: FnOnce(&mut [Option<ValOrChild<V, A>>]) -> TrieNodeODRc<V, A>,
-    V: Clone + Send + Sync + Lattice
-{
-    let mut request_keys = ArrayVec::<(&[u8], bool), MAX_PAYLOAD_CNT>::new();
-    let mut element_results = ArrayVec::<FatAlgebraicResult<ValOrChild<V, A>>, MAX_PAYLOAD_CNT>::new();
-    let mut request_results = ArrayVec::<(usize, PayloadRef<V, A>), MAX_PAYLOAD_CNT>::new();
-    for (self_key, self_payload) in self_payloads.iter() {
-        debug_assert!(!self_payload.is_none());
-        request_keys.push((self_key, self_payload.is_val()));
-        element_results.push(FatAlgebraicResult::none());
-        request_results.push((0, PayloadRef::default()));
+/// Returns `(self_ident, counter_ok, contribution)`.  `self_ident` is true exactly when the
+/// contribution equals the slot.  `counter_ok` is true when, along this slot's key and below it,
+/// the contribution holds everything `other` holds there; [meet_other_within_slots] checks the rest.
+/// `swapped` orients the meet as in [crate::line_list_node::LineListNode::pmeet_dyn_oriented].
+pub(crate) fn meet_list_slot<V: Clone + Send + Sync + Lattice, A: Allocator>(key: &[u8], payload: PayloadRef<V, A>, other: TaggedNodeRef<V, A>, swapped: bool) -> (bool, bool, SlotMeet<V, A>) {
+    let (node, rest) = meet_locate_key(other, key);
+    let exact_child = match node.node_get_child(rest) {
+        Some((consumed, child)) if consumed == rest.len() => Some(child),
+        _ => None
+    };
+    let other_val = node.node_get_val(rest);
+    if exact_child.is_none() && other_val.is_none() && !node.node_contains_partial_key(rest) {
+        //`other` stops partway along the key: the part both have is a dangling path
+        let reach = key.len() - rest.len() + node.node_key_overlap(rest);
+        return (false, true, if reach > 0 { SlotMeet::Dangling(reach) } else { SlotMeet::Nothing })
     }
 
-    let is_exhaustive = pmeet_generic_internal::<MAX_PAYLOAD_CNT, V, A>(self_payloads, &mut request_keys[..], &mut request_results[..], &mut element_results[..], other);
-    let mut is_none = true;
-    let mut combined_mask = SELF_IDENT | COUNTER_IDENT;
-    let mut result_payloads = ArrayVec::<Option<ValOrChild<V, A>>, MAX_PAYLOAD_CNT>::new();
-    for result in element_results {
-        combined_mask &= result.identity_mask;
-        is_none = is_none && result.element.is_none();
-        result_payloads.push(result.element);
+    match payload {
+        PayloadRef::Val(self_val) => match other_val {
+            Some(other_val) => {
+                let result = if swapped { other_val.pmeet(self_val).invert_identity() } else { self_val.pmeet(other_val) };
+                match result {
+                    AlgebraicResult::Identity(mask) => if mask & SELF_IDENT > 0 {
+                        (true, mask & COUNTER_IDENT > 0, SlotMeet::Keep)
+                    } else {
+                        (false, true, SlotMeet::Val(other_val.clone()))
+                    },
+                    AlgebraicResult::Element(val) => (false, false, SlotMeet::Val(val)),
+                    AlgebraicResult::None => (false, false, SlotMeet::Dangling(key.len())),
+                }
+            },
+            None => (false, true, SlotMeet::Dangling(key.len())),
+        },
+        PayloadRef::Child(self_child) => {
+            let onward = match exact_child {
+                Some(child) => AbstractNodeRef::BorrowedRc(child),
+                None => node.get_node_at_key(rest),
+            };
+            let self_empty = self_child.as_tagged().node_is_empty();
+            let other_empty = match onward.try_as_tagged() {
+                Some(below) => below.node_is_empty(),
+                None => true
+            };
+            if self_empty || other_empty {
+                //Nothing below the key survives, which leaves the key itself
+                let contribution = if self_empty { SlotMeet::Keep } else { SlotMeet::Dangling(key.len()) };
+                return (self_empty, other_empty, contribution)
+            }
+            let result = {
+                let other_below = onward.as_tagged();
+                if swapped {
+                    other_below.pmeet_dyn(self_child.as_tagged()).invert_identity()
+                } else {
+                    self_child.as_tagged().pmeet_dyn(other_below)
+                }
+            };
+            match result {
+                AlgebraicResult::Identity(mask) => if mask & SELF_IDENT > 0 {
+                    (true, mask & COUNTER_IDENT > 0, SlotMeet::Keep)
+                } else {
+                    (false, true, SlotMeet::Child(onward.into_option().unwrap()))
+                },
+                AlgebraicResult::Element(node) => (false, false, SlotMeet::Child(node)),
+                AlgebraicResult::None => (false, false, SlotMeet::Dangling(key.len())),
+            }
+        },
+        PayloadRef::None => unreachable!()
     }
+}
 
-    if is_none {
-        return AlgebraicResult::None
+/// Given the slots `(key, is_child, reach)` of a list node that have each been met against `other`
+/// with `counter_ok` (see [meet_list_slot]), is all of `other` inside the result?  That holds when
+/// `other` branches nowhere off the paths the slots reach, and holds no value on them except where a
+/// value slot stands.  Below a slot's onward node, the node meet has already answered.
+pub(crate) fn meet_other_within_slots<V: Clone + Send + Sync, A: Allocator>(other: TaggedNodeRef<V, A>, slots: &[Option<(&[u8], bool, usize)>; 2]) -> bool {
+    //The distinct bytes the slots continue with after `prefix`
+    let branches_expected = |prefix: &[u8]| -> usize {
+        let depth = prefix.len();
+        let mut first = None;
+        let mut count = 0;
+        for (key, _, reach) in slots.iter().flatten() {
+            if *reach > depth && &key[..depth] == prefix {
+                let byte = key[depth];
+                if first != Some(byte) {
+                    count += 1;
+                    first = Some(byte);
+                }
+            }
+        }
+        count
+    };
+    if meet_count_branches_at(other, &[]) != branches_expected(&[]) {
+        return false
     }
-    if !is_exhaustive {
-        combined_mask &= !COUNTER_IDENT;
+    for (key, _, reach) in slots.iter().flatten() {
+        for depth in 1..=*reach {
+            let prefix = &key[..depth];
+            //A value slot can share its key with an onward-node slot, which then answers for below
+            let below_is_met = slots.iter().flatten().any(|(slot_key, slot_is_child, slot_reach)| {
+                *slot_is_child && *slot_reach == depth && *slot_key == prefix
+            });
+            if !below_is_met && meet_count_branches_at(other, prefix) != branches_expected(prefix) {
+                return false
+            }
+            let (node, rest) = meet_locate_key(other, prefix);
+            if node.node_get_val(rest).is_some() {
+                let covered = slots.iter().flatten().any(|(slot_key, slot_is_child, slot_reach)| {
+                    !*slot_is_child && *slot_reach == depth && *slot_key == prefix
+                });
+                if !covered {
+                    return false
+                }
+            }
+        }
     }
-    if combined_mask > 0 {
-        return AlgebraicResult::Identity(combined_mask)
-    }
-    AlgebraicResult::Element(merge_f(&mut result_payloads[..]))
+    true
 }
 
 pub(crate) fn node_count_branches_recursive<V: Clone + Send + Sync, A: Allocator>(node: TaggedNodeRef<V, A>, key: &[u8]) -> usize {
@@ -696,124 +823,7 @@ pub(crate) fn node_count_branches_recursive<V: Clone + Send + Sync, A: Allocator
     }
 }
 
-/// Internal function to implement the recursive part of `pmeet_generic`
-pub(crate) fn pmeet_generic_internal<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allocator>(self_payloads: &[(&[u8], PayloadRef<V, A>)], keys: &mut [(&[u8], bool)], request_results: &mut [(usize, PayloadRef<'trie, V, A>)], results: &mut [FatAlgebraicResult<ValOrChild<V, A>>], other_node: TaggedNodeRef<'trie, V, A>) -> bool
-    where V: Clone + Send + Sync + Lattice
-{
-    //If is_exhaustive gets set to `false`, then the pmeet method cannot return a `COUNTER_IDENTITY` result
-    let mut is_exhaustive = true;
 
-    //Get the payload results from the node
-    if !other_node.node_get_payloads(&keys[..], request_results) {
-        is_exhaustive = false;
-    }
-
-    //Divide the results into groups based on the returned node.  Because keys must be
-    // in sorted order, we can assume that query results returning the same node will
-    // be contiguous.
-    //NOTE: It's theoretically possible (although pretty unlikely) that a node will
-    // have multiple discontinuous internal paths leading to the same child node, however
-    // the TrieNodeODRc pointers will be different in that case, so this logic is still
-    // correct.
-    let mut cur_group: Option<(usize, &TrieNodeODRc<V, A>)> = None;
-    for idx in 0..keys.len() {
-        let (consumed_bytes, payload) = core::mem::take(request_results.get_mut(idx).unwrap());
-        if !payload.is_none() {
-            let is_val = keys[idx].1;
-            if consumed_bytes < keys[idx].0.len() {
-                keys[idx].0 = &keys[idx].0[consumed_bytes..];
-                debug_assert!(!payload.is_val());
-                let child = payload.child();
-
-                //Continue to grow range, or do the recursive call, depending on whether
-                // we have the same node as the previous time through the loop
-                if cur_group.is_some() {
-                    if (cur_group.as_ref().unwrap().1 as *const TrieNodeODRc<V, A>) != (child as *const TrieNodeODRc<V, A>) {
-                        pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results);
-                        cur_group = Some((idx, child));
-                    }
-                } else {
-                    cur_group = Some((idx, child));
-                }
-            } else {
-                pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results);
-
-                //We've arrived at a contained value or onward link that has a correspondence
-                // to one of the values or links in `self`
-                debug_assert_eq!(consumed_bytes, keys[idx].0.len());
-                debug_assert_eq!(is_val, payload.is_val());
-                let result = match &self_payloads[idx].1 {
-                    PayloadRef::Child(self_link) => {
-                        let other_link = payload.child();
-                        let result = self_link.pmeet(other_link);
-                        FatAlgebraicResult::from_binary_op_result(result, self_link, other_link)
-                            .map(|child| ValOrChild::Child(child))
-                    },
-                    PayloadRef::Val(self_val) => {
-                        let other_val = payload.val();
-                        let result = (*self_val).pmeet(other_val);
-                        FatAlgebraicResult::from_binary_op_result(result, *self_val, other_val)
-                            .map(|val| ValOrChild::Val(val))
-                    },
-                    _ => unreachable!()
-                };
-                debug_assert!(results[idx].element.is_none());
-                debug_assert_eq!(results[idx].identity_mask, 0);
-                results[idx] = result;
-            }
-        } else {
-            pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, idx, self_payloads, keys, request_results, results);
-
-            let result = match &self_payloads[idx].1 {
-                PayloadRef::Child(self_link) => {
-                    match other_node.get_node_at_key(keys[idx].0).into_option() {
-                        Some(other_onward_node) => {
-                            let result = self_link.as_tagged().pmeet_dyn(other_onward_node.as_tagged());
-                            FatAlgebraicResult::from_binary_op_result(result, self_link, &other_onward_node)
-                                .map(|child| ValOrChild::Child(child))
-                        },
-                        None => {
-                            //Check to see if we have a dangling path, because a dangling path meet with a value should result in a path, but no value
-                            if self_link.is_empty() && other_node.node_get_val(keys[idx].0).is_some() {
-                                FatAlgebraicResult::new(SELF_IDENT, Some(ValOrChild::Child(TrieNodeODRc::new_empty())))
-                            } else {
-                                FatAlgebraicResult::new(COUNTER_IDENT, None)
-                            }
-                        }
-                    }
-                },
-                PayloadRef::Val(_self_val) => {
-                    //If self_payload is a val and we didn't get a corresponding val, then this result is None
-                    FatAlgebraicResult::new(COUNTER_IDENT, None)
-                },
-                _ => unreachable!()
-            };
-            results[idx] = result;
-        }
-    }
-    pmeet_generic_recursive_reset::<MAX_PAYLOAD_CNT, V, A>(&mut cur_group, &mut is_exhaustive, keys.len(), self_payloads, keys, request_results, results);
-
-    is_exhaustive
-}
-
-/// Effectively part of `pmeet_generic_internal`, but factored out separately because it's called in
-/// several different places.  Resets the `cur_group` state and does a recursive call of `pmeet_generic_internal`
-#[inline]
-fn pmeet_generic_recursive_reset<'trie, const MAX_PAYLOAD_CNT: usize, V, A: Allocator>(cur_group: &mut Option<(usize, &'trie TrieNodeODRc<V, A>)>, is_exhaustive: &mut bool, idx: usize, self_payloads: &[(&[u8], PayloadRef<V, A>)], keys: &mut [(&[u8], bool)], request_results: &mut [(usize, PayloadRef<'trie, V, A>)], results: &mut [FatAlgebraicResult<ValOrChild<V, A>>])
-    where V: Clone + Send + Sync + Lattice
-{
-    match core::mem::take(cur_group) {
-        Some((group_start, next_node)) => {
-            let group_keys = &mut keys[group_start..idx];
-            let group_results = &mut results[group_start..idx];
-            let group_self_payloads = &self_payloads[group_start..idx];
-            if !pmeet_generic_internal::<MAX_PAYLOAD_CNT, V, A>(group_self_payloads, group_keys, request_results, group_results, next_node.as_tagged()) {
-                *is_exhaustive = false;
-            }
-        },
-        None => {}
-    }
-}
 
 /// An abstracted reference to the node at the zipper's focus, returned by [`crate::zipper::ZipperInfallibleSubtries::get_focus`]
 ///
@@ -1265,15 +1275,6 @@ mod tagged_node_ref {
             }
         }
 
-        pub(crate) fn node_get_payloads<'res>(&self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'a, V, A>)]) -> bool {
-            match self {
-                Self::DenseByteNode(node) => node.node_get_payloads(keys, results),
-                Self::LineListNode(node) => node.node_get_payloads(keys, results),
-                Self::CellByteNode(node) => node.node_get_payloads(keys, results),
-                Self::TinyRefNode(node) => node.node_get_payloads(keys, results),
-                Self::EmptyNode => true,
-            }
-        }
 
         pub fn node_contains_val(&self, key: &[u8]) -> bool {
             match self {
@@ -1912,17 +1913,6 @@ mod tagged_node_ref {
                 _ => unsafe{ unreachable_unchecked() }
             }
         }
-        pub fn node_get_payloads<'res>(&self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'a, V, A>)]) -> bool {
-            let (ptr, tag) = self.ptr.get_raw_parts();
-            match tag {
-                EMPTY_NODE_TAG => true,
-                DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.node_get_payloads(keys, results),
-                LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.node_get_payloads(keys, results),
-                CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.node_get_payloads(keys, results),
-                TINY_REF_NODE_TAG => unsafe{ &*ptr.cast::<TinyRefNode<V, A>>() }.node_get_payloads(keys, results),
-                _ => unsafe{ unreachable_unchecked() }
-            }
-        }
         pub fn node_contains_val(&self, key: &[u8]) -> bool {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
@@ -2192,7 +2182,7 @@ mod tagged_node_ref {
             }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
-                EMPTY_NODE_TAG => AlgebraicResult::None,
+                EMPTY_NODE_TAG => crate::empty_node::EmptyNode.pmeet_dyn(other),
                 DENSE_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<DenseByteNode<V, A>>() }.pmeet_dyn(other),
                 LINE_LIST_NODE_TAG => unsafe{ &*ptr.cast::<LineListNode<V, A>>() }.pmeet_dyn(other),
                 CELL_BYTE_NODE_TAG => unsafe{ &*ptr.cast::<CellByteNode<V, A>>() }.pmeet_dyn(other),
@@ -2662,8 +2652,12 @@ pub(crate) fn node_along_path_mut<'a, 'k, V: Clone + Send + Sync, A: Allocator>(
 /// Ensures the node is a CellByteNode
 ///
 /// Returns `true` if the node was upgraded and `false` if it already was a CellByteNode
-pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>) -> bool {
-    if !node.as_tagged().is_cell_node() {
+pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>, alloc: A) -> bool {
+    if node.is_empty() {
+        //The empty sentinel can't be made mutable; there is nothing in it to keep
+        *node = TrieNodeODRc::new_in(crate::dense_byte_node::CellByteNode::new_in(alloc.clone()), alloc);
+        true
+    } else if !node.as_tagged().is_cell_node() {
         let replacement = node.make_mut().convert_to_cell_node();
         *node = replacement;
         true
@@ -3445,6 +3439,106 @@ mod tests {
     use crate::trie_node::TrieNodeODRc;
     use crate::PathMap;
     use crate::zipper::*;
+
+    fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> {
+        let mut m = PathMap::<u64>::new();
+        for (p, v) in ps { m.set_val_at(p, *v); }
+        m
+    }
+    fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> {
+        m.iter().map(|(p, v)| (p.to_vec(), *v)).collect()
+    }
+
+    /// `Lattice for u64` keeps `self` on a collision, so a meet carries the *left* operand's value.
+    /// That must not depend on which node type each operand happens to be stored in: a byte node
+    /// meeting a list node used to run the meet with the operands swapped and returned the list
+    /// node's values whichever side it was on.  Found by lean/differential.py.
+    #[test]
+    fn meet_value_bias_is_left_regardless_of_node_layout() {
+        let two_payload_list = mk(&[(&[0], 0), (&[0, 0], 0), (&[3, 0], 1)]);
+        let single_line = mk(&[(&[0], 1)]);
+        let dense = mk(&[(&[0], 0), (&[1], 0), (&[2], 0), (&[3], 0), (&[4], 0)]);
+        for (a, b, expect) in [
+            (&two_payload_list, &single_line, 0u64),
+            (&single_line, &two_payload_list, 1),
+            (&dense, &single_line, 0),
+            (&single_line, &dense, 1),
+            (&dense, &two_payload_list, 0),
+            (&two_payload_list, &dense, 0),
+        ] {
+            let mut out = PathMap::<u64>::new();
+            { let mut wz = out.write_zipper(); wz.meet_2(&a.read_zipper(), &b.read_zipper()); }
+            assert_eq!(out.get_val_at(&[0]), Some(&expect), "meet_2 of {:?} and {:?}", vals(a), vals(b));
+
+            let mut into = a.clone();
+            { let mut wz = into.write_zipper(); wz.meet_into(&b.read_zipper(), false); }
+            assert_eq!(into.get_val_at(&[0]), Some(&expect), "meet_into of {:?} and {:?}", vals(a), vals(b));
+        }
+    }
+
+    /// The same for joins: `PathMap::join` and `join_into` keep the left operand's value, whether
+    /// the left operand is a list node joining into a byte node or the other way round.
+    #[test]
+    fn join_value_bias_is_left_regardless_of_node_layout() {
+        let line = mk(&[(&[1], 0)]);
+        let dense = mk(&[(&[0], 0), (&[1], 1), (&[2], 0)]);
+        assert_eq!(line.join(&dense).get_val_at(&[1]), Some(&0));
+        assert_eq!(dense.join(&line).get_val_at(&[1]), Some(&1));
+
+        let mut into = line.clone();
+        { let mut wz = into.write_zipper(); wz.join_into(&dense.read_zipper()); }
+        assert_eq!(vals(&into), vec![(vec![0], 0), (vec![1], 0), (vec![2], 0)]);
+        let mut into = dense.clone();
+        { let mut wz = into.write_zipper(); wz.join_into(&line.read_zipper()); }
+        assert_eq!(vals(&into), vec![(vec![0], 0), (vec![1], 1), (vec![2], 0)]);
+
+        //A deeper collision, so the child-node join is exercised as well as the value join
+        let line = mk(&[(&[1, 5], 0), (&[1, 6], 0)]);
+        let dense = mk(&[(&[0], 0), (&[1, 5], 1), (&[2], 0)]);
+        assert_eq!(line.join(&dense).get_val_at(&[1, 5]), Some(&0));
+        assert_eq!(dense.join(&line).get_val_at(&[1, 5]), Some(&1));
+    }
+
+    /// `join_k_path_into` joins the surviving subtries in path order (`PathMap.dropHead` in the
+    /// Lean model folds over the k-paths in sorted order), so on a collision the value from the
+    /// lexicographically first k-path survives.  The byte node used to fold from the highest byte
+    /// down, and the list node's two-slot merge used to join with the second slot on the left.
+    #[test]
+    fn join_k_path_into_keeps_lexicographically_first_value() {
+        let mut m = mk(&[(&[0, 0, 0, 2], 0), (&[0, 1, 0, 2], 1), (&[0, 1, 0, 2, 0], 0)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(3, false); }
+        assert_eq!(vals(&m), vec![(vec![2], 0), (vec![2, 0], 0)]);
+
+        let mut m = mk(&[(&[1, 0, 3], 0), (&[0], 0), (&[0, 0, 0], 0), (&[0, 0, 3], 1)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(2, false); }
+        assert_eq!(vals(&m), vec![(vec![0], 0), (vec![3], 1)]);
+
+        let mut m = mk(&[(&[0, 0, 0], 0), (&[0], 0), (&[1, 0, 0], 1)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(2, false); }
+        assert_eq!(vals(&m), vec![(vec![0], 0)]);
+
+        //Three-plus branches at the root make it a byte node
+        let mut m = mk(&[(&[0, 0, 7], 0), (&[1, 0, 7], 1), (&[2, 0, 7], 2), (&[3, 0, 7], 3)]);
+        { let mut wz = m.write_zipper(); wz.join_k_path_into(2, false); }
+        assert_eq!(vals(&m), vec![(vec![7], 0)]);
+    }
+
+    /// `LineListNode::drop_head_dyn` with both keys longer than `byte_cnt`: the shortened keys come
+    /// out in the opposite order ([0,0] from slot 0 and [0] from slot 1), so the slots are swapped
+    /// before `factor_prefix` merges them.  The merge joined the swapped slot 0 (the original
+    /// slot 1, the later k-path) on the left, so its value won the collision at [0,0].
+    #[test]
+    fn join_k_path_into_keeps_first_value_when_shortened_keys_reorder() {
+        let mut m = PathMap::<u64>::new();
+        m.set_val_at(&[3u8, 0, 0, 0], 173);
+        m.set_val_at(&[0u8], 0);
+        m.set_val_at(&[3u8, 1, 0, 0], 0);
+        m.set_val_at(&[3u8, 1, 0, 1, 2], 82);
+        m.set_val_at(&[0u8, 0, 2], 196);
+        m.set_val_at(&[0u8, 0, 3, 1], 38);
+        m.write_zipper().join_k_path_into(2, false);
+        assert_eq!(vals(&m), vec![(vec![0, 0], 173), (vec![0, 1, 2], 82), (vec![2], 196), (vec![3, 1], 38)]);
+    }
 
     #[test]
     fn slim_ptrs_test1() {

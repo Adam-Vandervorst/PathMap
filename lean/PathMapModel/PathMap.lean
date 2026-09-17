@@ -338,11 +338,30 @@ def join (a b : PathMap V) : PathMap V :=
   mk' (keys.filterMap fun k => (joinVal ops (a.valAt k) (b.valAt k)).map (k, ·))
       (a.paths ++ b.paths)
 
-/-- Meet (intersection).  A location survives only if it lies on the way to a
-surviving value, so dangling paths never survive a meet. -/
+/-- Meet (intersection).  A location exists in the result exactly when it exists
+in both operands, dangling or not, and a value exists exactly where both operands
+hold one, as the meet of the two.  So meet is commutative, associative and
+idempotent on locations, and a meet with an equal trie changes nothing.
+
+This is the meet with `prune = false`; see `meetPruned`. -/
 def meet (a b : PathMap V) : PathMap V :=
   let keys := Path.sortDedup (a.vals.map (·.1))
-  mk' (keys.filterMap fun k => (meetVal ops (a.valAt k) (b.valAt k)).map (k, ·)) []
+  mk' (keys.filterMap fun k => (meetVal ops (a.valAt k) (b.valAt k)).map (k, ·))
+      (a.paths.filter b.pathExists)
+
+/-- The trie with every dangling path removed: only the root and the locations on
+the way to a value remain. -/
+def dropDangling (t : PathMap V) : PathMap V := mk' t.vals []
+
+/-- The meet with `prune = true`, at its most pruned: the same values as `meet`,
+and only the locations on the way to one of them.
+
+`pathmap` may stop short of this: it can skip a node shared with the source
+rather than walk it, so a dangling path inside a shared node may survive.  The
+result always lies between `meetPruned` and `meet` -- same values, locations a
+subset of `meet`'s and a superset of `meetPruned`'s -- and is not compared by
+the fuzzer. -/
+def meetPruned (a b : PathMap V) : PathMap V := (meet ops a b).dropDangling
 
 /-- Subtract.
 

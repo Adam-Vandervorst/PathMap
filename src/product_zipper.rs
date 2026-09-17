@@ -136,7 +136,7 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
     /// `product_zipper_test4` for more discussion.
     #[inline]
     fn ensure_descend_next_factor(&mut self) {
-        if self.factor_paths.len() < self.secondaries.len() && self.z.child_count() == 0 {
+        if self.factor_paths.len() < self.secondaries.len() && self.z.child_count() == 0 && self.z.path_exists() {
 
             //We don't want to push the same factor on the stack twice
             if let Some(factor_path_len) = self.factor_paths.last() {
@@ -146,6 +146,14 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
             }
 
             self.enroll_next_factor();
+        }
+    }
+    /// The secondary factor whose root node is the focus, if any.  Its node is not a child of the
+    /// node above it, so the core zipper can't look it up.
+    fn factor_root(&self) -> Option<&TrieRef<'trie, V, A>> {
+        match self.factor_paths.last() {
+            Some(&start) if start == self.depth() => self.secondaries.get(self.factor_paths.len() - 1),
+            _ => None
         }
     }
     /// Internal method to make sure `self.factor_paths` is correct after an ascend method
@@ -175,8 +183,22 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.z.reset()
     }
     fn val_count(&self) -> usize {
-        debug_assert!(self.focus_factor() == self.factor_count() - 1);
-        self.z.val_count()
+        //Values below the focus can be spread over later factors, so walk a copy of the zipper
+        let mut walker = ProductZipper {
+            z: self.z.clone(),
+            secondaries: self.secondaries.clone(),
+            factor_paths: self.factor_paths.clone(),
+            source_zippers: Vec::new(),
+        };
+        let focus = self.path();
+        let mut count = self.is_val() as usize;
+        while walker.to_next_val() {
+            if walker.path().len() <= focus.len() || !walker.path().starts_with(focus) {
+                break
+            }
+            count += 1;
+        }
+        count
     }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
         let k = k.as_ref();
@@ -266,16 +288,24 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         moved
     }
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
-        if self.factor_paths.last().cloned().unwrap_or(0) == self.depth() {
+        //Stepping sideways leaves a factor entered at this depth, but at the root there's no sideways
+        if self.depth() > 0 && self.factor_paths.last().cloned() == Some(self.depth()) {
+            //Take the factor's root off the core zipper too; a failed step enters it again below
             self.factor_paths.pop();
+            self.z.deregularize();
+            self.z.regularize();
         }
         let moved = self.z.to_next_sibling_byte();
         self.ensure_descend_next_factor();
         moved
     }
     fn to_prev_sibling_byte(&mut self) -> Option<u8> {
-        if self.factor_paths.last().cloned().unwrap_or(0) == self.depth() {
+        //Stepping sideways leaves a factor entered at this depth, but at the root there's no sideways
+        if self.depth() > 0 && self.factor_paths.last().cloned() == Some(self.depth()) {
+            //Take the factor's root off the core zipper too; a failed step enters it again below
             self.factor_paths.pop();
+            self.z.deregularize();
+            self.z.regularize();
         }
         let moved = self.z.to_prev_sibling_byte();
         self.ensure_descend_next_factor();
@@ -362,8 +392,19 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZipper<'_, '_, V, A> {
-    fn shared_node_id(&self) -> Option<u64> { self.z.shared_node_id() }
-    fn is_shared(&self) -> bool { self.z.is_shared() }
+    fn shared_node_id(&self) -> Option<u64> {
+        match self.factor_root() {
+            Some(_) if self.z.is_val() => None,
+            Some(factor) => factor.shared_node_id(),
+            None => self.z.shared_node_id(),
+        }
+    }
+    fn is_shared(&self) -> bool {
+        match self.factor_root() {
+            Some(factor) => factor.is_shared(),
+            None => self.z.is_shared(),
+        }
+    }
 }
 
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ProductZipper<'_, 'trie, V, A> {
@@ -497,6 +538,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ProductZipperG<'trie, PrimaryZ, SecondaryZ,
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        //`focus_byte` is unspecified at the root, and the root has no siblings
+        if self.depth() == 0 {
+            return None;
+        }
         let byte = self.focus_byte()?;
         let ascended = self.ascend(1);
         debug_assert_eq!(ascended, 1, "must ascend");
@@ -1975,6 +2020,133 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
     });
+
+    /// `val_count` counts the values below the focus in every later factor
+    #[test]
+    fn product_zipper_val_count_in_every_factor() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 2][..], &[1u8], &[3u8]] { a.set_val_at(p, 1); }
+        let mut b = PathMap::<u64>::new();
+        for p in [&[4u8][..], &[4u8, 5], &[6u8]] { b.set_val_at(p, 2); }
+        let mut c = PathMap::<u64>::new();
+        for p in [&[7u8][..], &[8u8, 9]] { c.set_val_at(p, 3); }
+
+        //Every value path in the product, from a full walk
+        let mut all = vec![];
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
+        while z.to_next_val() { all.push(z.path().to_vec()); }
+        assert!(!all.is_empty());
+
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]);
+        loop {
+            let focus = z.path().to_vec();
+            let expected = all.iter().filter(|p| p.starts_with(&focus)).count();
+            assert_eq!(z.val_count(), expected, "{focus:?}");
+            if !z.to_next_step() { break }
+        }
+    }
+
+    /// k-path walks and sibling steps keep factor bookkeeping in step with the core zipper, including
+    /// with a primary rooted at a missing path or at a leaf
+    #[test]
+    fn product_zipper_k_path_walk_from_the_root() {
+        let mut a = PathMap::<()>::new();
+        for p in [&[2u8, 2, 0, 0][..], &[0xe7]] { a.set_val_at(p, ()); }
+        let b = a.clone();
+        for root in [&[0xaau8, 0x77][..], &[0xe7u8][..], &[][..]] {
+            for k in 1..4 {
+                let mut z = ProductZipper::new(a.read_zipper_at_path(root), [b.read_zipper()]);
+                let mut paths = vec![];
+                if z.descend_first_k_path(k) {
+                    paths.push(z.path().to_vec());
+                    while paths.len() < 64 && z.to_next_k_path(k) { paths.push(z.path().to_vec()); }
+                }
+                assert_eq!(z.path(), &[] as &[u8], "{root:?} k={k}");
+                let _ = (z.is_shared(), z.shared_node_id(), z.child_mask());
+                assert!(paths.iter().all(|p| p.len() == k), "{root:?} k={k}: {paths:?}");
+                if root == &[0xaau8, 0x77][..] {
+                    assert!(paths.is_empty(), "a missing primary has no paths: {paths:?}");
+                }
+                let mut z = ProductZipper::new(a.read_zipper_at_path(root), [b.read_zipper()]);
+                let _ = (z.to_next_sibling_byte(), z.to_prev_sibling_byte());
+                let _ = (z.is_shared(), z.child_mask(), z.descend_first_byte(), z.is_shared());
+            }
+        }
+    }
+
+    /// Sibling steps and value walks at the root of a `ProductZipperG` whose primary is rooted below the map root
+    #[test]
+    fn product_zipper_g_sibling_step_at_root() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[2u8, 3, 2, 1, 0, 7][..], &[2, 3, 2, 1, 0, 8, 1], &[9]] { a.set_val_at(p, 1); }
+        let b = a.clone();
+        let mut z = ProductZipperG::new(a.read_zipper_at_path(&[2u8, 3, 2, 1, 0]), [b.read_zipper()]);
+        assert_eq!(z.to_next_sibling_byte(), None);
+        assert_eq!(z.to_prev_sibling_byte(), None);
+        assert_eq!(z.path(), &[] as &[u8]);
+        let mut n = 0;
+        while z.to_next_val() { n += 1; assert!(n < 100); }
+        assert!(n > 0);
+        assert_eq!(z.path(), &[] as &[u8]);
+    }
+
+    /// A failed sibling step at the root of a factor stays in that factor
+    #[test]
+    fn product_zipper_no_sibling_at_factor_root() {
+        let mut a = PathMap::<u64>::new();
+        a.set_val_at(&[0u8, 0], 1);
+        let mut b = PathMap::<u64>::new();
+        b.set_val_at(&[5u8], 2);
+        for prev in [false, true] {
+            let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+            assert!(z.to_next_val());
+            assert_eq!(z.path(), &[0, 0]);
+            let moved = if prev { z.to_prev_sibling_byte() } else { z.to_next_sibling_byte() };
+            assert_eq!(moved, None);
+            assert_eq!(z.child_count(), 1);
+            let _ = (z.is_shared(), z.shared_node_id());
+            assert!(z.to_next_val());
+            assert_eq!((z.path(), z.val()), (&[0u8, 0, 5][..], Some(&2)));
+        }
+    }
+
+    /// Sibling steps out of a factor entered below an empty node, as a dropped head writer leaves
+    #[test]
+    fn product_zipper_k_path_past_empty_node() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[0u8][..], &[0, 0, 0], &[1]] { a.set_val_at(p, 0); }
+        {
+            let zh = a.zipper_head();
+            zh.write_zipper_at_exclusive_path(&[1u8, 0]).unwrap().set_val(0);
+            let _w = zh.write_zipper_at_exclusive_path(&[0u8, 0, 0, 0]).unwrap();
+        }
+        let b = a.clone();
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+        let mut paths = vec![];
+        if z.descend_first_k_path(3) {
+            paths.push(z.path().to_vec());
+            while paths.len() < 64 && z.to_next_k_path(3) { paths.push(z.path().to_vec()); }
+        }
+        assert!(paths.iter().all(|p| p.len() == 3), "{paths:?}");
+    }
+
+    /// `is_shared` and `shared_node_id` across factor boundaries
+    #[test]
+    fn product_zipper_is_shared_across_factors() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { a.set_val_at(p, 7); }
+        let b = a.clone();
+        let mut z = ProductZipper::new(a.read_zipper_at_path(&[1u8, 2, 1]), [b.read_zipper()]);
+        let mut factor_roots = 0;
+        while z.to_next_step() {
+            let _ = (z.is_shared(), z.shared_node_id());
+            if z.factor_root().is_some() {
+                factor_roots += 1;
+                assert!(z.is_shared(), "{:?}", z.path());
+            }
+        }
+        assert!(factor_roots > 0);
+    }
 }
 
 //POSSIBLE FUTURE DIRECTION:

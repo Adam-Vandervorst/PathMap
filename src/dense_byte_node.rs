@@ -260,6 +260,94 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         }
     }
 
+    /// [Self::join_child_into] with `node` as the *left* operand of the join, so on a collision
+    /// `node`'s values take precedence over `self`'s.  The status is still relative to `self`.
+    pub(crate) fn join_child_into_left(&mut self, k: u8, node: TrieNodeODRc<V, A>) -> AlgebraicStatus where V: Clone + Lattice {
+        let ix = self.mask.index_of(k) as usize;
+        if self.mask.test_bit(k) {
+            let cf = unsafe { self.values.get_unchecked_mut(ix) };
+            match cf.rec_mut() {
+                Some(existing_node) => {
+                    match node.pjoin(existing_node) {
+                        //`COUNTER_IDENT` means the result is `existing_node`: nothing to do
+                        AlgebraicResult::Identity(mask) if mask & COUNTER_IDENT > 0 => AlgebraicStatus::Identity,
+                        AlgebraicResult::Identity(_) => {
+                            *existing_node = node;
+                            AlgebraicStatus::Element
+                        },
+                        AlgebraicResult::Element(joined) => {
+                            *existing_node = joined;
+                            AlgebraicStatus::Element
+                        },
+                        //Only two empty nodes join to nothing, and then there is nothing to change
+                        AlgebraicResult::None => AlgebraicStatus::Identity,
+                    }
+                },
+                None => {
+                    cf.set_rec(node);
+                    AlgebraicStatus::Element
+                }
+            }
+        } else {
+            self.mask.set_bit(k);
+            let new_cf = CoFree::new(Some(node), None);
+            self.values.insert(ix, new_cf);
+            AlgebraicStatus::Element
+        }
+    }
+
+    /// [Self::join_val_into] with `val` as the *left* operand of the join; see [Self::join_child_into_left]
+    pub(crate) fn join_val_into_left(&mut self, k: u8, val: V) -> AlgebraicStatus where V: Lattice {
+        let ix = self.mask.index_of(k) as usize;
+        if self.mask.test_bit(k) {
+            let cf = unsafe { self.values.get_unchecked_mut(ix) };
+            match cf.val_mut() {
+                Some(existing_val) => {
+                    match val.pjoin(existing_val) {
+                        AlgebraicResult::Identity(mask) if mask & COUNTER_IDENT > 0 => AlgebraicStatus::Identity,
+                        AlgebraicResult::Identity(_) => {
+                            *existing_val = val;
+                            AlgebraicStatus::Element
+                        },
+                        AlgebraicResult::Element(joined) => {
+                            *existing_val = joined;
+                            AlgebraicStatus::Element
+                        },
+                        //A join of two present values never has an empty result; see `Lattice::join_into`
+                        AlgebraicResult::None => AlgebraicStatus::Identity,
+                    }
+                }
+                None => {
+                    cf.set_val(val);
+                    AlgebraicStatus::Element
+                }
+            }
+        } else {
+            self.mask.set_bit(k);
+            let new_cf = CoFree::new(None, Some(val));
+            self.values.insert(ix, new_cf);
+            AlgebraicStatus::Element
+        }
+    }
+
+    /// Dispatches to [Self::join_child_into] or [Self::join_child_into_left]
+    #[inline]
+    pub(crate) fn join_child_into_oriented(&mut self, k: u8, node: TrieNodeODRc<V, A>, incoming_is_left: bool) -> AlgebraicStatus where V: Clone + Lattice {
+        if incoming_is_left { self.join_child_into_left(k, node) } else { self.join_child_into(k, node) }
+    }
+
+    /// Dispatches to [Self::join_payload_into] or its left-biased counterpart
+    #[inline]
+    pub(crate) fn join_payload_into_oriented(&mut self, k: u8, payload: ValOrChild<V, A>, incoming_is_left: bool) -> AlgebraicStatus where V: Clone + Lattice {
+        if !incoming_is_left {
+            return self.join_payload_into(k, payload)
+        }
+        match payload {
+            ValOrChild::Child(child) => self.join_child_into_left(k, child),
+            ValOrChild::Val(val) => self.join_val_into_left(k, val),
+        }
+    }
+
     /// Internal method to remove a CoFree from the node
     #[inline]
     fn remove(&mut self, k: u8) -> Option<Cf> {
@@ -418,10 +506,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 let cf = unsafe{ self_node.values.get_unchecked(cf_idx) };
                 let mut new_cf = Cf::new(None, None);
 
-                //If there is a value at this key_byte, and the other node contains a value, subtract them
+                //If there is a value at this key_byte, and the other node contains a value, subtract them.
+                // If the other node only passes through this byte on the way to something deeper, it holds
+                // nothing at this exact location, so the value survives untouched.
                 if let Some(self_val) = cf.val() {
-                    if let Some(other_val) = other.node_get_val(&[key_byte]) {
-                        match self_val.psubtract(other_val) {
+                    match other.node_get_val(&[key_byte]) {
+                        Some(other_val) => match self_val.psubtract(other_val) {
                             AlgebraicResult::None => { is_identity = false; },
                             AlgebraicResult::Identity(mask) => {
                                 debug_assert_eq!(mask, SELF_IDENT); //subtract is not commutative
@@ -431,7 +521,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                                 is_identity = false;
                                 new_cf.set_val(e);
                             },
-                        }
+                        },
+                        None => new_cf.set_val(self_val.clone()),
                     }
                 }
 
@@ -461,10 +552,17 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     }
                 }
 
-                //If we ended up with a value or a link in the CF, insert it into a new node
+                //If we ended up with a value or a link in the CF, insert it into a new node.
+                // Otherwise the location is gone from the result -- including when `self` held
+                // only a dangling path here (an empty link, or a CoFree with neither), which the
+                // other node reaches and so does not survive the subtraction.  Either way the
+                // result is no longer `self`; leaving `is_identity` set here reported `Identity`
+                // for a node that had just lost a branch, and the caller kept the dangling path.
                 if new_cf.has_rec() || new_cf.has_val() {
                     new_node.mask.set_bit(key_byte);
                     new_node.values.push(new_cf);
+                } else {
+                    is_identity = false;
                 }
             } else {
                 new_node.mask.set_bit(key_byte);
@@ -501,6 +599,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     new_node.values.push(cf.clone());
                 } else {
 
+                    //Without a value in `other`, the empty path doesn't validate, so a value of
+                    // `self`'s at this byte is dropped.  That is a modification, even when the
+                    // onward link below it restricts to an identity, and it is also the whole of
+                    // the change when there is no onward link at all.
+                    if cf.val().is_some() {
+                        is_identity = false;
+                    }
+
                     //If there is an onward link in the CF and other node, continue the restriction recursively
                     if let Some(self_child) = cf.rec() {
                         let other_child = other.get_node_at_key(&[key_byte]);
@@ -527,6 +633,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                                 is_identity = false;
                             }
                         }
+                    } else {
+                        //No onward link either, so nothing of this byte reaches the result.  A
+                        // co-free with neither a value nor a child is the dense representation of a
+                        // dangling path, and an unvalidated dangling path is dropped just like an
+                        // unvalidated value -- so this branch is a modification too.  Leaving the
+                        // flag set reported `Identity`, and the caller then kept `self` with the
+                        // dangling path still in it.
+                        is_identity = false;
                     }
                 }
             } else {
@@ -545,7 +659,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     /// Merges the entries in the ListNode into the ByteNode
-    pub fn merge_from_list_node(&mut self, list_node: &LineListNode<V, A>) -> AlgebraicStatus where V: Clone + Lattice {
+    /// Joins the contents of `list_node` into `self`.
+    ///
+    /// The join is left-biased, so `list_is_left` says which operand `list_node` is: `false` when
+    /// the caller is computing `self ∪ list_node` (collisions keep `self`'s values), `true` when it
+    /// is computing `list_node ∪ self` into a clone of the byte node (collisions keep the list
+    /// node's values).  The returned status is always relative to `self`.
+    pub fn merge_from_list_node(&mut self, list_node: &LineListNode<V, A>, list_is_left: bool) -> AlgebraicStatus where V: Clone + Lattice {
         let self_was_empty = self.is_empty();
         self.reserve_capacity(2);
 
@@ -555,9 +675,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             if key.len() > 1 {
                 let mut child_node = LineListNode::<V, A>::new_in(self.alloc.clone());
                 unsafe{ child_node.set_payload_owned::<0>(&key[1..], payload); }
-                self.join_child_into(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()))
+                self.join_child_into_oriented(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()), list_is_left)
             } else {
-                self.join_payload_into(key[0], payload)
+                self.join_payload_into_oriented(key[0], payload, list_is_left)
             }
         } else {
             if self_was_empty {
@@ -573,9 +693,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             if key.len() > 1 {
                 let mut child_node = LineListNode::<V, A>::new_in(self.alloc.clone());
                 unsafe{ child_node.set_payload_owned::<0>(&key[1..], payload); }
-                self.join_child_into(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()))
+                self.join_child_into_oriented(key[0], TrieNodeODRc::new_in(child_node, self.alloc.clone()), list_is_left)
             } else {
-                self.join_payload_into(key[0], payload)
+                self.join_payload_into_oriented(key[0], payload, list_is_left)
             }
         } else {
             if self_was_empty {
@@ -614,14 +734,11 @@ impl<V: Clone + Send + Sync, A: Allocator> CellByteNode<V, A> {
         }
         let cf = self.get_mut(k).unwrap();
         let (rec, val) = cf.both_mut_refs();
-        let rec = match rec {
-            Some(rec) => rec,
-            None => {
-                *rec = Some(TrieNodeODRc::new_allocated_in(0, 0, alloc));
-                rec.as_mut().unwrap()
-            }
-        };
-        (rec, val)
+        //A zipper can't be rooted at the empty sentinel, so an emptied link gets a real node too
+        if rec.as_ref().map_or(true, |rec| rec.is_empty()) {
+            *rec = Some(TrieNodeODRc::new_allocated_in(0, 0, alloc));
+        }
+        (rec.as_mut().unwrap(), val)
     }
 }
 
@@ -719,102 +836,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         debug_assert!(key.len() == 1);
         let cf = self.get_mut(key[0]).unwrap();
         *cf.rec_mut().unwrap() = new_node;
-    }
-    fn node_get_payloads<'node, 'res>(&'node self, keys: &[(&[u8], bool)], results: &'res mut [(usize, PayloadRef<'node, V, A>)]) -> bool {
-        //DISCUSSION: This function appears overly complicated primarily because it needs to track
-        // whether or not a both the val and the rec each cofree are requested, but we don't have a bitmask
-        // in advance that records vals and rec links separately.  Since we don't want nested loops, we leverage
-        // the fact that a rec must be requested before a val, to stash the val for the next trip through the
-        // loop.  The loop body therefore is an annoying state-machine.  But at least it's not that much code.
-
-        //Becomes true if only half of `(Some, Some)` CoFree is requested, without requesting the other half
-        // This flag never gets unset once it gets set
-        let mut unrequested_cofree_half = false;
-        //Temporary state that bridges across multiple requests into a `(Some, Some)` CoFree, by holding the
-        // val until it's requested, leveraging the fact that values are requested after rec links
-        let mut stashed_val: Option<&V> = None;
-        //Tracks whether the current CoFree's val has been taken.  So, `last_byte` toggles to `Some` and stays
-        // at `Some` until we move onto a different CF, while `stashed_val` toggles to `Some`, and toggles back
-        // as soon as the value is requested.
-        let mut last_byte: Option<u8> = None;
-        //Tracks which CoFrees have yet to be requested from the node
-        let mut requested_mask = ByteMask::from(self.mask);
-
-        debug_assert!(results.len() >= keys.len());
-        for ((key, expect_val), (result_key_len, payload_ref)) in keys.into_iter().zip(results.iter_mut()) {
-            if key.len() > 0 {
-                let byte = key[0];
-
-                //Check to see if we had a Val from the CoFree that we aren't going to request
-                match &last_byte {
-                    Some(prev_byte) => {
-                        if byte != *prev_byte {
-                            if stashed_val.is_some() {
-                                unrequested_cofree_half = true;
-                            }
-                            stashed_val = None;
-                            last_byte = None;
-                        }
-                    },
-                    None => {}
-                }
-
-                //Check to see if this trip through the loop is the request for the stashed val
-                match stashed_val {
-                    Some(val) => {
-                        if key.len() == 1 && *expect_val {
-                            *result_key_len = 1;
-                            *payload_ref = PayloadRef::Val(val);
-                            stashed_val = None;
-                            continue;
-                        }
-                    },
-                    None => {}
-                }
-
-                requested_mask.clear_bit(byte);
-                match self.get(byte) {
-                    Some(cf) => {
-                        // An exact value-only request does not enumerate an onward link stored in the
-                        // same CoFree.  The preceding stashed-value fast path means this branch is
-                        // reached only when that link was not requested separately.
-                        if key.len() == 1 && *expect_val && cf.has_rec() {
-                            unrequested_cofree_half = true;
-                        }
-
-                        //A key longer than 1 byte or an explicit request for a rec link can be answered with a Child
-                        if key.len() > 1 || !*expect_val {
-                            match cf.rec() {
-                                Some(rec) => {
-                                    *result_key_len = 1;
-                                    *payload_ref = PayloadRef::Child(rec);
-                                },
-                                None => {}
-                            }
-                        }
-                        match cf.val() {
-                            Some(val) => {
-                                //Answer an explicit request for this val, or stash the val for 
-                                if key.len() == 1 && *expect_val {
-                                    debug_assert!(stashed_val.is_none());
-                                    *result_key_len = 1;
-                                    *payload_ref = PayloadRef::Val(val);
-                                } else {
-                                    if last_byte.is_none() {
-                                        stashed_val = Some(val);
-                                        last_byte = Some(byte);
-                                    }
-                                }
-                            },
-                            None => {}
-                        }
-                    },
-                    None => {}
-                }
-            }
-        }
-
-        !unrequested_cofree_half && stashed_val.is_none() && requested_mask.is_empty_mask()
     }
     fn node_contains_val(&self, key: &[u8]) -> bool {
         if key.len() == 1 {
@@ -1308,7 +1329,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             LINE_LIST_NODE_TAG => {
                 let other_list_node = unsafe{ other.as_list_unchecked() };
                 let mut new_node = self.clone();
-                let status = new_node.merge_from_list_node(other_list_node);
+                let status = new_node.merge_from_list_node(other_list_node, false);
                 AlgebraicResult::from_status(status, || TrieNodeODRc::new_in(new_node, self.alloc.clone()))
             },
             #[cfg(feature = "bridge_nodes")]
@@ -1323,8 +1344,16 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 self.pjoin(other_byte_node).map(|new_node| TrieNodeODRc::new_in(new_node, self.alloc.clone()))
             },
             TINY_REF_NODE_TAG => {
+                //Expand the tiny node and keep `self` on the left.  Delegating to the tiny node with
+                // the operands swapped returned its identity mask un-inverted -- a join that left
+                // `self` unchanged reported COUNTER_IDENT, and `join_into` then replaced the
+                // destination with the source -- and made the left-biased value join take the
+                // source's values
                 let tiny_node = unsafe{ other.as_tiny_unchecked() };
-                tiny_node.pjoin_dyn(self.as_tagged())
+                match tiny_node.into_full() {
+                    Some(full_node) => self.pjoin_dyn(full_node.as_tagged()),
+                    None => AlgebraicResult::Identity(SELF_IDENT),
+                }
             }
             EMPTY_NODE_TAG => {
                 AlgebraicResult::Identity(SELF_IDENT)
@@ -1349,7 +1378,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 let other_list_node = unsafe{ other_node.into_list_unchecked() };
                 //GOAT, optimization opportunity to take the contents from the list, rather than cloning
                 // them, to turn around and drop the ListNode and free them / decrement the refcounts
-                self.merge_from_list_node(other_list_node)
+                self.merge_from_list_node(other_list_node, false)
             },
             #[cfg(feature = "bridge_nodes")]
             TaggedNodeRefMut::BridgeNode(_other_bridge_node) => {
@@ -1387,7 +1416,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             _ => {
                 let mut new_node = Self::new_in(self.alloc.clone());
-                while let Some(cf) = self.values.pop() {
+                //Ascending key order, with the accumulated node as the left operand of every join,
+                // so a collision keeps the value from the lexicographically first path
+                for cf in self.values.drain(..) {
                     let child = cf.into_rec().filter(|child| !child.is_empty());
                     let child = if byte_cnt > 1 {
                         child.and_then(|mut child| child.make_mut().drop_head_dyn(byte_cnt-1))
@@ -1420,7 +1451,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             LINE_LIST_NODE_TAG => {
                 let other_list_node = unsafe { other.as_list_unchecked() };
-                other_list_node.pmeet_dyn(self.as_tagged()).invert_identity()
+                //`self` is the left operand; the list node enumerates its payloads but must resolve
+                // every collision as `self op list`, hence `swapped`.
+                other_list_node.pmeet_dyn_oriented(self.as_tagged(), true).invert_identity()
             },
             #[cfg(feature = "bridge_nodes")]
             TaggedNodeRef::BridgeNode(other_bridge_node) => {
@@ -1432,7 +1465,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             TINY_REF_NODE_TAG => {
                 let tiny_node = unsafe { other.as_tiny_unchecked() };
-                tiny_node.pmeet_dyn(self.as_tagged()).invert_identity()
+                let full_node = tiny_node.into_full().unwrap();
+                self.pmeet_dyn(full_node.as_tagged())
             },
             EMPTY_NODE_TAG => AlgebraicResult::None,
             _ => unsafe{ unreachable_unchecked() }
@@ -1575,14 +1609,30 @@ where
             }
         }
 
-        let src_range_mask = src_node.mask & ByteMask::from_range(range_start..=range_end);
-        let mut src_ix = src_node.mask.index_of(range_start) as usize;
-        for child_byte in src_range_mask.iter() {
-            let cf = unsafe { src_node.values.get_unchecked(src_ix) };
-            src_ix += 1;
-
-            if cf.has_rec() || cf.has_val() {
-                new_values.v.push(CfDst::from_cf(cf.clone()));
+        let range_mask = ByteMask::from_range(range_start..=range_end);
+        let src_range_mask = src_node.mask & range_mask;
+        let dst_range_mask = old_mask & range_mask;
+        for child_byte in (src_range_mask | dst_range_mask).iter() {
+            // A source branch counts only if it leads somewhere: a value, or a node with
+            // contents.  A dangling branch in the source is nothing to graft, exactly like an
+            // absent one, so it must not create a location here.
+            let mut grafted = false;
+            if src_range_mask.test_bit(child_byte) {
+                let cf = unsafe { src_node.values.get_unchecked(src_node.mask.index_of(child_byte) as usize) };
+                let rec_has_contents = cf.rec().map_or(false, |rec| !rec.as_tagged().node_is_empty());
+                if rec_has_contents || cf.has_val() {
+                    new_values.v.push(CfDst::from_cf(cf.clone()));
+                    new_mask.set_bit(child_byte);
+                    grafted = true;
+                }
+            }
+            if !grafted && !REMOVE_UNSET && dst_range_mask.test_bit(child_byte) {
+                // Grafting nothing over an existing branch removes its contents and its value,
+                // but the location itself survives as a dangling path -- the same thing
+                // `graft` of an empty source does at the focus, and what the model's
+                // `graftBelow` + `removeVal` specify.  With `remove_unset` the branch was
+                // removed outright instead.
+                new_values.v.push(CfDst::new(Some(TrieNodeODRc::new_empty()), None));
                 new_mask.set_bit(child_byte);
             }
         }
@@ -1875,18 +1925,56 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         rec_status.merge(val_status, true, true)
     }
     fn pmeet(&self, other: &OtherCf) -> AlgebraicResult<Self> {
-        //If one or the other cofree is dangling, it's an identity result for the dangling cofree
-        let mut identity_flag = 0;
-        if !self.has_rec() && !self.has_val() {identity_flag = SELF_IDENT;}
-        if !other.has_rec() && !other.has_val() {identity_flag |= COUNTER_IDENT;}
-        if identity_flag > 0 {
-            return AlgebraicResult::Identity(identity_flag)
+        //Both co-frees exist, so the location they stand at exists in both operands, and it survives
+        // the meet even when nothing at or below it does: the result is never `None`.  An onward link
+        // to an empty node carries nothing, so it counts as no link at all.
+        let self_rec = self.rec().filter(|node| !node.as_tagged().node_is_empty());
+        let other_rec = other.rec().filter(|node| !node.as_tagged().node_is_empty());
+        let self_dangling = self_rec.is_none() && !self.has_val();
+        let other_dangling = other_rec.is_none() && !other.has_val();
+        if self_dangling || other_dangling {
+            //The meet is the bare location, which is exactly what a dangling side holds
+            let mut mask = 0;
+            if self_dangling { mask |= SELF_IDENT; }
+            if other_dangling { mask |= COUNTER_IDENT; }
+            return AlgebraicResult::Identity(mask)
         }
 
-        //Otherwise actually work with what the cofrees contain
-        let rec = self.rec().pmeet(&other.rec());
+        let rec = match (self_rec, other_rec) {
+            (Some(l), Some(r)) => l.pmeet(r),
+            _ => AlgebraicResult::None,
+        };
         let val = self.val().pmeet(&other.val());
-        self.combine_algebraic_results(other, rec, val)
+
+        //A part that meets to nothing equals the side that had nothing there
+        let (rec_self, rec_counter) = match &rec {
+            AlgebraicResult::Identity(mask) => (mask & SELF_IDENT > 0, mask & COUNTER_IDENT > 0),
+            AlgebraicResult::None => (self_rec.is_none(), other_rec.is_none()),
+            AlgebraicResult::Element(_) => (false, false),
+        };
+        let (val_self, val_counter) = match &val {
+            AlgebraicResult::Identity(mask) => (mask & SELF_IDENT > 0, mask & COUNTER_IDENT > 0),
+            AlgebraicResult::None => (!self.has_val(), !other.has_val()),
+            AlgebraicResult::Element(_) => (false, false),
+        };
+        let mut mask = 0;
+        if rec_self && val_self { mask |= SELF_IDENT; }
+        if rec_counter && val_counter { mask |= COUNTER_IDENT; }
+        if mask > 0 {
+            return AlgebraicResult::Identity(mask)
+        }
+
+        let new_rec = match rec {
+            AlgebraicResult::Element(node) => Some(node),
+            AlgebraicResult::Identity(mask) => if mask & SELF_IDENT > 0 { self_rec.cloned() } else { other_rec.cloned() },
+            AlgebraicResult::None => None,
+        };
+        let new_val = match val {
+            AlgebraicResult::Element(val) => val,
+            AlgebraicResult::Identity(mask) => if mask & SELF_IDENT > 0 { self.val().cloned() } else { other.val().cloned() },
+            AlgebraicResult::None => None,
+        };
+        AlgebraicResult::Element(Self::new(new_rec, new_val))
     }
     //GOAT, HeteroLattice will totally disappear when we do the policy refactor
     // fn join_all(_xs: &[&Self]) -> Self where Self: Sized {
@@ -1902,6 +1990,16 @@ impl<V: Clone + Send + Sync + DistributiveLattice, A: Allocator, Cf: CoFree<V=V,
         let self_rec = self.rec().filter(|child| !child.as_tagged().node_is_empty());
         let rec = self_rec.psubtract(&other.rec());
         let val = self.val().psubtract(&other.val());
+        //An empty onward link beside a value carries nothing: the value already holds the
+        // location.  Dropping it when the value survives is not a change, but
+        // `combine_algebraic_results` sees a link go and would report `Element`.
+        if self_rec.is_none() && self.rec().is_some() {
+            if let (AlgebraicResult::None, AlgebraicResult::Identity(mask)) = (&rec, &val) {
+                if mask & SELF_IDENT > 0 {
+                    return AlgebraicResult::Identity(SELF_IDENT)
+                }
+            }
+        }
         self.combine_algebraic_results(other, rec, val)
     }
 }
@@ -2050,8 +2148,9 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
                         AlgebraicResult::None => {
                             //Both nodes hold a dangling path (no value, no onward node) at this byte, e.g. after
                             // `remove_branches(prune = false)`; it stays dangling in the join and is an identity for both
-                            debug_assert!(!lv.has_rec() && !lv.has_val());
-                            debug_assert!(!rv.has_rec() && !rv.has_val());
+                            // An empty onward node counts as dangling too
+                            debug_assert!(!lv.has_val() && lv.rec().map_or(true, |n| n.as_tagged().node_is_empty()));
+                            debug_assert!(!rv.has_val() && rv.rec().map_or(true, |n| n.as_tagged().node_is_empty()));
                             unsafe { new_v.get_unchecked_mut(c).write(Cf::new(None, None)) };
                         },
                         AlgebraicResult::Identity(mask) => {
@@ -2350,12 +2449,66 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V,
 
 //NOTE: This *looks* like an impl of Quantale, but it isn't, so we can have `self` and
 // `other` be differently parameterized types
+impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> where Self: TrieNodeDowncast<V, A> {
+    /// See [node_drop_dangling]
+    pub(crate) fn drop_dangling(&self, src: Option<TaggedNodeRef<V, A>>) -> DropDangling<V, A> {
+        let mut new_node: Option<Self> = None;
+        for (idx, byte) in self.mask.iter().enumerate() {
+            let cf = unsafe{ self.values.get_unchecked(idx) };
+            let rec = match cf.rec() {
+                Some(child) => node_drop_dangling(child, meet_src_child(src, &[byte])),
+                None => DropDangling::Empty,
+            };
+            let unchanged = match (&rec, cf.rec()) {
+                (DropDangling::Unchanged, _) => true,
+                (DropDangling::Empty, None) => cf.has_val(),
+                _ => false,
+            };
+            if unchanged && new_node.is_none() {
+                continue
+            }
+            let new_node = new_node.get_or_insert_with(|| {
+                let mut node = Self::with_capacity_in(self.values.len(), self.alloc.clone());
+                for (prev_idx, prev_byte) in self.mask.iter().enumerate().take(idx) {
+                    node.set_cf(prev_byte, unsafe{ self.values.get_unchecked(prev_idx) }.rec().cloned(), unsafe{ self.values.get_unchecked(prev_idx) }.val().cloned());
+                }
+                node
+            });
+            let new_rec = match rec {
+                DropDangling::Unchanged => cf.rec().cloned(),
+                DropDangling::Empty => None,
+                DropDangling::New(node) => Some(node),
+            };
+            if new_rec.is_some() || cf.has_val() {
+                new_node.set_cf(byte, new_rec, cf.val().cloned());
+            }
+        }
+        match new_node {
+            None => DropDangling::Unchanged,
+            Some(node) if node.values.len() == 0 => DropDangling::Empty,
+            Some(node) => DropDangling::New(TrieNodeODRc::new_in(node, self.alloc.clone())),
+        }
+    }
+    fn set_cf(&mut self, byte: u8, rec: Option<TrieNodeODRc<V, A>>, val: Option<V>) {
+        if let Some(rec) = rec {
+            self.set_child(byte, rec);
+        }
+        if let Some(val) = val {
+            self.set_val(byte, val);
+        }
+    }
+}
+
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> {
     fn prestrict<OtherCf: CoFree<V=V, A=A>>(&self, other: &ByteNode<OtherCf, A>) -> AlgebraicResult<Self> where Self: Sized {
         // Iterate the overlap mask directly. Slot indexes are recovered with
         // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
-        let mut is_identity = self.mask == mm && other.mask == mm;
+        //NOTE: restrict is non-commutative.  The result is an identity of `self` when every one of
+        // `self`'s branches survives, i.e. `self.mask == mm`.  Branches that exist only in `other`
+        // never contribute to the result, so requiring `other.mask == mm` as well only threw away
+        // identities that were there.
+        let mut is_identity = self.mask == mm;
 
         let mmc = [mm.0[0].count_ones(), mm.0[1].count_ones(), mm.0[2].count_ones(), mm.0[3].count_ones()];
 

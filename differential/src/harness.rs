@@ -145,31 +145,24 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 /// * `skip:act` — the ACT read source cannot be a merge source
 ///   (`ZipperInfallibleSubtries` is not implemented for it) or does not
 ///   implement the trait the op needs.
-/// * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root,
-///   where the native read zipper escapes its own root.
 /// * `skip:k0` — a degenerate `k = 0`.
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
-/// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 /// * `skip:off-root-prune` — a prune on a write zipper not rooted at the map
 ///   root, where the depth pruned is a function of internal node layout.
-/// * `skip:quarantined` — the op is disabled outright (op 54).
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
 pub const SKIP_ACT: &str = "skip:act";
-pub const SKIP_AT_ROOT: &str = "skip:at-root";
 pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
-pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
 pub const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
-pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 
 /// Does the focus have no descendants at all?
 ///
 /// Several return values (`remove_branches`, `restricting`, `join_map_into`,
-/// `take_map`, `restrict`) hinge on whether an *empty node* happens to be
-/// materialised at the focus rather than on the logical state, so the harness
-/// masks them here.  See lean/README.md.
+/// `take_map`) hinge on whether an *empty node* happens to be materialised at
+/// the focus rather than on the logical state, so the harness masks them here.
+/// `restrict` used to be in that list and no longer is.  See lean/README.md.
 pub fn focus_node_empty<Z: Zipper>(z: &Z) -> bool {
     z.child_count() == 0
 }
@@ -224,9 +217,8 @@ pub trait ReadSource:
 
     fn do_graft<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> bool { false }
     fn do_graft_masked<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
-    /// Currently unused: op 54 is quarantined (lean/FINDINGS.md #15).  Kept so
-    /// the op can be re-enabled with one line once the method is fixed.
-    #[allow(dead_code)]
+    /// `graft_child_maps` fed this zipper's own child subtries (op 54), which must
+    /// agree with `graft_masked_branches` on the same mask.
     fn do_graft_child_maps<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
     /// `meet_2` needs two sources; the second is this zipper moved to `path`.
     fn do_meet_2<W: ZipperWriting<u64>>(&self, _wz: &mut W, _path: &[u8]) -> Option<AlgebraicStatus> { None }
@@ -550,23 +542,16 @@ pub fn run_ops<R: ReadSource>(
                 }
                 11 => {
                     let t = get!(d.modn(2));
-                    // Skipped at the zipper root: the native ReadZipper escapes
-                    // its own root there. See `Zip.toNextSiblingByte`.
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
-                        ("to_next_sibling_byte", SKIP_AT_ROOT.to_string())
-                    } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
-                        ("to_next_sibling_byte", show_byte_opt(r))
-                    }
+                    // Formerly skipped at the zipper root, where the native
+                    // ReadZipper escaped its own root (FINDINGS.md #3).  Fixed:
+                    // the root case is now compared like any other.
+                    let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
+                    ("to_next_sibling_byte", show_byte_opt(r))
                 }
                 12 => {
                     let t = get!(d.modn(2));
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
-                        ("to_prev_sibling_byte", SKIP_AT_ROOT.to_string())
-                    } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
-                        ("to_prev_sibling_byte", show_byte_opt(r))
-                    }
+                    let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
+                    ("to_prev_sibling_byte", show_byte_opt(r))
                 }
                 13 => {
                     let t = get!(d.modn(2));
@@ -747,7 +732,9 @@ pub fn run_ops<R: ReadSource>(
                     ("join_map_into", s)
                 }
                 38 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    // `prune = true` is best-effort (nodes shared with the source may be
+                    // left unpruned; see `Zip.meetInto`), so only `prune = false` is compared.
+                    let _pr = get!(d.boolean());
                     ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, no_prune)))
                 }
                 39 => {
@@ -758,14 +745,11 @@ pub fn run_ops<R: ReadSource>(
                     )
                 }
                 40 => {
-                    let leaky = focus_node_empty(&wz);
+                    // The status used to be masked to `?` at a focus with
+                    // nothing below it (FINDINGS.md #8).  No longer: it tracks
+                    // the spec over the whole sweep.
                     let st = (*rz).do_restrict(&mut wz);
-                    let s = if leaky && st.is_some() {
-                        "?".to_string()
-                    } else {
-                        show_status_opt(st)
-                    };
-                    ("restrict", s)
+                    ("restrict", show_status_opt(st))
                 }
                 41 => {
                     // Skipped when either side has nothing below its focus; see
@@ -786,24 +770,20 @@ pub fn run_ops<R: ReadSource>(
                     if k == 0 {
                         ("join_k_path_into", SKIP_K0.to_string())
                     } else {
-                        // The bool leaks node materialisation; see FINDINGS.md #8.
+                        // The bool was masked to `?` on an empty resulting
+                        // focus as a suspected materialisation leak
+                        // (FINDINGS.md #8).  It is not one: unmasked it tracks
+                        // the spec over the whole sweep.
                         let r = wz.join_k_path_into(k, no_prune);
-                        let s = if focus_node_empty(&wz) {
-                            "?".to_string()
-                        } else {
-                            show_bool(r).to_string()
-                        };
-                        ("join_k_path_into", s)
+                        ("join_k_path_into", show_bool(r).to_string())
                     }
                 }
                 43 => {
                     let p = get!(d.path(6));
-                    // `insert_prefix("")` destroys the subtrie in pathmap 0.3.1.
-                    if p.is_empty() {
-                        ("insert_prefix", SKIP_EMPTY_PATH.to_string())
-                    } else {
-                        ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
-                    }
+                    // The empty prefix was skipped while it destroyed the
+                    // subtrie (FINDINGS.md #4); fixed upstream, so it is
+                    // compared like any other prefix.
+                    ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
                 }
                 44 => {
                     let n = get!(d.modn(6));
@@ -823,7 +803,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 46 => {
                     let k = get!(d.modn(4));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let _pr = get!(d.boolean()); // decoded for stream alignment; see op 38
                     // `meet_k_path_into` spins forever when the focus has no
                     // children, and escapes the focus subtree when k == 0.
                     // See `Zip.meetKPathUnspecified`.
@@ -926,12 +906,14 @@ pub fn run_ops<R: ReadSource>(
                     let mut canon: Vec<u8> = m.clone();
                     canon.sort_unstable();
                     canon.dedup();
-                    // Skipped outright: `graft_child_maps` is broken three ways
-                    // (lean/FINDINGS.md #15) and the node representations it
-                    // leaves behind degrade the AlgebraicStatus that *later*
-                    // operations report, contaminating the rest of the run.
-                    let _ = (mask, ru, &canon);
-                    ("graft_child_maps", SKIP_QUARANTINED.to_string())
+                    // Fed the source's own child subtries, so it must agree with
+                    // `graft_masked_branches` on the same mask (op 53).
+                    let s = if (*rz).do_graft_child_maps(&mut wz, mask, ru) {
+                        format!("{}:{}", hex_path(&canon), show_bool(ru))
+                    } else {
+                        SKIP_ACT.to_string()
+                    };
+                    ("graft_child_maps", s)
                 }
                 55 => {
                     let p = get!(d.path(6));

@@ -42,6 +42,30 @@ same `join_into` into a *non-empty* destination produces the right answer.  Only
 the empty-destination case loses the data, and it reports `Identity` — "self was
 not modified" — rather than failing.
 
+**Addendum (2026-09-11).**  The empty-destination case was fixed in PR #70, but the
+same key kept firing (99 of 100k seed-11 inputs).  Two causes, both in the node
+join, neither specific to an empty destination:
+
+* A source focus partway into a line node is a `TinyRefNode`, and the
+  `TINY_REF_NODE_TAG` arm of `pjoin_dyn` (dense and list nodes) evaluated the join
+  with the operands swapped and returned the identity mask un-inverted.  A
+  destination that already contained the source reported `COUNTER_IDENT`, which
+  `join_into` takes as "the result is the source": a *dense* destination was
+  replaced by the source (data loss), a list destination merely reported
+  `Element`.  The swapped operands also made the left-biased value join take the
+  source's values.  The arm now expands the tiny node and keeps `self` on the
+  left.
+* `merge_guts`, pairing a slot that holds an onward child with a slot whose key
+  is longer, always reported the pair as `Element`, even when the child already
+  held the other payload.  It now reports the child slot as the identity.
+* The integer `pjoin` placeholders returned `SELF_IDENT` alone even for equal
+  values; with equal values the result is also `other`, and without that bit a
+  join seen from the other side can never be a self-identity.  (This also
+  removed two thirds of the finding-8 `join_map_into`/`restrict` hits.)
+
+Test: `write_zipper_join_into_mid_key_source_keeps_destination`,
+`write_zipper_join_into_contained_under_child_is_identity`.
+
 ## 2. A token-maintaining move leaves the zipper navigating wrongly
 
 `case: to_next_val_after_step` -- **silent wrong answer**
@@ -468,6 +492,14 @@ it.
 ## 15. `graft_child_maps` is unusable on a dense node, and creates paths from nothing
 
 `case: graft_child_maps_dense` -- **abort, or a silently created path**
+
+*Fixed* (`bugfix/graft-child-maps`): the root-focus lookup no longer hands an
+empty key to the dense node, and grafting nothing onto a branch now follows
+`graft`: an existing branch is emptied but survives as a dangling path, an
+absent one is not created.  A third symptom found while fixing -- an empty map,
+or one without a root value, left the destination's old branch or old value in
+place -- is fixed the same way.  Op 54 is no longer skipped by the harness, and
+the regression test is `write_zipper::tests::graft_child_maps_dense`.
 
 Two symptoms, one method.
 
