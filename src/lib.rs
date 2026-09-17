@@ -593,8 +593,10 @@ mod tests {
             assert_eq!(met, l);
         }
 
+        //No common values, but the shared path prefix survives as dangling
         let met = met.meet(&r);
-        assert!(met.is_empty());
+        assert_eq!(met.val_count(), 0);
+        assert!(!met.is_empty());
     }
 
     #[test]

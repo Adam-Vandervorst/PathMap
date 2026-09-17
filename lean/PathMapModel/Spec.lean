@@ -314,10 +314,21 @@ def joinIdem (ops : ValOps V) (a : PathMap V) : Bool :=
 def joinAssoc (ops : ValOps V) (a b c : PathMap V) : Bool :=
   PathMap.beqT ops (PathMap.join ops (PathMap.join ops a b) c) (PathMap.join ops a (PathMap.join ops b c))
 
-/-- `meet` is idempotent *on values*.  It is not idempotent on locations: a meet
-discards dangling paths, so `meet a a` keeps only the value-bearing skeleton. -/
+/-- `meet` is idempotent *on values*. -/
 def meetIdemOnVals (ops : ValOps V) (a : PathMap V) : Bool :=
   (PathMap.meet ops a a).vals.map (·.1) == a.vals.map (·.1)
+
+/-- `meet` is idempotent, dangling paths included. -/
+def meetIdem (ops : ValOps V) (a : PathMap V) : Bool :=
+  PathMap.beqT ops (PathMap.meet ops a a) a
+
+/-- `meetPruned a a` is `a` with its dangling paths dropped. -/
+def meetPrunedIdem (ops : ValOps V) (a : PathMap V) : Bool :=
+  PathMap.beqT ops (PathMap.meetPruned ops a a) a.dropDangling
+
+/-- `meet` is commutative on locations. -/
+def meetCommOnPaths (ops : ValOps V) (a b : PathMap V) : Bool :=
+  (PathMap.meet ops a b).paths == (PathMap.meet ops b a).paths
 
 /-- Subtracting a map from itself leaves no values. -/
 def subSelfEmptyVals (ops : ValOps V) (a : PathMap V) : Bool :=

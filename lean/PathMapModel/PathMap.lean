@@ -338,11 +338,19 @@ def join (a b : PathMap V) : PathMap V :=
   mk' (keys.filterMap fun k => (joinVal ops (a.valAt k) (b.valAt k)).map (k, ·))
       (a.paths ++ b.paths)
 
-/-- Meet (intersection).  A location survives only if it lies on the way to a
-surviving value, so dangling paths never survive a meet. -/
+/-- Meet (`prune = false`): a location survives iff both sides have it, a value iff
+both hold one. -/
 def meet (a b : PathMap V) : PathMap V :=
   let keys := Path.sortDedup (a.vals.map (·.1))
-  mk' (keys.filterMap fun k => (meetVal ops (a.valAt k) (b.valAt k)).map (k, ·)) []
+  mk' (keys.filterMap fun k => (meetVal ops (a.valAt k) (b.valAt k)).map (k, ·))
+      (a.paths.filter b.pathExists)
+
+/-- `t` without its dangling paths. -/
+def dropDangling (t : PathMap V) : PathMap V := mk' t.vals []
+
+/-- Meet with `prune = true`, fully pruned.  `pathmap` may skip shared nodes, so its
+result lies between this and `meet`; not compared by the fuzzer. -/
+def meetPruned (a b : PathMap V) : PathMap V := (meet ops a b).dropDangling
 
 /-- Subtract.
 

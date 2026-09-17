@@ -425,36 +425,6 @@ impl<V> FatAlgebraicResult<V> {
     pub(crate) const fn new(identity_mask: u64, element: Option<V>) -> Self {
         Self {identity_mask, element}
     }
-    /// Converts an [AlgebraicResult] into a `FatAlgebraicResult`, assuming the source `result` was the
-    /// output of a binary operation (two arguments).
-    #[inline]
-    pub(crate) fn from_binary_op_result(result: AlgebraicResult<V>, a: &V, b: &V) -> Self
-        where V: Clone
-    {
-        match result {
-            AlgebraicResult::None => FatAlgebraicResult::none(),
-            AlgebraicResult::Element(v) => FatAlgebraicResult::element(v),
-            AlgebraicResult::Identity(mask) => {
-                debug_assert!(mask <= (SELF_IDENT | COUNTER_IDENT));
-                if mask & SELF_IDENT > 0 {
-                    FatAlgebraicResult::new(mask, Some(a.clone()))
-                } else {
-                    debug_assert_eq!(mask, COUNTER_IDENT);
-                    FatAlgebraicResult::new(mask, Some(b.clone()))
-                }
-            }
-        }
-    }
-    /// Maps a `FatAlgebraicResult<V>` to `FatAlgebraicResult<U>` by applying a function to a contained value
-    #[inline]
-    pub fn map<U, F>(self, f: F) -> FatAlgebraicResult<U>
-        where F: FnOnce(V) -> U,
-    {
-        FatAlgebraicResult::<U> {
-            identity_mask: self.identity_mask,
-            element: self.element.map(f)
-        }
-    }
     /// The result of an operation between non-none arguments that results in None
     #[inline(always)]
     pub(crate) const fn none() -> Self {
@@ -851,15 +821,21 @@ impl Lattice for () {
     fn pmeet(&self, _other: &Self) -> AlgebraicResult<Self> { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) }
 }
 
+/// Left-biased join; equal values are also `other`'s identity
+#[inline]
+fn left_biased_pjoin<T: PartialEq>(a: &T, b: &T) -> AlgebraicResult<T> {
+    if a == b { AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT) } else { AlgebraicResult::Identity(SELF_IDENT) }
+}
+
 //GOAT trash
 impl Lattice for usize {
-    fn pjoin(&self, _other: &usize) -> AlgebraicResult<usize> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &usize) -> AlgebraicResult<usize> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &usize) -> AlgebraicResult<usize> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
 //GOAT trash
 impl Lattice for u64 {
-    fn pjoin(&self, _other: &u64) -> AlgebraicResult<u64> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u64) -> AlgebraicResult<u64> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u64) -> AlgebraicResult<u64> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
@@ -873,13 +849,13 @@ impl DistributiveLattice for u64 {
 
 //GOAT trash
 impl Lattice for u32 {
-    fn pjoin(&self, _other: &u32) -> AlgebraicResult<u32> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u32) -> AlgebraicResult<u32> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u32) -> AlgebraicResult<u32> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
 //GOAT trash
 impl Lattice for u16 {
-    fn pjoin(&self, _other: &u16) -> AlgebraicResult<u16> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u16) -> AlgebraicResult<u16> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u16) -> AlgebraicResult<u16> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
@@ -893,7 +869,7 @@ impl DistributiveLattice for u16 {
 
 //GOAT trash
 impl Lattice for u8 {
-    fn pjoin(&self, _other: &u8) -> AlgebraicResult<u8> { AlgebraicResult::Identity(SELF_IDENT) }
+    fn pjoin(&self, other: &u8) -> AlgebraicResult<u8> { left_biased_pjoin(self, other) }
     fn pmeet(&self, _other: &u8) -> AlgebraicResult<u8> { AlgebraicResult::Identity(SELF_IDENT) }
 }
 
