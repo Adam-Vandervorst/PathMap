@@ -2669,7 +2669,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 unimplemented!()
             },
             CELL_BYTE_NODE_TAG => {
-                let other_dense_node = unsafe{ other.as_dense_unchecked() };
+                let other_dense_node = unsafe{ other.as_cell_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 match new_node.merge_from_list_node(self, true) {
                     //See the DENSE_BYTE_NODE_TAG arm: two empty nodes join to an empty result
@@ -4098,5 +4098,31 @@ mod tests {
         let mut m = mk(&[b"ab", b"ac", b"bx"]);
         m.write_zipper().restrict(&o.read_zipper());
         assert_eq!(keys(&m), ["bx"]);
+    }
+
+    /// Joining a list node with a `CellByteNode` (left behind by a `ZipperHead`)
+    #[test]
+    fn list_node_join_with_cell_node() {
+        use crate::PathMap;
+        use crate::zipper::*;
+        let mut cell = PathMap::<u64>::new();
+        {
+            let zh = cell.zipper_head();
+            for b in [1u8, 2] {
+                let mut wz = zh.write_zipper_at_exclusive_path(&[b]).unwrap();
+                wz.set_val(b as u64);
+            }
+        }
+        assert!(cell.root().unwrap().as_tagged().tag() == CELL_BYTE_NODE_TAG, "the layout this test needs");
+        let mut list = PathMap::<u64>::new();
+        list.set_val_at(&[0u8, 5], 7);
+        assert!(list.root().unwrap().as_tagged().tag() == LINE_LIST_NODE_TAG, "the layout this test needs");
+
+        let joined = list.join(&cell);
+        let vals: Vec<(Vec<u8>, u64)> = joined.iter().map(|(k, v)| (k, *v)).collect();
+        assert_eq!(vals, vec![(vec![0, 5], 7), (vec![1], 1), (vec![2], 2)]);
+        let mut into = list.clone();
+        into.write_zipper().join_map_into(cell.clone());
+        assert_eq!(into.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), vals);
     }
 }
