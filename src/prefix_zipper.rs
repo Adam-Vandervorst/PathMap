@@ -59,6 +59,8 @@ pub struct PrefixZipper<'prefix, Z> {
     prefix: Cow<'prefix, [u8]>,
     origin_depth: usize,
     position: PrefixPos,
+    /// The zipper's own root is off the trie, as for a fork taken past a diverged prefix
+    off_root: bool,
 }
 
 impl<'prefix, Z>  PrefixZipper<'prefix, Z>
@@ -83,6 +85,7 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
             prefix,
             origin_depth: 0,
             position,
+            off_root: false,
         }
     }
 
@@ -110,7 +113,9 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
 
     fn set_valid(&mut self, valid: usize) {
         debug_assert!(valid <= self.prefix.len(), "valid prefix can't be outside prefix");
-        self.position = if valid == self.prefix.len() - self.origin_depth {
+        self.position = if self.off_root {
+            PrefixPos::PrefixOff { valid: 0, invalid: 0 }
+        } else if valid == self.prefix.len() - self.origin_depth {
             PrefixPos::Source
         } else {
             PrefixPos::Prefix { valid }
@@ -379,7 +384,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
     fn at_root(&self) -> bool {
         match self.position {
             PrefixPos::Prefix { valid } => valid == 0,
-            PrefixPos::PrefixOff {..} => false,
+            PrefixPos::PrefixOff { valid, invalid } => self.off_root && valid == 0 && invalid == 0,
             PrefixPos::Source => self.prefix.len() <= self.origin_depth && self.source.at_root(),
         }
     }
@@ -629,12 +634,19 @@ impl<'prefix, Z, V> ZipperForking<V> for PrefixZipper<'prefix, Z>
 {
     type ReadZipperT<'a> = PrefixZipper<'prefix, Z::ReadZipperT<'a>> where Self: 'a;
     fn fork_read_zipper<'a>(&'a self) -> <Self as ZipperForking<V>>::ReadZipperT<'a> {
+        //The fork is rooted at the focus: in the source, partway along the prefix, or off the trie
+        let (prefix, position, off_root) = match self.position {
+            PrefixPos::Source => (Cow::Borrowed(&[][..]), PrefixPos::Source, false),
+            PrefixPos::Prefix { valid } => (Cow::Owned(self.prefix[self.origin_depth + valid..].to_vec()), PrefixPos::Prefix { valid: 0 }, false),
+            PrefixPos::PrefixOff {..} => (Cow::Borrowed(&[][..]), PrefixPos::PrefixOff { valid: 0, invalid: 0 }, true),
+        };
         PrefixZipper {
             path: Vec::new(),
-            position: PrefixPos::Prefix { valid: 0 },
+            position,
             source: self.source.fork_read_zipper(),
-            prefix: self.prefix.clone(),
+            prefix,
             origin_depth: 0,
+            off_root,
         }
     }
 }
@@ -1010,5 +1022,41 @@ mod tests {
         z.reset();
         while z.to_next_step() { steps.push(z.path().to_vec()); }
         assert_eq!(steps, vec![vec![0], vec![0, 7], vec![0, 7, 0]]);
+    }
+
+    /// A fork is rooted at the focus, wherever the focus is
+    #[test]
+    fn prefix_zipper_fork_at_focus() {
+        use crate::zipper::ZipperForking;
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[5u8], 1);
+        map.set_val_at(&[5u8, 6], 2);
+        fn steps<Z: ZipperMoving + ZipperPath>(z: &mut Z) -> Vec<Vec<u8>> {
+            let mut v = vec![];
+            while z.to_next_step() { v.push(z.path().to_vec()); assert!(v.len() < 16); }
+            v
+        }
+        let mut z = PrefixZipper::new(&[2u8, 3][..], map.read_zipper());
+        for (at, want) in [
+            (&[][..], vec![vec![2], vec![2, 3], vec![2, 3, 5], vec![2, 3, 5, 6]]),
+            (&[2u8][..], vec![vec![3], vec![3, 5], vec![3, 5, 6]]),
+            (&[2u8, 3, 5][..], vec![vec![6]]),
+            (&[9u8][..], vec![]),
+        ] {
+            z.reset();
+            z.descend_to(at);
+            let mut f = z.fork_read_zipper();
+            assert!(f.at_root(), "{at:?}");
+            assert_eq!(f.path_exists(), z.path_exists(), "{at:?}");
+            assert_eq!(steps(&mut f), want, "{at:?}");
+            f.descend_to(&[1u8, 1]);
+            assert_eq!(f.ascend(5), 2, "{at:?}");
+            assert!(f.at_root(), "{at:?}");
+        }
+        //An empty prefix
+        let mut z = PrefixZipper::new(&[][..], map.read_zipper());
+        z.set_root_prefix_path(&[]).unwrap();
+        let mut f = z.fork_read_zipper();
+        assert_eq!(steps(&mut f), vec![vec![5], vec![5, 6]]);
     }
 }
