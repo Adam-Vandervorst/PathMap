@@ -1394,7 +1394,11 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
             (true, true) => { //both are child nodes, so join them
                 let a_child = unsafe{ a.child_in_slot::<ASLOT>() };
                 let b_child = unsafe{ b.child_in_slot::<BSLOT>() };
-                return a_child.pjoin(b_child).map(|new_child| (a_key, ValOrChild::Child(new_child)))
+                return match a_child.pjoin(b_child) {
+                    //Two empty children are both just the dangling path
+                    AlgebraicResult::None => AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT),
+                    joined => joined.map(|new_child| (a_key, ValOrChild::Child(new_child))),
+                }
             },
             (false, false) => { //both are values, so join them
                 let a_val = unsafe{ a.val_in_slot::<ASLOT>() };
@@ -4124,5 +4128,21 @@ mod tests {
         let mut into = list.clone();
         into.write_zipper().join_map_into(cell.clone());
         assert_eq!(into.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), vals);
+    }
+
+    /// Joining two nodes whose children under the same key are both empty
+    #[test]
+    fn merge_empty_children_under_same_key() {
+        let node = || {
+            let mut n = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+            let child = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+            unsafe { n.set_child_0(&[0, 3], TrieNodeODRc::new_in(child, global_alloc())); }
+            n
+        };
+        let (a, b) = (node(), node());
+        match merge_list_nodes(&a, &b) {
+            Ok(AlgebraicResult::Identity(mask)) => assert_eq!(mask, SELF_IDENT | COUNTER_IDENT),
+            _ => panic!("expected an identity"),
+        }
     }
 }
