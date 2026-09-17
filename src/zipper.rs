@@ -653,14 +653,14 @@ pub trait ZipperIteration: ZipperMoving {
     ///
     /// ## Usage
     ///
-    /// Together with [`to_next_k_path_observed`](ZipperIteration::to_next_k_path_observed), this method provides a general
+    /// Together with [`to_next_k_path`](ZipperIteration::to_next_k_path), this method provides a general
     /// mechanism for iterating sub-paths at a fixed depth below the current focus.  This is useful
     /// when decoding items encoded into the trie paths using a fixed-width encoding.
     ///
     /// This example encodes every element in `items` as a 4-byte representation in the trie path,
-    /// and then iterates each element using `descend_first_k_path_observed` and [`to_next_k_path_observed`](ZipperIteration::to_next_k_path_observed)
+    /// and then iterates each element using `descend_first_k_path` and [`to_next_k_path`](ZipperIteration::to_next_k_path).
     /// ```
-    /// # use pathmap::{PathMap, zipper::ZipperIteration};
+    /// # use pathmap::{PathMap, zipper::{ZipperIteration, ZipperMoving}};
     /// let items = [7_u32, 42, 1_000, 1_000_000];
     /// let mut trie = PathMap::new();
     /// for item in items {
@@ -668,12 +668,11 @@ pub trait ZipperIteration: ZipperMoving {
     /// }
     ///
     /// let mut zipper = trie.read_zipper();
-    /// let mut path = Vec::new(); // Tracks movement reported by the observed methods.
     /// let mut decoded = Vec::new();
-    /// if zipper.descend_first_k_path_observed(4, &mut path) {
+    /// if zipper.descend_first_k_path(4) {
     ///     loop {
-    ///         decoded.push(u32::from_be_bytes(path.as_slice().try_into().unwrap()));
-    ///         if !zipper.to_next_k_path_observed(4, &mut path) {
+    ///         decoded.push(u32::from_be_bytes(zipper.path().try_into().unwrap()));
+    ///         if !zipper.to_next_k_path(4) {
     ///             break;
     ///         }
     ///     }
