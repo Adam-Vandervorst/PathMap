@@ -1515,4 +1515,27 @@ mod tests {
         paths.sort();
         assert_eq!(paths, vec![b"ax".to_vec(), b"bx".to_vec(), b"c".to_vec(), b"dx".to_vec()]);
     }
+
+    /// A `ZipperHead` from a write zipper made with a borrowed path, and the zipper used afterwards
+    #[test]
+    fn zipper_head_from_write_zipper_at_borrowed_path() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[1u8, 2, 3], 7);
+        {
+            let path = [1u8, 2];
+            let mut wz = map.write_zipper_at_path(&path);
+            {
+                let zh = wz.zipper_head();
+                let mut child = zh.write_zipper_at_exclusive_path(&[4u8]).unwrap();
+                child.set_val(1);
+            }
+            assert_eq!(wz.origin_path(), &[1u8, 2]);
+            wz.descend_to(&[5u8]);
+            wz.set_val(2);
+            assert_eq!(wz.origin_path(), &[1u8, 2, 5]);
+        }
+        assert_eq!(map.get_val_at(&[1u8, 2, 4]), Some(&1));
+        assert_eq!(map.get_val_at(&[1u8, 2, 5]), Some(&2));
+        assert_eq!(map.get_val_at(&[1u8, 2, 3]), Some(&7));
+    }
 }
