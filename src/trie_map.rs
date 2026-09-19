@@ -890,10 +890,10 @@ mod tests {
         a.insert([0, 0, 0], 7);
         a.insert([1, 0, 0], 8);
         let diff = a.subtract(&b);
-        assert_eq!(diff.val_at([0]), Some(&5));
-        assert_eq!(diff.val_at([0, 0]), Some(&6));   // 6 - 0 is Element(6) for u64
-        assert_eq!(diff.val_at([0, 0, 0]), Some(&7));
-        assert_eq!(diff.val_at([1, 0, 0]), Some(&8));
+        assert_eq!(diff.get_val_at([0]), Some(&5));
+        assert_eq!(diff.get_val_at([0, 0]), Some(&6));   // 6 - 0 is Element(6) for u64
+        assert_eq!(diff.get_val_at([0, 0, 0]), Some(&7));
+        assert_eq!(diff.get_val_at([1, 0, 0]), Some(&8));
     }
 
     #[test]
