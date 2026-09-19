@@ -2762,7 +2762,53 @@ where Storage: AsRef<[u8]>
         descended
     }
 
+    #[cold]
+    #[inline(never)]
+    fn to_sibling_from_nonexistent_path(&mut self, next: bool) -> bool {
+        // A sibling can only exist when the final byte alone is nonexistent and
+        // its parent is therefore an existing trie position.
+        if self.invalid != 1 || self.at_root() {
+            return false;
+        }
+
+        let cur_byte = *self.path.last().unwrap();
+        let sibling_idx = match &self.cur_node {
+            Node::Line(line) => {
+                let frame = self.stack.last().unwrap();
+                let Some(&byte) = self.tree.get_line(line.path).get(frame.node_depth) else {
+                    return false;
+                };
+                if (next && byte > cur_byte) || (!next && byte < cur_byte) {
+                    0
+                } else {
+                    return false;
+                }
+            }
+            Node::Branch(node) => {
+                let sibling_byte = if next {
+                    node.bytemask.next_bit(cur_byte)
+                } else {
+                    node.bytemask.prev_bit(cur_byte)
+                };
+                let Some(byte) = sibling_byte else {
+                    return false;
+                };
+                node.bytemask.index_of(byte) as usize
+            }
+        };
+
+        self.path.pop();
+        self.invalid = 0;
+        let result = self.descend_indexed_byte(sibling_idx);
+        debug_assert!(result);
+        result
+    }
+
     fn to_sibling(&mut self, next: bool) -> bool {
+        if self.invalid > 0 {
+            return self.to_sibling_from_nonexistent_path(next);
+        }
+
         let top_frame = self.stack.last().unwrap();
         if self.stack.len() <= 1 || top_frame.node_depth > 0 {
             // can't move to sibling at root, or along the path
