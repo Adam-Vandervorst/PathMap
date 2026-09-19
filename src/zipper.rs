@@ -4308,11 +4308,11 @@ pub(crate) mod zipper_iteration_tests {
 
     /// The contract explicitly defines `k == 0` as unsuccessful and requires an unsuccessful
     /// descent to leave the zipper at its original focus.
-    pub fn k_path_zero<Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+    pub fn k_path_zero<Z: ZipperIteration>(mut zipper: Z) {
         //At a branching focus, where the native zipper used to report success
         assert!(!zipper.descend_first_k_path(0));
         assert_eq!(zipper.path(), b"");
-        assert!(zipper.descend_first_byte().is_some());
+        assert!(zipper.descend_first_byte());
         assert_eq!(zipper.path(), b"a");
         assert!(!zipper.descend_first_k_path(0));
         assert_eq!(zipper.path(), b"a");
