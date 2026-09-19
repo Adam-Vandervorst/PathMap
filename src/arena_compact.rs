@@ -2668,17 +2668,9 @@ where Storage: AsRef<[u8]>
                 return start_len - self.path.len();
             }
 
-            match &self.cur_node {
-                Node::Line(line) => {
-                    if need_value && line.value.is_some() {
-                        return start_len - self.path.len();
-                    }
-                }
-                Node::Branch(node) => {
-                    if need_value && node.value.is_some() {
-                        return start_len - self.path.len();
-                    }
-                }
+            //The deepest real ancestor stops the ascent if the *focus* has a value (when needed) or branches
+            if (need_value && self.is_val()) || self.child_count() > 1 {
+                return start_len - self.path.len();
             }
         }
         while let Some(top_frame) = self.stack.last_mut() {
@@ -4232,4 +4224,51 @@ mod tests {
         assert_eq!(az.val(), None);
         assert!(!az.path_exists());
     }
+
+    /// `ACTZipper` sibling steps from a focus off the trie
+    #[test]
+    fn act_zipper_sibling_step_from_an_off_trie_focus() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        { let mut w = m.write_zipper(); w.set_val(38); }
+        m.insert(&[1u8], 5);
+        m.insert(&[1u8, 0, 2], 22);
+        m.insert(&[3u8], 7);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+
+        //One byte off the trie, with a sibling on either side
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[2u8]);
+        assert!(!az.path_exists());
+        assert_eq!(az.to_next_sibling_byte(), Some(3));
+        assert_eq!(az.path(), &[3u8]);
+        assert_eq!(az.val(), Some(&7));
+        az.ascend(1);
+        az.descend_to(&[2u8]);
+        assert_eq!(az.to_prev_sibling_byte(), Some(1));
+        assert_eq!(az.path(), &[1u8]);
+        assert_eq!(az.val(), Some(&5));
+
+        //No sibling on that side: the zipper stays where it was
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[0u8]);
+        assert_eq!(az.to_prev_sibling_byte(), None);
+        assert_eq!(az.path(), &[0u8]);
+        assert!(!az.path_exists());
+        assert_eq!(az.to_next_sibling_byte(), Some(1));
+
+        //Two bytes off the trie: the parent is not real, so there is no sibling
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[2u8, 0]);
+        assert_eq!(az.to_next_sibling_byte(), None);
+        assert_eq!(az.path(), &[2u8, 0]);
+
+        //`to_next_step` from an off-trie focus visits what follows it
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[0u8]);
+        let mut seen = Vec::new();
+        while az.to_next_step() { seen.push(az.path().to_vec()); }
+        assert_eq!(seen, vec![vec![1u8], vec![1, 0], vec![1, 0, 2], vec![3]]);
+    }
+
 }
