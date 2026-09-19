@@ -2572,6 +2572,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
         if should_ascend {
             self.key.prefix_buf.truncate(temp_path.len());
+        } else if ascended {
+            //The zipper didn't move, so restore the node stack to the focus
+            self.descend_to_internal();
         }
 
         pruned_bytes
@@ -3709,6 +3712,50 @@ mod tests {
         assert_eq!(btm2.path_exists_at(&[0, 200, 5]), false);
         assert_eq!(btm2.path_exists_at(&[0, 255, 1]), false);
     }
+
+    /// A write after `prune_path` (or `meet_into(.., true)`) must reach the focus node
+    #[test]
+    fn write_zipper_write_after_prune_path_below_a_graft() {
+        let build = || {
+            let mut m0 = PathMap::<u64>::new();
+            let mut m1 = PathMap::<u64>::new();
+            m1.set_val_at(&[1u8, 0, 0, 0, 0], 7);
+            m0.create_path(&[0u8, 0]);
+            m1.create_path(&[1u8]);
+            (m0, m1)
+        };
+
+        // prune_path directly
+        let (mut m0, m1) = build();
+        {
+            let mut wz = m0.write_zipper_at_path(&[0u8, 0]);
+            let rz = m1.read_zipper_at_path(&[1u8]);
+            wz.graft(&rz);
+            wz.descend_last_byte();
+            wz.remove_branches(false);
+            wz.prune_path();
+            assert_eq!(wz.path(), &[0u8]);
+            assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
+            assert_eq!(wz.val(), Some(&3));
+        }
+        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
+        assert_eq!(m0.val_count(), 1);
+
+        // through meet_into with prune
+        let (mut m0, m1) = build();
+        {
+            let mut wz = m0.write_zipper_at_path(&[0u8, 0]);
+            let rz = m1.read_zipper_at_path(&[1u8]);
+            wz.graft(&rz);
+            wz.descend_last_byte();
+            wz.meet_into(&rz, true);
+            assert_eq!(wz.path(), &[0u8]);
+            assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
+            assert_eq!(wz.val(), Some(&3));
+        }
+        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
+    }
+
 
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
     #[test]
