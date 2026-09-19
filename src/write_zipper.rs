@@ -6660,6 +6660,8 @@ mod tests {
         drop(rz);
         assert_eq!(map.val_count(), 2);
 
+    }
+
     /// Dense `restrict` is `Identity` even when the restrictor has extra branches
     #[test]
     fn write_zipper_restrict_wider_restrictor_is_identity() {
