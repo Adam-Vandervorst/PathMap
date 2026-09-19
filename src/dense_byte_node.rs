@@ -505,6 +505,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     new_node.values.push(cf.clone());
                 } else {
 
+                    //Dropping this value changes the destination
+                    if cf.val().is_some() {
+                        is_identity = false;
+                    }
+
                     //If there is an onward link in the CF and other node, continue the restriction recursively
                     if let Some(self_child) = cf.rec() {
                         let other_child = other.get_node_at_key(&[key_byte]);
@@ -531,6 +536,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                                 is_identity = false;
                             }
                         }
+                    } else {
+                        //The target slot is dangling and the restrictor has no value here: drop it
+                        is_identity = false;
                     }
                 }
             } else {
@@ -2359,7 +2367,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         // Iterate the overlap mask directly. Slot indexes are recovered with
         // prefix popcounts in each dense-mask word.
         let mut mm: ByteMask = self.mask & other.mask;
-        let mut is_identity = self.mask == mm && other.mask == mm;
+        //Restrict is non-commutative: only `self`'s branches matter for identity
+        let mut is_identity = self.mask == mm;
 
         let mmc = [mm.0[0].count_ones(), mm.0[1].count_ones(), mm.0[2].count_ones(), mm.0[3].count_ones()];
 
