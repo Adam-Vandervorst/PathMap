@@ -2585,6 +2585,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
         if should_ascend {
             self.key.prefix_buf.truncate(temp_path.len());
+        } else if ascended {
+            //The zipper didn't move, so restore the node stack to the focus
+            self.descend_to_internal();
         }
 
         pruned_bytes
@@ -3723,6 +3726,50 @@ mod tests {
         assert_eq!(btm2.path_exists_at(&[0, 255, 1]), false);
     }
 
+    /// A write after `prune_path` (or `meet_into(.., true)`) must reach the focus node
+    #[test]
+    fn write_zipper_write_after_prune_path_below_a_graft() {
+        let build = || {
+            let mut m0 = PathMap::<u64>::new();
+            let mut m1 = PathMap::<u64>::new();
+            m1.set_val_at(&[1u8, 0, 0, 0, 0], 7);
+            m0.create_path(&[0u8, 0]);
+            m1.create_path(&[1u8]);
+            (m0, m1)
+        };
+
+        // prune_path directly
+        let (mut m0, m1) = build();
+        {
+            let mut wz = m0.write_zipper_at_path(&[0u8, 0]);
+            let rz = m1.read_zipper_at_path(&[1u8]);
+            wz.graft(&rz);
+            wz.descend_last_byte();
+            wz.remove_branches(false);
+            wz.prune_path();
+            assert_eq!(wz.path(), &[0u8]);
+            assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
+            assert_eq!(wz.val(), Some(&3));
+        }
+        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
+        assert_eq!(m0.val_count(), 1);
+
+        // through meet_into with prune
+        let (mut m0, m1) = build();
+        {
+            let mut wz = m0.write_zipper_at_path(&[0u8, 0]);
+            let rz = m1.read_zipper_at_path(&[1u8]);
+            wz.graft(&rz);
+            wz.descend_last_byte();
+            wz.meet_into(&rz, true);
+            assert_eq!(wz.path(), &[0u8]);
+            assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
+            assert_eq!(wz.val(), Some(&3));
+        }
+        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
+    }
+
+
     /// Tests whether the [WriteZipper::subtract_into] operation will do the right thing with the root value
     #[test]
     fn write_zipper_subtract_into_test1() {
@@ -3765,6 +3812,39 @@ mod tests {
         all_but_root_map.insert(b"a", ());
         assert_eq!(map.write_zipper().subtract_into(&all_but_root_map.read_zipper(), true), AlgebraicStatus::Element);
         assert_eq!(map.iter().count(), 1);
+    }
+
+    /// `subtract_into` keeps a value when the source only has a longer path through it
+    #[test]
+    fn write_zipper_subtract_into_value_under_source_path() {
+        let mut map: PathMap<u64> = PathMap::new();
+        map.insert([0], 0);
+        map.insert([0, 0], 0);
+        map.insert([0, 0, 0], 0);
+        map.insert([1, 0, 0], 0);
+        let mut src: PathMap<u64> = PathMap::new();
+        src.insert([0, 0], 0);
+        src.insert([1, 0, 0], 0);
+
+        assert_eq!(map.write_zipper().subtract_into(&src.read_zipper(), false), AlgebraicStatus::Element);
+        let remaining: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(remaining, vec![(vec![0], 0), (vec![0, 0, 0], 0)]);
+
+        // Same shape, reached through a join first
+        let mut map: PathMap<u64> = PathMap::new();
+        map.insert([], 0);
+        map.insert([0], 0);
+        map.insert([0, 0, 0], 0);
+        let mut src: PathMap<u64> = PathMap::new();
+        src.insert([], 0);
+        src.insert([0, 0], 0);
+        src.insert([1, 0, 0], 0);
+        let mut wz = map.write_zipper();
+        wz.join_into(&src.read_zipper());
+        wz.subtract_into(&src.read_zipper(), false);
+        drop(wz);
+        let remaining: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(remaining, vec![(vec![0], 0), (vec![0, 0, 0], 0)]);
     }
 
     /// Tests how `subtract_into` handles dangling paths, including situations with extraneous empty nodes hanging around
@@ -6716,5 +6796,52 @@ mod tests {
         assert!(rz.path_exists());
         drop(rz);
         assert_eq!(map.val_count(), 2);
+    }
+
+    /// Every location in `map`, dangling ones included, with its value
+    fn all_locations(map: &PathMap<u64>) -> Vec<(Vec<u8>, Option<u64>)> {
+        let mut rz = map.read_zipper();
+        let mut locations = vec![];
+        loop {
+            locations.push((rz.path().to_vec(), rz.val().cloned()));
+            if !rz.to_next_step() { break }
+        }
+        locations
+    }
+
+    /// Dense `subtract_into` against a list or tiny node drops a dangling path the source reaches
+    #[test]
+    fn write_zipper_subtract_into_dense_drops_reached_dangling_path() {
+        // Empty onward link at [2]; the source (a LineListNode) reaches [2]
+        let mut dst = PathMap::<u64>::new();
+        for b in [1u8, 3, 4] { dst.set_val_at(&[b], 1); }
+        dst.create_path(&[2u8]);
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[2u8, 0, 1], 246);
+        let mut wz = dst.write_zipper();
+        assert_eq!(wz.subtract_into(&src.read_zipper(), false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![(vec![], None), (vec![1], Some(1)), (vec![3], Some(1)), (vec![4], Some(1))]);
+
+        // Dangling [2] from an empty meet; the source is a TinyRefNode
+        let mut dst = PathMap::<u64>::new();
+        dst.set_val_at(&[2u8, 0, 0, 0, 0], 0);
+        dst.set_val_at(&[0u8, 0, 0, 0, 0], 0);
+        dst.set_val_at(&[0u8], 0);
+        let mut srcs = PathMap::<u64>::new();
+        srcs.set_val_at(&[1u8, 2, 0], 0);
+        let mut wz = dst.write_zipper();
+        wz.descend_to_byte(2);
+        let ra = srcs.read_zipper_at_path(&[1u8]);
+        let rb = srcs.read_zipper_at_path(&[1u8, 0]);
+        assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None);
+        wz.reset();
+        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[2u8]); probe.path_exists() }, true, "the meet should leave [2] dangling");
+        assert_eq!(wz.subtract_into(&ra, false), AlgebraicStatus::Element);
+        drop(wz);
+        assert_eq!(all_locations(&dst), vec![
+            (vec![], None), (vec![0], Some(0)), (vec![0, 0], None), (vec![0, 0, 0], None),
+            (vec![0, 0, 0, 0], None), (vec![0, 0, 0, 0, 0], Some(0)),
+        ]);
     }
 }

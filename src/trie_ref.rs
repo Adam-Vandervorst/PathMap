@@ -94,6 +94,82 @@ impl<V> ValRefOrKey<'_, V> {
     }
 }
 
+/// Internal function to encapsulate the logic to walk a path and then make a new TrieRef.  Abstracted so it can
+/// create either kind of TrieRef (owned or borrowed)
+#[inline(always)]
+fn trie_ref_from_key_and_path_in<'a, 'paths, V, A, R, RootValF, BuildF, InvalidF>(
+    mut node: &'a TrieNodeODRc<V, A>,
+    root_val_f: RootValF,
+    node_key: &'paths [u8],
+    mut path: &'paths [u8],
+    alloc: A,
+    build: BuildF,
+    invalid: InvalidF,
+) -> R
+where
+    V: Clone + Send + Sync,
+    A: Allocator + 'a,
+    RootValF: FnOnce() -> Option<&'a V>,
+    BuildF: FnOnce(&'a TrieNodeODRc<V, A>, &[u8], Option<&'a V>, A) -> R,
+    InvalidF: FnOnce(A) -> R,
+{
+    // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`.
+    let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
+
+    let node_key_len = node_key.len();
+    let path_len = path.len();
+
+    // Copy the existing node key and the first chunk of the path into the temporary buffer, then try to descend one step.
+    if node_key_len > 0 && path_len > 0 {
+        let next_node_path = unsafe {
+            // SAFETY: `temp_key_buf` has capacity for `MAX_NODE_KEY_BYTES` bytes. We copy exactly
+            // `node_key_len` bytes from `node_key`, which is a valid slice, then append at most the
+            // remaining buffer capacity from the valid slice `path`. Both destination ranges are
+            // within the stack buffer and do not overlap the sources.
+            let src_ptr = node_key.as_ptr();
+            let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
+            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
+
+            let remaining_len = (MAX_NODE_KEY_BYTES - node_key_len).min(path_len);
+            let src_ptr = path.as_ptr();
+            let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>().add(node_key_len);
+            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, remaining_len);
+
+            let total_buf_len = node_key_len + remaining_len;
+            // SAFETY: The first `total_buf_len` bytes of `temp_key_buf` were initialized by the
+            // copies above, and `total_buf_len <= MAX_NODE_KEY_BYTES`, so this slice is valid for
+            // reads for the duration of this function.
+            core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
+        };
+
+        match node.as_tagged().node_get_child(next_node_path) {
+            // Only step into the child if path remains, or we'd answer with the focus value.
+            Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len && consumed_byte_cnt < node_key_len + path_len => {
+                node = next_node;
+                path = &path[consumed_byte_cnt-node_key_len..];
+            }
+            // If the child begins within `node_key`, let the general walker handle the combined key and path.
+            _ => path = next_node_path,
+        }
+    } else if path_len == 0 {
+        path = node_key;
+    }
+
+    let (node, key, val) = if path.is_empty() {
+        (node, &[] as &[u8], root_val_f())
+    } else {
+        node_along_path(node, path, None, true)
+    };
+    let (node, key, val) = node_along_path(node, key, val, false);
+    if key.len() > MAX_NODE_KEY_BYTES ||
+        (!key.is_empty() && !node.as_tagged().node_contains_partial_key(key))
+    {
+        invalid(alloc)
+    } else {
+        build(node, key, val, alloc)
+    }
+}
+
 impl<V: Clone + Send + Sync, A: Allocator> Clone for TrieRefBorrowed<'_, V, A> {
     #[inline]
     fn clone(&self) -> Self {
@@ -107,6 +183,31 @@ impl<V: Clone + Send + Sync, A: Allocator> Clone for TrieRefBorrowed<'_, V, A> {
 impl<V: Clone + Send + Sync, A: Allocator + Copy> Copy for TrieRefBorrowed<'_, V, A> {}
 
 impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, A> {
+    /// Makes a new TrieRefBorrowed from its parts
+    #[inline(always)]
+    fn new_from_parts(
+        node: &'a TrieNodeODRc<V, A>,
+        key: &[u8],
+        val: Option<&'a V>,
+        alloc: A,
+    ) -> Self {
+        let val_or_key = if !key.is_empty() {
+            let mut node_key_bytes = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    key.as_ptr(),
+                    node_key_bytes.as_mut_ptr().cast::<u8>(),
+                    key.len(),
+                );
+            }
+            ValRefOrKey { node_key: (key.len() as u8, node_key_bytes) }
+        } else {
+            ValRefOrKey { val_ref: (VAL_SENTINEL, val) }
+        };
+
+        Self { focus_node: Some(node), val_or_key, alloc }
+    }
+
     /// Makes a new `TrieRef` that points to no trie node.
     pub(crate) fn new_invalid_in(alloc: A) -> Self {
         Self {
@@ -115,108 +216,26 @@ impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, 
             alloc,
         }
     }
-    /// Internal constructor
-    pub(crate) fn new_with_node_and_path_in(root_node: &'a TrieNodeODRc<V, A>, root_val: Option<&'a V>, path: &[u8], alloc: A) -> Self {
-        let (node, key, val) = node_along_path(root_node, path, root_val, false);
-        let node_key_len = key.len();
-        if node_key_len > MAX_NODE_KEY_BYTES ||
-            (node_key_len > 0 && !node.as_tagged().node_contains_partial_key(key))
-        {
-            return Self::new_invalid_in(alloc)
-        }
-        let val_or_key = if node_key_len > 0 && node_key_len <= MAX_NODE_KEY_BYTES {
-            let mut node_key_bytes = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
-            unsafe {
-                let src_ptr = key.as_ptr();
-                let dst_ptr = node_key_bytes.as_mut_ptr().cast::<u8>();
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
-            }
-            ValRefOrKey { node_key: (node_key_len as u8, node_key_bytes) }
-        } else {
-            ValRefOrKey { val_ref: (VAL_SENTINEL, val) }
-        };
-
-        Self { focus_node: Some(node), val_or_key, alloc }
-    }
-
     /// Internal function to implement [ZipperReadOnlySubtries::trie_ref_at_path] for all the types that need it
     ///
     /// The root value is computed lazily because it is only needed if the combined `node_key + path`
     /// resolves to the current node root rather than to a non-empty key within that node.
     pub(crate) fn new_with_key_and_path_in<'paths>(
-        mut node: &'a TrieNodeODRc<V, A>,
+        node: &'a TrieNodeODRc<V, A>,
         root_val_f: impl FnOnce() -> Option<&'a V>,
         node_key: &'paths [u8],
-        mut path: &'paths [u8],
+        path: &'paths [u8],
         alloc: A,
     ) -> Self {
-        // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`
-        let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
-
-        let node_key_len = node_key.len();
-        let path_len = path.len();
-
-        //Copy the existing node key and the first chunk of the path into the temp buffer, and try to
-        // descend one step
-        if node_key_len > 0 && path_len > 0 {
-            let next_node_path = unsafe {
-                // SAFETY: `temp_key_buf` has capacity for `MAX_NODE_KEY_BYTES` bytes. We copy exactly
-                // `node_key_len` bytes from `node_key`, which is a valid slice, then append at most the
-                // remaining buffer capacity from the valid slice `path`. Both destination ranges are
-                // within the stack buffer and do not overlap the sources.
-                let src_ptr = node_key.as_ptr();
-                let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
-
-                let remaining_len = (MAX_NODE_KEY_BYTES - node_key_len).min(path_len);
-                let src_ptr = path.as_ptr();
-                let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>().add(node_key_len);
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, remaining_len);
-
-                let total_buf_len = node_key_len + remaining_len;
-                // SAFETY: The first `total_buf_len` bytes of `temp_key_buf` were initialized by the
-                // copies above, and `total_buf_len <= MAX_NODE_KEY_BYTES`, so this slice is valid for
-                // reads for the duration of this function.
-                core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
-            };
-
-            match node.as_tagged().node_get_child(next_node_path) {
-                //The child was reached at or beyond the end of `node_key`, so what is left to walk
-                //is a suffix of `path` and the step can be taken here.
-                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len => {
-                    node = next_node;
-                    path = &path[consumed_byte_cnt-node_key_len..];
-                }
-                //The child was reached *inside* `node_key`: the key spans a node boundary, which
-                //happens when a node was materialised part-way along it -- `create_path` leaves an
-                //empty one (FINDINGS #8), and a `TrieRef` taken below such a path lands here.  What
-                //remains to walk is `node_key[consumed..] ++ path`, which is a slice of neither, so
-                //the step is left to `node_along_path` below: it walks a whole key from a node and
-                //crosses boundaries itself.
-                //
-                //This used to be a `debug_assert!(consumed_byte_cnt >= node_key_len)` and a
-                //subtraction, so a release build computed `2 - 6` and indexed a slice at
-                //18446744073709551612.  Reached from the public API by
-                //`create_path(&[2,2]); write_zipper_at_path(&[2,2]); descend_to(&[2,1,3,1]);
-                //val_at(&[1,1])`.
-                _ => {
-                    path = next_node_path;
-                }
-            }
-        } else {
-            if path_len == 0 {
-                path = node_key;
-            }
-        }
-
-        let (node, key, val) = if path.is_empty() {
-            (node, &[] as &[u8], root_val_f())
-        } else {
-            //Descend the rest of the way along the path
-            node_along_path(node, path, None, true)
-        };
-
-        TrieRefBorrowed::new_with_node_and_path_in(node, val, key, alloc)
+        trie_ref_from_key_and_path_in(
+            node,
+            root_val_f,
+            node_key,
+            path,
+            alloc,
+            Self::new_from_parts,
+            Self::new_invalid_in,
+        )
     }
 
     /// Internal Method to convert a trie ref into an [AbstractNodeRef]
@@ -511,6 +530,31 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> From<PathMap<V, A>> for TrieR
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> TrieRefOwned<V, A> {
+    /// Makes a new TrieRefOwned from its parts
+    #[inline(always)]
+    fn new_from_parts(
+        node: &TrieNodeODRc<V, A>,
+        key: &[u8],
+        val: Option<&V>,
+        alloc: A,
+    ) -> Self {
+        let val_or_key = if !key.is_empty() {
+            let mut node_key_bytes = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    key.as_ptr(),
+                    node_key_bytes.as_mut_ptr().cast::<u8>(),
+                    key.len(),
+                );
+            }
+            ValOrKey { node_key: (key.len() as u8, node_key_bytes) }
+        } else {
+            ValOrKey { val: (VAL_SENTINEL, core::mem::ManuallyDrop::new(val.cloned())) }
+        };
+
+        Self { focus_node: Some(node.clone()), val_or_key, alloc }
+    }
+
     /// Makes a `TrieRefOwned` from a node and a val
     pub(crate) fn new_with_node_and_val_in(focus_node: Option<TrieNodeODRc<V, A>>, val: Option<V>, alloc: A) -> Self {
         match focus_node {
@@ -526,90 +570,17 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieRefOwned<V, A> {
             alloc,
         }
     }
-    /// Internal constructor
-    pub(crate) fn new_with_node_and_path_in(parent_node: &TrieNodeODRc<V, A>, root_val: Option<&V>, path: &[u8], alloc: A) -> Self {
-        let (node, key, val) = node_along_path(parent_node, path, root_val, false);
-        let node_key_len = key.len();
-        if node_key_len > MAX_NODE_KEY_BYTES ||
-            (node_key_len > 0 && !node.as_tagged().node_contains_partial_key(key))
-        {
-            return Self::new_invalid_in(alloc)
-        }
-        let val_or_key = if node_key_len > 0 && node_key_len <= MAX_NODE_KEY_BYTES {
-            let mut node_key_bytes = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
-            unsafe {
-                let src_ptr = key.as_ptr();
-                let dst_ptr = node_key_bytes.as_mut_ptr().cast::<u8>();
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
-            }
-            ValOrKey { node_key: (node_key_len as u8, node_key_bytes) }
-        } else {
-            let val = val.cloned();
-            ValOrKey { val: (VAL_SENTINEL, core::mem::ManuallyDrop::new(val)) }
-        };
-
-        Self { focus_node: Some(node.clone()), val_or_key, alloc }
-    }
-
     /// Internal function to implement [ZipperReadOnlySubtries::trie_ref_at_path] for all the types that need it
-    pub(crate) fn new_with_key_and_path_in<'a, 'paths>(mut node: &TrieNodeODRc<V, A>, root_val: Option<&'a V>, node_key: &'paths [u8], mut path: &'paths [u8], alloc: A) -> Self {
-
-        // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`
-        let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
-
-        let node_key_len = node_key.len();
-        let path_len = path.len();
-
-        //Copy the existing node key and the first chunk of the path into the temp buffer, and try to
-        // descend one step
-        if node_key_len > 0 && path_len > 0 {
-            let next_node_path = unsafe {
-                let src_ptr = node_key.as_ptr();
-                let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
-
-                let remaining_len = (MAX_NODE_KEY_BYTES - node_key_len).min(path_len);
-                let src_ptr = path.as_ptr();
-                let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>().add(node_key_len);
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, remaining_len);
-
-                let total_buf_len = node_key_len + remaining_len;
-                core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
-            };
-
-            match node.as_tagged().node_get_child(next_node_path) {
-                //The child was reached at or beyond the end of `node_key`, so what is left to walk
-                //is a suffix of `path` and the step can be taken here.
-                Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len => {
-                    node = next_node;
-                    path = &path[consumed_byte_cnt-node_key_len..];
-                }
-                //The child was reached *inside* `node_key`: the key spans a node boundary, which
-                //happens when a node was materialised part-way along it -- `create_path` leaves an
-                //empty one (FINDINGS #8), and a `TrieRef` taken below such a path lands here.  What
-                //remains to walk is `node_key[consumed..] ++ path`, which is a slice of neither, so
-                //the step is left to `node_along_path` below: it walks a whole key from a node and
-                //crosses boundaries itself.
-                //
-                //This used to be a `debug_assert!(consumed_byte_cnt >= node_key_len)` and a
-                //subtraction, so a release build computed `2 - 6` and indexed a slice at
-                //18446744073709551612.  Reached from the public API by
-                //`create_path(&[2,2]); write_zipper_at_path(&[2,2]); descend_to(&[2,1,3,1]);
-                //val_at(&[1,1])`.
-                _ => {
-                    path = next_node_path;
-                }
-            }
-        } else {
-            if path_len == 0 {
-                path = node_key;
-            }
-        }
-
-        //Descend the rest of the way along the path
-        let (node, key, val) = node_along_path(node, path, root_val, true);
-
-        TrieRefOwned::new_with_node_and_path_in(node, val, key, alloc)
+    pub(crate) fn new_with_key_and_path_in<'a, 'paths>(node: &TrieNodeODRc<V, A>, root_val: Option<&'a V>, node_key: &'paths [u8], path: &'paths [u8], alloc: A) -> Self {
+        trie_ref_from_key_and_path_in(
+            node,
+            || root_val,
+            node_key,
+            path,
+            alloc,
+            Self::new_from_parts,
+            Self::new_invalid_in,
+        )
     }
 
     /// Internal.  Checks if the `TrieRef` is valid, which is a prerequisite to see if it's pointing
@@ -1298,6 +1269,54 @@ mod tests {
         assert_eq!(tr.val_at(&[1u8]), Some(&5));
         let tr = map.trie_ref_at_path(&[2u8, 2, 2, 1]);
         assert_eq!(tr.val_at(&[3u8, 1, 4]), Some(&6));
+    }
+
+    /// `val_at` on a dangling child of a focus with a value is `None`
+    #[test]
+    fn trie_ref_val_at_dangling_child_is_none() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8], 7);
+        map.create_path(&[0u8, 3]);
+
+        //Read zipper descended to the value-bearing location
+        let mut rz = map.read_zipper();
+        rz.descend_to(&[0u8]);
+        assert_eq!(rz.val(), Some(&7));
+        assert!({ let mut z = rz.fork_read_zipper(); z.descend_to(&[3u8]); z.path_exists() });
+        assert_eq!(rz.val_at(&[3u8]), None);
+        assert_eq!(rz.get_val_at(&[3u8]), None);
+        assert_eq!(rz.val_at(&[3u8, 9]), None);
+        assert_eq!(rz.val_at(&[5u8]), None);
+        assert_eq!(rz.val_at(&[]), Some(&7));
+        drop(rz);
+
+        //Write zipper
+        let mut wz = map.write_zipper();
+        wz.descend_to(&[0u8]);
+        assert_eq!(wz.val_at(&[3u8]), None);
+        assert_eq!(wz.val_at(&[]), Some(&7));
+        drop(wz);
+
+        //TrieRefs, borrowed and owned
+        assert_eq!(map.trie_ref_at_path(&[0u8]).val_at(&[3u8]), None);
+        assert_eq!(map.trie_ref_at_path(&[0u8]).val_at(&[]), Some(&7));
+        assert_eq!(map.trie_ref_at_path(&[]).val_at(&[0u8, 3]), None);
+        let owned = match TrieRef::from(map.clone()) {
+            TrieRef::Owned(trie_ref) => trie_ref,
+            TrieRef::Borrowed(_) => unreachable!(),
+        };
+        assert_eq!(owned.trie_ref_at_path(&[0u8]).val_at(&[3u8]), None);
+        assert_eq!(owned.trie_ref_at_path(&[0u8]).val_at(&[]), Some(&7));
+        assert_eq!(owned.val_at(&[0u8, 3]), None);
+
+        //A value stored exactly at a node boundary is still found
+        map.set_val_at(&[0u8, 3], 8);
+        map.set_val_at(&[0u8, 3, 1], 9);
+        let mut rz = map.read_zipper();
+        rz.descend_to(&[0u8]);
+        assert_eq!(rz.val_at(&[3u8]), Some(&8));
+        assert_eq!(rz.val_at(&[3u8, 1]), Some(&9));
+        assert_eq!(map.trie_ref_at_path(&[0u8]).val_at(&[3u8]), Some(&8));
     }
 
     fn assert_invalid_trie_ref<T>(trie_ref: &T)

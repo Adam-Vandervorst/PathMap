@@ -454,7 +454,6 @@ pub trait ZipperMoving: Zipper {
             },
             None => {
                 self.descend_to_byte(cur_byte);
-                debug_assert!(self.path_exists());
                 None
             }
         }
@@ -1051,6 +1050,9 @@ pub trait ZipperIteration: ZipperMoving {
     ///
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        if k == 0 {
+            return false;
+        }
         k_path_default_internal(self, k, self.depth(), obs)
     }
 
@@ -2664,6 +2666,9 @@ pub(crate) mod read_zipper_core {
         }
         fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
             timed_span!(DescendFirstKPath, COUNTERS);
+            if k == 0 {
+                return false;
+            }
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -3643,6 +3648,30 @@ pub(crate) mod zipper_moving_tests {
                 }
 
                 #[test]
+                fn [<$z_name _prev_sibling_sparse_paths>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_PREV_SIBLING_SPARSE_PATHS_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::prev_sibling_sparse_paths)
+                }
+
+                #[test]
+                fn [<$z_name _prev_sibling_value_and_child_location>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_PREV_SIBLING_VALUE_AND_CHILD_LOCATION_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::prev_sibling_value_and_child_location)
+                }
+
+                #[test]
+                fn [<$z_name _sibling_step_from_a_focus_that_does_not_exist_empty>]() {
+                    let mut temp_store = $read_keys(&[]);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::sibling_step_from_a_focus_that_does_not_exist_empty)
+                }
+
+                #[test]
+                fn [<$z_name _sibling_step_from_a_focus_that_does_not_exist>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::SIBLING_STEP_FROM_A_FOCUS_THAT_DOES_NOT_EXIST_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::sibling_step_from_a_focus_that_does_not_exist)
+                }
+
+                #[test]
                 fn [<$z_name _zipper_indexed_bytes_test1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_INDEXED_BYTE_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_indexed_bytes_test1)
@@ -3694,6 +3723,30 @@ pub(crate) mod zipper_moving_tests {
                 fn [<$z_name _zipper_ascend_until_test5>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_ASCEND_UNTIL_TEST5_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_ascend_until_test5)
+                }
+
+                #[test]
+                fn [<$z_name _ascend_until_from_off_trie_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_root)
+                }
+
+                #[test]
+                fn [<$z_name _ascend_until_from_off_trie_line_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[1], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_line_root)
+                }
+
+                #[test]
+                fn [<$z_name _ascend_until_from_off_trie_mid_line_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[1, 2], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_mid_line_root)
+                }
+
+                #[test]
+                fn [<$z_name _ascend_until_from_off_trie_value_branch_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[7], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_value_branch_root)
                 }
 
                 #[test]
@@ -3816,6 +3869,40 @@ pub(crate) mod zipper_moving_tests {
     /// from https://en.wikipedia.org/wiki/Radix_tree#/media/File:Patricia_trie.svg
     pub const ZIPPER_MOVING_BASIC_TEST_KEYS: &[&[u8]] = &[b"romane", b"romanus", b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i"];
 
+    pub const ZIPPER_PREV_SIBLING_SPARSE_PATHS_KEYS: &[&[u8]] = &[b"AA", b"CCC"];
+
+    pub const ZIPPER_PREV_SIBLING_VALUE_AND_CHILD_LOCATION_KEYS: &[&[u8]] = &[&[2, 0], &[2, 1], &[2]];
+
+    pub fn prev_sibling_sparse_paths<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        // An absent root child can have a preceding sibling, while positions
+        // inside a line have no preceding sibling at their respective depths.
+        zipper.descend_to(b"C");
+        assert_eq!(zipper.to_prev_sibling_byte(), Some(b'A'));
+        assert_eq!(zipper.path(), b"A");
+        zipper.reset();
+        zipper.descend_to(b"CC");
+        assert_eq!(zipper.to_prev_sibling_byte(), None);
+        zipper.reset();
+        zipper.descend_to(b"CCC");
+        assert_eq!(zipper.to_prev_sibling_byte(), None);
+    }
+
+    /// `to_prev_sibling_byte` onto a location holding both a value and a child subtree.
+    pub fn prev_sibling_value_and_child_location<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        for start in [&[3u8][..], &[9u8]] {
+            zipper.reset();
+            zipper.descend_to(start);
+            assert!(!zipper.path_exists());
+            assert_eq!(zipper.to_prev_sibling_byte(), Some(2), "from {start:?}");
+            assert_eq!(zipper.path(), &[2u8]);
+            assert!(zipper.is_val());
+            assert_eq!(zipper.child_count(), 2, "from {start:?}");
+            assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![0u8, 1]);
+            assert_eq!(zipper.descend_first_byte(), Some(0), "from {start:?}");
+            assert_eq!(zipper.path(), &[2u8, 0]);
+        }
+    }
+
     pub fn zipper_moving_basic_test<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
         fn assert_in_list(val: &[u8], list: &[&[u8]]) {
             for test_val in list {
@@ -3932,6 +4019,121 @@ pub(crate) mod zipper_moving_tests {
         //`descend_first_byte` is documented to behave identically to `descend_indexed_byte(0)`
         assert_eq!(zip.descend_first_byte(), None);
         assert_eq!(zip.path(), b"bb");
+    }
+
+    /// Sibling steps from a focus that is not in the trie
+    pub fn sibling_step_from_a_focus_that_does_not_exist_empty<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        zipper.descend_to(&[0]);
+        assert!(!zipper.path_exists());
+        assert_eq!(zipper.to_prev_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[0]);
+        assert!(!zipper.path_exists());
+        assert_eq!(zipper.to_next_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[0]);
+        assert!(!zipper.path_exists());
+    }
+
+    pub const SIBLING_STEP_FROM_A_FOCUS_THAT_DOES_NOT_EXIST_KEYS: &[&[u8]] =
+        &[&[1, 3], &[1, 5], &[7]];
+
+    /// Sibling steps from a missing focus use the parent\'s siblings when present, and otherwise
+    /// preserve the missing focus.
+    pub fn sibling_step_from_a_focus_that_does_not_exist<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        //Missing focus under an existing parent: siblings come from the parent
+        for (byte, prev, next) in [(2, None, Some(3)), (4, Some(3), Some(5)), (6, Some(5), None)] {
+            zipper.reset();
+            zipper.descend_to(&[1, byte]);
+            assert!(!zipper.path_exists(), "byte {byte}");
+            assert_eq!(zipper.to_prev_sibling_byte(), prev, "byte {byte}");
+            assert_eq!(zipper.path_exists(), prev.is_some(), "byte {byte}");
+            assert_eq!(zipper.path(), &[1, prev.unwrap_or(byte)], "byte {byte}");
+
+            zipper.reset();
+            zipper.descend_to(&[1, byte]);
+            assert_eq!(zipper.to_next_sibling_byte(), next, "byte {byte}");
+            assert_eq!(zipper.path_exists(), next.is_some(), "byte {byte}");
+            assert_eq!(zipper.path(), &[1, next.unwrap_or(byte)], "byte {byte}");
+        }
+
+        //Missing parent: no siblings, focus unchanged, and the zipper remains usable
+        zipper.reset();
+        zipper.descend_to(&[9, 9]);
+        assert!(!zipper.path_exists());
+        assert_eq!(zipper.to_prev_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[9, 9]);
+        assert_eq!(zipper.to_next_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[9, 9]);
+        assert!(!zipper.path_exists());
+        zipper.ascend(2);
+        assert_eq!(zipper.to_next_sibling_byte(), None);
+        zipper.descend_to(&[7]);
+        assert!(zipper.path_exists());
+    }
+
+    pub const OFF_TRIE_ASCEND_KEYS: &[&[u8]] = &[
+        &[1, 2, 3, 4], &[5, 2], &[5, 6], &[7], &[7, 8], &[7, 9],
+    ];
+
+    type OffTrieAscendCase = (&'static [u8], bool, usize, &'static [u8], bool, usize, Option<u8>, &'static [u8], bool);
+
+    /// Checks an off-trie ascent and then verifies that the landed focus remains usable.
+    fn run_off_trie_ascend_cases<Z: ZipperMoving + ZipperPath>(mut zipper: Z, cases: &[OffTrieAscendCase]) {
+        for &(focus, need_value, steps, path, is_val, children, first, after_path, after_is_val) in cases {
+            zipper.reset();
+            zipper.descend_to(focus);
+            assert!(!zipper.path_exists(), "focus {focus:?}");
+            let actual_steps = if need_value { zipper.ascend_until() } else { zipper.ascend_until_branch() };
+            assert_eq!(actual_steps, steps, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.path(), path, "focus {focus:?}, need_value {need_value}");
+            assert!(zipper.path_exists(), "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.is_val(), is_val, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.child_count(), children, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.descend_first_byte(), first, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.path(), after_path, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.is_val(), after_is_val, "focus {focus:?}, need_value {need_value}");
+        }
+    }
+
+    /// Rooted at the map root: 9 off-trie focuses, each tested with both ascent modes.
+    pub fn ascend_until_from_off_trie_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[1,2,9],false,3,&[],false,3,Some(1),&[1],false), (&[1,2,9],true,3,&[],false,3,Some(1),&[1],false),
+            (&[1,2,3,9],false,4,&[],false,3,Some(1),&[1],false), (&[1,2,3,9],true,4,&[],false,3,Some(1),&[1],false),
+            (&[1,2,3,4,9],false,5,&[],false,3,Some(1),&[1],false), (&[1,2,3,4,9],true,1,&[1,2,3,4],true,0,None,&[1,2,3,4],true),
+            (&[1,9,9],false,3,&[],false,3,Some(1),&[1],false), (&[1,9,9],true,3,&[],false,3,Some(1),&[1],false),
+            (&[5,9],false,1,&[5],false,2,Some(2),&[5,2],true), (&[5,9],true,1,&[5],false,2,Some(2),&[5,2],true),
+            (&[5,2,9],false,2,&[5],false,2,Some(2),&[5,2],true), (&[5,2,9],true,1,&[5,2],true,0,None,&[5,2],true),
+            (&[7,9,9],false,2,&[7],true,2,Some(8),&[7,8],true), (&[7,9,9],true,1,&[7,9],true,0,None,&[7,9],true),
+            (&[7,8,9,9],false,3,&[7],true,2,Some(8),&[7,8],true), (&[7,8,9,9],true,2,&[7,8],true,0,None,&[7,8],true),
+            (&[9],false,1,&[],false,3,Some(1),&[1],false), (&[9],true,1,&[],false,3,Some(1),&[1],false),
+        ]);
+    }
+
+    /// Rooted at byte 1, the start of the compressed line.
+    pub fn ascend_until_from_off_trie_line_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[2,9],false,2,&[],false,1,Some(2),&[2],false), (&[2,9],true,2,&[],false,1,Some(2),&[2],false),
+            (&[2,3,9],false,3,&[],false,1,Some(2),&[2],false), (&[2,3,9],true,3,&[],false,1,Some(2),&[2],false),
+            (&[2,3,4,9],false,4,&[],false,1,Some(2),&[2],false), (&[2,3,4,9],true,1,&[2,3,4],true,0,None,&[2,3,4],true),
+            (&[9,9],false,2,&[],false,1,Some(2),&[2],false), (&[9,9],true,2,&[],false,1,Some(2),&[2],false),
+        ]);
+    }
+
+    /// Rooted partway through the compressed line.
+    pub fn ascend_until_from_off_trie_mid_line_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[9],false,1,&[],false,1,Some(3),&[3],false), (&[9],true,1,&[],false,1,Some(3),&[3],false),
+            (&[3,9],false,2,&[],false,1,Some(3),&[3],false), (&[3,9],true,2,&[],false,1,Some(3),&[3],false),
+            (&[3,4,9],false,3,&[],false,1,Some(3),&[3],false), (&[3,4,9],true,1,&[3,4],true,0,None,&[3,4],true),
+        ]);
+    }
+
+    /// Rooted at byte 7, which is both a value and a branch.
+    pub fn ascend_until_from_off_trie_value_branch_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[9,9],false,2,&[],true,2,Some(8),&[8],true), (&[9,9],true,1,&[9],true,0,None,&[9],true),
+            (&[8,9,9],false,3,&[],true,2,Some(8),&[8],true), (&[8,9,9],true,2,&[8],true,0,None,&[8],true),
+        ]);
     }
 
     pub const ZIPPER_INDEXED_BYTE_TEST1_KEYS: &[&[u8]] = &[b"0", b"1", b"2", b"3", b"4", b"5", b"6"];
@@ -4594,6 +4796,12 @@ pub(crate) mod zipper_iteration_tests {
                 }
 
                 #[test]
+                fn [<$z_name _k_path_zero>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_iteration_tests::K_PATH_ZERO_KEYS);
+                    crate::zipper::zipper_iteration_tests::run_test(&mut temp_store, $make_z, b"", crate::zipper::zipper_iteration_tests::k_path_zero)
+                }
+
+                #[test]
                 fn [<$z_name _k_path_test2>]() {
                     let paths = crate::zipper::zipper_iteration_tests::k_path_test2_paths();
                     let path_refs: Vec<&[u8]> = paths.iter().map(|path| &path[..]).collect();
@@ -4702,6 +4910,20 @@ pub(crate) mod zipper_iteration_tests {
             count += 1;
         }
         assert_eq!(count, ZIPPER_ITER_TEST2_COUNT);
+    }
+
+    pub const K_PATH_ZERO_KEYS: &[&[u8]] = &[b"a", b"b"];
+
+    /// The contract explicitly defines `k == 0` as unsuccessful and requires an unsuccessful
+    /// descent to leave the zipper at its original focus.
+    pub fn k_path_zero<Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+        //At a branching focus, where the native zipper used to report success
+        assert!(!zipper.descend_first_k_path(0));
+        assert_eq!(zipper.path(), b"");
+        assert!(zipper.descend_first_byte().is_some());
+        assert_eq!(zipper.path(), b"a");
+        assert!(!zipper.descend_first_k_path(0));
+        assert_eq!(zipper.path(), b"a");
     }
 
     /// This is a toy encoding where `:n:` precedes a symbol `n` characters long
