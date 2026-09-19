@@ -3570,25 +3570,25 @@ pub(crate) mod zipper_moving_tests {
     type OffTrieAscendCase = (&'static [u8], bool, usize, &'static [u8], bool, usize, Option<u8>, &'static [u8], bool);
 
     /// Checks an off-trie ascent and then verifies that the landed focus remains usable.
-    fn run_off_trie_ascend_cases<Z: ZipperMoving + ZipperPath>(mut zipper: Z, cases: &[OffTrieAscendCase]) {
+    fn run_off_trie_ascend_cases<Z: ZipperMoving>(mut zipper: Z, cases: &[OffTrieAscendCase]) {
         for &(focus, need_value, steps, path, is_val, children, first, after_path, after_is_val) in cases {
             zipper.reset();
             zipper.descend_to(focus);
             assert!(!zipper.path_exists(), "focus {focus:?}");
-            let actual_steps = if need_value { zipper.ascend_until() } else { zipper.ascend_until_branch() };
-            assert_eq!(actual_steps, steps, "focus {focus:?}, need_value {need_value}");
+            let moved = if need_value { zipper.ascend_until() } else { zipper.ascend_until_branch() };
+            assert_eq!(moved, steps > 0, "focus {focus:?}, need_value {need_value}");
             assert_eq!(zipper.path(), path, "focus {focus:?}, need_value {need_value}");
             assert!(zipper.path_exists(), "focus {focus:?}, need_value {need_value}");
             assert_eq!(zipper.is_val(), is_val, "focus {focus:?}, need_value {need_value}");
             assert_eq!(zipper.child_count(), children, "focus {focus:?}, need_value {need_value}");
-            assert_eq!(zipper.descend_first_byte(), first, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.descend_first_byte(), first.is_some(), "focus {focus:?}, need_value {need_value}");
             assert_eq!(zipper.path(), after_path, "focus {focus:?}, need_value {need_value}");
             assert_eq!(zipper.is_val(), after_is_val, "focus {focus:?}, need_value {need_value}");
         }
     }
 
     /// Rooted at the map root: 9 off-trie focuses, each tested with both ascent modes.
-    pub fn ascend_until_from_off_trie_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+    pub fn ascend_until_from_off_trie_root<Z: ZipperMoving>(zipper: Z) {
         run_off_trie_ascend_cases(zipper, &[
             (&[1,2,9],false,3,&[],false,3,Some(1),&[1],false), (&[1,2,9],true,3,&[],false,3,Some(1),&[1],false),
             (&[1,2,3,9],false,4,&[],false,3,Some(1),&[1],false), (&[1,2,3,9],true,4,&[],false,3,Some(1),&[1],false),
@@ -3603,7 +3603,7 @@ pub(crate) mod zipper_moving_tests {
     }
 
     /// Rooted at byte 1, the start of the compressed line.
-    pub fn ascend_until_from_off_trie_line_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+    pub fn ascend_until_from_off_trie_line_root<Z: ZipperMoving>(zipper: Z) {
         run_off_trie_ascend_cases(zipper, &[
             (&[2,9],false,2,&[],false,1,Some(2),&[2],false), (&[2,9],true,2,&[],false,1,Some(2),&[2],false),
             (&[2,3,9],false,3,&[],false,1,Some(2),&[2],false), (&[2,3,9],true,3,&[],false,1,Some(2),&[2],false),
@@ -3613,7 +3613,7 @@ pub(crate) mod zipper_moving_tests {
     }
 
     /// Rooted partway through the compressed line.
-    pub fn ascend_until_from_off_trie_mid_line_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+    pub fn ascend_until_from_off_trie_mid_line_root<Z: ZipperMoving>(zipper: Z) {
         run_off_trie_ascend_cases(zipper, &[
             (&[9],false,1,&[],false,1,Some(3),&[3],false), (&[9],true,1,&[],false,1,Some(3),&[3],false),
             (&[3,9],false,2,&[],false,1,Some(3),&[3],false), (&[3,9],true,2,&[],false,1,Some(3),&[3],false),
@@ -3622,7 +3622,7 @@ pub(crate) mod zipper_moving_tests {
     }
 
     /// Rooted at byte 7, which is both a value and a branch.
-    pub fn ascend_until_from_off_trie_value_branch_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+    pub fn ascend_until_from_off_trie_value_branch_root<Z: ZipperMoving>(zipper: Z) {
         run_off_trie_ascend_cases(zipper, &[
             (&[9,9],false,2,&[],true,2,Some(8),&[8],true), (&[9,9],true,1,&[9],true,0,None,&[9],true),
             (&[8,9,9],false,3,&[],true,2,Some(8),&[8],true), (&[8,9,9],true,2,&[8],true,0,None,&[8],true),
