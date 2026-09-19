@@ -3227,7 +3227,7 @@ where Storage: AsRef<[u8]>
     fn descend_first_k_path(&mut self, k: usize) -> bool {
         timed_span!(DescendFirstKPath, COUNTERS);
         if k == 0 {
-            return true;
+            return false;
         }
         //This used to follow the first byte `k` times and give up if it ran out, which finds a
         //path of length `k` only when the leftmost chain happens to be that long -- so a trie
