@@ -558,6 +558,9 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
     }
 
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        if k == 0 {
+            return false;
+        }
         if self.position.is_invalid() {
             return false;
         }
