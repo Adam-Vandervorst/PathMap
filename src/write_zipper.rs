@@ -3702,7 +3702,7 @@ mod tests {
             assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
             assert_eq!(wz.val(), Some(&3));
         }
-        assert_eq!(m0.val_at(&[0u8, 0, 0]), Some(&3));
+        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
         assert_eq!(m0.val_count(), 1);
 
         // through meet_into with prune
@@ -3717,7 +3717,7 @@ mod tests {
             assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
             assert_eq!(wz.val(), Some(&3));
         }
-        assert_eq!(m0.val_at(&[0u8, 0, 0]), Some(&3));
+        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
     }
 
 
@@ -6627,6 +6627,8 @@ mod tests {
             (vec![], None), (vec![0], Some(0)), (vec![0, 0], None), (vec![0, 0, 0], None),
             (vec![0, 0, 0, 0], None), (vec![0, 0, 0, 0, 0], Some(0)),
         ]);
+    }
+
     /// `remove_unmasked_branches` at or below a dangling path does nothing
     #[test]
     fn write_zipper_test_remove_unmasked_branches_dangling_focus() {
@@ -6649,9 +6651,9 @@ mod tests {
         drop(wz);
 
         //Nothing may have changed
-        assert_eq!(map.val_at([0u8]), Some(&0));
-        assert_eq!(map.val_at([0u8, 0]), Some(&1));
-        assert_eq!(map.val_at([1u8, 0]), None);
+        assert_eq!(map.get_val_at([0u8]), Some(&0));
+        assert_eq!(map.get_val_at([0u8, 0]), Some(&1));
+        assert_eq!(map.get_val_at([1u8, 0]), None);
         let mut rz = map.read_zipper();
         rz.descend_to([1u8, 0]);
         assert!(rz.path_exists());
