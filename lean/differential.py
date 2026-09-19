@@ -266,12 +266,6 @@ KNOWN = [
      "copy-on-write cannot make a shared dangling path unique (finding 16) "
      "[shared_dangling_cow]"),
     # ArenaCompactTree read source (differential.py --act).
-    (["k_path_walk"],
-     "ACTZipper::descend_first_k_path() only walks the leftmost chain "
-     "[act: first_k_path_no_backtrack]"),
-    (["descend_first_k_path"],
-     "ACTZipper::descend_first_k_path() only walks the leftmost chain "
-     "[act: first_k_path_no_backtrack]"),
     (["descend_last_path"],
      "ACTZipper::descend_last_path() runs one byte past the end of the trie "
      "[act: last_path_overshoots]"),

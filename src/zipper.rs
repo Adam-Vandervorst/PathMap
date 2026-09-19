@@ -1050,6 +1050,9 @@ pub trait ZipperIteration: ZipperMoving {
     ///
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        if k == 0 {
+            return false;
+        }
         k_path_default_internal(self, k, self.depth(), obs)
     }
 
@@ -2663,6 +2666,9 @@ pub(crate) mod read_zipper_core {
         }
         fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
             timed_span!(DescendFirstKPath, COUNTERS);
+            if k == 0 {
+                return false;
+            }
             self.prepare_buffers();
             debug_assert!(self.is_regularized());
 
@@ -4700,6 +4706,12 @@ pub(crate) mod zipper_iteration_tests {
                 }
 
                 #[test]
+                fn [<$z_name _k_path_zero>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_iteration_tests::K_PATH_ZERO_KEYS);
+                    crate::zipper::zipper_iteration_tests::run_test(&mut temp_store, $make_z, b"", crate::zipper::zipper_iteration_tests::k_path_zero)
+                }
+
+                #[test]
                 fn [<$z_name _k_path_test2>]() {
                     let paths = crate::zipper::zipper_iteration_tests::k_path_test2_paths();
                     let path_refs: Vec<&[u8]> = paths.iter().map(|path| &path[..]).collect();
@@ -4808,6 +4820,20 @@ pub(crate) mod zipper_iteration_tests {
             count += 1;
         }
         assert_eq!(count, ZIPPER_ITER_TEST2_COUNT);
+    }
+
+    pub const K_PATH_ZERO_KEYS: &[&[u8]] = &[b"a", b"b"];
+
+    /// The contract explicitly defines `k == 0` as unsuccessful and requires an unsuccessful
+    /// descent to leave the zipper at its original focus.
+    pub fn k_path_zero<Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+        //At a branching focus, where the native zipper used to report success
+        assert!(!zipper.descend_first_k_path(0));
+        assert_eq!(zipper.path(), b"");
+        assert!(zipper.descend_first_byte().is_some());
+        assert_eq!(zipper.path(), b"a");
+        assert!(!zipper.descend_first_k_path(0));
+        assert_eq!(zipper.path(), b"a");
     }
 
     /// This is a toy encoding where `:n:` precedes a symbol `n` characters long

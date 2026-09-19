@@ -62,7 +62,7 @@ agree exactly or every input with a skip diverges.
   the trait the op needs.
 * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root, where
   the native read zipper escapes its own root.
-* `skip:k0` — a degenerate `k = 0`.
+* `skip:k0` — a degenerate `k = 0` on `join`/`meet_k_path_into`.
 * `skip:empty-focus` — the focus has nothing below it, where the op's behaviour
   is a function of node materialisation rather than trie state.
 * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
@@ -310,23 +310,21 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              let (r, z) := s.rz.toNextVal
              some (emit { s with rz := z } "to_next_val" (showBool r), d)
   | 15 => do let (_t, d) ← d.mod 2; let (k, d) ← d.mod 4
-             -- `k = 0` is degenerate: `k_path_internal` treats "already at depth
-             -- base+0" as a hit and reports success without moving, then
-             -- `to_next_k_path(0)` reports success forever.  Skipped.
-             if k == 0 then some (emit s "descend_first_k_path" skipK0, d)
-             else
-               let (r, z) := s.rz.descendFirstKPath k
-               some (emit { s with rz := z } "descend_first_k_path" (showBool r), d)
+             -- `k = 0` is specified: `false`, focus untouched.  `kPathFrom` gives
+             -- that with no special case, since it wants a location strictly after
+             -- the focus and the only one at depth base+0 is the focus itself.
+             let (r, z) := s.rz.descendFirstKPath k
+             some (emit { s with rz := z } "descend_first_k_path" (showBool r), d)
   | 16 => do let (_t, d) ← d.mod 2; let (k, d) ← d.mod 4
              -- `to_next_k_path` is only meaningful as the continuation of a
              -- `descend_first_k_path` iteration -- `k_path_internal` carries
              -- iteration state, and calling it cold is flagged by pathmap's own
              -- debug assertions.  So the op is the whole walk, not one step.
-             if k == 0 then some (emit s "k_path_walk" skipK0, d)
-             else
-               let (ps, z) := kWalk s.rz k
-               some (emit { s with rz := z } "k_path_walk"
-                 (String.intercalate "," (ps.map hexPath)), d)
+             -- With `k = 0` the descent fails, so the walk is empty and the
+             -- never-ending `to_next_k_path(0)` is not reached.
+             let (ps, z) := kWalk s.rz k
+             some (emit { s with rz := z } "k_path_walk"
+               (String.intercalate "," (ps.map hexPath)), d)
   | 17 => do let (_t, d) ← d.mod 2
              -- `ZipperIteration` is read-only: the target byte is still consumed,
              -- but the operation always applies to the read zipper.
