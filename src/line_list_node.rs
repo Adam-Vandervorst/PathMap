@@ -1925,15 +1925,16 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 remove_0 = !mask.test_bit(key0[key_len]);
             } else {
                 //We can only get here if key0 == key, and the calling code should have descend
-                // through this node if that key specifies an onward link
-                debug_assert!(!self.is_child_ptr::<0>());
+                // through this node if that key specifies a non-dangling onward link
+                debug_assert!(!self.is_used_child_0() || unsafe{ self.child_in_slot::<0>().is_empty() });
             }
         }
         if starts_with(key1, key) {
             if key1.len() > key_len {
                 remove_1 = !mask.test_bit(key1[key_len]);
             } else {
-                debug_assert!(!self.is_child_ptr::<1>()); //See comment above
+                //See comment above
+                debug_assert!(!self.is_used_child_1() || unsafe{ self.child_in_slot::<1>().is_empty() });
             }
         }
         self.remove_subtries(remove_0, remove_1, key0_starts_with, prune, key.len());
@@ -2482,21 +2483,23 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                             && *byte < key[last_key_byte_idx]
                     })
                 };
-                let (sibling_byte, slot) = match key_byte(key1) {
-                    Some(byte) => (byte, 1),
-                    None => match key_byte(key0) {
-                        Some(byte) => (byte, 0),
-                        None => return (None, None),
-                    },
+                let sibling_byte = match key_byte(key1).or_else(|| key_byte(key0)) {
+                    Some(byte) => byte,
+                    None => return (None, None),
                 };
-                let sib_node = match slot {
-                    0 if key0.len() == key.len() && self.is_child_ptr::<0>() => {
-                        Some(unsafe { self.child_in_slot::<0>().as_tagged() })
-                    },
-                    1 if key1.len() == key.len() && self.is_child_ptr::<1>() => {
-                        Some(unsafe { self.child_in_slot::<1>().as_tagged() })
-                    },
-                    _ => None,
+                //A value+child location is two same-key slots, so check both for the child
+                let holds_child = |candidate: &[u8], slot: usize| {
+                    candidate.len() == key.len()
+                        && candidate[last_key_byte_idx] == sibling_byte
+                        && candidate[..last_key_byte_idx] == common_key[..]
+                        && if slot == 0 { self.is_child_ptr::<0>() } else { self.is_child_ptr::<1>() }
+                };
+                let sib_node = if holds_child(key1, 1) {
+                    Some(unsafe { self.child_in_slot::<1>().as_tagged() })
+                } else if holds_child(key0, 0) {
+                    Some(unsafe { self.child_in_slot::<0>().as_tagged() })
+                } else {
+                    None
                 };
                 (Some(sibling_byte), sib_node)
             }

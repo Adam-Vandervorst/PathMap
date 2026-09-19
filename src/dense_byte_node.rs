@@ -418,10 +418,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                 let cf = unsafe{ self_node.values.get_unchecked(cf_idx) };
                 let mut new_cf = Cf::new(None, None);
 
-                //If there is a value at this key_byte, and the other node contains a value, subtract them
+                //If there is a value at this key_byte, and the other node contains a value, subtract them;
+                // otherwise keep it
                 if let Some(self_val) = cf.val() {
-                    if let Some(other_val) = other.node_get_val(&[key_byte]) {
-                        match self_val.psubtract(other_val) {
+                    match other.node_get_val(&[key_byte]) {
+                        Some(other_val) => match self_val.psubtract(other_val) {
                             AlgebraicResult::None => { is_identity = false; },
                             AlgebraicResult::Identity(mask) => {
                                 debug_assert_eq!(mask, SELF_IDENT); //subtract is not commutative
@@ -431,7 +432,8 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                                 is_identity = false;
                                 new_cf.set_val(e);
                             },
-                        }
+                        },
+                        None => new_cf.set_val(self_val.clone()),
                     }
                 }
 
@@ -461,10 +463,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     }
                 }
 
-                //If we ended up with a value or a link in the CF, insert it into a new node
+                //Keep the CF if it still has a value or link; otherwise the location, dangling or not, is gone
                 if new_cf.has_rec() || new_cf.has_val() {
                     new_node.mask.set_bit(key_byte);
                     new_node.values.push(new_cf);
+                } else {
+                    is_identity = false;
                 }
             } else {
                 new_node.mask.set_bit(key_byte);

@@ -329,7 +329,7 @@ skips diverges:
 
 | token | what it means |
 |---|---|
-| `skip:k0` | `meet_k_path_into(0)`, `join_k_path_into(0)`, `descend_first_k_path(0)` / `to_next_k_path(0)` — degenerate; the first two should be the identity and destroy the subtrie, the last reports success without moving, forever. |
+| `skip:k0` | `meet_k_path_into(0)`, `join_k_path_into(0)` — degenerate; they should be the identity and destroy the subtrie. (`descend_first_k_path(0)` is specified as `false` without moving and is no longer skipped.) |
 | `skip:empty-focus` | `meet_k_path_into` with no children (it does not terminate), and `restricting` when either side has nothing below its focus (the two branches differ in *effect*, not just in the reported bool). |
 | `skip:empty-path` | `insert_prefix("")` — should be the identity, destroys the subtrie. |
 | `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native read zipper leaves its own root there. |
