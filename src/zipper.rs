@@ -3151,6 +3151,18 @@ pub(crate) mod zipper_moving_tests {
                 }
 
                 #[test]
+                fn [<$z_name _prev_sibling_sparse_paths>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_PREV_SIBLING_SPARSE_PATHS_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::prev_sibling_sparse_paths)
+                }
+
+                #[test]
+                fn [<$z_name _prev_sibling_value_and_child_location>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_PREV_SIBLING_VALUE_AND_CHILD_LOCATION_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::prev_sibling_value_and_child_location)
+                }
+
+                #[test]
                 fn [<$z_name _zipper_indexed_bytes_test1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_INDEXED_BYTE_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_indexed_bytes_test1)
@@ -3313,6 +3325,40 @@ pub(crate) mod zipper_moving_tests {
 
     /// from https://en.wikipedia.org/wiki/Radix_tree#/media/File:Patricia_trie.svg
     pub const ZIPPER_MOVING_BASIC_TEST_KEYS: &[&[u8]] = &[b"romane", b"romanus", b"romulus", b"rubens", b"ruber", b"rubicon", b"rubicundus", b"rom'i"];
+
+    pub const ZIPPER_PREV_SIBLING_SPARSE_PATHS_KEYS: &[&[u8]] = &[b"AA", b"CCC"];
+
+    pub const ZIPPER_PREV_SIBLING_VALUE_AND_CHILD_LOCATION_KEYS: &[&[u8]] = &[&[2, 0], &[2, 1], &[2]];
+
+    pub fn prev_sibling_sparse_paths<Z: ZipperMoving>(mut zipper: Z) {
+        // An absent root child can have a preceding sibling, while positions
+        // inside a line have no preceding sibling at their respective depths.
+        zipper.descend_to(b"C");
+        assert!(zipper.to_prev_sibling_byte());
+        assert_eq!(zipper.path(), b"A");
+        zipper.reset();
+        zipper.descend_to(b"CC");
+        assert!(!zipper.to_prev_sibling_byte());
+        zipper.reset();
+        zipper.descend_to(b"CCC");
+        assert!(!zipper.to_prev_sibling_byte());
+    }
+
+    /// `to_prev_sibling_byte` onto a location holding both a value and a child subtree.
+    pub fn prev_sibling_value_and_child_location<Z: ZipperMoving>(mut zipper: Z) {
+        for start in [&[3u8][..], &[9u8]] {
+            zipper.reset();
+            zipper.descend_to(start);
+            assert!(!zipper.path_exists());
+            assert!(zipper.to_prev_sibling_byte(), "from {start:?}");
+            assert_eq!(zipper.path(), &[2u8]);
+            assert!(zipper.is_val());
+            assert_eq!(zipper.child_count(), 2, "from {start:?}");
+            assert_eq!(zipper.child_mask().iter().collect::<Vec<_>>(), vec![0u8, 1]);
+            assert!(zipper.descend_first_byte(), "from {start:?}");
+            assert_eq!(zipper.path(), &[2u8, 0]);
+        }
+    }
 
     pub fn zipper_moving_basic_test<Z: ZipperMoving>(mut zipper: Z) {
         fn assert_in_list(val: &[u8], list: &[&[u8]]) {
@@ -5789,27 +5835,6 @@ mod tests {
         assert!(!z.to_next_val());
         assert!(z.to_next_step());                          // fad58f4: false
         assert_eq!(z.path(), &[3]);
-    }
-
-    /// `to_prev_sibling_byte` onto a list-node location holding both a value and a child
-    #[test]
-    fn read_zipper_prev_sibling_onto_a_value_and_child_location() {
-        let mut m = PathMap::<u64>::new();
-        m.set_val_at(&[2u8, 0], 0);
-        m.set_val_at(&[2u8, 1], 0);
-        m.set_val_at(&[2u8], 0);
-        for start in [&[3u8][..], &[9u8]] {
-            let mut z = m.read_zipper();
-            z.descend_to(start);
-            assert!(!z.path_exists());
-            assert_eq!(z.to_prev_sibling_byte(), Some(2), "from {start:?}");
-            assert_eq!(z.path(), &[2u8]);
-            assert_eq!(z.val(), Some(&0));
-            assert_eq!(z.child_count(), 2, "from {start:?}");
-            assert_eq!(z.child_mask().iter().collect::<Vec<_>>(), vec![0u8, 1]);
-            assert_eq!(z.descend_first_byte(), Some(0), "from {start:?}");
-            assert_eq!(z.path(), &[2u8, 0]);
-        }
     }
 
     #[test]
