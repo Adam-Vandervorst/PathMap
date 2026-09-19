@@ -454,7 +454,6 @@ pub trait ZipperMoving: Zipper {
             },
             None => {
                 self.descend_to_byte(cur_byte);
-                debug_assert!(self.path_exists());
                 None
             }
         }
@@ -3655,6 +3654,18 @@ pub(crate) mod zipper_moving_tests {
                 }
 
                 #[test]
+                fn [<$z_name _sibling_step_from_a_focus_that_does_not_exist_empty>]() {
+                    let mut temp_store = $read_keys(&[]);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::sibling_step_from_a_focus_that_does_not_exist_empty)
+                }
+
+                #[test]
+                fn [<$z_name _sibling_step_from_a_focus_that_does_not_exist>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::SIBLING_STEP_FROM_A_FOCUS_THAT_DOES_NOT_EXIST_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::sibling_step_from_a_focus_that_does_not_exist)
+                }
+
+                #[test]
                 fn [<$z_name _zipper_indexed_bytes_test1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_INDEXED_BYTE_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_indexed_bytes_test1)
@@ -3978,6 +3989,55 @@ pub(crate) mod zipper_moving_tests {
         //`descend_first_byte` is documented to behave identically to `descend_indexed_byte(0)`
         assert_eq!(zip.descend_first_byte(), None);
         assert_eq!(zip.path(), b"bb");
+    }
+
+    /// Sibling steps from a focus that is not in the trie
+    pub fn sibling_step_from_a_focus_that_does_not_exist_empty<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        zipper.descend_to(&[0]);
+        assert!(!zipper.path_exists());
+        assert_eq!(zipper.to_prev_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[0]);
+        assert!(!zipper.path_exists());
+        assert_eq!(zipper.to_next_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[0]);
+        assert!(!zipper.path_exists());
+    }
+
+    pub const SIBLING_STEP_FROM_A_FOCUS_THAT_DOES_NOT_EXIST_KEYS: &[&[u8]] =
+        &[&[1, 3], &[1, 5], &[7]];
+
+    /// Sibling steps from a missing focus use the parent\'s siblings when present, and otherwise
+    /// preserve the missing focus.
+    pub fn sibling_step_from_a_focus_that_does_not_exist<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        //Missing focus under an existing parent: siblings come from the parent
+        for (byte, prev, next) in [(2, None, Some(3)), (4, Some(3), Some(5)), (6, Some(5), None)] {
+            zipper.reset();
+            zipper.descend_to(&[1, byte]);
+            assert!(!zipper.path_exists(), "byte {byte}");
+            assert_eq!(zipper.to_prev_sibling_byte(), prev, "byte {byte}");
+            assert_eq!(zipper.path_exists(), prev.is_some(), "byte {byte}");
+            assert_eq!(zipper.path(), &[1, prev.unwrap_or(byte)], "byte {byte}");
+
+            zipper.reset();
+            zipper.descend_to(&[1, byte]);
+            assert_eq!(zipper.to_next_sibling_byte(), next, "byte {byte}");
+            assert_eq!(zipper.path_exists(), next.is_some(), "byte {byte}");
+            assert_eq!(zipper.path(), &[1, next.unwrap_or(byte)], "byte {byte}");
+        }
+
+        //Missing parent: no siblings, focus unchanged, and the zipper remains usable
+        zipper.reset();
+        zipper.descend_to(&[9, 9]);
+        assert!(!zipper.path_exists());
+        assert_eq!(zipper.to_prev_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[9, 9]);
+        assert_eq!(zipper.to_next_sibling_byte(), None);
+        assert_eq!(zipper.path(), &[9, 9]);
+        assert!(!zipper.path_exists());
+        zipper.ascend(2);
+        assert_eq!(zipper.to_next_sibling_byte(), None);
+        zipper.descend_to(&[7]);
+        assert!(zipper.path_exists());
     }
 
     pub const ZIPPER_INDEXED_BYTE_TEST1_KEYS: &[&[u8]] = &[b"0", b"1", b"2", b"3", b"4", b"5", b"6"];
