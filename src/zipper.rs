@@ -3234,6 +3234,30 @@ pub(crate) mod zipper_moving_tests {
                 }
 
                 #[test]
+                fn [<$z_name _ascend_until_from_off_trie_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_root)
+                }
+
+                #[test]
+                fn [<$z_name _ascend_until_from_off_trie_line_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[1], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_line_root)
+                }
+
+                #[test]
+                fn [<$z_name _ascend_until_from_off_trie_mid_line_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[1, 2], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_mid_line_root)
+                }
+
+                #[test]
+                fn [<$z_name _ascend_until_from_off_trie_value_branch_root>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::OFF_TRIE_ASCEND_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[7], crate::zipper::zipper_moving_tests::ascend_until_from_off_trie_value_branch_root)
+                }
+
+                #[test]
                 fn [<$z_name _indexed_zipper_movement1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_INDEXED_MOVEMENT_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::indexed_zipper_movement1)
@@ -3537,6 +3561,72 @@ pub(crate) mod zipper_moving_tests {
         assert!(!zipper.to_next_sibling_byte());
         zipper.descend_to(&[7]);
         assert!(zipper.path_exists());
+    }
+
+    pub const OFF_TRIE_ASCEND_KEYS: &[&[u8]] = &[
+        &[1, 2, 3, 4], &[5, 2], &[5, 6], &[7], &[7, 8], &[7, 9],
+    ];
+
+    type OffTrieAscendCase = (&'static [u8], bool, usize, &'static [u8], bool, usize, Option<u8>, &'static [u8], bool);
+
+    /// Checks an off-trie ascent and then verifies that the landed focus remains usable.
+    fn run_off_trie_ascend_cases<Z: ZipperMoving + ZipperPath>(mut zipper: Z, cases: &[OffTrieAscendCase]) {
+        for &(focus, need_value, steps, path, is_val, children, first, after_path, after_is_val) in cases {
+            zipper.reset();
+            zipper.descend_to(focus);
+            assert!(!zipper.path_exists(), "focus {focus:?}");
+            let actual_steps = if need_value { zipper.ascend_until() } else { zipper.ascend_until_branch() };
+            assert_eq!(actual_steps, steps, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.path(), path, "focus {focus:?}, need_value {need_value}");
+            assert!(zipper.path_exists(), "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.is_val(), is_val, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.child_count(), children, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.descend_first_byte(), first, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.path(), after_path, "focus {focus:?}, need_value {need_value}");
+            assert_eq!(zipper.is_val(), after_is_val, "focus {focus:?}, need_value {need_value}");
+        }
+    }
+
+    /// Rooted at the map root: 9 off-trie focuses, each tested with both ascent modes.
+    pub fn ascend_until_from_off_trie_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[1,2,9],false,3,&[],false,3,Some(1),&[1],false), (&[1,2,9],true,3,&[],false,3,Some(1),&[1],false),
+            (&[1,2,3,9],false,4,&[],false,3,Some(1),&[1],false), (&[1,2,3,9],true,4,&[],false,3,Some(1),&[1],false),
+            (&[1,2,3,4,9],false,5,&[],false,3,Some(1),&[1],false), (&[1,2,3,4,9],true,1,&[1,2,3,4],true,0,None,&[1,2,3,4],true),
+            (&[1,9,9],false,3,&[],false,3,Some(1),&[1],false), (&[1,9,9],true,3,&[],false,3,Some(1),&[1],false),
+            (&[5,9],false,1,&[5],false,2,Some(2),&[5,2],true), (&[5,9],true,1,&[5],false,2,Some(2),&[5,2],true),
+            (&[5,2,9],false,2,&[5],false,2,Some(2),&[5,2],true), (&[5,2,9],true,1,&[5,2],true,0,None,&[5,2],true),
+            (&[7,9,9],false,2,&[7],true,2,Some(8),&[7,8],true), (&[7,9,9],true,1,&[7,9],true,0,None,&[7,9],true),
+            (&[7,8,9,9],false,3,&[7],true,2,Some(8),&[7,8],true), (&[7,8,9,9],true,2,&[7,8],true,0,None,&[7,8],true),
+            (&[9],false,1,&[],false,3,Some(1),&[1],false), (&[9],true,1,&[],false,3,Some(1),&[1],false),
+        ]);
+    }
+
+    /// Rooted at byte 1, the start of the compressed line.
+    pub fn ascend_until_from_off_trie_line_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[2,9],false,2,&[],false,1,Some(2),&[2],false), (&[2,9],true,2,&[],false,1,Some(2),&[2],false),
+            (&[2,3,9],false,3,&[],false,1,Some(2),&[2],false), (&[2,3,9],true,3,&[],false,1,Some(2),&[2],false),
+            (&[2,3,4,9],false,4,&[],false,1,Some(2),&[2],false), (&[2,3,4,9],true,1,&[2,3,4],true,0,None,&[2,3,4],true),
+            (&[9,9],false,2,&[],false,1,Some(2),&[2],false), (&[9,9],true,2,&[],false,1,Some(2),&[2],false),
+        ]);
+    }
+
+    /// Rooted partway through the compressed line.
+    pub fn ascend_until_from_off_trie_mid_line_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[9],false,1,&[],false,1,Some(3),&[3],false), (&[9],true,1,&[],false,1,Some(3),&[3],false),
+            (&[3,9],false,2,&[],false,1,Some(3),&[3],false), (&[3,9],true,2,&[],false,1,Some(3),&[3],false),
+            (&[3,4,9],false,3,&[],false,1,Some(3),&[3],false), (&[3,4,9],true,1,&[3,4],true,0,None,&[3,4],true),
+        ]);
+    }
+
+    /// Rooted at byte 7, which is both a value and a branch.
+    pub fn ascend_until_from_off_trie_value_branch_root<Z: ZipperMoving + ZipperPath>(zipper: Z) {
+        run_off_trie_ascend_cases(zipper, &[
+            (&[9,9],false,2,&[],true,2,Some(8),&[8],true), (&[9,9],true,1,&[9],true,0,None,&[9],true),
+            (&[8,9,9],false,3,&[],true,2,Some(8),&[8],true), (&[8,9,9],true,2,&[8],true,0,None,&[8],true),
+        ]);
     }
 
     pub const ZIPPER_INDEXED_BYTE_TEST1_KEYS: &[&[u8]] = &[b"0", b"1", b"2", b"3", b"4", b"5", b"6"];

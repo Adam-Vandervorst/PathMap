@@ -4208,46 +4208,4 @@ mod tests {
         assert_eq!(seen, vec![vec![1u8], vec![1, 0], vec![1, 0, 2], vec![3]]);
     }
 
-    /// `ascend_until` / `ascend_until_branch` from a focus off the trie stop at the right ancestor
-    #[test]
-    fn act_zipper_ascend_until_from_an_off_trie_focus() {
-        use crate::zipper::*;
-        let mut m = PathMap::<u64>::new();
-        m.insert(&[1u8, 2, 3, 4], 11); //a line under 01, its value at the line's end
-        m.insert(&[5u8, 2], 22);       //a branch at 05, two children, no value
-        m.insert(&[5u8, 6], 33);
-        m.insert(&[7u8], 44);          //a value at 07, which branches below it as well
-        m.insert(&[7u8, 8], 55);
-        m.insert(&[7u8, 9], 66);
-        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
-
-        let off_trie: [&[u8]; 9] = [&[1, 2, 9], &[1, 2, 3, 9], &[1, 2, 3, 4, 9], &[1, 9, 9],
-            &[5, 9], &[5, 2, 9], &[7, 9, 9], &[7, 8, 9, 9], &[9]];
-        for root in [&[][..], &[1u8], &[1, 2], &[7]] {
-            for focus in off_trie {
-                if !focus.starts_with(root) { continue }
-                let focus = &focus[root.len()..];
-                for need_value in [false, true] {
-                    let mut az = t.read_zipper_at_path_u64(root);
-                    let mut pz = m.read_zipper_at_path(root);
-                    assert_eq!(az.descend_to(focus), pz.descend_to(focus));
-                    assert!(!az.path_exists() && !pz.path_exists(), "{root:?} {focus:?}");
-                    let (a, p) = if need_value {
-                        (az.ascend_until(), pz.ascend_until())
-                    } else {
-                        (az.ascend_until_branch(), pz.ascend_until_branch())
-                    };
-                    assert_eq!(a, p, "root {root:?} focus {focus:?} need_value {need_value}");
-                    assert_eq!(az.path(), pz.path(), "root {root:?} focus {focus:?}");
-                    //Check the focus, then move
-                    assert_eq!(az.path_exists(), pz.path_exists(), "{root:?} {focus:?}");
-                    assert_eq!(az.val(), pz.val(), "{root:?} {focus:?}");
-                    assert_eq!(az.child_count(), pz.child_count(), "{root:?} {focus:?}");
-                    assert_eq!(az.descend_first_byte(), pz.descend_first_byte(), "{root:?} {focus:?}");
-                    assert_eq!(az.path(), pz.path(), "{root:?} {focus:?} after descend");
-                    assert_eq!(az.val(), pz.val(), "{root:?} {focus:?} after descend");
-                }
-            }
-        }
-    }
 }
