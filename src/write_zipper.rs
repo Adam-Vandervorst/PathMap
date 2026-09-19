@@ -6660,28 +6660,28 @@ mod tests {
         drop(rz);
         assert_eq!(map.val_count(), 2);
 
-    /// Dense `restrict` is `Identity` even when the source has extra branches
+    /// Dense `restrict` is `Identity` even when the restrictor has extra branches
     #[test]
-    fn write_zipper_restrict_wider_source_is_identity() {
+    fn write_zipper_restrict_wider_restrictor_is_identity() {
         fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
         fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
 
         let mut dst = mk(&[(&[0], 1), (&[1], 2), (&[2], 3)]);
         let before = vals(&dst);
-        let src = mk(&[(&[0], 0), (&[1], 0), (&[2], 0), (&[3], 0), (&[4], 0)]);
-        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        let restrictor = mk(&[(&[0], 0), (&[1], 0), (&[2], 0), (&[3], 0), (&[4], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&restrictor.read_zipper()) };
         assert_eq!(st, AlgebraicStatus::Identity);
         assert_eq!(vals(&dst), before);
 
         //A restriction that really does drop a branch still reports it
         let mut dst = mk(&[(&[0], 1), (&[1], 2), (&[2], 3)]);
-        let src = mk(&[(&[0], 0), (&[1], 0), (&[3], 0), (&[4], 0)]);
-        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        let restrictor = mk(&[(&[0], 0), (&[1], 0), (&[3], 0), (&[4], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&restrictor.read_zipper()) };
         assert_eq!(st, AlgebraicStatus::Element);
         assert_eq!(vals(&dst), vec![(vec![0], 1), (vec![1], 2)]);
     }
 
-    /// Dense `restrict` against a list node drops a value beside a kept child
+    /// Dense `restrict` against a list node drops a value in the same node as a kept child
     #[test]
     fn write_zipper_restrict_drops_value_beside_kept_child() {
         fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
@@ -6693,14 +6693,14 @@ mod tests {
         { let mut wz = dst.write_zipper(); wz.meet_into(&filter.read_zipper(), false); }
         assert_eq!(vals(&dst), vec![(vec![0], 7), (vec![0, 0], 1)]);
 
-        //`src` has no value at `[0]`, so `[0]` is not kept, while `[0, 0]` is
-        let src = mk(&[(&[0, 0], 0)]);
-        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        //The restrictor has no value at `[0]`, so `[0]` is not kept, while `[0, 0]` is
+        let restrictor = mk(&[(&[0, 0], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&restrictor.read_zipper()) };
         assert_eq!(vals(&dst), vec![(vec![0, 0], 1)]);
         assert_eq!(st, AlgebraicStatus::Element);
     }
 
-    /// Dense `restrict` drops an unvalidated dangling path
+    /// Dense `restrict` drops a dangling path not kept by the restrictor
     #[test]
     fn write_zipper_restrict_drops_dangling_branch() {
         fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
@@ -6714,19 +6714,19 @@ mod tests {
         assert_eq!(dst.path_exists_at(&[0u8]), true, "[0] should be left dangling");
         assert_eq!(vals(&dst), vec![(vec![1], 2)]);
 
-        //`src` has no value at [0], so the dangling [0] goes
-        let src = mk(&[(&[0, 9], 0), (&[1], 0)]);
-        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        //The restrictor has no value at [0], so the dangling [0] goes
+        let restrictor = mk(&[(&[0, 9], 0), (&[1], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&restrictor.read_zipper()) };
         assert_eq!(st, AlgebraicStatus::Element);
         assert_eq!(dst.path_exists_at(&[0u8]), false);
         assert_eq!(vals(&dst), vec![(vec![1], 2)]);
 
-        //A dangling path that *is* validated stays: `src` has a value at [0].
+        //A dangling path that is kept stays: the restrictor has a value at [0].
         let mut dst = mk(&[(&[0], 1), (&[1], 2), (&[2], 3), (&[3], 4)]);
         { let mut wz = dst.write_zipper(); wz.meet_into(&filter.read_zipper(), false); }
         dst.remove_val_at(&[0u8], false);
-        let src = mk(&[(&[0], 0), (&[1], 0)]);
-        let st = { let mut wz = dst.write_zipper(); wz.restrict(&src.read_zipper()) };
+        let restrictor = mk(&[(&[0], 0), (&[1], 0)]);
+        let st = { let mut wz = dst.write_zipper(); wz.restrict(&restrictor.read_zipper()) };
         assert_eq!(st, AlgebraicStatus::Identity);
         assert_eq!(dst.path_exists_at(&[0u8]), true);
         assert_eq!(vals(&dst), vec![(vec![1], 2)]);

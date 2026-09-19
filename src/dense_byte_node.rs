@@ -505,7 +505,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                     new_node.values.push(cf.clone());
                 } else {
 
-                    //An unvalidated value is dropped, so this is a change
+                    //Dropping this value changes the destination
                     if cf.val().is_some() {
                         is_identity = false;
                     }
@@ -537,7 +537,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
                             }
                         }
                     } else {
-                        //No value or child: an unvalidated dangling path, also dropped
+                        //The target slot is dangling and the restrictor has no value here: drop it
                         is_identity = false;
                     }
                 }
