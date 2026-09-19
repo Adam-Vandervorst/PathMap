@@ -1925,15 +1925,16 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 remove_0 = !mask.test_bit(key0[key_len]);
             } else {
                 //We can only get here if key0 == key, and the calling code should have descend
-                // through this node if that key specifies an onward link
-                debug_assert!(!self.is_child_ptr::<0>());
+                // through this node if that key specifies a non-dangling onward link
+                debug_assert!(!self.is_used_child_0() || unsafe{ self.child_in_slot::<0>().is_empty() });
             }
         }
         if starts_with(key1, key) {
             if key1.len() > key_len {
                 remove_1 = !mask.test_bit(key1[key_len]);
             } else {
-                debug_assert!(!self.is_child_ptr::<1>()); //See comment above
+                //See comment above
+                debug_assert!(!self.is_used_child_1() || unsafe{ self.child_in_slot::<1>().is_empty() });
             }
         }
         self.remove_subtries(remove_0, remove_1, key0_starts_with, prune, key.len());

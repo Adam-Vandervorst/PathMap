@@ -2236,30 +2236,17 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// See [WriteZipper::remove_unmasked_branches]
     pub fn remove_unmasked_branches(&mut self, mask: ByteMask, prune: bool) {
         let node_key = self.key.node_key();
-
-        //A dangling focus has no branches to filter; `get_child_mut` won't descend into it
-        let below_dangling_stub = node_key.len() > 0
-            && match self.focus_stack.top() {
-                Some(focus_node) => match focus_node.node_get_child(node_key) {
-                    Some((_consumed_bytes, child_node)) => child_node.is_empty(),
-                    None => false
-                },
-                None => false
-            };
-
         let mut focus_node = self.focus_stack.top_mut().unwrap();
-        if below_dangling_stub {
-            //Nothing to do
-        } else if node_key.len() > 0 {
+        if node_key.len() > 0 {
             match focus_node.node_get_child_mut(node_key) {
                 Some((consumed_bytes, child_node)) => {
-                    if node_key.len() >= consumed_bytes {
+                    if node_key.len() >= consumed_bytes && !child_node.is_empty() {
                         child_node.make_mut().node_remove_unmasked_branches(&node_key[consumed_bytes..], mask, prune);
                         if child_node.as_tagged().node_is_empty() {
                             focus_node.node_remove_all_branches(&node_key[..consumed_bytes], prune);
                         }
                     } else {
-                        //Zipper is positioned at non-existent node.  Removing anything from nothing is nothing
+                        //Zipper is positioned at non-existent or dangling node.  Removing anything from nothing is nothing
                     }
                 },
                 None => {
@@ -3715,7 +3702,7 @@ mod tests {
             assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
             assert_eq!(wz.val(), Some(&3));
         }
-        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
+        assert_eq!(m0.val_at(&[0u8, 0, 0]), Some(&3));
         assert_eq!(m0.val_count(), 1);
 
         // through meet_into with prune
@@ -3730,7 +3717,7 @@ mod tests {
             assert_eq!(*wz.get_val_or_set_mut_with(|| 3), 3);
             assert_eq!(wz.val(), Some(&3));
         }
-        assert_eq!(m0.get_val_at(&[0u8, 0, 0]), Some(&3));
+        assert_eq!(m0.val_at(&[0u8, 0, 0]), Some(&3));
     }
 
 
