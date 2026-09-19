@@ -3259,43 +3259,6 @@ where Storage: AsRef<[u8]>
         }
     }
 
-    /// Moves the zipper's focus to the next location with the same path length as the current focus,
-    /// following a depth-first exploration from a common root `k` steps above the current focus
-    ///
-    /// Returns `true` if the zipper has sucessfully moved to a new location at the same level, or `false`
-    /// if no further locations exist.  If this method returns `false` then the zipper will be ascended `k`
-    /// steps to the common root.  (The focus position when [descend_first_k_path](ZipperIteration::descend_first_k_path) was called)
-    ///
-    /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to the paths
-    /// below the zipper's focus.  Although a typical cost is `order log n` or better.
-    ///
-    /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
-    fn to_next_k_path(&mut self, k: usize) -> bool {
-        timed_span!(ToNextKPath, COUNTERS);
-        let mut depth = k;
-        'outer: loop {
-            while depth > 0 && self.child_count() <= 1 {
-                if !self.ascend(1) { break 'outer; }
-                depth -= 1;
-            }
-            let stack = self.stack.last_mut().unwrap();
-            let idx = stack.child_index + 1;
-            if idx >= stack.child_count {
-                if depth == 0 || !self.ascend(1) { break 'outer; }
-                depth -= 1;
-                continue 'outer;
-            }
-            assert!(self.descend_indexed_byte(idx));
-            depth += 1;
-            for _ii in 0..k - depth {
-                if !self.descend_first_byte() { continue 'outer; }
-                depth += 1;
-            }
-            return true;
-        }
-        self.ascend(depth);
-        false
-    }
 }
 
 /// Iterator over (Path, Value) in ArenaCompactTree
