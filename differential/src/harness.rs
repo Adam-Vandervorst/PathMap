@@ -147,7 +147,7 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 ///   implement the trait the op needs.
 /// * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root,
 ///   where the native read zipper escapes its own root.
-/// * `skip:k0` — a degenerate `k = 0`.
+/// * `skip:k0` — a degenerate `k = 0` on `join`/`meet_k_path_into`.
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
 /// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
@@ -583,13 +583,9 @@ pub fn run_ops<R: ReadSource>(
                 15 => {
                     let _t = get!(d.modn(2));
                     let k = get!(d.modn(4));
-                    // k == 0 is degenerate; see Fuzz.lean.
-                    if k == 0 {
-                        ("descend_first_k_path", SKIP_K0.to_string())
-                    } else {
-                        let r = (*rz).descend_first_k_path(k);
-                        ("descend_first_k_path", show_bool(r).to_string())
-                    }
+                    // k == 0 is specified as an unsuccessful descent; see Fuzz.lean.
+                    let r = (*rz).descend_first_k_path(k);
+                    ("descend_first_k_path", show_bool(r).to_string())
                 }
                 16 => {
                     let _t = get!(d.modn(2));
@@ -598,13 +594,7 @@ pub fn run_ops<R: ReadSource>(
                     // unspecified (it continues state left by
                     // `descend_first_k_path`).
                     let mut v: Vec<String> = Vec::new();
-                    if k == 0 {
-                        let _ = writeln!(out, 
-                            "{step} k_path_walk ret={SKIP_K0} W={} R={}",
-                            fingerprint(&wz, root0), fingerprint(rz, root1));
-                        step += 1;
-                        continue;
-                    }
+                    // With k == 0 the descent fails and the walk is empty.
                     if rz.descend_first_k_path(k) {
                         v.push(hex_path(rz.path()));
                         while v.len() < 32 && rz.to_next_k_path(k) {
