@@ -2637,12 +2637,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 unimplemented!()
             },
             CELL_BYTE_NODE_TAG => {
-                let other_dense_node = unsafe{ other.as_dense_unchecked() };
-                let mut new_node = other_dense_node.clone();
+                let other_cell_node = unsafe{ other.as_cell_unchecked() };
+                let mut new_node = other_cell_node.clone();
                 match new_node.merge_from_list_node(self) {
                     //See the DENSE_BYTE_NODE_TAG arm: two empty nodes join to an empty result
                     AlgebraicStatus::None => {
-                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        debug_assert!(self.node_is_empty() && other_cell_node.node_is_empty());
                         AlgebraicResult::None
                     },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
