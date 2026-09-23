@@ -156,6 +156,12 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
             _ => None
         }
     }
+    /// `true` once every factor has been entered, i.e. the focus is in the last factor's trie (including
+    /// its root).  See the `ZipperConcrete` impl for why sharing is only reported there.
+    #[inline]
+    fn in_last_factor(&self) -> bool {
+        self.factor_paths.len() == self.secondaries.len()
+    }
     /// Internal method to make sure `self.factor_paths` is correct after an ascend method
     #[inline]
     fn fix_after_ascend(&mut self) {
@@ -369,8 +375,14 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
     }
 }
 
+/// Sharing is only reported in the last factor.  In an earlier factor, the subtrie below a node continues
+/// into the following factors, so the same node reached from a different factor is a different subtrie of
+/// the product, and a cache keyed by `shared_node_id` would conflate the two.
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZipper<'_, '_, V, A> {
     fn shared_node_id(&self) -> Option<u64> {
+        if !self.in_last_factor() {
+            return None
+        }
         match self.factor_root() {
             Some(_) if self.z.is_val() => None,
             Some(factor) => factor.shared_node_id(),
@@ -378,6 +390,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZip
         }
     }
     fn is_shared(&self) -> bool {
+        if !self.in_last_factor() {
+            return false
+        }
         match self.factor_root() {
             Some(factor) => factor.is_shared(),
             None => self.z.is_shared(),
@@ -544,6 +559,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperAbsolutePath
     fn root_prefix_path(&self) -> &[u8] { self.primary.root_prefix_path() }
 }
 
+/// Sharing is only reported in the last factor.  See the `ZipperConcrete` impl for [ProductZipper]
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
@@ -552,6 +568,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
         SecondaryZ: ZipperMoving + ZipperPath + ZipperConcrete,
 {
     fn shared_node_id(&self) -> Option<u64> {
+        if self.factor_paths.len() < self.secondary.len() {
+            return None
+        }
         if let Some(idx) = self.factor_idx(true) {
             self.secondary[idx].shared_node_id()
         } else {
@@ -559,6 +578,9 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
         }
     }
     fn is_shared(&self) -> bool {
+        if self.factor_paths.len() < self.secondary.len() {
+            return false
+        }
         if let Some(idx) = self.factor_idx(true) {
             self.secondary[idx].is_shared()
         } else {
@@ -2011,6 +2033,31 @@ mod tests {
             }
         }
         assert!(factor_roots > 0);
+    }
+
+    /// A node shared between factors must not share a `shared_node_id`, because its subtrie in the product
+    /// differs by factor.  Otherwise a cached cata reuses the result from one factor in another.
+    #[test]
+    fn product_zipper_cata_cached_across_factors() {
+        // `s` is grafted in two places, and `b = a.clone()`, so the same node is in both factors
+        let mut s = PathMap::<u64>::new();
+        for p in [&[5u8, 6][..], &[5, 7], &[9]] { s.set_val_at(p, 1); }
+        let mut a = PathMap::<u64>::new();
+        a.write_zipper_at_path(&[1u8]).graft_map(s.clone());
+        a.write_zipper_at_path(&[2u8]).graft_map(s.clone());
+        a.set_val_at(&[3u8], 1);
+        let b = a.clone();
+
+        let alg = |_: &ByteMask, children: &mut [usize], val: Option<&u64>| children.iter().sum::<usize>() + val.is_some() as usize;
+        let expected = 7 + 7 * 7;
+        let pz = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+        assert_eq!(pz.into_cata_cached(alg), expected);
+        let pzg = ProductZipperG::new(a.read_zipper(), [b.read_zipper()]);
+        assert_eq!(pzg.into_cata_cached(alg), expected);
+
+        // Sharing is still reported in the last factor
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+        assert!(z.descend_to_existing(&[3u8, 1]) == 2 && z.is_shared() && z.shared_node_id().is_some());
     }
 }
 
