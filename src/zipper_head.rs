@@ -1494,4 +1494,25 @@ mod tests {
         assert_eq!(rz.is_val(), false);
         drop(rz);
     }
+
+    /// A ZipperHead turns the parent node into a CellByteNode; joining a list node with it must not
+    /// treat the cell node as a DenseByteNode
+    #[test]
+    fn zipper_head_cell_node_pjoin_test() {
+        let mut b = PathMap::<()>::new();
+        b.set_val_at(b"ax", ());
+        b.set_val_at(b"bx", ());
+        {
+            let zh = b.zipper_head();
+            let mut wz = zh.write_zipper_at_exclusive_path(b"c").unwrap();
+            wz.set_val(());
+        }
+        let mut a = PathMap::<()>::new();
+        a.set_val_at(b"dx", ());
+
+        let joined = a.join(&b);
+        let mut paths: Vec<Vec<u8>> = joined.iter().map(|(p, _)| p).collect();
+        paths.sort();
+        assert_eq!(paths, vec![b"ax".to_vec(), b"bx".to_vec(), b"c".to_vec(), b"dx".to_vec()]);
+    }
 }
