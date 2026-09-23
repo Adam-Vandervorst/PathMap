@@ -606,6 +606,16 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 
 impl<V: Clone + Send + Sync, A: Allocator> CellByteNode<V, A> {
 
+    /// Clones this node into its ordinary representation without cloning its pinned CoFrees.
+    pub(crate) fn clone_as_dense(&self) -> DenseByteNode<V, A> {
+        let mut dense_node = DenseByteNode::with_capacity_in(self.values.len(), self.alloc.clone());
+        dense_node.mask = self.mask;
+        dense_node.values.extend(self.values.iter().map(|cf| {
+            OrdinaryCoFree::new(cf.rec().cloned(), cf.val().cloned())
+        }));
+        dense_node
+    }
+
     /// Ensures that a CoFree exists for the specified key, and returns a reference to the node and
     /// value option
     ///

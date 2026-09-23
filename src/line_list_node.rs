@@ -2638,7 +2638,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             },
             CELL_BYTE_NODE_TAG => {
                 let other_cell_node = unsafe{ other.as_cell_unchecked() };
-                let mut new_node = other_cell_node.clone();
+                let mut new_node = other_cell_node.clone_as_dense();
                 match new_node.merge_from_list_node(self) {
                     //See the DENSE_BYTE_NODE_TAG arm: two empty nodes join to an empty result
                     AlgebraicStatus::None => {
@@ -2684,8 +2684,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 unimplemented!()
             },
             CELL_BYTE_NODE_TAG => {
-                let other_dense_node = unsafe{ other_node.as_cell_unchecked() };
-                let mut new_node = other_dense_node.clone();
+                let mut new_node = unsafe{ other_node.as_cell_unchecked() }.clone_as_dense();
                 let status = new_node.merge_from_list_node(self);
                 debug_assert!(!status.is_none());
                 (AlgebraicStatus::Element, Err(TrieNodeODRc::new_in(new_node, self.alloc.clone())))
