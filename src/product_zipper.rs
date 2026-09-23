@@ -401,6 +401,14 @@ fn factor_shared_node_id(id: u64, factor: usize, factor_count: usize) -> Option<
     Some(id ^ ((tag as u64) << 48))
 }
 
+/// The factor's own `shared_node_id` would be inconsistent here.  In every factor but the last, the product
+/// continues below the node into the following factors, so the same node reached in two different factors
+/// (e.g. one trie used as two factors) roots two different subtries of the product, and a cache keyed by the
+/// id, like `into_cata_cached`, would reuse the result for one as the result for the other.  So the id is
+/// tagged with the factor, see `factor_shared_node_id`.  Within one factor the tag is enough: the factors
+/// below are the same fixed tries wherever the node is reached, so equal ids do mean equal subtries.
+///
+/// `is_shared` needs no tag, it only says the focus can be reached by more than one path.
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZipper<'_, '_, V, A> {
     fn shared_node_id(&self) -> Option<u64> {
         let id = match self.factor_root() {
@@ -577,7 +585,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperAbsolutePath
     fn root_prefix_path(&self) -> &[u8] { self.primary.root_prefix_path() }
 }
 
-/// See [factor_shared_node_id] for how the factor enters the id
+/// As for [ProductZipper], the factor's own `shared_node_id` would be inconsistent: the same node reached in
+/// two different factors roots two different subtries of the product, since the following factors continue
+/// below it, and a cache keyed by the id would conflate them.  The id is tagged with the factor, see
+/// `factor_shared_node_id`, which is enough because the factors below a node are fixed.
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where

@@ -189,6 +189,16 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
     fn root_prefix_path(&self) -> &[u8] { self.primary.root_prefix_path() }
 }
 
+/// Sharing is never reported, because any id would be inconsistent.  Below a node, the product continues into
+/// whatever `enroll` returns for the path so far and the payload, so the same node reached at two paths can
+/// root two different subtries of the product, even within one factor.  E.g. with a subtrie grafted at `[1]`
+/// and `[2]`, and an `enroll` that picks the next factor by the first byte, both paths reach the same node but
+/// continue into different tries, and a cache keyed by `shared_node_id`, like `into_cata_cached`, would reuse
+/// the result for `[1]` at `[2]` (see `dep_cata_cached_path_dependent_enroll`).  Tagging the id with the
+/// factor, as [ProductZipper] does, only separates factors, not paths; and the last factor, where the node's
+/// own id would be safe, isn't known until `enroll` declines to add another.
+///
+/// `is_shared` is `false` to match: each location of the product is reported as reachable by only its path.
 impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperConcrete
     for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
     where
@@ -196,20 +206,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
         PrimaryZ: ZipperMoving + ZipperPath + ZipperConcrete,
         SecondaryZ: ZipperMoving + ZipperConcrete,
 {
-    fn shared_node_id(&self) -> Option<u64> {
-        if let Some(idx) = self.factor_idx(true) {
-            self.secondary[idx].shared_node_id()
-        } else {
-            self.primary.shared_node_id()
-        }
-    }
-    fn is_shared(&self) -> bool {
-        if let Some(idx) = self.factor_idx(true) {
-            self.secondary[idx].is_shared()
-        } else {
-            self.primary.is_shared()
-        }
-    }
+    fn shared_node_id(&self) -> Option<u64> { None }
+    fn is_shared(&self) -> bool { false }
 }
 
 impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperPathBuffer
@@ -501,6 +499,8 @@ impl<'trie, PrimaryZ, SecondaryZ, V: Clone + Send + Sync + Unpin, C, F : Clone +
 #[cfg(test)]
 mod tests {
     use crate::zipper::*;
+    use crate::utils::ByteMask;
+    use crate::morphisms::Catamorphism;
     use crate::PathMap;
 
     #[test]
@@ -567,5 +567,41 @@ ruberruber
 rubiconrubicon
 rubicundusrubicundus
 ")
+    }
+
+    /// Below a node, the product continues into whatever `enroll` returns for the path, so the same node
+    /// at two paths can be two different subtries of the product, even within one factor.  A cached cata
+    /// must not reuse the result from one for the other.
+    #[test]
+    fn dep_cata_cached_path_dependent_enroll() {
+        // `s` is grafted at [1] and [2], so both reach the same node in the primary factor
+        let s = PathMap::single([5u8], 1u64);
+        let mut a = PathMap::<u64>::new();
+        a.write_zipper_at_path(&[1u8]).graft_map(s.clone());
+        a.write_zipper_at_path(&[2u8]).graft_map(s.clone());
+        let x = PathMap::single([7u8], 1u64);
+        let mut y = PathMap::<u64>::new();
+        for p in [[8u8], [9]] { y.set_val_at(p, 1); }
+
+        // The next factor after [1] is `x`, and after [2] it is `y`
+        let dpz = || DependentProductZipperG::new_enroll(a.read_zipper(), (), |_, path: &[u8], idx| {
+            match idx {
+                0 => ((), Some(if path[0] == 1 { x.read_zipper() } else { y.read_zipper() })),
+                _ => ((), None),
+            }
+        });
+
+        // [1,5] [1,5,7] [2,5] [2,5,8] [2,5,9]
+        let mut z = dpz();
+        let mut vals = 0;
+        while z.to_next_val() { vals += 1; }
+        assert_eq!(vals, 5);
+
+        let alg = |_: &ByteMask, children: &mut [usize], val: Option<&u64>| children.iter().sum::<usize>() + val.is_some() as usize;
+        assert_eq!(dpz().into_cata_cached(alg), 5);
+
+        let mut z = dpz();
+        assert_eq!(z.descend_to_existing(&[1u8]), 1);
+        assert_eq!((z.shared_node_id(), z.is_shared()), (None, false));
     }
 }
