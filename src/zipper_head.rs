@@ -1541,9 +1541,9 @@ mod tests {
             wz.set_val(2);
             assert_eq!(wz.origin_path(), &[1u8, 2, 5]);
         }
-        assert_eq!(map.get_val_at(&[1u8, 2, 4]), Some(&1));
-        assert_eq!(map.get_val_at(&[1u8, 2, 5]), Some(&2));
-        assert_eq!(map.get_val_at(&[1u8, 2, 3]), Some(&7));
+        assert_eq!(map.val_at(&[1u8, 2, 4]), Some(&1));
+        assert_eq!(map.val_at(&[1u8, 2, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 3]), Some(&7));
     }
 
     /// An exclusive zipper at the head's own root, requested more than once, from a head whose

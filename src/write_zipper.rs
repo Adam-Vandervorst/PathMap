@@ -1343,11 +1343,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// Internal method to re-borrow a WriteZipperCore without the `'path` lifetime
     fn as_static_path_zipper(&mut self) -> &mut WriteZipperCore<'a, 'static, V, A> {
         self.prepare_buffers();
-        //The path is in `prefix_buf` now, so drop the borrowed copy
-        if self.key.origin_path.len() > 0 {
-            self.key.origin_path = SliceOrLen::new_owned(self.key.origin_path.len());
-        }
-        debug_assert!(!self.key.origin_path.is_slice() || self.key.origin_path.len() == 0);
+        debug_assert!(
+            !self.key.origin_path.is_slice() || self.key.origin_path.len() == 0,
+            "a prepared zipper must not retain a borrowed origin path"
+        );
         unsafe{ &mut *(self as *mut WriteZipperCore<V, A>).cast() }
     }
 
@@ -2788,6 +2787,8 @@ impl<'k> KeyFields<'k> {
             self.prefix_buf.reserve(path_len.saturating_sub(self.prefix_buf.len()));
             if was_unallocated {
                 self.prefix_buf.extend(unsafe{ self.origin_path.as_slice_unchecked() });
+                //The path now lives in `prefix_buf`; release the borrowed slice.
+                self.origin_path.make_len();
             }
         }
         if self.prefix_idx.capacity() < stack_depth {
