@@ -1563,9 +1563,9 @@ mod tests {
             wz.set_val(v);
         }
         let map = zh.into_map();
-        assert_eq!(map.get_val_at(&[1u8, 5]), Some(&3));
-        assert_eq!(map.get_val_at(&[1u8, 9, 5]), Some(&2));
-        assert_eq!(map.get_val_at(&[1u8, 2, 1, 0]), Some(&7));
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&3));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 1, 0]), Some(&7));
         assert_eq!(map.val_count(), 7);
 
         let mut map = sample();
@@ -1579,8 +1579,8 @@ mod tests {
                 child.set_val(v);
             }
         }
-        assert_eq!(map.get_val_at(&[1u8, 5]), Some(&2));
-        assert_eq!(map.get_val_at(&[1u8, 9, 5]), Some(&3));
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&3));
         assert_eq!(map.val_count(), 7);
     }
 }
