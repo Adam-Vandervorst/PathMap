@@ -99,6 +99,17 @@
 [`join_into_take`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.join_into_take
 [`join_into`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.join_into
 [`join_k_path_into`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.join_k_path_into
+[`ring`]: https://docs.rs/pathmap/latest/pathmap/ring/index.html
+[`Lattice`]: https://docs.rs/pathmap/latest/pathmap/ring/trait.Lattice.html
+[`DistributiveLattice`]: https://docs.rs/pathmap/latest/pathmap/ring/trait.DistributiveLattice.html
+[`AlgebraicResult`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicResult.html
+[`AlgebraicResult::None`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicResult.html#variant.None
+[`AlgebraicResult::Identity`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicResult.html#variant.Identity
+[`AlgebraicResult::Element`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicResult.html#variant.Element
+[`AlgebraicStatus`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicStatus.html
+[`AlgebraicStatus::None`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicStatus.html#variant.None
+[`AlgebraicStatus::Identity`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicStatus.html#variant.Identity
+[`AlgebraicStatus::Element`]: https://docs.rs/pathmap/latest/pathmap/ring/enum.AlgebraicStatus.html#variant.Element
 [`join_map`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.join_map
 [`make_map`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperSubtries.html#tymethod.make_map
 [`meet_2`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.meet_2
