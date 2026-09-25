@@ -2659,11 +2659,35 @@ pub(crate) fn node_along_path_mut<'a, 'k, V: Clone + Send + Sync, A: Allocator>(
     (key, node)
 }
 
+/// Applies a node operation at a path, replacing the node if it needs to be upgraded.
+#[inline]
+pub(crate) fn with_node_at_path_mut<V, A, NodeF, RetryF, R>(root: &mut TrieNodeODRc<V, A>, path: &[u8], node_f: NodeF, retry_f: RetryF) -> R
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    NodeF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> Result<R, TrieNodeODRc<V, A>>,
+    RetryF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> R,
+{
+    debug_assert!(!path.is_empty());
+    let (remaining_key, node) = node_along_path_mut(root, path, true);
+    match node_f(&mut node.make_mut(), remaining_key) {
+        Ok(result) => result,
+        Err(replacement_node) => {
+            *node = replacement_node;
+            retry_f(&mut node.make_mut(), remaining_key)
+        }
+    }
+}
+
 /// Ensures the node is a CellByteNode
 ///
 /// Returns `true` if the node was upgraded and `false` if it already was a CellByteNode
-pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>) -> bool {
-    if !node.as_tagged().is_cell_node() {
+pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>, alloc: A) -> bool {
+    if node.is_empty() {
+        //The empty sentinel can't be made mutable; there is nothing in it to keep
+        *node = TrieNodeODRc::new_in(crate::dense_byte_node::CellByteNode::new_in(alloc.clone()), alloc);
+        true
+    } else if !node.as_tagged().is_cell_node() {
         let replacement = node.make_mut().convert_to_cell_node();
         *node = replacement;
         true

@@ -45,6 +45,94 @@ fn binary_insert(bencher: Bencher, n: u64) {
     divan::black_box_drop(out)
 }
 
+// Every branch in these fixtures has at most two children. Short paths use
+// all eight three-byte binary keys; long paths branch at four spaced bytes.
+fn short_key(mask: u8) -> [u8; 3] {
+    [
+        b'0' + ((mask >> 2) & 1),
+        b'0' + ((mask >> 1) & 1),
+        b'0' + (mask & 1),
+    ]
+}
+
+fn seed_val(map: &mut PathMap<u64>, key: &[u8], val: u64) {
+    map.write_zipper_at_path(key).set_val(val);
+}
+
+fn short_map(target_len: usize, create: bool) -> PathMap<u64> {
+    let target = short_key(7);
+    let mut map = PathMap::new();
+    for mask in 0..8 {
+        let key = short_key(mask);
+        if !create || !key.starts_with(&target[..target_len]) {
+            seed_val(&mut map, &key, mask as u64);
+        }
+    }
+    if !create && target_len < target.len() {
+        seed_val(&mut map, &target[..target_len], 0);
+    }
+    assert_eq!(map.path_exists_at(&target[..target_len]), !create);
+    map
+}
+
+fn long_key(len: usize, mask: u8) -> Vec<u8> {
+    let mut key = vec![b'-'; len];
+    for (bit, index) in [0, len / 4, len / 2, 3 * len / 4].into_iter().enumerate() {
+        key[index] = b'0' + ((mask >> (3 - bit)) & 1);
+    }
+    key
+}
+
+fn long_map(len: usize, create: bool) -> PathMap<u64> {
+    let mut map = PathMap::new();
+    for mask in 0..16 {
+        if !create || mask != 15 {
+            seed_val(&mut map, &long_key(len, mask), mask as u64);
+        }
+    }
+    assert_eq!(map.path_exists_at(long_key(len, 15)), !create);
+    map
+}
+
+#[divan::bench(sample_size = 64, args = [0usize, 1, 2, 3])]
+fn binary_set_val_at_short_replace(bencher: Bencher, key_len: usize) {
+    let key = short_key(7);
+    let mut map = short_map(key_len, false);
+    bencher.bench_local(|| {
+        black_box(&mut map).set_val_at(black_box(&key[..key_len]), black_box(1));
+    });
+}
+
+// The empty path is the root, so creating a new path starts at length one.
+#[divan::bench(sample_size = 16, args = [1usize, 2, 3])]
+fn binary_set_val_at_short_create(bencher: Bencher, key_len: usize) {
+    let key = short_key(7);
+    let out = bencher.with_inputs(|| short_map(key_len, true)).bench_local_values(|mut map| {
+        black_box(&mut map).set_val_at(black_box(&key[..key_len]), black_box(1));
+        map
+    });
+    divan::black_box_drop(out);
+}
+
+#[divan::bench(args = [160usize, 256])]
+fn binary_set_val_at_long_replace(bencher: Bencher, key_len: usize) {
+    let key = long_key(key_len, 15);
+    let mut map = long_map(key_len, false);
+    bencher.bench_local(|| {
+        black_box(&mut map).set_val_at(black_box(&key), black_box(1));
+    });
+}
+
+#[divan::bench(sample_size = 16, args = [160usize, 256])]
+fn binary_set_val_at_long_create(bencher: Bencher, key_len: usize) {
+    let key = long_key(key_len, 15);
+    let out = bencher.with_inputs(|| long_map(key_len, true)).bench_local_values(|mut map| {
+        black_box(&mut map).set_val_at(black_box(&key), black_box(1));
+        map
+    });
+    divan::black_box_drop(out);
+}
+
 #[divan::bench(args = [250, 500, 1000, 2000, 4000, 8000])]
 fn binary_get(bencher: Bencher, n: u64) {
 

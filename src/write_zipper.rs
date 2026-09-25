@@ -50,7 +50,15 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     ///
     /// Returns `Some(replaced_val)` if an existing value was replaced, otherwise returns `None` if
     /// the value was added without replacing anything.
-    fn set_val(&mut self, val: V) -> Option<V>;
+    fn set_val(&mut self, val: V) -> Option<V> {
+        self.set_val_at([], val)
+    }
+
+    /// Sets the value at a path relative to the zipper's focus
+    ///
+    /// Returns `Some(replaced_val)` if an existing value was replaced, otherwise returns `None` if
+    /// the value was added without replacing anything.
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V>;
 
     /// Deprecated alias for [ZipperWriting::set_val]
     #[deprecated] //GOAT-old-names
@@ -351,6 +359,7 @@ impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperWriting<V, A> for &mut Z whe
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { (**self).get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { (**self).get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { (**self).set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { (**self).set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { (**self).remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { (**self).zipper_head() }
     fn graft<RZ: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &RZ) { (**self).graft(read_zipper) }
@@ -520,6 +529,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { self.z.get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { self.z.get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { self.z.set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { self.z.set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { self.z.remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
@@ -690,6 +700,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { self.z.get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { self.z.get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { self.z.set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { self.z.set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { self.z.remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
@@ -830,6 +841,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperWriting<V, A> for Write
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { self.z.get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { self.z.get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { self.z.set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { self.z.set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { self.z.remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
@@ -1343,7 +1355,10 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// Internal method to re-borrow a WriteZipperCore without the `'path` lifetime
     fn as_static_path_zipper(&mut self) -> &mut WriteZipperCore<'a, 'static, V, A> {
         self.prepare_buffers();
-        debug_assert!(!self.key.origin_path.is_slice() || self.key.origin_path.len() == 0);
+        debug_assert!(
+            !self.key.origin_path.is_slice() || self.key.origin_path.len() == 0,
+            "a prepared zipper must not retain a borrowed origin path"
+        );
         unsafe{ &mut *(self as *mut WriteZipperCore<V, A>).cast() }
     }
 
@@ -1439,21 +1454,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::set_val]
     pub fn set_val(&mut self, val: V) -> Option<V> {
-        if self.key.node_key().len() == 0 {
-            debug_assert!(self.at_root());
-            let root_val_ref = self.root_val.as_mut().unwrap();
-            let mut temp_val = Some(val);
-            core::mem::swap(unsafe{&mut **root_val_ref}, &mut temp_val);
-            return temp_val
-        }
-        let (old_val, created_subnode) = self.in_zipper_mut_static_result(
-            |node, remaining_key| node.node_set_val(remaining_key, val),
-            |_new_leaf_node, _remaining_key| (None, true));
-        if created_subnode {
-            self.mend_root();
-            self.descend_to_internal();
-        }
-        old_val
+        self.set_val_at(&[], val)
     }
     /// See [ZipperWriting::remove_val]
     pub fn remove_val(&mut self, prune: bool) -> Option<V> {
@@ -1716,7 +1717,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     self.set_node_at_child_path(&[child_byte], node)
                 }
                 if let Some(val) = src_root_val {
-                    let _ = self.set_val_at_child_path(&[child_byte], val);
+                    let _ = self.set_val_at(&[child_byte], val);
                 }
             }
         }
@@ -1736,12 +1737,26 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         }
     }
 
-    /// Sets a child value one byte below the focus
+    /// Sets a value at a path relative to the focus
     #[inline]
-    fn set_val_at_child_path(&mut self, path: &[u8], val: V) -> Option<V> {
-        let (old_val, created_subnode) = self.with_node_at_path(path,
-            |node, remaining_key| node.node_set_val(remaining_key, val),
-            |_new_leaf_node, _remaining_key| (None, true));
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> {
+        let path = path.as_ref();
+
+        //Special case for the root val
+        if path.is_empty() && self.key.node_key().is_empty() {
+            debug_assert!(self.at_root());
+            let root_val_ref = self.root_val.as_mut().unwrap();
+            return core::mem::replace(unsafe { &mut **root_val_ref }, Some(val));
+        }
+        let (old_val, created_subnode) = if path.is_empty() {
+            self.in_zipper_mut_static_result(
+                |node, remaining_key| node.node_set_val(remaining_key, val),
+                |_new_leaf_node, _remaining_key| (None, true))
+        } else {
+            self.with_node_at_path(path,
+                |node, remaining_key| node.node_set_val(remaining_key, val),
+                |_new_leaf_node, _remaining_key| (None, true))
+        };
         if created_subnode {
             self.mend_root();
             self.descend_to_internal();
@@ -2440,30 +2455,49 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     {
         let key = self.key.node_key();
         let mut focus_node = self.focus_stack.top_mut().unwrap();
-        if let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
+        if !key.is_empty() && let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
             debug_assert_eq!(key_bytes, key.len());
-            let (key, node) = node_along_path_mut(child_node, path, true);
-            let mut node_ref = node.make_mut();
-            match node_f(&mut node_ref, key) {
+            with_node_at_path_mut(child_node, path, node_f, retry_f)
+        } else if key.is_empty() {
+            // At the zipper root there is no focus key to combine with `path`.
+            // Walk existing children first, as write_zipper_at_path does.
+            drop(focus_node);
+            with_node_at_path_mut(self.focus_stack.root_mut().unwrap(), path, node_f, retry_f)
+        } else if key.len() + path.len() <= MAX_NODE_KEY_BYTES {
+            let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
+            key_buf[..key.len()].copy_from_slice(key);
+            key_buf[key.len()..key.len()+path.len()].copy_from_slice(path);
+            let full_key = &key_buf[..key.len()+path.len()];
+            drop(focus_node);
+            self.in_zipper_mut_static_result(
+                |focus_node, _| node_f(focus_node, full_key),
+                |focus_node, _| retry_f(focus_node, full_key),
+            )
+        } else {
+            // The focus is not represented by its own node yet. Take any subtree
+            // below it, apply the operation there, then back-fill the focus path
+            // using the same node insertion machinery as set_val.
+            let mut child = focus_node.take_node_at_key(key, false).filter(|node| !node.is_empty()).unwrap_or_else(|| {
+                #[cfg(not(feature = "all_dense_nodes"))]
+                { TrieNodeODRc::new_in(crate::line_list_node::LineListNode::new_in(self.alloc.clone()), self.alloc.clone()) }
+                #[cfg(feature = "all_dense_nodes")]
+                { TrieNodeODRc::new_in(crate::dense_byte_node::DenseByteNode::new_in(self.alloc.clone()), self.alloc.clone()) }
+            });
+            let result = match node_f(&mut child.make_mut(), path) {
                 Ok(result) => result,
                 Err(replacement_node) => {
-                    *node = replacement_node;
-                    retry_f(&mut node.make_mut(), key)
+                    child = replacement_node;
+                    retry_f(&mut child.make_mut(), path)
                 },
-            }
-        } else {
+            };
+            drop(focus_node);
             self.in_zipper_mut_static_result(
-                |focus_node, partial_key| {
-                    let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
-                    key_buf[0..partial_key.len()].copy_from_slice(partial_key);
-                    //GOAT, currently this will panic if the path is too long to fit in the buffer, which means this internal API
-                    // isn't suitable for general-purpose path-based ops yet, but we're using it to deal with single-byte ops
-                    key_buf[partial_key.len()..partial_key.len()+path.len()].copy_from_slice(path);
-                    let full_key = &key_buf[0..partial_key.len()+path.len()];
-                    node_f(focus_node, full_key)
-                },
-                retry_f
-            )
+                |node, key| node.node_set_branch(key, child),
+                |_, _| true,
+            );
+            self.mend_root();
+            self.descend_to_internal();
+            result
         }
     }
 
@@ -2784,6 +2818,8 @@ impl<'k> KeyFields<'k> {
             self.prefix_buf.reserve(path_len.saturating_sub(self.prefix_buf.len()));
             if was_unallocated {
                 self.prefix_buf.extend(unsafe{ self.origin_path.as_slice_unchecked() });
+                //The path now lives in `prefix_buf`; release the borrowed slice.
+                self.origin_path.make_len();
             }
         }
         if self.prefix_idx.capacity() < stack_depth {
@@ -6130,6 +6166,72 @@ mod tests {
             wz.graft_masked_branches(&o.read_zipper(), mask(b"abd"), false);
         }
         assert_eq!(keys(&m), ["cax", "cbx", "cdx", "d"]);
+    }
+
+    /// `graft_child_maps` and `graft_masked_branches` below a root path too long for one node key
+    #[test]
+    fn graft_child_maps_long_root() {
+        for root_len in [47usize, 48, 60, 200] {
+            let root = vec![0u8; root_len];
+            let mut map = PathMap::<u64>::new();
+            {
+                let mut wz = map.write_zipper_at_path(&root);
+                wz.graft_child_maps(ByteMask::from_iter([1u8, 3]), [PathMap::single([2u8], 5), PathMap::single([], 6)], false);
+            }
+            let mut want = root.clone();
+            want.extend([1u8, 2]);
+            assert_eq!(map.val_at(&want), Some(&5), "root {root_len}");
+            want.truncate(root_len);
+            want.push(3);
+            assert_eq!(map.val_at(&want).is_some(), cfg!(feature = "graft_root_vals"), "root {root_len}");
+
+            let mut src = PathMap::<u64>::new();
+            src.set_val_at([4u8, 4], 9);
+            let mut map = PathMap::<u64>::new();
+            {
+                let mut wz = map.write_zipper_at_path(&root);
+                wz.graft_masked_branches(&src.read_zipper(), ByteMask::from_iter([4u8]), false);
+            }
+            let mut want = root.clone();
+            want.extend([4u8, 4]);
+            assert_eq!(map.val_at(&want), Some(&9), "root {root_len}");
+        }
+    }
+
+    #[test]
+    fn set_val_at_below_long_missing_focus() {
+        for focus_len in [48usize, 60, 200] {
+            let focus = vec![0u8; focus_len];
+            let child_path = vec![1u8; 96];
+            let mut map = PathMap::<u64>::new();
+            {
+                let mut zipper = map.write_zipper_at_path(&focus);
+                assert_eq!(zipper.set_val_at(&child_path, 7), None);
+            }
+            let mut full_path = focus;
+            full_path.extend_from_slice(&child_path);
+            assert_eq!(map.val_at(&full_path), Some(&7));
+            assert_eq!(map.set_val_at(&full_path, 8), Some(7));
+            assert_eq!(map.val_at(&full_path), Some(&8));
+        }
+    }
+
+    #[test]
+    fn set_val_at_empty_path_sets_focus() {
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut zipper = map.write_zipper_at_path(b"focus");
+            assert_eq!(zipper.set_val_at(&[], 7), None);
+            assert_eq!(zipper.set_val_at(&[], 8), Some(7));
+        }
+        assert_eq!(map.val_at(b"focus"), Some(&8));
+        {
+            let mut zipper = map.write_zipper();
+            assert_eq!(zipper.set_val_at(&[], 9), None);
+            assert_eq!(zipper.set_val_at(&[], 10), Some(9));
+        }
+        assert_eq!(map.val_at([]), Some(&10));
+        assert_eq!(map.val_at(b"focus"), Some(&8));
     }
 
     #[test]
