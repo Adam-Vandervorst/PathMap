@@ -588,7 +588,15 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
     }
 
     fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
-        if self.position.is_invalid() || self.depth() < k {
+        let depth = self.depth();
+        if depth < k {
+            self.reset();
+            obs.ascend(depth);
+            return false;
+        }
+        if self.position.is_invalid() {
+            self.ascend(k);
+            obs.ascend(k);
             return false;
         }
         //Only the portion of `k` inside the source can have alternatives to step to, so `k` is
@@ -597,6 +605,9 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
         let source_depth = self.source.depth();
         if source_depth == 0 {
             //Entirely within the prefix, which offers no alternatives
+            let ascended = self.ascend(k);
+            debug_assert_eq!(ascended, k);
+            obs.ascend(k);
             return false
         }
         let clamped = k.min(source_depth);
@@ -834,6 +845,7 @@ mod tests {
         assert_eq!(z.path(), b"fix.b");
         assert_eq!(&obs[..], z.path());
         assert!(!z.to_next_k_path_observed(5, &mut obs));
+        assert_eq!(z.path(), b"");
         assert_eq!(&obs[..], z.path());
 
         //k_path where `k` lands inside the prefix, which is a single forced path with no siblings
@@ -843,6 +855,20 @@ mod tests {
         assert_eq!(z.path(), b"fi");
         assert_eq!(&obs[..], z.path());
         assert!(!z.to_next_k_path_observed(2, &mut obs));
+        assert_eq!(z.path(), b"");
+        assert_eq!(&obs[..], z.path());
+
+        //A missing path within the prefix also rewinds to the common root.
+        let mut z = make();
+        z.descend_to(b"fix.x");
+        let mut obs = z.path().to_vec();
+        assert!(!z.to_next_k_path_observed(2, &mut obs));
+        assert_eq!(z.path(), b"fix");
+        assert_eq!(&obs[..], z.path());
+
+        //An oversized step resets the zipper to its root, including the observer.
+        assert!(!z.to_next_k_path_observed(99, &mut obs));
+        assert_eq!(z.path(), b"");
         assert_eq!(&obs[..], z.path());
 
         //`k` deeper than anything the source can supply, so the prefix bytes descended on the way
