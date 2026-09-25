@@ -1524,42 +1524,26 @@ mod tests {
         assert_eq!(paths, vec![b"ax".to_vec(), b"bx".to_vec(), b"c".to_vec(), b"dx".to_vec()]);
     }
 
-    /// An exclusive zipper at the head's own root, requested more than once, from a head whose
-    /// root sits partway into a node
+    /// `get_trie_ref`, `get_focus` and forks from a head's read zipper, which owns its root node
     #[test]
-    fn exclusive_path_at_head_root_twice() {
-        let sample = || {
-            let mut m = PathMap::<u64>::new();
-            for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { m.set_val_at(p, 7); }
-            m
-        };
-
-        let zh = sample().into_zipper_head(&[1u8]);
-        for (path, v) in [(&[][..], 1), (&[9u8][..], 2), (&[][..], 3)] {
-            let mut wz = zh.write_zipper_at_exclusive_path(path).unwrap();
-            wz.descend_to(&[5u8]);
-            wz.set_val(v);
-        }
-        let map = zh.into_map();
-        assert_eq!(map.get_val_at(&[1u8, 5]), Some(&3));
-        assert_eq!(map.get_val_at(&[1u8, 9, 5]), Some(&2));
-        assert_eq!(map.get_val_at(&[1u8, 2, 1, 0]), Some(&7));
-        assert_eq!(map.val_count(), 7);
-
-        let mut map = sample();
-        {
-            let mut wz = map.write_zipper();
-            wz.descend_to(&[1u8]);
-            let zh = wz.zipper_head();
-            for (path, v) in [(&[][..], 1), (&[][..], 2), (&[9u8][..], 3)] {
-                let mut child = zh.write_zipper_at_exclusive_path(path).unwrap();
-                child.descend_to(&[5u8]);
-                child.set_val(v);
+    fn head_read_zipper_trie_refs() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 3], &[0]] { map.set_val_at(p, 7); }
+        let zh = map.zipper_head();
+        for path in [&[][..], &[1u8], &[1u8, 2], &[9u8]] {
+            let mut rz = zh.read_zipper_at_path(path).unwrap();
+            for step in [&[][..], &[2u8], &[2u8, 1]] {
+                rz.reset();
+                rz.descend_to(step);
+                let tr = rz.get_trie_ref();
+                assert_eq!(tr.val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(tr.child_mask(), rz.child_mask(), "{path:?} {step:?}");
+                let _ = rz.get_focus();
+                let fork = rz.fork_read_zipper();
+                assert_eq!(fork.get_trie_ref().val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(fork.trie_ref_at_path(&[0u8]).val(), rz.val_at(&[0u8]), "{path:?} {step:?}");
             }
         }
-        assert_eq!(map.get_val_at(&[1u8, 5]), Some(&2));
-        assert_eq!(map.get_val_at(&[1u8, 9, 5]), Some(&3));
-        assert_eq!(map.val_count(), 7);
     }
 
     /// A `ZipperHead` from a write zipper made with a borrowed path, and the zipper used afterwards
@@ -1580,9 +1564,47 @@ mod tests {
             wz.set_val(2);
             assert_eq!(wz.origin_path(), &[1u8, 2, 5]);
         }
-        assert_eq!(map.get_val_at(&[1u8, 2, 4]), Some(&1));
-        assert_eq!(map.get_val_at(&[1u8, 2, 5]), Some(&2));
-        assert_eq!(map.get_val_at(&[1u8, 2, 3]), Some(&7));
+        assert_eq!(map.val_at(&[1u8, 2, 4]), Some(&1));
+        assert_eq!(map.val_at(&[1u8, 2, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 3]), Some(&7));
+    }
+
+    /// An exclusive zipper at the head's own root, requested more than once, from a head whose
+    /// root sits partway into a node
+    #[test]
+    fn exclusive_path_at_head_root_twice() {
+        let sample = || {
+            let mut m = PathMap::<u64>::new();
+            for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { m.set_val_at(p, 7); }
+            m
+        };
+
+        let zh = sample().into_zipper_head(&[1u8]);
+        for (path, v) in [(&[][..], 1), (&[9u8][..], 2), (&[][..], 3)] {
+            let mut wz = zh.write_zipper_at_exclusive_path(path).unwrap();
+            wz.descend_to(&[5u8]);
+            wz.set_val(v);
+        }
+        let map = zh.into_map();
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&3));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 1, 0]), Some(&7));
+        assert_eq!(map.val_count(), 7);
+
+        let mut map = sample();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(&[1u8]);
+            let zh = wz.zipper_head();
+            for (path, v) in [(&[][..], 1), (&[][..], 2), (&[9u8][..], 3)] {
+                let mut child = zh.write_zipper_at_exclusive_path(path).unwrap();
+                child.descend_to(&[5u8]);
+                child.set_val(v);
+            }
+        }
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&3));
+        assert_eq!(map.val_count(), 7);
     }
 
     /// Exclusive paths from a head whose focus node is the empty sentinel
@@ -1607,10 +1629,10 @@ mod tests {
                         w.set_val(n as u64);
                     }
                 }
-                assert_eq!(map.get(&[7u8]), Some(&9), "setup {i} {paths:?}");
+                assert_eq!(map.val_at(&[7u8]), Some(&9), "setup {i} {paths:?}");
                 for (n, p) in paths.iter().enumerate() {
                     let full: Vec<u8> = [&[0u8, 0][..], p].concat();
-                    assert_eq!(map.get(&full), Some(&(n as u64)), "setup {i} {paths:?}");
+                    assert_eq!(map.val_at(&full), Some(&(n as u64)), "setup {i} {paths:?}");
                 }
             }
         }
