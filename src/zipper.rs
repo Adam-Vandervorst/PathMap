@@ -1121,9 +1121,9 @@ fn k_path_default_internal<Z: ZipperMoving + ?Sized, Obs: PathObserver>(z: &mut 
         }
         //Back at the base: nothing (more) below it, and its own siblings are out of bounds
         if z.depth() == base_idx { return false }
-        //A sibling step replaces the last byte rather than adding one, so the observer sees the old
-        //byte retracted before the new one arrives
         if let Some(byte) = z.to_next_sibling_byte() {
+            //A sibling step replaces the last byte rather than adding one, so the observer sees the old
+            //byte retracted before the new one arrives
             obs.ascend(1);
             obs.descend_to_byte(byte);
             if z.depth() == base_idx + k { return true }
@@ -2001,7 +2001,7 @@ pub(crate) mod read_zipper_core {
             PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
         }
         fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
-            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent_borrowed(), || self.val(), self.node_key(), b"", self.alloc.clone()).into()
+            TrieRefBorrowed::new_with_key_and_path_in(self.focus_parent(), || self.val(), self.node_key(), b"", self.alloc.clone()).into()
         }
         fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
             self.get_focus_at([])
@@ -2588,7 +2588,8 @@ pub(crate) mod read_zipper_core {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
                     parent.node_get_val(self.parent_key())
                 } else {
-                    if self.root_val.is_some() {
+                    if self.root_val.is_some() || self.root_parent_key_start == usize::MAX {
+                        //No parent key: the zipper root is the root node itself, and its value is `root_val`
                         self.root_val
                     } else {
                         //We know the node in the witness and the node in self.root_node are the same,
@@ -3414,6 +3415,21 @@ pub(crate) mod read_zipper_core {
                 if !found {
                     assert_eq!(z.path(), path, "{path:?} k={k}");
                 }
+            }
+        }
+    }
+
+    /// `get_val_with_witness` agrees with `val` on owned read zippers, including at a root without a value
+    #[test]
+    fn read_zipper_owned_get_val_with_witness() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[1u8][..], &[1, 2], &[3, 4, 5]] { map.set_val_at(p, p.len() as u64); }
+        for root in [&[][..], &[1u8], &[3u8], &[3u8, 4], &[9u8]] {
+            let mut z = map.clone().into_read_zipper(root);
+            loop {
+                let w = z.witness();
+                assert_eq!(z.get_val_with_witness(&w), z.val(), "{root:?} {:?}", z.path());
+                if !z.to_next_step() { break }
             }
         }
     }
@@ -4824,6 +4840,22 @@ pub(crate) mod zipper_iteration_tests {
                 }
 
                 #[test]
+                fn [<$z_name _k_path_walk_at_a_leaf>]() {
+                    use crate::zipper::zipper_iteration_tests::{k_path_walk_at_a_leaf, run_test};
+                    const LEAF_KEYS: &[&[u8]] = &[&[1u8]];
+                    for (keys, path, has_child) in [
+                        (&[][..], &[][..], false),
+                        (LEAF_KEYS, &[1u8][..], false),
+                        (LEAF_KEYS, &[][..], true),
+                    ] {
+                        let mut temp_store = $read_keys(keys);
+                        run_test(&mut temp_store, $make_z, b"", |zipper| {
+                            k_path_walk_at_a_leaf(zipper, path, has_child)
+                        });
+                    }
+                }
+
+                #[test]
                 fn [<$z_name _k_path_test2>]() {
                     let paths = crate::zipper::zipper_iteration_tests::k_path_test2_paths();
                     let path_refs: Vec<&[u8]> = paths.iter().map(|path| &path[..]).collect();
@@ -4946,6 +4978,19 @@ pub(crate) mod zipper_iteration_tests {
         assert_eq!(zipper.path(), b"a");
         assert!(!zipper.descend_first_k_path(0));
         assert_eq!(zipper.path(), b"a");
+    }
+
+    /// A k-path walk must stop at an empty root or leaf without stepping to a sibling.
+    pub fn k_path_walk_at_a_leaf<Z: ZipperIteration + ZipperPath>(mut zipper: Z, path: &[u8], has_child: bool) {
+        for k in 0..3 {
+            zipper.reset();
+            zipper.descend_to(path);
+            let found = zipper.descend_first_k_path(k);
+            assert_eq!(found, has_child && k == 1, "{path:?} k={k}");
+            if !found {
+                assert_eq!(zipper.path(), path, "{path:?} k={k}");
+            }
+        }
     }
 
     /// This is a toy encoding where `:n:` precedes a symbol `n` characters long

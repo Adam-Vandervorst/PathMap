@@ -337,21 +337,19 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         self.path_exists_at(k)
     }
 
-    /// Inserts `v` into the map at `path`.  Panics if `path` has a zero length
+    /// Inserts `v` into the map at `path`.
     ///
     /// Returns `Some(replaced_val)` if an existing value was replaced, otherwise returns `None` if
     /// the value was added to the map without replacing anything.
     pub fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, v: V) -> Option<V> {
         let path = path.as_ref();
-
-        //NOTE: Here is the old impl traversing without the zipper.  Kept here for benchmarking purposes
-        // However, the zipper version is basically identical performance, within the margin of error 
-        // traverse_to_leaf_static_result(&mut self.root, k,
-        // |node, remaining_key| node.node_set_val(remaining_key, v),
-        // |_new_leaf_node, _remaining_key| None)
-
-        let mut zipper = self.write_zipper_at_path(path);
-        zipper.set_val(v)
+        if path.is_empty() {
+            return core::mem::replace(self.root_val_mut(), Some(v));
+        }
+        let (old_val, _) = with_node_at_path_mut(self.get_or_init_root_mut(), path,
+            |node, remaining_key| node.node_set_val(remaining_key, v),
+            |_, _| (None, true));
+        old_val
     }
 
     /// Alias for [Self::set_val_at], so `PathMap` "feels" like other Rust collections

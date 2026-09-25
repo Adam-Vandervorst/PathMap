@@ -343,7 +343,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
         debug_assert_eq!(z.focus_stack.depth(), 1);
         z.focus_stack.to_root();
         let stack_root = z.focus_stack.root_mut().unwrap();
-        make_cell_node(stack_root);
+        make_cell_node(stack_root, z.alloc.clone());
         let root_val = z.root_val.as_mut().unwrap();
         return (stack_root, unsafe{ &mut **root_val })
     }
@@ -368,7 +368,11 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                 let cell_node = end_node.make_mut().into_cell_node().unwrap();
                 let (exclusive_node, val) = cell_node.prepare_cf(last_path_byte);
 
+                //With an empty `path`, the popped byte was the zipper's own; put it back
                 z.key.prefix_buf.truncate(original_path_len);
+                if z.key.prefix_buf.len() < original_path_len {
+                    z.key.prefix_buf.push(last_path_byte);
+                }
 
                 return (exclusive_node, val)
             },
@@ -382,7 +386,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                     |node, key| {
                         let new_node = if key.len() > 0 {
                             if let Some(mut remaining) = node.take_node_at_key(key, false) {
-                                make_cell_node(&mut remaining);
+                                make_cell_node(&mut remaining, alloc.clone());
                                 remaining
                             } else {
                                 TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc)
@@ -409,11 +413,15 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
     } else {
         //CASE 4
         z.key.prefix_buf.truncate(original_path_len);
+        if z.key.prefix_buf.len() < original_path_len {
+            z.key.prefix_buf.push(last_path_byte);
+        }
 
         //If the node on top of the stack is not a cell node, we need to upgrade it
         if !z.focus_stack.top().unwrap().is_cell_node() {
+            let alloc = z.alloc.clone();
             swap_top_node(&mut z.focus_stack, &z.key, |mut existing_node| {
-                make_cell_node(&mut existing_node);
+                make_cell_node(&mut existing_node, alloc);
                 existing_node
             });
         }
@@ -432,9 +440,9 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
         let mut node_ref = node.make_mut();
         let mut new_parent = match node_ref.take_node_at_key(remaining_key, false) {
             Some(downward_node) => downward_node,
-            None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc)
+            None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc.clone())
         };
-        make_cell_node(&mut new_parent);
+        make_cell_node(&mut new_parent, alloc.clone());
         let result = node_ref.node_set_branch(remaining_key, new_parent);
         match result {
             Ok(_) => { },
@@ -445,7 +453,7 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
         node = child_node;
     } else {
         //Otherwise just upgrade node
-        make_cell_node(node);
+        make_cell_node(node, alloc);
     }
     node
 }
@@ -1514,5 +1522,119 @@ mod tests {
         let mut paths: Vec<Vec<u8>> = joined.iter().map(|(p, _)| p).collect();
         paths.sort();
         assert_eq!(paths, vec![b"ax".to_vec(), b"bx".to_vec(), b"c".to_vec(), b"dx".to_vec()]);
+    }
+
+    /// `get_trie_ref`, `get_focus` and forks from a head's read zipper, which owns its root node
+    #[test]
+    fn head_read_zipper_trie_refs() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 3], &[0]] { map.set_val_at(p, 7); }
+        let zh = map.zipper_head();
+        for path in [&[][..], &[1u8], &[1u8, 2], &[9u8]] {
+            let mut rz = zh.read_zipper_at_path(path).unwrap();
+            for step in [&[][..], &[2u8], &[2u8, 1]] {
+                rz.reset();
+                rz.descend_to(step);
+                let tr = rz.get_trie_ref();
+                assert_eq!(tr.val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(tr.child_mask(), rz.child_mask(), "{path:?} {step:?}");
+                let _ = rz.get_focus();
+                let fork = rz.fork_read_zipper();
+                assert_eq!(fork.get_trie_ref().val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(fork.trie_ref_at_path(&[0u8]).val(), rz.val_at(&[0u8]), "{path:?} {step:?}");
+            }
+        }
+    }
+
+    /// A `ZipperHead` from a write zipper made with a borrowed path, and the zipper used afterwards
+    #[test]
+    fn zipper_head_from_write_zipper_at_borrowed_path() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[1u8, 2, 3], 7);
+        {
+            let path = [1u8, 2];
+            let mut wz = map.write_zipper_at_path(&path);
+            {
+                let zh = wz.zipper_head();
+                let mut child = zh.write_zipper_at_exclusive_path(&[4u8]).unwrap();
+                child.set_val(1);
+            }
+            assert_eq!(wz.origin_path(), &[1u8, 2]);
+            wz.descend_to(&[5u8]);
+            wz.set_val(2);
+            assert_eq!(wz.origin_path(), &[1u8, 2, 5]);
+        }
+        assert_eq!(map.val_at(&[1u8, 2, 4]), Some(&1));
+        assert_eq!(map.val_at(&[1u8, 2, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 3]), Some(&7));
+    }
+
+    /// An exclusive zipper at the head's own root, requested more than once, from a head whose
+    /// root sits partway into a node
+    #[test]
+    fn exclusive_path_at_head_root_twice() {
+        let sample = || {
+            let mut m = PathMap::<u64>::new();
+            for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { m.set_val_at(p, 7); }
+            m
+        };
+
+        let zh = sample().into_zipper_head(&[1u8]);
+        for (path, v) in [(&[][..], 1), (&[9u8][..], 2), (&[][..], 3)] {
+            let mut wz = zh.write_zipper_at_exclusive_path(path).unwrap();
+            wz.descend_to(&[5u8]);
+            wz.set_val(v);
+        }
+        let map = zh.into_map();
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&3));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 1, 0]), Some(&7));
+        assert_eq!(map.val_count(), 7);
+
+        let mut map = sample();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(&[1u8]);
+            let zh = wz.zipper_head();
+            for (path, v) in [(&[][..], 1), (&[][..], 2), (&[9u8][..], 3)] {
+                let mut child = zh.write_zipper_at_exclusive_path(path).unwrap();
+                child.descend_to(&[5u8]);
+                child.set_val(v);
+            }
+        }
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&3));
+        assert_eq!(map.val_count(), 7);
+    }
+
+    /// Exclusive paths from a head whose focus node is the empty sentinel
+    #[test]
+    fn exclusive_path_over_empty_node() {
+        let setups: [fn(&mut PathMap<u64>); 3] = [
+            |m| { m.write_zipper_at_path(&[0u8, 0]).remove_branches(false); },
+            |m| { let e = PathMap::<u64>::new(); m.write_zipper_at_path(&[0u8, 0]).graft(&e.read_zipper()); },
+            |m| { m.write_zipper_at_path(&[0u8, 0]).take_map(false); },
+        ];
+        for (i, setup) in setups.iter().enumerate() {
+            for paths in [[&[][..], &[5u8][..]], [&[5u8, 6][..], &[][..]], [&[0u8, 0][..], &[1u8][..]]] {
+                let mut map = PathMap::<u64>::new();
+                map.set_val_at(&[0u8, 0, 1, 2], 9);
+                map.set_val_at(&[7u8], 9);
+                setup(&mut map);
+                {
+                    let mut wz = map.write_zipper_at_path(&[0u8, 0]);
+                    let zh = wz.zipper_head();
+                    for (n, p) in paths.iter().enumerate() {
+                        let mut w = zh.write_zipper_at_exclusive_path(p).unwrap();
+                        w.set_val(n as u64);
+                    }
+                }
+                assert_eq!(map.val_at(&[7u8]), Some(&9), "setup {i} {paths:?}");
+                for (n, p) in paths.iter().enumerate() {
+                    let full: Vec<u8> = [&[0u8, 0][..], p].concat();
+                    assert_eq!(map.val_at(&full), Some(&(n as u64)), "setup {i} {paths:?}");
+                }
+            }
+        }
     }
 }
