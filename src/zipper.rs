@@ -1949,6 +1949,7 @@ pub(crate) mod read_zipper_core {
         fn is_val(&self) -> bool {
             self.is_val_internal()
         }
+        #[inline]
         fn child_count(&self) -> usize {
             debug_assert!(self.is_regularized());
             self.focus_node.count_branches(self.node_key())
