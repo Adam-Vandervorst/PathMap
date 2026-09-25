@@ -94,7 +94,7 @@ fn long_map(len: usize, create: bool) -> PathMap<u64> {
     map
 }
 
-#[divan::bench(args = [0usize, 1, 2, 3])]
+#[divan::bench(sample_size = 64, args = [0usize, 1, 2, 3])]
 fn binary_set_val_at_short_replace(bencher: Bencher, key_len: usize) {
     let key = short_key(7);
     let mut map = short_map(key_len, false);

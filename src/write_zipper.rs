@@ -50,7 +50,15 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     ///
     /// Returns `Some(replaced_val)` if an existing value was replaced, otherwise returns `None` if
     /// the value was added without replacing anything.
-    fn set_val(&mut self, val: V) -> Option<V>;
+    fn set_val(&mut self, val: V) -> Option<V> {
+        self.set_val_at([], val)
+    }
+
+    /// Sets the value at a path relative to the zipper's focus
+    ///
+    /// Returns `Some(replaced_val)` if an existing value was replaced, otherwise returns `None` if
+    /// the value was added without replacing anything.
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V>;
 
     /// Deprecated alias for [ZipperWriting::set_val]
     #[deprecated] //GOAT-old-names
@@ -351,6 +359,7 @@ impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperWriting<V, A> for &mut Z whe
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { (**self).get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { (**self).get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { (**self).set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { (**self).set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { (**self).remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { (**self).zipper_head() }
     fn graft<RZ: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &RZ) { (**self).graft(read_zipper) }
@@ -520,6 +529,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { self.z.get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { self.z.get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { self.z.set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { self.z.set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { self.z.remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
@@ -565,14 +575,6 @@ crate::zipper::impl_zipper_debug!(
 /// is possible to statically guarantee non-interference between zippers
 pub struct WriteZipperUntracked<'a, 'k, V: Clone + Send + Sync, A: Allocator = GlobalAlloc> {
     z: WriteZipperCore<'a, 'k, V, A>,
-}
-
-//GOAT TODO.  I will pick this up to a public API in the near future, but this PR is a bug-fix that turned into
-// an opportunistic optimization so I don't want to touch the external-facing API right now.
-impl<'a, 'k, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperUntracked<'a, 'k, V, A> {
-    pub(crate) fn set_val_at(&mut self, path: &[u8], val: V) -> Option<V> {
-        self.z.set_val_at(path, val)
-    }
 }
 
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> Zipper for WriteZipperUntracked<'a, '_, V, A> {
@@ -698,6 +700,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { self.z.get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { self.z.get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { self.z.set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { self.z.set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { self.z.remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
@@ -838,6 +841,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperWriting<V, A> for Write
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { self.z.get_val_or_set_mut(default) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { self.z.get_val_or_set_mut_with(func) }
     fn set_val(&mut self, val: V) -> Option<V> { self.z.set_val(val) }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { self.z.set_val_at(path, val) }
     fn remove_val(&mut self, prune: bool) -> Option<V> { self.z.remove_val(prune) }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { self.z.zipper_head() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) { self.z.graft(read_zipper) }
@@ -1732,7 +1736,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
     /// Sets a value at a path relative to the focus
     #[inline]
-    pub(crate) fn set_val_at(&mut self, path: &[u8], val: V) -> Option<V> {
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> {
+        let path = path.as_ref();
+
         //Special case for the root val
         if path.is_empty() && self.key.node_key().is_empty() {
             debug_assert!(self.at_root());
@@ -2448,27 +2454,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let mut focus_node = self.focus_stack.top_mut().unwrap();
         if !key.is_empty() && let Some((key_bytes, child_node)) = focus_node.node_get_child_mut(key) {
             debug_assert_eq!(key_bytes, key.len());
-            let (key, node) = node_along_path_mut(child_node, path, true);
-            let mut node_ref = node.make_mut();
-            match node_f(&mut node_ref, key) {
-                Ok(result) => result,
-                Err(replacement_node) => {
-                    *node = replacement_node;
-                    retry_f(&mut node.make_mut(), key)
-                },
-            }
+            with_node_at_path_mut(child_node, path, node_f, retry_f)
         } else if key.is_empty() {
             // At the zipper root there is no focus key to combine with `path`.
             // Walk existing children first, as write_zipper_at_path does.
             drop(focus_node);
-            let (remaining_key, node) = node_along_path_mut(self.focus_stack.root_mut().unwrap(), path, true);
-            match node_f(&mut node.make_mut(), remaining_key) {
-                Ok(result) => result,
-                Err(replacement_node) => {
-                    *node = replacement_node;
-                    retry_f(&mut node.make_mut(), remaining_key)
-                },
-            }
+            with_node_at_path_mut(self.focus_stack.root_mut().unwrap(), path, node_f, retry_f)
         } else if key.len() + path.len() <= MAX_NODE_KEY_BYTES {
             let mut key_buf = [0u8; MAX_NODE_KEY_BYTES];
             key_buf[..key.len()].copy_from_slice(key);
