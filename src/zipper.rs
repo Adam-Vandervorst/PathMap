@@ -2586,7 +2586,8 @@ pub(crate) mod read_zipper_core {
                 if let Some((parent, _iter_tok, _prefix_offset)) = self.ancestors.last() {
                     parent.node_get_val(self.parent_key())
                 } else {
-                    if self.root_val.is_some() {
+                    if self.root_val.is_some() || self.root_parent_key_start == usize::MAX {
+                        //No parent key: the zipper root is the root node itself, and its value is `root_val`
                         self.root_val
                     } else {
                         //We know the node in the witness and the node in self.root_node are the same,
@@ -3393,6 +3394,21 @@ pub(crate) mod read_zipper_core {
 
         pub(crate) fn into_path(self) -> Vec<u8> {
             self.prefix_buf
+        }
+    }
+
+    /// `get_val_with_witness` agrees with `val` on owned read zippers, including at a root without a value
+    #[test]
+    fn read_zipper_owned_get_val_with_witness() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[1u8][..], &[1, 2], &[3, 4, 5]] { map.set_val_at(p, p.len() as u64); }
+        for root in [&[][..], &[1u8], &[3u8], &[3u8, 4], &[9u8]] {
+            let mut z = map.clone().into_read_zipper(root);
+            loop {
+                let w = z.witness();
+                assert_eq!(z.get_val_with_witness(&w), z.val(), "{root:?} {:?}", z.path());
+                if !z.to_next_step() { break }
+            }
         }
     }
 
