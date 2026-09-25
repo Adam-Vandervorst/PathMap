@@ -50,7 +50,7 @@ impl ZipperMoving for EmptyZipper {
             self.reset();
             false
         } else {
-            self.path.truncate(self.path.len() - self.path_start_idx - steps);
+            self.path.truncate(self.path.len() - steps);
             true
         }
     }
@@ -85,7 +85,10 @@ impl ZipperAbsolutePath for EmptyZipper {
 impl ZipperIteration for EmptyZipper {
     fn to_next_val(&mut self) -> bool { false }
     fn descend_first_k_path(&mut self, _k: usize) -> bool { false }
-    fn to_next_k_path(&mut self, _k: usize) -> bool { false }
+    fn to_next_k_path(&mut self, k: usize) -> bool {
+        self.ascend(k);
+        false
+    }
 }
 
 impl<V> ZipperValues<V> for EmptyZipper {
@@ -133,3 +136,21 @@ impl ZipperPathBuffer for EmptyZipper {
 crate::impl_name_only_debug!(
     impl core::fmt::Debug for EmptyZipper
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_next_k_path_rewinds_to_common_root() {
+        let mut z = EmptyZipper::new_at_path(b"root.");
+        z.descend_to(b"abc");
+
+        assert!(!z.to_next_k_path(2));
+        assert_eq!(z.path(), b"a");
+        assert_eq!(z.root_prefix_path(), b"root.");
+
+        assert!(!z.to_next_k_path(5));
+        assert_eq!(z.path(), b"");
+    }
+}

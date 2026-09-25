@@ -685,8 +685,40 @@ mod tests {
     use crate::zipper::Zipper;
     use crate::zipper::ZipperMoving;
     use crate::zipper::ZipperAbsolutePath;
+    use crate::zipper::ZipperIteration;
     use crate::zipper::ZipperReadOnlyValues;
     use crate::zipper::ZipperValues;
+
+    #[test]
+    fn to_next_k_path_rewinds_across_prefix_and_source() {
+        let keys: &[&[u8]] = &[b"pre.fix.aa", b"pre.fix.ab", b"pre.fix.b"];
+        let map: PathMap<()> = keys.iter().map(|k| (k, ())).collect();
+        let make = || {
+            let mut z = PrefixZipper::new(b"pre.fix.".to_vec(), map.read_zipper_at_path(b"pre.fix."));
+            z.set_root_prefix_path(b"pre.").unwrap();
+            z
+        };
+
+        let mut z = make();
+        assert!(z.descend_first_k_path(5));
+        assert_eq!(z.path(), b"fix.a");
+        assert!(z.to_next_k_path(5));
+        assert_eq!(z.path(), b"fix.b");
+        assert!(!z.to_next_k_path(5));
+        assert_eq!(z.path(), b"");
+
+        let mut z = make();
+        z.descend_to(b"fi");
+        assert!(!z.to_next_k_path(2));
+        assert_eq!(z.path(), b"");
+
+        let mut z = make();
+        z.descend_to(b"fix.x");
+        assert!(!z.to_next_k_path(2));
+        assert_eq!(z.path(), b"fix");
+        assert!(!z.to_next_k_path(99));
+        assert_eq!(z.path(), b"");
+    }
     const PATHS1: &[(&[u8], u64)] = &[
         (b"0000", 0),
         (b"00000", 1),
