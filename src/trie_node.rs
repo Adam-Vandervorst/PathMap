@@ -2682,8 +2682,12 @@ where
 /// Ensures the node is a CellByteNode
 ///
 /// Returns `true` if the node was upgraded and `false` if it already was a CellByteNode
-pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>) -> bool {
-    if !node.as_tagged().is_cell_node() {
+pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>, alloc: A) -> bool {
+    if node.is_empty() {
+        //The empty sentinel can't be made mutable; there is nothing in it to keep
+        *node = TrieNodeODRc::new_in(crate::dense_byte_node::CellByteNode::new_in(alloc.clone()), alloc);
+        true
+    } else if !node.as_tagged().is_cell_node() {
         let replacement = node.make_mut().convert_to_cell_node();
         *node = replacement;
         true
