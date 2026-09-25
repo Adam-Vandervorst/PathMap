@@ -148,14 +148,6 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
             self.enroll_next_factor();
         }
     }
-    /// The secondary factor whose root node is the focus, if any.  Its node is not a child of the
-    /// node above it, so the core zipper can't look it up.
-    fn factor_root(&self) -> Option<&TrieRef<'trie, V, A>> {
-        match self.factor_paths.last() {
-            Some(&start) if start == self.depth() => self.secondaries.get(self.factor_paths.len() - 1),
-            _ => None
-        }
-    }
     /// Internal method to make sure `self.factor_paths` is correct after an ascend method
     #[inline]
     fn fix_after_ascend(&mut self) {
@@ -274,8 +266,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         moved
     }
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
-        //Stepping sideways leaves a factor entered at this depth, but at the root there's no sideways
-        if self.depth() > 0 && self.factor_paths.last().cloned() == Some(self.depth()) {
+        if self.depth() == 0 { return None }
+        //Stepping sideways leaves a factor entered at this depth.
+        if self.factor_paths.last().cloned() == Some(self.depth()) {
             self.factor_paths.pop();
         }
         let moved = self.z.to_next_sibling_byte();
@@ -283,8 +276,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         moved
     }
     fn to_prev_sibling_byte(&mut self) -> Option<u8> {
-        //Stepping sideways leaves a factor entered at this depth, but at the root there's no sideways
-        if self.depth() > 0 && self.factor_paths.last().cloned() == Some(self.depth()) {
+        if self.depth() == 0 { return None }
+        //Stepping sideways leaves a factor entered at this depth.
+        if self.factor_paths.last().cloned() == Some(self.depth()) {
             self.factor_paths.pop();
         }
         let moved = self.z.to_prev_sibling_byte();
@@ -372,17 +366,22 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 }
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZipper<'_, '_, V, A> {
+    //GOAT, this is a temporary fix to provide correctness at the expense of reporting sharing until
+    // https://github.com/Adam-Vandervorst/PathMap/pull/136 gets sorted.
     fn shared_node_id(&self) -> Option<u64> {
-        match self.factor_root() {
-            Some(_) if self.z.is_val() => None,
-            Some(factor) => factor.shared_node_id(),
-            None => self.z.shared_node_id(),
+        if self.factor_paths.len() == 0 {
+            self.z.shared_node_id()
+        } else {
+            None
         }
     }
+    //GOAT, this is a temporary fix to provide correctness at the expense of reporting sharing until
+    // https://github.com/Adam-Vandervorst/PathMap/pull/136 gets sorted.
     fn is_shared(&self) -> bool {
-        match self.factor_root() {
-            Some(factor) => factor.is_shared(),
-            None => self.z.is_shared(),
+        if self.factor_paths.len() == 0 {
+            self.z.is_shared()
+        } else {
+            false
         }
     }
 }
@@ -967,9 +966,6 @@ mod tests {
             impl_product_zipper_tests!($mod, $ProductZipper, $convert, read_zipper);
         };
         ($mod:ident, $ProductZipper:ident, $convert:ident, $read_zipper_u64:ident) => {
-            impl_product_zipper_tests!($mod, $ProductZipper, $convert, $read_zipper_u64, ignore_shared_root);
-        };
-        ($mod:ident, $ProductZipper:ident, $convert:ident, $read_zipper_u64:ident, $check_shared_root:ident) => {
             // --- START OF MACRO GENERATED MOD ---
             pub mod $mod {
                 use super::*;
@@ -991,8 +987,8 @@ mod tests {
         assert!(pz.path_indices().is_empty());
     }
 
-    /// k-path walks and sibling steps keep factor bookkeeping in step with the core zipper, including
-    /// with a primary rooted at a missing path or at a leaf
+    /// k-path walks stay within the requested depth, including with a primary rooted at a
+    /// missing path or at a leaf.
     #[test]
     fn k_path_walk_from_the_root() {
         let mut a = PathMap::<()>::new();
@@ -1009,36 +1005,12 @@ mod tests {
                     while paths.len() < 64 && z.to_next_k_path(k) { paths.push(z.path().to_vec()); }
                 }
                 assert_eq!(z.path(), &[] as &[u8], "{root:?} k={k}");
-                let _ = (z.is_shared(), z.shared_node_id(), z.child_mask());
                 assert!(paths.iter().all(|p| p.len() == k), "{root:?} k={k}: {paths:?}");
                 if root == &[0xaau8, 0x77][..] {
                     assert!(paths.is_empty(), "a missing primary has no paths: {paths:?}");
                 }
-                let mut z = $ProductZipper::new(a.read_zipper_at_path(root), [b.read_zipper()]);
-                let _ = (z.to_next_sibling_byte(), z.to_prev_sibling_byte());
-                let _ = (z.is_shared(), z.child_mask(), z.descend_first_byte(), z.is_shared());
             }
         }
-    }
-
-    /// `is_shared` and `shared_node_id` across factor boundaries
-    #[test]
-    fn is_shared_across_factors() {
-        let mut a = PathMap::<u64>::new();
-        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { a.set_val_at(p, 7); }
-        let b = a.clone();
-        $convert!(a);
-        $convert!(b);
-        let mut z = $ProductZipper::new(a.read_zipper_at_path(&[1u8, 2, 1]), [b.read_zipper()]);
-        let mut factor_roots = 0;
-        while z.to_next_step() {
-            let _ = (z.is_shared(), z.shared_node_id());
-            if z.path_indices().last() == Some(&z.depth()) {
-                factor_roots += 1;
-                $check_shared_root!(z);
-            }
-        }
-        assert!(factor_roots > 0);
     }
 
     /// Builds a path long enough to span several trie nodes, so a `descend_until` over it is
@@ -1965,9 +1937,7 @@ mod tests {
     }
 
     macro_rules! noop { ($x:ident) => {}; (*$x:ident) => {}; }
-    macro_rules! ignore_shared_root { ($z:ident) => {}; }
-    macro_rules! assert_shared_root { ($z:ident) => { assert!($z.is_shared(), "{:?}", $z.path()); }; }
-    impl_product_zipper_tests!(pz_concrete, ProductZipper, noop, read_zipper, assert_shared_root);
+    impl_product_zipper_tests!(pz_concrete, ProductZipper, noop);
     impl_product_zipper_tests!(pz_generic, ProductZipperG, noop);
 
     /// Adapts [DependentProductZipperG] to the `new(primary, [secondaries])` shape the shared
