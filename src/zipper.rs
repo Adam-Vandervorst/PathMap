@@ -1119,11 +1119,10 @@ fn k_path_default_internal<Z: ZipperMoving + ?Sized, Obs: PathObserver>(z: &mut 
                 if z.depth() == base_idx + k { return true }
             }
         }
-        //Back at the base: nothing (more) below it, and its own siblings are out of bounds
         if z.depth() == base_idx { return false }
-        //A sibling step replaces the last byte rather than adding one, so the observer sees the old
-        //byte retracted before the new one arrives
         if let Some(byte) = z.to_next_sibling_byte() {
+            //A sibling step replaces the last byte rather than adding one, so the observer sees the old
+            //byte retracted before the new one arrives
             obs.ascend(1);
             obs.descend_to_byte(byte);
             if z.depth() == base_idx + k { return true }
@@ -3399,26 +3398,6 @@ pub(crate) mod read_zipper_core {
         }
     }
 
-    /// The default k-path walk ends when there is nothing below its base, and `k = 0` returns `false`
-    #[test]
-    fn default_k_path_walk_at_a_leaf() {
-        use crate::zipper::ProductZipperG;
-        let mut leaf = PathMap::<u64>::new();
-        leaf.set_val_at(&[1u8], 1);
-        let empty = PathMap::<u64>::new();
-        for (map, path) in [(&empty, &[][..]), (&leaf, &[1u8][..]), (&leaf, &[][..])] {
-            for k in 0..3 {
-                let mut z = ProductZipperG::new(map.read_zipper(), [empty.read_zipper()]);
-                z.descend_to(path);
-                let found = z.descend_first_k_path(k);
-                assert_eq!(found, map.val_count() > 0 && path.is_empty() && k == 1, "{path:?} k={k}");
-                if !found {
-                    assert_eq!(z.path(), path, "{path:?} k={k}");
-                }
-            }
-        }
-    }
-
     /// `get_val_with_witness` agrees with `val` on owned read zippers, including at a root without a value
     #[test]
     fn read_zipper_owned_get_val_with_witness() {
@@ -4840,6 +4819,22 @@ pub(crate) mod zipper_iteration_tests {
                 }
 
                 #[test]
+                fn [<$z_name _k_path_walk_at_a_leaf>]() {
+                    use crate::zipper::zipper_iteration_tests::{k_path_walk_at_a_leaf, run_test};
+                    const LEAF_KEYS: &[&[u8]] = &[&[1u8]];
+                    for (keys, path, has_child) in [
+                        (&[][..], &[][..], false),
+                        (LEAF_KEYS, &[1u8][..], false),
+                        (LEAF_KEYS, &[][..], true),
+                    ] {
+                        let mut temp_store = $read_keys(keys);
+                        run_test(&mut temp_store, $make_z, b"", |zipper| {
+                            k_path_walk_at_a_leaf(zipper, path, has_child)
+                        });
+                    }
+                }
+
+                #[test]
                 fn [<$z_name _k_path_test2>]() {
                     let paths = crate::zipper::zipper_iteration_tests::k_path_test2_paths();
                     let path_refs: Vec<&[u8]> = paths.iter().map(|path| &path[..]).collect();
@@ -4962,6 +4957,19 @@ pub(crate) mod zipper_iteration_tests {
         assert_eq!(zipper.path(), b"a");
         assert!(!zipper.descend_first_k_path(0));
         assert_eq!(zipper.path(), b"a");
+    }
+
+    /// A k-path walk must stop at an empty root or leaf without stepping to a sibling.
+    pub fn k_path_walk_at_a_leaf<Z: ZipperIteration + ZipperPath>(mut zipper: Z, path: &[u8], has_child: bool) {
+        for k in 0..3 {
+            zipper.reset();
+            zipper.descend_to(path);
+            let found = zipper.descend_first_k_path(k);
+            assert_eq!(found, has_child && k == 1, "{path:?} k={k}");
+            if !found {
+                assert_eq!(zipper.path(), path, "{path:?} k={k}");
+            }
+        }
     }
 
     /// This is a toy encoding where `:n:` precedes a symbol `n` characters long
