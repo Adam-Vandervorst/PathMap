@@ -148,6 +148,20 @@ impl<'factor_z, 'trie, V: Clone + Send + Sync + Unpin, A: Allocator> ProductZipp
             self.enroll_next_factor();
         }
     }
+    /// The secondary factor whose root node is the focus, if any.  Its node is not a child of the
+    /// node above it, so the core zipper can't look it up.
+    fn factor_root(&self) -> Option<&TrieRef<'trie, V, A>> {
+        match self.factor_paths.last() {
+            Some(&start) if start == self.depth() => self.secondaries.get(self.factor_paths.len() - 1),
+            _ => None
+        }
+    }
+    /// The index of the factor whose trie holds the node at the focus.  At a factor root that is the
+    /// entered factor, not the one whose path ends there.
+    #[inline]
+    fn focus_node_factor(&self) -> usize {
+        self.factor_paths.len()
+    }
     /// Internal method to make sure `self.factor_paths` is correct after an ascend method
     #[inline]
     fn fix_after_ascend(&mut self) {
@@ -361,9 +375,55 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
     }
 }
 
+/// Converts the `shared_node_id` of a node in factor `factor` of a product of `factor_count` factors
+/// into the product's `shared_node_id` for it
+///
+/// In every factor but the last, the subtrie below a node continues into the following factors, so the
+/// same node reached in two different factors is two different subtries of the product.  Its id must
+/// therefore depend on the factor, while two places that reach it in the same factor still share it.
+///
+/// A node id is the node's address.  In a canonical address the byte below the top byte equals the top
+/// byte (`0x00` in user space, `0xff` in kernel space), so `factor + 1` is XORed into that byte.  The
+/// result is never a canonical address, so it can't be mistaken for an unencoded id, and it is exact:
+/// no two (factor, node) pairs map to the same id.  An address with no room for the encoding reports no
+/// sharing.  The last factor keeps the node's own id, since the product adds nothing below it.
+fn factor_shared_node_id(id: u64, factor: usize, factor_count: usize) -> Option<u64> {
+    if factor + 1 >= factor_count {
+        return Some(id);
+    }
+    let tag = u8::try_from(factor + 1).ok()?;
+    let [.., below_top, top] = id.to_le_bytes();
+    // The assumption is that the address space is 48 bit, and the node id was not already tagged
+    // Skip sharing if that's not the case.
+    if below_top != top {
+        return None;
+    }
+    Some(id ^ ((tag as u64) << 48))
+}
+
+/// The factor's own `shared_node_id` would be inconsistent here.  In every factor but the last, the product
+/// continues below the node into the following factors, so the same node reached in two different factors
+/// (e.g. one trie used as two factors) roots two different subtries of the product, and a cache keyed by the
+/// id, like `into_cata_cached`, would reuse the result for one as the result for the other.  So the id is
+/// tagged with the factor, see `factor_shared_node_id`.  Within one factor the tag is enough: the factors
+/// below are the same fixed tries wherever the node is reached, so equal ids do mean equal subtries.
+///
+/// `is_shared` needs no tag, it only says the focus can be reached by more than one path.
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZipper<'_, '_, V, A> {
-    fn shared_node_id(&self) -> Option<u64> { self.z.shared_node_id() }
-    fn is_shared(&self) -> bool { self.z.is_shared() }
+    fn shared_node_id(&self) -> Option<u64> {
+        let id = match self.factor_root() {
+            Some(_) if self.z.is_val() => None,
+            Some(factor) => factor.shared_node_id(),
+            None => self.z.shared_node_id(),
+        }?;
+        factor_shared_node_id(id, self.focus_node_factor(), self.factor_count())
+    }
+    fn is_shared(&self) -> bool {
+        match self.factor_root() {
+            Some(factor) => factor.is_shared(),
+            None => self.z.is_shared(),
+        }
+    }
 }
 
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ProductZipper<'_, 'trie, V, A> {
@@ -525,6 +585,10 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperAbsolutePath
     fn root_prefix_path(&self) -> &[u8] { self.primary.root_prefix_path() }
 }
 
+/// As for [ProductZipper], the factor's own `shared_node_id` would be inconsistent: the same node reached in
+/// two different factors roots two different subtries of the product, since the following factors continue
+/// below it, and a cache keyed by the id would conflate them.  The id is tagged with the factor, see
+/// `factor_shared_node_id`, which is enough because the factors below a node are fixed.
 impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
     for ProductZipperG<'trie, PrimaryZ, SecondaryZ, V>
     where
@@ -533,11 +597,11 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperConcrete
         SecondaryZ: ZipperMoving + ZipperPath + ZipperConcrete,
 {
     fn shared_node_id(&self) -> Option<u64> {
-        if let Some(idx) = self.factor_idx(true) {
-            self.secondary[idx].shared_node_id()
-        } else {
-            self.primary.shared_node_id()
-        }
+        let (id, factor) = match self.factor_idx(true) {
+            Some(idx) => (self.secondary[idx].shared_node_id()?, idx + 1),
+            None => (self.primary.shared_node_id()?, 0),
+        };
+        factor_shared_node_id(id, factor, self.secondary.len() + 1)
     }
     fn is_shared(&self) -> bool {
         if let Some(idx) = self.factor_idx(true) {
@@ -1975,6 +2039,105 @@ mod tests {
         |btm: &mut PathMap<()>, path: &[u8]| -> _ {
             ProductZipperG::new::<[ReadZipperUntracked<()>; 0]>(btm.read_zipper_at_path(path), [])
     });
+
+    /// `is_shared` and `shared_node_id` across factor boundaries
+    #[test]
+    fn product_zipper_is_shared_across_factors() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { a.set_val_at(p, 7); }
+        let b = a.clone();
+        let mut z = ProductZipper::new(a.read_zipper_at_path(&[1u8, 2, 1]), [b.read_zipper()]);
+        let mut factor_roots = 0;
+        while z.to_next_step() {
+            let _ = (z.is_shared(), z.shared_node_id());
+            if z.factor_root().is_some() {
+                factor_roots += 1;
+                assert!(z.is_shared(), "{:?}", z.path());
+            }
+        }
+        assert!(factor_roots > 0);
+    }
+
+    /// A node shared between factors must not share a `shared_node_id`, because its subtrie in the product
+    /// differs by factor.  Otherwise a cached cata reuses the result from one factor in another.
+    #[test]
+    fn product_zipper_cata_cached_across_factors() {
+        // `s` is grafted in two places, and `b = a.clone()`, so the same node is in both factors
+        let mut s = PathMap::<u64>::new();
+        for p in [&[5u8, 6][..], &[5, 7], &[9]] { s.set_val_at(p, 1); }
+        let mut a = PathMap::<u64>::new();
+        a.write_zipper_at_path(&[1u8]).graft_map(s.clone());
+        a.write_zipper_at_path(&[2u8]).graft_map(s.clone());
+        a.set_val_at(&[3u8], 1);
+        let b = a.clone();
+
+        let alg = |_: &ByteMask, children: &mut [usize], val: Option<&u64>| children.iter().sum::<usize>() + val.is_some() as usize;
+        let expected = 7 + 7 * 7;
+        let pz = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+        assert_eq!(pz.into_cata_cached(alg), expected);
+        let pzg = ProductZipperG::new(a.read_zipper(), [b.read_zipper()]);
+        assert_eq!(pzg.into_cata_cached(alg), expected);
+
+        // Sharing is still reported in the last factor
+        let mut z = ProductZipper::new(a.read_zipper(), [b.read_zipper()]);
+        assert!(z.descend_to_existing(&[3u8, 1]) == 2 && z.is_shared() && z.shared_node_id().is_some());
+    }
+
+    /// A node keeps one `shared_node_id` within a factor, and gets a different one in each factor
+    #[test]
+    fn product_zipper_shared_node_id_by_factor() {
+        let mut s = PathMap::<u64>::new();
+        for p in [&[5u8, 6][..], &[5, 7], &[9]] { s.set_val_at(p, 1); }
+        let mut a = PathMap::<u64>::new();
+        a.write_zipper_at_path(&[1u8]).graft_map(s.clone());
+        a.write_zipper_at_path(&[2u8]).graft_map(s.clone());
+        a.set_val_at(&[3u8], 1);
+        let b = a.clone();
+        let c = a.clone();
+
+        // `s` in factor 0 (twice), factor 1 (twice) and factor 2
+        let paths: [&[u8]; 5] = [&[1], &[2], &[3, 1], &[3, 2], &[3, 3, 1]];
+        fn ids<Z: ZipperMoving + ZipperConcrete>(mut z: Z, paths: &[&[u8]]) -> Vec<u64> {
+            paths.iter().map(|p| {
+                z.reset();
+                assert_eq!(z.descend_to_existing(p), p.len(), "{p:?}");
+                z.shared_node_id().unwrap_or_else(|| panic!("no id at {p:?}"))
+            }).collect()
+        }
+        let s_id = a.read_zipper_at_path(&[1u8]).shared_node_id().unwrap();
+        for ids in [
+            ids(ProductZipper::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]), &paths),
+            ids(ProductZipperG::new(a.read_zipper(), [b.read_zipper(), c.read_zipper()]), &paths),
+        ] {
+            assert_eq!(ids[0], ids[1]);
+            assert_eq!(ids[2], ids[3]);
+            assert_ne!(ids[0], ids[2]);
+            assert_ne!(ids[0], ids[4]);
+            assert_ne!(ids[2], ids[4]);
+            // The last factor adds nothing below the node, so it keeps the node's own id
+            assert_eq!(ids[4], s_id);
+        }
+    }
+
+    /// The factor is XORed into the byte below the top byte, which leaves a non-canonical address
+    #[test]
+    fn factor_shared_node_id_encoding() {
+        use super::factor_shared_node_id;
+        let user = 0x0000_7fff_1234_5678u64;
+        let kernel = 0xffff_8000_0000_1000u64;
+        assert_eq!(factor_shared_node_id(user, 0, 3), Some(0x0001_7fff_1234_5678));
+        assert_eq!(factor_shared_node_id(user, 1, 3), Some(0x0002_7fff_1234_5678));
+        assert_eq!(factor_shared_node_id(user, 2, 3), Some(user));
+        assert_eq!(factor_shared_node_id(kernel, 0, 3), Some(0xfffe_8000_0000_1000));
+        assert_eq!(factor_shared_node_id(kernel, 1, 3), Some(0xfffd_8000_0000_1000));
+        assert_eq!(factor_shared_node_id(kernel, 2, 3), Some(kernel));
+        // The widest factor that fits, and the first that doesn't
+        assert_eq!(factor_shared_node_id(user, 254, 300), Some(0x00ff_7fff_1234_5678));
+        assert_eq!(factor_shared_node_id(user, 255, 300), None);
+        // An address using the byte below the top has no room
+        assert_eq!(factor_shared_node_id(0x0080_0000_0000_1000, 0, 2), None);
+        assert_eq!(factor_shared_node_id(0x0080_0000_0000_1000, 1, 2), Some(0x0080_0000_0000_1000));
+    }
 }
 
 //POSSIBLE FUTURE DIRECTION:
