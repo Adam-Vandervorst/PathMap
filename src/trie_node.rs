@@ -152,10 +152,11 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///
     /// Does nothing and returns 0 if `key` specifies a non-dagling or non-existent path.
     /// This method will not affect dangling paths other than those specified by `key`.
+    /// The first `min_keep_len` bytes of `key` must not be removed.
     /// This method may leave the node empty.
     /// This method should never be called with a zero-length key.  If the `key` arg is longer than the
     /// keys contained within the node, this method should return `false`
-    fn node_remove_dangling(&mut self, key: &[u8]) -> usize;
+    fn node_remove_dangling(&mut self, key: &[u8], min_keep_len: usize) -> usize;
 
     /// Sets the downstream branch from the specified `key`.  Does not affect the value at the `key`
     ///
@@ -1707,11 +1708,11 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn node_remove_dangling(&mut self, key: &[u8]) -> usize {
+        pub fn node_remove_dangling(&mut self, key: &[u8], min_keep_len: usize) -> usize {
             match self {
-                Self::DenseByteNode(node) => node.node_remove_dangling(key),
-                Self::LineListNode(node) => node.node_remove_dangling(key),
-                Self::CellByteNode(node) => node.node_remove_dangling(key),
+                Self::DenseByteNode(node) => node.node_remove_dangling(key, min_keep_len),
+                Self::LineListNode(node) => node.node_remove_dangling(key, min_keep_len),
+                Self::CellByteNode(node) => node.node_remove_dangling(key, min_keep_len),
             }
         }
 

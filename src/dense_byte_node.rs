@@ -929,8 +929,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             }
         }
     }
-    fn node_remove_dangling(&mut self, key: &[u8]) -> usize {
+    fn node_remove_dangling(&mut self, key: &[u8], min_keep_len: usize) -> usize {
         debug_assert!(key.len() > 0);
+        if min_keep_len >= key.len() {
+            return 0;
+        }
         if key.len() == 1 {
             let k = key[0];
             if self.mask.test_bit(k) {

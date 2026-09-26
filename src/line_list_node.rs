@@ -1863,13 +1863,29 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
     }
 
     #[inline]
-    fn node_remove_dangling(&mut self, key: &[u8]) -> usize {
+    fn node_remove_dangling(&mut self, key: &[u8], min_keep_len: usize) -> usize {
         debug_assert!(key.len() > 0);
+        debug_assert!(min_keep_len <= key.len());
+        if min_keep_len >= key.len() {
+            return 0;
+        }
         let (key0, key1) = self.get_both_keys();
         if self.is_used_child_0() {
             if key0 == key {
                 let child = unsafe{ &self.val_or_child0.child };
                 if child.as_tagged().node_is_empty() {
+                    if min_keep_len > 0 {
+                        let overlap = find_prefix_overlap(key, key1);
+                        if overlap == key.len() {
+                            return 0;
+                        }
+                        if overlap < min_keep_len {
+                            self.shorten_key_len::<0>(min_keep_len);
+                        } else {
+                            let _ = self.take_payload::<0>();
+                        }
+                        return key.len() - overlap.max(min_keep_len);
+                    }
                     let pruned_bytes = if key1.len() > 0 && key[0] == key1[0] {
                         key.len() - 1
                     } else {
@@ -1884,6 +1900,18 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             if key1 == key {
                 let child = unsafe{ &self.val_or_child1.child };
                 if child.as_tagged().node_is_empty() {
+                    if min_keep_len > 0 {
+                        let overlap = find_prefix_overlap(key, key0);
+                        if overlap == key.len() {
+                            return 0;
+                        }
+                        if overlap < min_keep_len {
+                            self.shorten_key_len::<1>(min_keep_len);
+                        } else {
+                            let _ = self.take_payload::<1>();
+                        }
+                        return key.len() - overlap.max(min_keep_len);
+                    }
                     let pruned_bytes = if key[0] == key0[0] {
                         key.len() - 1
                     } else {

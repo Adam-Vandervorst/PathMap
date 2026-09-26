@@ -197,7 +197,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
     }
     fn node_remove_val(&mut self, _key: &[u8], _prune: bool) -> Option<V> { unreachable!() }
     fn node_create_dangling(&mut self, _key: &[u8]) -> Result<(bool, bool), TrieNodeODRc<V, A>> { unreachable!() }
-    fn node_remove_dangling(&mut self, _key: &[u8]) -> usize { unreachable!() }
+    fn node_remove_dangling(&mut self, _key: &[u8], _min_keep_len: usize) -> usize { unreachable!() }
     fn node_get_val_mut(&mut self, _key: &[u8]) -> Option<&mut V> { unreachable!() }
     fn node_set_val(&mut self, key: &[u8], val: V) -> Result<(Option<V>, bool), TrieNodeODRc<V, A>> {
         let mut replacement_node = self.into_full().unwrap();
