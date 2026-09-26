@@ -1231,7 +1231,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let alloc = self.alloc.clone();
         let sub_branch_added = self.in_zipper_mut_static_result(
             |node, key| {
-                let new_node = if let Some(remaining) = node.take_node_at_key(key, false) {
+                let new_node = if let Some(remaining) = node.take_node_at_key(key, usize::MAX) {
                     remaining
                 } else {
                     #[cfg(not(feature = "all_dense_nodes"))]
@@ -1425,6 +1425,15 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         }
         old_val
     }
+    #[inline(always)]
+    fn node_prune_limit(&self, prune: bool) -> usize {
+        if prune {
+            self.key.origin_path.len().saturating_sub(self.key.node_key_start())
+        } else {
+            usize::MAX
+        }
+    }
+
     /// See [ZipperWriting::remove_val]
     pub fn remove_val(&mut self, prune: bool) -> Option<V> {
         if self.key.node_key().len() == 0 {
@@ -1432,8 +1441,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             let root_val_ref = self.root_val.as_mut().unwrap();
             return core::mem::take(unsafe{&mut **root_val_ref})
         }
+        let prune_limit = self.node_prune_limit(prune);
         let mut focus_node = self.focus_stack.top_mut().unwrap();
-        if let Some(result) = focus_node.node_remove_val(self.key.node_key(), prune) {
+        if let Some(result) = focus_node.node_remove_val(self.key.node_key(), prune_limit) {
             if prune {
                 self.prune_path_internal(false);
             }
@@ -2199,8 +2209,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn remove_branches(&mut self, prune: bool) -> bool {
         let node_key = self.key.node_key();
         if node_key.len() > 0 {
+            let prune_limit = self.node_prune_limit(prune);
             let mut focus_node = self.focus_stack.top_mut().unwrap();
-            if focus_node.node_remove_all_branches(node_key, prune) {
+            if focus_node.node_remove_all_branches(node_key, prune_limit) {
                 if prune {
                     self.prune_path_internal(false);
                 }
@@ -2239,26 +2250,27 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// See [WriteZipper::remove_unmasked_branches]
     pub fn remove_unmasked_branches(&mut self, mask: ByteMask, prune: bool) {
         let node_key = self.key.node_key();
+        let prune_limit = self.node_prune_limit(prune);
         let mut focus_node = self.focus_stack.top_mut().unwrap();
         if node_key.len() > 0 {
             match focus_node.node_get_child_mut(node_key) {
                 Some((consumed_bytes, child_node)) => {
                     if node_key.len() >= consumed_bytes && !child_node.is_empty() {
-                        child_node.make_mut().node_remove_unmasked_branches(&node_key[consumed_bytes..], mask, prune);
+                        child_node.make_mut().node_remove_unmasked_branches(&node_key[consumed_bytes..], mask, prune_limit.saturating_sub(consumed_bytes));
                         if child_node.as_tagged().node_is_empty() {
-                            focus_node.node_remove_all_branches(&node_key[..consumed_bytes], prune);
+                            focus_node.node_remove_all_branches(&node_key[..consumed_bytes], prune_limit);
                         }
                     } else {
                         //Zipper is positioned at non-existent or dangling node.  Removing anything from nothing is nothing
                     }
                 },
                 None => {
-                    focus_node.node_remove_unmasked_branches(node_key, mask, prune);
+                    focus_node.node_remove_unmasked_branches(node_key, mask, prune_limit);
                 }
             }
         } else {
             debug_assert!(self.key.prefix_buf.len() <= self.key.origin_path.len()); //Equivalent to `self.at_root()`, but can't borrow `self` here
-            focus_node.node_remove_unmasked_branches(node_key, mask, prune);
+            focus_node.node_remove_unmasked_branches(node_key, mask, prune_limit);
         }
         if prune {
             self.prune_path_internal(false);
@@ -2307,6 +2319,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// Internal method, Removes and returns the node at the zipper's focus.  This method may leave behind a dangling path
     #[inline]
     fn take_focus(&mut self, prune: bool) -> Option<TrieNodeODRc<V, A>> {
+        let prune_limit = self.node_prune_limit(prune);
         let mut focus_node = self.focus_stack.top_mut().unwrap();
         let node_key = self.key.node_key();
         if node_key.len() == 0 {
@@ -2321,7 +2334,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 None
             }
         } else {
-            if let Some(new_node) = focus_node.take_node_at_key(node_key, prune) {
+            if let Some(new_node) = focus_node.take_node_at_key(node_key, prune_limit) {
                 if prune {
                     self.prune_path_internal(false);
                 }
@@ -2359,7 +2372,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     let sub_branch_added = self.in_zipper_mut_static_result(
                         |node, key| {
                             // A graft replaces everything below the focus
-                            node.node_remove_all_branches(key, false);
+                            node.node_remove_all_branches(key, usize::MAX);
                             node.node_set_branch(key, src)
                         },
                         |_, _| true);
@@ -2527,18 +2540,19 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
             //The path to the node or subnode we need to remove might not be within the focus node,
             // so get the actual node that we want to remove the contents from
-            let (mut container_node, next_node_key) = match focus_node.node_get_child_mut(next_node_key) {
+            let (mut container_node, next_node_key, consumed) = match focus_node.node_get_child_mut(next_node_key) {
                 Some((consumed_bytes, new_focus)) => {
                     if consumed_bytes < next_node_key.len() {
-                        (new_focus.make_mut(), &next_node_key[consumed_bytes..])
+                        (new_focus.make_mut(), &next_node_key[consumed_bytes..], consumed_bytes)
                     } else {
-                        (focus_node, next_node_key)
+                        (focus_node, next_node_key, 0)
                     }
                 },
-                None => (focus_node, next_node_key)
+                None => (focus_node, next_node_key, 0)
             };
 
-            let removed = container_node.node_remove_all_branches(next_node_key, !stopped_at_zipper_root);
+            let prune_limit = if stopped_at_zipper_root { root_len.saturating_sub(node_key_start + consumed) } else { 0 };
+            let removed = container_node.node_remove_all_branches(next_node_key, prune_limit);
 
             //If we got here, we should have either removed something, or we should be at the top of the zipper
             debug_assert!(removed || self.focus_stack.depth()==1);
@@ -2660,7 +2674,7 @@ pub(crate) fn swap_top_node<'cursor, V: Clone + Send + Sync, A: Allocator + 'cur
         focus_stack.backtrack();
         let mut parent_node = unsafe{ focus_stack.top_mut().unwrap_unchecked() };
         let parent_key = key.parent_key();
-        let existing_node = parent_node.take_node_at_key(parent_key, false).unwrap();
+        let existing_node = parent_node.take_node_at_key(parent_key, usize::MAX).unwrap();
         let replacement_node = func(existing_node);
         parent_node.node_set_branch(parent_key, replacement_node).unwrap();
         focus_stack.advance(|node| node.node_get_child_mut(parent_key).map(|(_, child_node)| child_node.make_mut()));
@@ -3872,6 +3886,46 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn prune_flags_preserve_sibling_paths() {
+        for root in [b"".as_slice(), b"a", b"ab"] {
+            for remove_branches in [false, true] {
+                let mut map = PathMap::<u64>::new();
+                map.set_val_at(b"abc", 1);
+                map.set_val_at(b"axd", 2);
+                let mut wz = map.write_zipper_at_path(root);
+                if remove_branches {
+                    wz.descend_to(&b"ab"[root.len()..]);
+                    assert!(wz.remove_branches(true));
+                } else {
+                    wz.descend_to(&b"abc"[root.len()..]);
+                    assert_eq!(wz.remove_val(true), Some(1));
+                }
+                assert!(map.path_exists_at(root), "root={root:?}, remove_branches={remove_branches}");
+                assert!(!map.path_exists_at(b"abc"));
+                assert_eq!(map.get(b"axd"), Some(&2));
+            }
+        }
+
+        for remove_branches in [false, true] {
+            let mut map = PathMap::<u64>::new();
+            for (path, val) in [(b"a0", 1), (b"b0", 2), (b"c0", 3)] {
+                map.set_val_at(path, val);
+            }
+            let mut wz = map.write_zipper_at_path(b"a");
+            if remove_branches {
+                assert!(wz.remove_branches(true));
+            } else {
+                wz.descend_to(b"0");
+                assert_eq!(wz.remove_val(true), Some(1));
+            }
+            assert!(map.path_exists_at(b"a"));
+            assert!(!map.path_exists_at(b"a0"));
+            assert_eq!(map.get(b"b0"), Some(&2));
+            assert_eq!(map.get(b"c0"), Some(&3));
+        }
     }
 
     /// A write after `prune_path` (or `meet_into(.., true)`) must reach the focus node

@@ -35,7 +35,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn node_get_val(&self, _key: &[u8]) -> Option<&V> {
         None
     }
-    fn node_remove_val(&mut self, _key: &[u8], _prune: bool) -> Option<V> {
+    fn node_remove_val(&mut self, _key: &[u8], _prune_limit: usize) -> Option<V> {
         unreachable!()
     }
     fn node_create_dangling(&mut self, _key: &[u8]) -> Result<(bool, bool), TrieNodeODRc<V, A>> {
@@ -53,10 +53,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn node_set_branch(&mut self, _key: &[u8], _new_node: TrieNodeODRc<V, A>) -> Result<bool, TrieNodeODRc<V, A>> {
         unreachable!() //we should head this off upstream
     }
-    fn node_remove_all_branches(&mut self, _key: &[u8], _prune: bool) -> bool {
+    fn node_remove_all_branches(&mut self, _key: &[u8], _prune_limit: usize) -> bool {
         false
     }
-    fn node_remove_unmasked_branches(&mut self, _key: &[u8], _mask: ByteMask, _prune: bool) {}
+    fn node_remove_unmasked_branches(&mut self, _key: &[u8], _mask: ByteMask, _prune_limit: usize) {}
     fn node_is_empty(&self) -> bool { true }
     fn new_iter_token(&self) -> IterToken {
         0
@@ -115,7 +115,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
     fn get_node_at_key(&self, _key: &[u8]) -> AbstractNodeRef<'_, V, A> {
         AbstractNodeRef::None
     }
-    fn take_node_at_key(&mut self, _key: &[u8], _prune: bool) -> Option<TrieNodeODRc<V, A>> {
+    fn take_node_at_key(&mut self, _key: &[u8], _prune_limit: usize) -> Option<TrieNodeODRc<V, A>> {
         None
     }
     fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {

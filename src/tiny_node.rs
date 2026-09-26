@@ -195,7 +195,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         }
         None
     }
-    fn node_remove_val(&mut self, _key: &[u8], _prune: bool) -> Option<V> { unreachable!() }
+    fn node_remove_val(&mut self, _key: &[u8], _prune_limit: usize) -> Option<V> { unreachable!() }
     fn node_create_dangling(&mut self, _key: &[u8]) -> Result<(bool, bool), TrieNodeODRc<V, A>> { unreachable!() }
     fn node_remove_dangling(&mut self, _key: &[u8], _min_keep_len: usize) -> usize { unreachable!() }
     fn node_get_val_mut(&mut self, _key: &[u8]) -> Option<&mut V> { unreachable!() }
@@ -209,8 +209,8 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         replacement_node.node_set_branch(key, new_node).unwrap_or_else(|_| panic!());
         Err(TrieNodeODRc::new_in(replacement_node, self.alloc.clone()))
     }
-    fn node_remove_all_branches(&mut self, _key: &[u8], _prune: bool) -> bool { unreachable!() }
-    fn node_remove_unmasked_branches(&mut self, _key: &[u8], _mask: ByteMask, _prune: bool) { unreachable!() }
+    fn node_remove_all_branches(&mut self, _key: &[u8], _prune_limit: usize) -> bool { unreachable!() }
+    fn node_remove_unmasked_branches(&mut self, _key: &[u8], _mask: ByteMask, _prune_limit: usize) { unreachable!() }
     fn node_is_empty(&self) -> bool {
         self.header & (1 << 7) == 0
     }
@@ -291,7 +291,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         //The key must specify a path the node doesn't contains
         AbstractNodeRef::None
     }
-    fn take_node_at_key(&mut self, _key: &[u8], _prune: bool) -> Option<TrieNodeODRc<V, A>> { unreachable!() }
+    fn take_node_at_key(&mut self, _key: &[u8], _prune_limit: usize) -> Option<TrieNodeODRc<V, A>> { unreachable!() }
     fn pjoin_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
         //TODO, I can streamline this quite a lot, but for now I'll just up-convert to a ListNode to test
         // the basic premise of the TinyRefNode

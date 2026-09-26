@@ -385,7 +385,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                 z.in_zipper_mut_static_result(
                     |node, key| {
                         let new_node = if key.len() > 0 {
-                            if let Some(mut remaining) = node.take_node_at_key(key, false) {
+                            if let Some(mut remaining) = node.take_node_at_key(key, usize::MAX) {
                                 make_cell_node(&mut remaining, alloc.clone());
                                 remaining
                             } else {
@@ -438,7 +438,7 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
     //If remaining_key is non-zero length, split and upgrade the intervening node
     if remaining_key.len() > 0 {
         let mut node_ref = node.make_mut();
-        let mut new_parent = match node_ref.take_node_at_key(remaining_key, false) {
+        let mut new_parent = match node_ref.take_node_at_key(remaining_key, usize::MAX) {
             Some(downward_node) => downward_node,
             None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc.clone())
         };
