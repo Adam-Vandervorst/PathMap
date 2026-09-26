@@ -178,14 +178,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     #[inline]
-    pub fn remove_val(&mut self, k: u8, prune: bool) -> Option<V> {
+    pub fn remove_val(&mut self, k: u8, prune_limit: usize) -> Option<V> {
         if self.mask.test_bit(k) {
             let ix = self.mask.index_of(k) as usize;
 
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
             let result = cf.take_val();
 
-            if prune && !cf.has_rec() {
+            if prune_limit == 0 && !cf.has_rec() {
                 self.mask.clear_bit(k);
                 self.values.remove(ix);
             }
@@ -895,9 +895,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             }
         }
     }
-    fn node_remove_val(&mut self, key: &[u8], prune: bool) -> Option<V> {
+    fn node_remove_val(&mut self, key: &[u8], prune_limit: usize) -> Option<V> {
         if key.len() == 1 {
-            self.remove_val(key[0], prune)
+            self.remove_val(key[0], prune_limit)
         } else {
             None
         }
@@ -997,7 +997,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             }
         }
     }
-    fn node_remove_all_branches(&mut self, key: &[u8], prune: bool) -> bool {
+    fn node_remove_all_branches(&mut self, key: &[u8], prune_limit: usize) -> bool {
         if key.len() > 1 {
             return false;
         }
@@ -1012,7 +1012,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                     true
                 },
                 (true, false) => {
-                    if prune {
+                    if prune_limit == 0 {
                         self.values.remove(ix);
                         self.mask.clear_bit(k);
                     } else {
@@ -1184,7 +1184,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         (Some(&ALL_BYTES[prefix..=prefix]), cf.rec().map(|cf| cf.as_tagged()))
     }
 
-    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, _prune: bool) {
+    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, _prune_limit: usize) {
         if key.len() > 0 {
             //We're in a non-existent path below this node
             return
@@ -1301,7 +1301,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         }
     }
 
-    fn take_node_at_key(&mut self, key: &[u8], prune: bool) -> Option<TrieNodeODRc<V, A>> {
+    fn take_node_at_key(&mut self, key: &[u8], prune_limit: usize) -> Option<TrieNodeODRc<V, A>> {
         if key.len() < 2 {
             debug_assert!(key.len() == 1);
             let k = key[0];
@@ -1311,7 +1311,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 let cf = unsafe { self.values.get_unchecked_mut(ix) };
                 let result = cf.take_rec();
 
-                if prune && !cf.has_val() {
+                if prune_limit == 0 && !cf.has_val() {
                     self.mask.clear_bit(k);
                     self.values.remove(ix);
                 }
