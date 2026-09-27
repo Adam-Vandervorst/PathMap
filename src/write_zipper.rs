@@ -1821,11 +1821,15 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let src = match src_root_node {
             Some(src) => src,
             None => {
-                if self_focus.is_none() {
-                    return AlgebraicStatus::None
+                let node_status = if self_focus.is_none() {
+                    AlgebraicStatus::None
                 } else {
-                    return AlgebraicStatus::Identity
-                }
+                    AlgebraicStatus::Identity
+                };
+                #[cfg(not(feature = "graft_root_vals"))]
+                return node_status;
+                #[cfg(feature = "graft_root_vals")]
+                return node_status.merge(val_status, true, true);
             }
         };
         let node_status = match self_focus.try_as_tagged() {
@@ -3426,6 +3430,82 @@ mod tests {
         assert_eq!(btm2.val_at(&[1, 255, 0]), None);
         let rz = btm2.read_zipper();
         assert_eq!(rz.child_count(), 2); // Should have both [0] and [1] branches
+    }
+
+    /// Tests status results when joining maps that have root values
+    #[test]
+    fn write_zipper_join_into_test3() {
+
+        // ---------------------------------------------------------------
+        // Root-value-Only Tests
+
+        //A new root value should return Element
+        let mut dst = PathMap::<u64>::new();
+        let mut src = PathMap::new();
+        src.insert(b"", 7);
+        let status = dst.write_zipper().join_map_into(src);
+        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(status, AlgebraicStatus::Element);
+
+        //Joining root val with itself should return Identity (idempotent value policy)
+        let mut dst = PathMap::<u64>::new();
+        dst.insert(b"", 7);
+        let mut src = PathMap::new();
+        src.insert(b"", 7);
+        let status = dst.write_zipper().join_map_into(src);
+        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(status, AlgebraicStatus::Identity);
+
+        //Joining in nothing should return Identity
+        let mut dst = PathMap::<u64>::new();
+        dst.insert(b"", 7);
+        let status = dst.write_zipper().join_map_into(PathMap::new());
+        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(status, AlgebraicStatus::Identity);
+
+        //Joining nothing with nothin is still nothing
+        let mut dst = PathMap::<u64>::new();
+        let src = PathMap::<u64>::new();
+        let status = dst.write_zipper().join_into(&src.read_zipper());
+        assert_eq!(dst.val_at(b""), None);
+        assert_eq!(status, AlgebraicStatus::None);
+
+        // ---------------------------------------------------------------
+        // Root-value + Subtrie Tests
+
+        // An identical root value and identical subtrie return Identity.
+        let mut dst = PathMap::<u64>::new();
+        dst.insert(b"", 7);
+        dst.insert(b"branch:leaf", 11);
+        let mut src = PathMap::new();
+        src.insert(b"", 7);
+        src.insert(b"branch:leaf", 11);
+        let status = dst.write_zipper().join_map_into(src);
+        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(dst.val_at(b"branch:leaf"), Some(&11));
+        assert_eq!(status, AlgebraicStatus::Identity);
+
+        // A new root value and Identical subtrie is still Element.
+        let mut dst = PathMap::<u64>::new();
+        dst.insert(b"branch:leaf", 11);
+        let mut src = PathMap::new();
+        src.insert(b"", 7);
+        src.insert(b"branch:leaf", 11);
+        let status = dst.write_zipper().join_map_into(src);
+        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(dst.val_at(b"branch:leaf"), Some(&11));
+        assert_eq!(status, AlgebraicStatus::Element);
+
+        // An identical root value and a different subtrie is Element too.
+        let mut dst = PathMap::<u64>::new();
+        dst.insert(b"", 7);
+        let mut src = PathMap::new();
+        src.insert(b"", 7);
+        src.insert(b"branch:leaf", 11);
+        let status = dst.write_zipper().join_map_into(src);
+        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(dst.val_at(b"branch:leaf"), Some(&11));
+        assert_eq!(status, AlgebraicStatus::Element);
     }
 
     #[test]
