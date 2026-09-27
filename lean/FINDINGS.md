@@ -343,7 +343,7 @@ wz.remove_unmasked_branches(ByteMask::EMPTY, false);
 
 The same model, the same operation table, the same trace format -- with an
 `ArenaCompactTree` as the read source instead of a `PathMap`
-(`differential.py --act`, `differential/src/bin/act_trace.rs`).  ACT is a second
+(`differential.py --act`, `validation/differential/src/bin/act_trace.rs`).  ACT is a second
 implementation of the same read specification, so the model holds it to exactly
 the same standard.
 

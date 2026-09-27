@@ -10,7 +10,7 @@ traces.  All of them decode the same bytes with the same rules; see
     target/*/act_trace                     ACT read source (--act)
 
 Each child is spawned once with `--server` and stays resident, taking inputs as
-`run-input <timeout-ms> <hex>` on stdin; see `differential/src/server.rs` for the
+`run-input <timeout-ms> <hex>` on stdin; see `validation/differential/src/server.rs` for the
 protocol.  That replaced a temp file and two fresh processes per input, which
 cost about 5x the runtime and left `/tmp/pathmap-diff-*` behind forever.  Only a
 *failing* input is written to disk now, so it can still be replayed and shrunk.
@@ -64,7 +64,7 @@ class Child:
     Spawning a process per input dominated the old runtime — 200 inputs spent
     more time in `sys` (fork/exec) than in `user` — so each front end now stays
     up and takes work as `run-input <timeout-ms> <hex>`, replying with the trace
-    and one `!`-prefixed terminator.  See `differential/src/server.rs`.
+    and one `!`-prefixed terminator.  See `validation/differential/src/server.rs`.
 
     Two failure modes have to be survivable, because a wedged or dead child must
     not take the run with it:

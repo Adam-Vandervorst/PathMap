@@ -9,7 +9,7 @@ Two things live here:
 1. **The model** (`PathMapModel/`) — a total, executable definition of what each
    API function *means*, with the laws relating them.
 2. **The harness** (`Main.lean`, `differential.py`, `shrink.py`, and the
-   `../differential` crate) — the machinery that runs the same generated
+   `../validation/differential` crate) — the machinery that runs the same generated
    program against the model and against `pathmap`, and diffs the results.
 
 Everything the fuzzing found is written up in [FINDINGS.md](FINDINGS.md), with
@@ -206,7 +206,7 @@ count); the run ends with a full dump of both maps.  Any behavioural difference
 is a textual diff.
 
 The op table lives in `Fuzz.lean` (`PathMapModel.Fuzz.step`) and
-`differential/src/harness.rs`; **the two must be changed together.**
+`validation/differential/src/harness.rs`; **the two must be changed together.**
 
 ### Front ends
 
@@ -228,7 +228,7 @@ The op table lives in `Fuzz.lean` (`PathMapModel.Fuzz.step`) and
 Each front end is spawned once with `--server` and stays up, taking inputs as
 hex on stdin — `run-input <timeout-ms> <hex>`, replying with the trace and one
 `!DONE` / `!TIMEOUT` / `!PANIC <msg>` terminator.  The protocol lives in
-`differential/src/server.rs`, shared by both crate front ends (it is plumbing;
+`validation/differential/src/server.rs`, shared by both crate front ends (it is plumbing;
 it knows nothing about tries).
 
 This replaced a temp file plus two fresh processes per input.  Process creation
@@ -305,7 +305,7 @@ cargo run --release -p differential --bin pathmap_trace -- --repro --upto 15 FIL
 
 `--upto N` stops after N operations, so a trace line `14 to_next_val ...` is
 reproduced by `--upto 15`.  Shrink first (`shrink.py`) and the result is usually
-a handful of calls, ready to paste into `differential/src/bin/zipper_bug_repros.rs`.
+a handful of calls, ready to paste into `validation/differential/src/bin/zipper_bug_repros.rs`.
 
 The generator decodes the same bytes in the same order as the op table,
 including the operands consumed only to keep the stream aligned, so it is worth
@@ -323,7 +323,7 @@ commented at its site.
 
 A skip is named in the trace — `ret=skip:<reason>`, never a bare `skip` — so a
 skipped op says which rule declined it.  The vocabulary is defined once on each
-side (`SKIP_*` in `differential/src/harness.rs`, `skip*` in
+side (`SKIP_*` in `validation/differential/src/harness.rs`, `skip*` in
 `PathMapModel/Fuzz.lean`) and the two must agree exactly, or every input that
 skips diverges:
 
@@ -529,7 +529,7 @@ cargo build --release -p differential
 ./lean/differential.py --act --random 500 --seed 99 --max-fails 0
 ```
 
-`differential/src/bin/act_trace.rs` builds an ACT from map1 with `from_zipper` and runs the
+`validation/differential/src/bin/act_trace.rs` builds an ACT from map1 with `from_zipper` and runs the
 identical operation table against an `ACTZipper`.  There is still exactly one
 op table: the merge operations sit behind a `ReadSource` trait, whose ACT
 implementation declines them, so the two front ends cannot drift apart.  The
@@ -553,7 +553,7 @@ programs), `descend_first_k_path()` only walks the leftmost chain, and
 `descend_last_path()` can run one byte past the end of the trie.  `from_zipper`
 round-trips faithfully, and `merge_zipper_into_file` -- ACT's one write-shaped
 operation -- matches its specification on all 300 cases of
-`differential/src/bin/act_merge_check.rs`.
+`validation/differential/src/bin/act_merge_check.rs`.
 
 ## Sharing
 

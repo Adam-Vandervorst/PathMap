@@ -1,5 +1,5 @@
 //! The Rust side of the differential fuzzing harness for `pathmap`'s zipper
-//! API.  The Lean model in `../lean` is the oracle; `lean/differential.py`
+//! API.  The Lean model in `../../lean` is the oracle; `lean/differential.py`
 //! drives the binaries in `src/bin/` against it.  See `lean/README.md`.
 //!
 //! * [`harness`] decodes a fuzzer input into a program over two maps and two
