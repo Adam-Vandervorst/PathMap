@@ -85,7 +85,11 @@ impl ZipperIteration for EmptyZipper {
     fn to_next_val_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn descend_last_path_observed<Obs: PathObserver>(&mut self, _obs: &mut Obs) -> bool { false }
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, _k: usize, _obs: &mut Obs) -> bool { false }
-    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, _k: usize, _obs: &mut Obs) -> bool { false }
+    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
+        let ascended = self.ascend(k);
+        obs.ascend(ascended);
+        false
+    }
 }
 
 impl<V> ZipperValues<V> for EmptyZipper {
@@ -136,3 +140,24 @@ impl ZipperPathBuffer for EmptyZipper {
 crate::impl_name_only_debug!(
     impl core::fmt::Debug for EmptyZipper
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_next_k_path_rewinds_and_reports_movement() {
+        let mut z = EmptyZipper::new_at_path(b"root.");
+        z.descend_to(b"abc");
+        let mut observed = z.path().to_vec();
+
+        assert!(!z.to_next_k_path_observed(2, &mut observed));
+        assert_eq!(z.path(), b"a");
+        assert_eq!(observed, z.path());
+        assert_eq!(z.root_prefix_path(), b"root.");
+
+        assert!(!z.to_next_k_path_observed(5, &mut observed));
+        assert_eq!(z.path(), b"");
+        assert_eq!(observed, z.path());
+    }
+}
