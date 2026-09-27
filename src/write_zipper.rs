@@ -3398,7 +3398,7 @@ mod tests {
         let mut src = PathMap::new();
         src.insert(b"", 7);
         let status = dst.write_zipper().join_map_into(src);
-        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(dst.get_val_at(b""), Some(&7));
         assert_eq!(status, AlgebraicStatus::Element);
 
         //Joining root val with itself should return Identity (idempotent value policy)
@@ -3407,21 +3407,21 @@ mod tests {
         let mut src = PathMap::new();
         src.insert(b"", 7);
         let status = dst.write_zipper().join_map_into(src);
-        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(dst.get_val_at(b""), Some(&7));
         assert_eq!(status, AlgebraicStatus::Identity);
 
         //Joining in nothing should return Identity
         let mut dst = PathMap::<u64>::new();
         dst.insert(b"", 7);
         let status = dst.write_zipper().join_map_into(PathMap::new());
-        assert_eq!(dst.val_at(b""), Some(&7));
+        assert_eq!(dst.get_val_at(b""), Some(&7));
         assert_eq!(status, AlgebraicStatus::Identity);
 
         //Joining nothing with nothin is still nothing
         let mut dst = PathMap::<u64>::new();
         let src = PathMap::<u64>::new();
         let status = dst.write_zipper().join_into(&src.read_zipper());
-        assert_eq!(dst.val_at(b""), None);
+        assert_eq!(dst.get_val_at(b""), None);
         assert_eq!(status, AlgebraicStatus::None);
 
         // ---------------------------------------------------------------
@@ -3435,8 +3435,8 @@ mod tests {
         src.insert(b"", 7);
         src.insert(b"branch:leaf", 11);
         let status = dst.write_zipper().join_map_into(src);
-        assert_eq!(dst.val_at(b""), Some(&7));
-        assert_eq!(dst.val_at(b"branch:leaf"), Some(&11));
+        assert_eq!(dst.get_val_at(b""), Some(&7));
+        assert_eq!(dst.get_val_at(b"branch:leaf"), Some(&11));
         assert_eq!(status, AlgebraicStatus::Identity);
 
         // A new root value and Identical subtrie is still Element.
@@ -3446,8 +3446,8 @@ mod tests {
         src.insert(b"", 7);
         src.insert(b"branch:leaf", 11);
         let status = dst.write_zipper().join_map_into(src);
-        assert_eq!(dst.val_at(b""), Some(&7));
-        assert_eq!(dst.val_at(b"branch:leaf"), Some(&11));
+        assert_eq!(dst.get_val_at(b""), Some(&7));
+        assert_eq!(dst.get_val_at(b"branch:leaf"), Some(&11));
         assert_eq!(status, AlgebraicStatus::Element);
 
         // An identical root value and a different subtrie is Element too.
@@ -3457,8 +3457,8 @@ mod tests {
         src.insert(b"", 7);
         src.insert(b"branch:leaf", 11);
         let status = dst.write_zipper().join_map_into(src);
-        assert_eq!(dst.val_at(b""), Some(&7));
-        assert_eq!(dst.val_at(b"branch:leaf"), Some(&11));
+        assert_eq!(dst.get_val_at(b""), Some(&7));
+        assert_eq!(dst.get_val_at(b"branch:leaf"), Some(&11));
         assert_eq!(status, AlgebraicStatus::Element);
     }
 
