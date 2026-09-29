@@ -101,7 +101,7 @@ fn trie_ref_from_key_and_path_in<'a, 'paths, V, A, R, RootValF, BuildF, InvalidF
     mut node: &'a TrieNodeODRc<V, A>,
     root_val_f: RootValF,
     node_key: &'paths [u8],
-    mut path: &'paths [u8],
+    path: &'paths [u8],
     alloc: A,
     build: BuildF,
     invalid: InvalidF,
@@ -115,31 +115,24 @@ where
 {
     // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`.
     let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
-
-    let node_key_len = node_key.len();
-    let path_len = path.len();
+    let mut node_key: &[u8] = node_key;
+    let mut path: &[u8] = path;
 
     // Copy the existing node key and the first chunk of the path into the temporary buffer, then try to descend one step.
-    if node_key_len > 0 && path_len > 0 {
+    // No child key is longer than `MAX_NODE_KEY_BYTES`, so the first `MAX_NODE_KEY_BYTES` bytes of the
+    // combined key decide every step, however long the combined key is.
+    while !node_key.is_empty() && !path.is_empty() {
+        let node_key_len = node_key.len();
+        let path_len = path.len();
+        let key_from_node = node_key_len.min(MAX_NODE_KEY_BYTES);
+        let key_from_path = path_len.min(MAX_NODE_KEY_BYTES - key_from_node);
         let next_node_path = unsafe {
-            // SAFETY: `temp_key_buf` has capacity for `MAX_NODE_KEY_BYTES` bytes. We copy exactly
-            // `node_key_len` bytes from `node_key`, which is a valid slice, then append at most the
-            // remaining buffer capacity from the valid slice `path`. Both destination ranges are
-            // within the stack buffer and do not overlap the sources.
-            let src_ptr = node_key.as_ptr();
+            // SAFETY: `key_from_node + key_from_path <= MAX_NODE_KEY_BYTES`, and we copy that many bytes
+            // from two valid slices into `temp_key_buf`, so the resulting slice is initialized and in bounds.
             let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
-            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, node_key_len);
-
-            let remaining_len = (MAX_NODE_KEY_BYTES - node_key_len).min(path_len);
-            let src_ptr = path.as_ptr();
-            let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>().add(node_key_len);
-            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, remaining_len);
-
-            let total_buf_len = node_key_len + remaining_len;
-            // SAFETY: The first `total_buf_len` bytes of `temp_key_buf` were initialized by the
-            // copies above, and `total_buf_len <= MAX_NODE_KEY_BYTES`, so this slice is valid for
-            // reads for the duration of this function.
-            core::slice::from_raw_parts(temp_key_buf.as_mut_ptr().cast::<u8>(), total_buf_len)
+            core::ptr::copy_nonoverlapping(node_key.as_ptr(), dst_ptr, key_from_node);
+            core::ptr::copy_nonoverlapping(path.as_ptr(), dst_ptr.add(key_from_node), key_from_path);
+            core::slice::from_raw_parts(dst_ptr, key_from_node + key_from_path)
         };
 
         match node.as_tagged().node_get_child(next_node_path) {
@@ -147,11 +140,25 @@ where
             Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len && consumed_byte_cnt < node_key_len + path_len => {
                 node = next_node;
                 path = &path[consumed_byte_cnt-node_key_len..];
+                node_key = &[];
             }
-            // If the child begins within `node_key`, let the general walker handle the combined key and path.
-            _ => path = next_node_path,
+            // The child begins within `node_key`, so step into it and keep going with the rest
+            Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt < node_key_len => {
+                node = next_node;
+                node_key = &node_key[consumed_byte_cnt..];
+            }
+            _ => {
+                // The combined key can't be walked any further from here, so it's the remaining key
+                // at `node`, and a key longer than a node key can't be there
+                if node_key_len + path_len > MAX_NODE_KEY_BYTES {
+                    return invalid(alloc);
+                }
+                path = next_node_path;
+                node_key = &[];
+            }
         }
-    } else if path_len == 0 {
+    }
+    if path.is_empty() {
         path = node_key;
     }
 
@@ -1447,5 +1454,56 @@ mod tests {
 
         assert!(!trie_ref.is_shared());
         assert_eq!(trie_ref.shared_node_id(), None);
+    }
+
+    /// `val_at` and `trie_ref_at_path` where the focus key plus the path are longer than a node key
+    #[test]
+    fn trie_ref_long_node_key_and_path() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8; 70], 5);
+        map.set_val_at(&[1u8], 6);
+        for (focus, rest) in [(10usize, 60usize), (30, 40), (47, 23), (69, 1)] {
+            let mut rz = map.read_zipper();
+            rz.descend_to(&vec![0u8; focus]);
+            assert_eq!(rz.val_at(&vec![0u8; rest]), Some(&5), "{focus}+{rest}");
+            assert_eq!(rz.trie_ref_at_path(&vec![0u8; rest]).val(), Some(&5), "{focus}+{rest}");
+            assert_eq!(rz.val_at(&vec![0u8; rest + 1]), None, "{focus}+{rest}");
+        }
+        //A focus far below anything in the trie
+        let mut rz = map.read_zipper();
+        rz.descend_to(&[7u8; 60]);
+        assert_eq!(rz.val_at(&[1u8]), None);
+        assert_eq!(rz.val_at(&[7u8; 60]), None);
+    }
+
+    /// Every split of a long path into a focus and a lookup path agrees with a lookup from the root
+    #[test]
+    fn trie_ref_long_key_every_split() {
+        let mut map = PathMap::<u64>::new();
+        let mut keys: Vec<Vec<u8>> = vec![];
+        for (n, len) in [(0u8, 100usize), (1, 130), (2, 49), (3, 48), (4, 47)] {
+            let mut k = vec![n; len];
+            keys.push(k.clone());
+            //A branch part way along, and one just past a node key's length
+            for at in [30usize, 48, 49, 96] {
+                if at < len { k[at] = 9; keys.push(k[..(at + 5).min(len)].to_vec()); k[at] = n; }
+            }
+        }
+        for (i, k) in keys.iter().enumerate() { map.set_val_at(k, i as u64); }
+        for k in keys.iter() {
+            for focus in 0..=k.len() {
+                let mut rz = map.read_zipper();
+                rz.descend_to(&k[..focus]);
+                for rest in 0..=(k.len() - focus + 1).min(120) {
+                    let mut path = k[focus..].iter().copied().take(rest).collect::<Vec<u8>>();
+                    while path.len() < rest { path.push(7); }
+                    let mut full = k[..focus].to_vec();
+                    full.extend(&path);
+                    let want = map.val_at(&full);
+                    assert_eq!(rz.val_at(&path), want, "focus {focus} rest {rest} key {}", k.len());
+                    assert_eq!(rz.trie_ref_at_path(&path).val(), want, "focus {focus} rest {rest} key {}", k.len());
+                }
+            }
+        }
     }
 }
