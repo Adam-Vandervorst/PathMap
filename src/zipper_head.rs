@@ -1542,8 +1542,8 @@ mod tests {
             drop(w1);
         }
         let map = zh.into_map();
-        assert_eq!(map.get_val_at(&[0x11u8]), Some(&5));
-        assert_eq!(map.get_val_at(&[0u8, 0]), Some(&1));
+        assert_eq!(map.val_at(&[0x11u8]), Some(&5));
+        assert_eq!(map.val_at(&[0u8, 0]), Some(&1));
     }
 
     /// `get_trie_ref`, `get_focus` and forks from a head's read zipper, which owns its root node

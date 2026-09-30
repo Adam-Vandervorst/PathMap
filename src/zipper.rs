@@ -1223,6 +1223,10 @@ pub trait ZipperConcrete {
     /// subtrie may be copied for thread isolation, or the internal trie representation might otherwise
     /// change, and alter the shared property.
     ///
+    /// NOTE: A `ZipperHead` may produce read zippers that own private references to subtries. Therefore
+    /// `is_shared` does not always indicate genuine structural sharing (i.e. sharing between upstream
+    /// parents) when it is called at the root of a read zipper created from a zipper head.
+    ///
     /// GOAT: Make a graphic diagram to illustrate the `shared` property.  The graphic should have
     /// multiple shared subtries accessible via distinct paths, and highlight which locations will be
     /// considered `shared` from the perspective of this method.
