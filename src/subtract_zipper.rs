@@ -1,5 +1,7 @@
 use std::{cell::Cell, num::NonZeroUsize};
 
+use smallvec::SmallVec;
+
 use crate::{
     ring::{self, AlgebraicResult, DistributiveLattice, DistributiveLatticeRef},
     utils::{BitMask, ByteMask},
@@ -8,6 +10,127 @@ use crate::{
         ZipperValues,
     },
 };
+
+#[derive(Default, Debug)]
+struct PathWitness {
+    path: SmallVec<[u8; 16]>,
+}
+
+impl PathObserver for PathWitness {
+    #[inline]
+    fn descend_to(&mut self, path: &[u8]) {
+        self.path.extend_from_slice(path);
+    }
+    #[inline]
+    fn descend_to_byte(&mut self, byte: u8) {
+        self.path.push(byte);
+    }
+    #[inline]
+    fn ascend(&mut self, steps: usize) {
+        self.path.truncate(self.path.len() - steps)
+    }
+}
+
+#[derive(Debug)]
+struct SurvivalWitness {
+    path: SmallVec<[u8; 16]>,
+    pos: usize,
+}
+
+impl SurvivalWitness {
+    fn from_path_witness(witness: PathWitness) -> SurvivalWitness {
+        Self {
+            path: witness.path,
+            pos: 0,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Self {
+        Self {
+            path: SmallVec::from_slice(&[byte]),
+            pos: 0,
+        }
+    }
+
+    fn from_raw_parts(path: &[u8], pos: usize) -> SurvivalWitness {
+        assert!(pos <= path.len());
+        Self {
+            path: SmallVec::from_slice(path),
+            pos,
+        }
+    }
+
+    fn next_byte(&self) -> Option<&u8> {
+        self.path.get(self.pos)
+    }
+
+    /// Advances the logical focus along the witness.
+    ///
+    /// Returns `None` if the requested descent leaves the witness path.
+    fn descend_to(mut self, path: &[u8]) -> Option<Self> {
+        let remaining = self.path.get(self.pos..)?;
+
+        if fast_slice_utils::starts_with(remaining, path) {
+            self.pos += path.len();
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    /// Advances the logical focus by one byte along the witness.
+    ///
+    /// Returns `None` if the requested descent leaves the witness path.
+    fn descend_to_byte(mut self, byte: u8) -> Option<Self> {
+        if self.next_byte() == Some(&byte) {
+            self.pos += 1;
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    /// Moves the logical focus back along the already consumed part of the
+    /// witness.
+    ///
+    /// Returns `None` if the ascent crosses above the focus at which the
+    /// witness was created.
+    fn ascend(mut self, steps: usize) -> Option<Self> {
+        if steps <= self.pos {
+            self.pos -= steps;
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    /// Consume as much of the known surviving path as possible.
+    fn consume_path(mut self, path: &[u8]) -> (usize, Self) {
+        if let Some(remaining) = self.path.get(self.pos..) {
+            let matched = fast_slice_utils::find_prefix_overlap(remaining, path);
+            self.pos += matched;
+            (matched, self)
+        } else {
+            (0, self)
+        }
+    }
+
+    #[inline(always)]
+    fn __replace_suffix(&mut self, path: &[u8]) {
+        self.path.truncate(self.pos);
+        self.path.extend_from_slice(path);
+    }
+
+    fn extend_with_path_witness(&mut self, witness: PathWitness) {
+        self.__replace_suffix(&witness.path);
+    }
+
+    fn extend_with_consumed_path(mut self, path: &[u8]) -> Self {
+        self.__replace_suffix(path);
+        self.pos += path.len();
+        self
+    }
+}
 
 pub struct SubtractZipper<V, A, B> {
     lhs: A,
@@ -29,6 +152,10 @@ pub struct SubtractZipper<V, A, B> {
     // checked_common bit is set.
     checked_common: ByteMask,
     surviving_common: ByteMask,
+
+    // if Some(witness), then following witness' path from the current focus leads to a subtree that
+    // is known to exist in the subtraction
+    survival_witness: Option<SurvivalWitness>,
 }
 
 enum CachedVal<V> {
@@ -69,6 +196,7 @@ where
             val_count: Cell::new(None),
             checked_common: ByteMask::EMPTY,
             surviving_common: ByteMask::EMPTY,
+            survival_witness: None,
         };
 
         this.refresh();
@@ -130,6 +258,11 @@ where
     #[inline]
     fn descend_to_byte_raw(&mut self, byte: u8) {
         self.invalidate_child_probes();
+        self.survival_witness = self
+            .survival_witness
+            .take()
+            .and_then(|witness| witness.descend_to_byte(byte));
+
         self.lhs.descend_to_byte(byte);
         self.rhs.descend_to_byte(byte);
     }
@@ -148,6 +281,11 @@ where
             self.lhs.depth() >= self.lhs_root_depth + steps,
             "SubtractZipper attempted to ascend above its root"
         );
+
+        self.survival_witness = self
+            .survival_witness
+            .take()
+            .and_then(|witness| witness.ascend(steps));
 
         let lhs_ascended = self.lhs.ascend(steps);
         let rhs_ascended = self.rhs.ascend(steps);
@@ -187,13 +325,10 @@ where
         // For a multi-level surviving ascent, only the child directly below the
         // final focus matters. Ascend the prefix in bulk and leave the last step
         // separate so that its byte can be recorded.
+        // Use ascend_raw() for the prefix so that any
+        // existing survival witness is moved or invalidated consistently
         if multi_level {
-            let prefix = steps - 1;
-            let lhs_ascended = self.lhs.ascend(prefix);
-            let rhs_ascended = self.rhs.ascend(prefix);
-
-            debug_assert_eq!(lhs_ascended, prefix);
-            debug_assert_eq!(rhs_ascended, prefix);
+            self.ascend_raw(steps - 1);
         }
 
         let child_byte = self
@@ -202,6 +337,14 @@ where
             .expect("path is below SubtractZipper root");
 
         self.ascend_raw(1);
+        // If an older witness survived the ascent, the child we have
+        // just left must lie on that witness path.
+        if survives && self.survival_witness.is_none() {
+            // Crossing above the old witness anchor may have invalidated
+            // it, but the known-surviving child itself is now a sufficient
+            // witness for the parent.
+            self.survival_witness = Some(SurvivalWitness::from_byte(child_byte))
+        }
 
         // Probe facts are meaningful only for children shared by both tries.
         // The raw focus being left may itself be structurally absent on either side,
@@ -218,13 +361,13 @@ where
     /// Both backing zippers are temporarily descended into the child and restored
     /// to their original focus before this method returns.
     #[inline]
-    fn subtree_survives_uncached(&mut self, at: u8) -> bool {
+    fn subtree_survives_uncached<P: PathObserver>(&mut self, at: u8, witness: &mut P) -> bool {
         // This is a temporary probe, not a logical focus change, so bypass the
         // raw movement helpers in order to preserve the current-focus probe cache.
         self.lhs.descend_to_byte(at);
         self.rhs.descend_to_byte(at);
 
-        let survives = subtree_has_difference::<V, _, _>(&mut self.lhs, &mut self.rhs);
+        let survives = subtree_has_difference::<V, _, _, _>(&mut self.lhs, &mut self.rhs, witness);
 
         let lhs_ascended = self.lhs.ascend_byte();
         let rhs_ascended = self.rhs.ascend_byte();
@@ -244,8 +387,27 @@ where
         if self.checked_common.test_bit(at) {
             return self.surviving_common.test_bit(at);
         }
+        if self
+            .survival_witness
+            .as_ref()
+            .is_some_and(|witness| witness.next_byte() == Some(&at))
+        {
+            // No probe necessary: this exact child is on a known witness path.
+            self.set_child_probe(at, true);
+            return true;
+        }
 
-        let survives = self.subtree_survives_uncached(at);
+        let mut witness: PathWitness = PathWitness::default();
+        witness.descend_to_byte(at);
+
+        let survives = self.subtree_survives_uncached(at, &mut witness);
+        if survives {
+            if let Some(current) = self.survival_witness.as_mut() {
+                current.extend_with_path_witness(witness)
+            } else {
+                self.survival_witness = Some(SurvivalWitness::from_path_witness(witness));
+            }
+        }
 
         self.set_child_probe(at, survives);
         survives
@@ -262,11 +424,16 @@ where
         out ^= self.checked_common & !self.surviving_common;
 
         // Since checked_common ⊆ common, XOR gives exactly the unchecked children.
-        let unchecked = common ^ self.checked_common;
+        let mut unchecked = common ^ self.checked_common;
         // Only probe shared children whose subtraction subtree has not already
         // been inspected at this focus.
+        if let Some(witness) = &self.survival_witness
+            && let Some(known_byte) = witness.next_byte()
+        {
+            unchecked.clear_bit(*known_byte);
+        }
         for byte in unchecked.iter() {
-            if !self.subtree_survives_uncached(byte) {
+            if !self.subtree_survives_uncached(byte, &mut ()) {
                 out.clear_bit(byte);
             }
         }
@@ -546,8 +713,9 @@ where
 /// as a surviving value or LHS-only branch is found.
 ///
 /// Both zippers are restored to their original focus before returning.
-fn subtree_has_difference<V, A, B>(lhs: &mut A, rhs: &mut B) -> bool
+fn subtree_has_difference<V, P, A, B>(lhs: &mut A, rhs: &mut B, witness: &mut P) -> bool
 where
+    P: PathObserver,
     V: DistributiveLattice + Clone,
     A: ZipperMoving + ZipperValues<V>,
     B: ZipperMoving + ZipperValues<V>,
@@ -586,6 +754,7 @@ where
 
                 lhs.descend_to_byte(byte);
                 rhs.descend_to_byte(byte);
+                witness.descend_to_byte(byte);
 
                 depth += 1;
             }
@@ -599,6 +768,9 @@ where
                     debug_assert_eq!(lhs_ascended, depth);
                     debug_assert_eq!(rhs_ascended, depth);
 
+                    // Unlike the successful case, failure leaves no witness.
+                    witness.ascend(depth);
+
                     return false;
                 };
 
@@ -607,6 +779,7 @@ where
 
                 debug_assert_eq!(rhs_ascended, ascended);
 
+                witness.ascend(ascended);
                 depth -= ascended;
 
                 // We are back at the branch point. If another child follows the one
@@ -620,6 +793,7 @@ where
 
                 lhs.descend_to_byte(cur_byte);
                 rhs.descend_to_byte(cur_byte);
+                witness.descend_to_byte(cur_byte);
                 depth += 1;
             }
         }
@@ -796,6 +970,10 @@ where
             return;
         }
 
+        self.survival_witness = self
+            .survival_witness
+            .take()
+            .and_then(|witness| witness.descend_to(path));
         self.lhs.descend_to(path);
         self.rhs.descend_to(path);
 
@@ -893,15 +1071,38 @@ where
 
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
         let k = k.as_ref();
-
-        // The cached virtual child mask is valid at the initial focus, so the
-        // first step can be checked without inspecting the subtraction again.
-        if k.is_empty() || !self.child_mask.test_bit(k[0]) {
+        if k.is_empty() {
             return 0;
         }
 
-        self.descend_to_byte_raw(k[0]);
-        let mut i = 1;
+        let mut i = 0;
+
+        // Consume as much of the known surviving path as possible.
+        if let Some(witness) = self.survival_witness.take() {
+            let (matched, new_witness) = witness.consume_path(k);
+            if matched != 0 {
+                let prefix = &k[..matched];
+
+                self.invalidate_child_probes();
+
+                self.lhs.descend_to(prefix);
+                self.rhs.descend_to(prefix);
+
+                i = matched;
+                self.survival_witness = Some(new_witness);
+            }
+        }
+
+        // If the witness did not move us at all, the initial cached child mask
+        // still gives us the cheapest first-step check.
+        if i == 0 {
+            if !self.child_mask.test_bit(k[0]) {
+                return 0;
+            }
+
+            self.descend_to_byte_raw(k[0]);
+            i = 1;
+        }
 
         while i < k.len() {
             let byte = k[i];
@@ -916,20 +1117,30 @@ where
                 // An LHS-only child survives wholesale. From this point downward
                 // A - B is exactly A, so delegate the rest to the native LHS zipper.
                 let descended = self.lhs.descend_to_existing(&k[i..]);
-                self.rhs.descend_to(&k[i..i + descended]);
+                let path = &k[i..i + descended];
+
+                self.rhs.descend_to(path);
+
+                if let Some(witness) = self.survival_witness.take() {
+                    self.survival_witness = Some(witness.extend_with_consumed_path(path));
+                }
+
                 i += descended;
                 break;
             }
 
             // Both sides contain the child structurally. It belongs to the
             // materialized difference iff something survives below it.
-            self.descend_to_byte_raw(byte);
-            if !subtree_has_difference::<V, _, _>(&mut self.lhs, &mut self.rhs) {
-                self.ascend_raw_known(1, false);
+            if !self.subtree_survives(byte) {
                 break;
             }
 
+            self.descend_to_byte_raw(byte);
             i += 1;
+        }
+
+        if i != 0 && self.survival_witness.is_none() {
+            self.survival_witness = Some(SurvivalWitness::from_raw_parts(&k[..i], i));
         }
 
         self.refresh();
@@ -946,30 +1157,39 @@ where
         }
 
         self.descend_to_byte_raw(k[0]);
+        // The cached child mask proves that the first descended path survives.
+        if self.survival_witness.is_none() {
+            self.survival_witness = Some(SurvivalWitness::from_raw_parts(&[k[0]], 1));
+        }
+
         let mut i = 1;
 
-        // If RHS disappeared on the first step, subtraction has no further
-        // effect below this point. Check the current LHS value first because
-        // descend_to_val() deliberately skips a value at its initial focus.
-        if !self.rhs.path_exists() {
-            if !self.lhs.is_val() {
-                let descended = self.lhs.descend_to_val(&k[i..]);
-                self.rhs.descend_to(&k[i..i + descended]);
-                i += descended;
+        while i < k.len() {
+            // Once RHS disappears, subtraction has no further
+            // effect below this point. Check the current LHS value first because
+            // descend_to_val() deliberately skips a value at its initial focus.
+            if !self.rhs.path_exists() {
+                if !self.lhs.is_val() {
+                    let descended = self.lhs.descend_to_val(&k[i..]);
+                    let path = &k[i..i + descended];
+
+                    self.rhs.descend_to(path);
+
+                    if let Some(witness) = self.survival_witness.take() {
+                        self.survival_witness = Some(witness.extend_with_consumed_path(path));
+                    }
+
+                    i += descended;
+                }
+
+                break;
             }
 
-            self.refresh();
-            return i;
-        }
+            // If the value survives subtraction, we are already done.
+            if value_survives::<V, _, _>(&self.lhs, &self.rhs) {
+                break;
+            }
 
-        // The first child is known to exist in the virtual trie from the cached
-        // child mask. If its value survives subtraction, we are already done.
-        if value_survives::<V, _, _>(&self.lhs, &self.rhs) {
-            self.refresh();
-            return i;
-        }
-
-        while i < k.len() {
             let byte = k[i];
 
             // No such LHS child means there cannot be such a child in A - B.
@@ -977,40 +1197,13 @@ where
                 break;
             }
 
-            let rhs_gone = !self.rhs.child_mask().test_bit(byte);
+            // A shared child survives only if something remains after subtraction.
+            // An LHS-only child survives unconditionally
+            if self.rhs.child_mask().test_bit(byte) && !self.subtree_survives(byte) {
+                break;
+            }
 
             self.descend_to_byte_raw(byte);
-
-            // An LHS-only child survives wholesale. From this point downward
-            // A - B is exactly A, so delegate the rest to the native LHS zipper.
-            if rhs_gone {
-                i += 1;
-
-                // The newly reached focus itself may already contain a value.
-                // The native descend_to_val() would intentionally skip it.
-                if !self.lhs.is_val() {
-                    let descended = self.lhs.descend_to_val(&k[i..]);
-                    self.rhs.descend_to(&k[i..i + descended]);
-                    i += descended;
-                }
-
-                break;
-            }
-
-            // A surviving value also proves that this virtual path exists, so
-            // avoid the more expensive subtree check in this case.
-            if value_survives::<V, _, _>(&self.lhs, &self.rhs) {
-                i += 1;
-                break;
-            }
-
-            // Both tries contain the structural child, but it exists in the
-            // materialized difference only if something survives below it.
-            if !subtree_has_difference::<V, _, _>(&mut self.lhs, &mut self.rhs) {
-                self.ascend_raw_known(1, false);
-                break;
-            }
-
             i += 1;
         }
 
@@ -1181,6 +1374,10 @@ where
             }
         }
         if !suffix.is_empty() {
+            self.survival_witness = self
+                .survival_witness
+                .take()
+                .and_then(|witness| witness.descend_to(suffix));
             self.lhs.descend_to(suffix);
             self.rhs.descend_to(suffix);
         }
