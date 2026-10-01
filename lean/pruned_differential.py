@@ -62,14 +62,20 @@ def _fields(line):
 
 
 def dangling_focus(a, b):
-    """The crate's focus exists where the model's does not, and carries nothing.
+    """The crate has locations the model does not, and none of them holds a value.
 
-    `e1 v- c0 n0` against `e0 v- c0 n0`: a location with no value and no
-    children that `path_exists` still reports.  That is a dangling path, and the
-    operations that leave one are the ones with no `prune` parameter to pass --
-    `graft`, `graft_src_at`, `restrict`, `meet_2`, `remove_prefix`.  The ones
-    that have one (`remove_val`, `remove_branches`, `meet_into`,
-    `subtract_into`) clean up correctly when it is set.
+    The signature is that `e` and/or `c` moved *up* while `v` and `n` did not
+    move at all: `path_exists` became true, or `child_mask` gained a bit, without
+    a value appearing anywhere at or below the focus.  So whatever the crate
+    created or kept leads nowhere.  Both halves of
+    PRUNED_FINDINGS.md #1 and #2 land here -- the focus itself (`e0` -> `e1`) and
+    a child of it (`c0` -> `c1`), which is why the two are one entry in `KNOWN`.
+
+    The operations that do this are the ones with no `prune` parameter to pass:
+    `graft`, `graft_src_at`, `graft_masked_branches`, `meet_2`, `restrict`,
+    `restricting`, `remove_prefix`.  The ones that have one (`remove_val`,
+    `remove_branches`, `meet_into`, `subtract_into`) clean up correctly when it
+    is set, which is what this harness passes throughout.
     """
     fa, fb = _fields(a), _fields(b)
     if not fa or not fb:
@@ -79,10 +85,16 @@ def dangling_focus(a, b):
         xa, xb = fa[side], fb[side]
         if xa == xb:
             continue
-        if {k for k in xa if xa.get(k) != xb.get(k)} != {"e"}:
+        moved = {k for k in set(xa) | set(xb) if xa.get(k) != xb.get(k)}
+        if not moved or not moved <= {"e", "c"}:
             return None
-        if not (xa["e"] == "0" and xb["e"] == "1" and xb["v"] == "-"
-                and xb["c"] == "0" and xb["n"] == "0"):
+        # No value may appear: `v` at the focus and `n` below it must be equal,
+        # or the difference is content rather than an empty location.
+        if xa["v"] != xb["v"] or xa["n"] != xb["n"]:
+            return None
+        if "e" in moved and not (xa["e"] == "0" and xb["e"] == "1"):
+            return None
+        if "c" in moved and not int(xb["c"]) > int(xa["c"]):
             return None
         hit = True
     return "DANGLING-FOCUS" if hit else None
@@ -117,7 +129,7 @@ def dangling_kept_dump(a, b):
         return None
     if any(not e.endswith(":-") for e in extra):
         return None
-    return "DANGLING-KEPT"
+    return "DANGLING-DUMP"
 
 
 _inherited_shape = D.divergence_shape
@@ -141,6 +153,25 @@ D.divergence_shape = divergence_shape
 D.KNOWN = [
     (["ESCAPED-ROOT"],
      "a zipper left its own root: root_prefix_path() changed [root_escape]"),
+    # The trie-dump form, tested before the fingerprint form: a line that is
+    # only a dump has no fingerprint to read.
+    (["DANGLING-DUMP"],
+     "an empty write leaves locations that lead nowhere in the trie "
+     "(PRUNED_FINDINGS.md #1) [empty_write_materialises_focus]"),
+    # PRUNED_FINDINGS.md #1 and #2 -- one mechanism, seen at the focus (#1) or at
+    # a child of it (#2).  Still present on fuzz-fixes-v3.
+    (["DANGLING-FOCUS"],
+     "an operation with no prune parameter materialises an empty location "
+     "(PRUNED_FINDINGS.md #1, #2) [empty_write_materialises_focus]"),
+    # The two classes this model shares with the other one.  Both are fixed on
+    # fuzz-fixes-v3 (3dae731, and the restrict/subtract status commits), so a
+    # hit here means the run is against a tree without those.
+    (["STATUS-ONLY"],
+     "AlgebraicStatus::Identity is not returned reliably when nothing changed "
+     "(FINDINGS.md #8); fixed on fuzz-fixes-v3"),
+    (["VALUE-ONLY"],
+     "a value collision resolves to the counterpart, by node layout rather than "
+     "by path (FINDINGS.md value bias); fixed on fuzz-fixes-v3 by 3dae731"),
 ]
 
 if __name__ == "__main__":

@@ -36,8 +36,16 @@ cargo build --release -p differential
 # generate random programs and compare model against crate
 ./lean/differential.py --random 500 --seed 1
 
+# the same, for the dangling-path-free subset (the second model, below)
+./lean/pruned_differential.py --random 500 --seed 1
+
 # minimise an input that diverges (or that panics)
 ./lean/shrink.py path/to/input.bin
+
+# ...or one that diverges against the second model
+PATHMAP_ORACLE=lean/.lake/build/bin/pruned-oracle \
+PATHMAP_TRACE=target/release/pruned_trace \
+  ./lean/shrink.py path/to/input.bin
 ```
 
 `lake build` also checks every `#guard` in `PathMapModel/Check.lean`, so a build
@@ -155,6 +163,8 @@ focus, such that ..." — instead of as a node walk.
 | `PathMapModel/Check.lean` | `#guard`s: regression fixtures transcribed from `src/write_zipper.rs`'s own tests, and the §2 laws over a battery of tries |
 | `PathMapModel/Fuzz.lean` | the wire format, the operation table, and the trace producer (including `--act` mode) |
 | `Main.lean` | the `pathmap-oracle` binary |
+| `PrunedModel/*.lean` | the second model — the same API over `List (Path × V)`, covering only the subset that cannot leave a dangling path; see below |
+| `PrunedMain.lean` | the `pruned-oracle` binary |
 
 ## What is proved versus what is checked
 
@@ -610,6 +620,87 @@ invariants in-process after every operation — no oracle needed:
 
 `differential.py` runs without `--check`, because a crate that violates an
 invariant should show up as a trace diff rather than as an abort.
+
+## A second model: the dangling-path-free subset
+
+`PrunedModel` is a separate specification of the same crate, and the thing worth
+understanding about it is why there are two.
+
+This model represents a trie as `List (Path × Option V)`.  The `Option` is not
+optional: `pathmap` locations really do come in three states — absent,
+present-without-a-value, valued — and `create_path` makes the middle one on
+purpose while `remove_val(false)` leaves it behind.  A model that could not
+represent it could not specify those operations.
+
+But that third state is also where most of the specification's difficulty lives.
+`subtract` needs a rule of its own for it ("where the source has no node at all,
+keep `self`'s subtree verbatim, *including its dangling paths*"), every algebraic
+operation has to say which valueless locations survive it, and the `prune` flag
+has to be pinned to `false` and compared against nothing, because its effect is
+a function of where an internal node boundary happens to fall rather than of the
+trie.  Several of the findings are about nothing else.
+
+`PrunedModel` takes the other branch.  It covers **only the subset of the API
+that cannot produce a dangling path**, and in exchange drops the `Option`:
+
+```lean
+structure PrunedMap (V : Type) where
+  entries : List (Path × V)
+```
+
+A location exists iff some key has it as a prefix.  Existence is *derived*, not
+stored, so a dangling path is not merely absent from the model — it is
+unrepresentable.  There is no third state to specify, no flag to thread, and
+`subtract` is pointwise, because with nothing valueless to preserve, "keep
+`self`'s subtree verbatim" and "subtract pointwise" coincide.
+
+The claim is correspondingly stronger.  Where `PathMapModel` says *here is what
+the crate does with dangling paths*, `PrunedModel` says *these operations never
+make one* — so a trace divergence is either a wrong value or a location that
+leads nowhere.  `PrunedModel/Spec.lean` proves the claim (`no_dangling`, three
+lines) and the corollary the fuzzer trades on: `prune_path` has nothing to do, so
+the crate must report `0` for it.
+
+Three restrictions define the subset:
+
+1. **No `create_path`**, whose whole purpose is a location with no value.
+2. **`prune = true` everywhere.**  Removal here is inherently pruning, so there
+   is nothing to opt into; `prune_path` and `prune_ascend` stay in the operation
+   table as *assertions*.
+3. **The write zipper is rooted at the map root.**  One rooted below it holds a
+   node at its own root, which survives as a location leading nowhere once
+   everything beneath it is removed, and `prune_path` is documented not to rise
+   above the zipper's origin — so that is outside the model by construction
+   rather than by a bug.  Off-root *writing* is still covered: the root-rooted
+   zipper reaches every focus with `descend_to`.
+
+Operations the subset covers are specified, not skipped, even where the crate is
+known to leak.  That is the point: `graft` with an empty source is accidentally
+`create_path`, and
+[PRUNED_FINDINGS.md](PRUNED_FINDINGS.md) is the result.  Only four `skip:`
+reasons survive (`at-root`, `k0`, `empty-focus`, `empty-path`), against the
+other harness's seven.
+
+`differential/src/pruned.rs` is the crate side — one read source, so no
+`ReadSource` trait and no ACT mode — and `lean/pruned_differential.py` is
+`differential.py` with `ORACLE`, `TRACE_CANDIDATES` and `KNOWN` repointed, so
+nothing about *how* inputs are run is duplicated.  `pruned_trace --check` needs
+no oracle at all: it asserts the zipper invariants after every operation and,
+at the end, that the write target contains no dangling path.
+
+### Agreement
+
+4000 random programs, seed 11, against `pathmap` 0.4.0 at `ec818cf`:
+
+| | inputs |
+| --- | --- |
+| agree | 3005 |
+| the two findings in `PRUNED_FINDINGS.md` | 901 |
+| two classes shared with the other model (value bias, `join_map_into` status) | 94 |
+| anything else | **0** |
+
+The same corpus against `fuzz-fixes-v3`: the two shared classes are fixed there,
+the two new ones are not.
 
 ## Out of scope
 
