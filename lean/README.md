@@ -696,11 +696,17 @@ at the end, that the write target contains no dangling path.
 | --- | --- |
 | agree | 3005 |
 | the two findings in `PRUNED_FINDINGS.md` | 901 |
-| two classes shared with the other model (value bias, `join_map_into` status) | 94 |
+| two classes shared with the other model (value bias, `Identity` not reported) | 94 |
 | anything else | **0** |
 
-The same corpus against `fuzz-fixes-v3`: the two shared classes are fixed there,
-the two new ones are not.
+The same 4000 inputs with the harness built on `fuzz-fixes-v3`: that branch
+fixes both of the classes this model inherited and neither of the two it found.
+Which is the argument for having both models — `fuzz-fixes-v3` was driven by the
+other one, and a model that *reproduces* dangling paths cannot report an
+operation for making one.  See
+[PRUNED_FINDINGS.md](PRUNED_FINDINGS.md) §4, which also says which v3 columns
+are spec drift rather than findings: v3 changes the k-path walk and the integer
+`psubtract`, and this oracle is pinned to master's reading of both.
 
 ## Out of scope
 

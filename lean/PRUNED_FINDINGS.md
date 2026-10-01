@@ -107,23 +107,61 @@ created.
 
 ## 3. Pre-existing classes this model also reports
 
-Two of the 70 divergence shapes are not about dangling paths.  Both are already
-recorded against the other model; they appear here because the operation subsets
-overlap, and they are in the corpus so a regression in either shows up in
-whichever harness is run.
+Two divergence shapes are not about dangling paths.  Both are already recorded
+against the other model; they appear here because the operation subsets overlap,
+and they are in the corpus so a regression in either shows up in whichever
+harness is run.
 
-* **`join_into` keeps the counterpart's value.**
+* **A value collision resolves to the counterpart.**
   `join_into-value-bias-by-node-layout.bin`.  `u64`'s `pjoin` returns
   `Identity(SELF_IDENT)`, so the destination's value must survive a collision;
   at one location out of six the crate kept the source's (`0301:118` against
   `0301:0`).  Which location depends on node layout, not on the paths — see
-  `FINDINGS.md` on value bias.
+  `FINDINGS.md` on value bias.  7 of 4000 inputs.
 
-* **`join_map_into` reports `Element` where nothing changed.**
+* **`Identity` is not reported where nothing changed.**
   `join_map_into-status-element-when-unchanged.bin`.  The source map is
   `{[] ↦ v}` and the destination focus already holds `v`, so both the value step
-  and the node step are identities and the status must be `Identity`.  This is
-  `FINDINGS.md` #8.
+  and the node step are identities and the status must be `Identity`; the crate
+  says `Element`.  `FINDINGS.md` #8.  87 of 4000 inputs, across `join_map_into`
+  (most), `subtract_into` and `meet_into`.
+
+## 4. Against `fuzz-fixes-v3`
+
+Same 4000 inputs, same seed, with the harness built on `fuzz-fixes-v3`
+(`ee7546e`) and the oracle unchanged.  `fuzz-fixes-v3` carries 73 commits of
+fixes off an older master, several of them about dangling paths, so the question
+is which of the above it already answers.
+
+| finding | master `ec818cf` | `fuzz-fixes-v3` |
+| --- | --- | --- |
+| #1 + #2, empty write materialises a location | 897 + 64 | **not fixed** — 974, and all 8 reproducers still diverge |
+| #3, value bias | 7 | fixed (`3dae731`, "Make meet/join value bias independent of node layout") |
+| #3, `Identity` not reported | 87 | fixed |
+
+So the branch fixes the two classes this model inherited and neither of the two
+it found.  That is not surprising — `fuzz-fixes-v3` was driven by the other
+model, which *reproduces* dangling paths rather than forbidding them, so no
+amount of fuzzing against it could have reported finding 1.  It is the clearest
+argument for keeping both models: they cannot find each other's bugs.
+
+Two things in the v3 column are **not** findings and should not be read as any:
+
+* **420 inputs diverge in `descend_first_k_path` / `k_path_walk`.**  v3 changes
+  the k-path walk (`7f9c59a`, "Fix the default k-path walk looping forever at a
+  leaf", among others) and updates its own copy of the model to match.
+  `PrunedModel` was ported from master's model, so it still specifies master's
+  behaviour.  This is spec drift between the two branches, and re-measuring the
+  k-path operations on v3 needs the port redone against v3's model.
+* **45 of 600 inputs show `subtract_into` reporting `Identity`** where the model
+  says `Element` — the opposite direction from finding 3.  v3 deliberately
+  changed the integer instance (`f8a4599`, "Return Identity from the integer
+  psubtract when nothing was subtracted"); `Basic.u64Ops` is master's and
+  returns `Element(*self)`.  Also spec drift.
+
+Both are visible only because the oracle is pinned to master while the crate is
+not.  The `STATUS-ONLY` shape in particular is two-directional, so the driver's
+`KNOWN` note for it says to read the direction rather than the tag.
 
 ## What is not covered
 

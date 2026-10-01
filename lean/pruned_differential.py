@@ -163,12 +163,16 @@ D.KNOWN = [
     (["DANGLING-FOCUS"],
      "an operation with no prune parameter materialises an empty location "
      "(PRUNED_FINDINGS.md #1, #2) [empty_write_materialises_focus]"),
-    # The two classes this model shares with the other one.  Both are fixed on
-    # fuzz-fixes-v3 (3dae731, and the restrict/subtract status commits), so a
-    # hit here means the run is against a tree without those.
+    # The two classes this model shares with the other one; both are fixed on
+    # fuzz-fixes-v3.  Note the STATUS-ONLY shape is two-directional and the
+    # direction is what names it, so read the report, not just the tag:
+    # `Identity` from the model against `Element` from the crate is FINDINGS.md
+    # #8, while the reverse on fuzz-fixes-v3 is that branch's deliberate change
+    # to `u64::psubtract` (f8a4599), which this model's `u64Ops` predates.
     (["STATUS-ONLY"],
      "AlgebraicStatus::Identity is not returned reliably when nothing changed "
-     "(FINDINGS.md #8); fixed on fuzz-fixes-v3"),
+     "(FINDINGS.md #8), or -- on fuzz-fixes-v3 -- u64::psubtract now returns it "
+     "where u64Ops still says Element"),
     (["VALUE-ONLY"],
      "a value collision resolves to the counterpart, by node layout rather than "
      "by path (FINDINGS.md value bias); fixed on fuzz-fixes-v3 by 3dae731"),
