@@ -1546,6 +1546,71 @@ mod tests {
         assert_eq!(map.val_at(&[0u8, 0]), Some(&1));
     }
 
+    #[test]
+    fn head_reader_private_root_value_and_witness() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([0x22], 22);
+        map.set_val_at([0x22, 0x01], 1);
+        map.set_val_at([0x44, 0x55], 55);
+        let zh = map.into_zipper_head([]);
+        let mut other_writer = zh.write_zipper_at_exclusive_path([0x11]).unwrap();
+
+        let reader = zh.read_zipper_at_borrowed_path(&[0x22]).unwrap();
+        assert!(reader.path_exists());
+        assert!(reader.is_val());
+        assert_eq!(reader.val(), Some(&22));
+        assert_eq!(reader.val_at([0x01]), Some(&1));
+        let cloned_reader = reader.clone();
+        let witness = reader.witness();
+        let held_value = reader.get_val_with_witness(&witness).unwrap();
+        drop(reader);
+        assert_eq!(cloned_reader.val(), Some(&22));
+        drop(cloned_reader);
+
+        let mut writer = zh.write_zipper_at_exclusive_path([0x22]).unwrap();
+        writer.set_val(99);
+        drop(writer);
+        assert_eq!(*held_value, 22);
+
+        let prefix = zh.read_zipper_at_borrowed_path(&[0x44]).unwrap();
+        assert!(prefix.path_exists());
+        assert!(!prefix.is_val());
+        assert_eq!(prefix.val_at([0x55]), Some(&55));
+        drop(prefix);
+
+        let missing = zh.read_zipper_at_borrowed_path(&[0xee, 0x00]).unwrap();
+        assert!(!missing.path_exists());
+        assert!(!missing.is_val());
+        assert_eq!(missing.child_count(), 0);
+        drop(missing);
+
+        other_writer.set_val(11);
+    }
+
+    /// A witness must keep the head's root value alive after its reader releases the path lock.
+    #[test]
+    fn head_root_value_witness_survives_reader_and_writer() {
+        use std::sync::Arc;
+
+        let original = Arc::new(String::from("old"));
+        let mut map = PathMap::<Arc<String>>::new();
+        map.set_val_at([], original.clone());
+        let head = map.zipper_head();
+
+        let reader = head.read_zipper_at_path([]).unwrap();
+        let witness = reader.witness();
+        assert_eq!(reader.get_val_with_witness(&witness).map(|v| v.as_str()), Some("old"));
+        drop(reader);
+
+        let mut writer = head.write_zipper_at_exclusive_path([]).unwrap();
+        drop(writer.remove_val(false));
+        drop(writer);
+
+        // The map no longer owns the old value. A valid witness must still own it.
+        assert!(Arc::strong_count(&original) > 1);
+        drop(witness);
+    }
+
     /// `get_trie_ref`, `get_focus` and forks from a head's read zipper, which owns its root node
     #[test]
     fn head_read_zipper_trie_refs() {
