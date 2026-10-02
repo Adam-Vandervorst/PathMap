@@ -248,7 +248,9 @@ It also short-circuits: when the map has no root node the node status is
 returned directly and the value status computed above is discarded — even though
 the value has already been written. -/
 def joinMapInto (m : PrunedMap V) : AlgStatus × PZip V :=
-  let (valStatus, valWasNone, z1) :=
+  -- `merge` is called with both "was none" flags set, as the crate does, so the
+  -- second component is carried only for symmetry with the other operations.
+  let (valStatus, _valWasNone, z1) :=
     match z.val, m.valAt [] with
     | some sv, some mv =>
         let r := ops.pjoin sv mv
@@ -261,17 +263,23 @@ def joinMapInto (m : PrunedMap V) : AlgStatus × PZip V :=
     | none, none => (AlgStatus.none, true, z)
   let srcB := (m.removeVal []).2
   if srcB.isEmptyMap then
-    -- Short-circuit, and note the asymmetry with `join_into`: this branch tests
+    -- Note the asymmetry with `join_into`: this branch tests
     -- `self.get_focus().is_none()` (does a node exist at all?), not
     -- `node_is_empty()`.  The two coincide here, since a location that exists
     -- has something below it or a value of its own.
-    (if z1.pathExists then AlgStatus.identity else AlgStatus.none, z1)
+    --
+    -- The node status is *merged* with the value status rather than returned on
+    -- its own.  It used to be returned directly -- an early `return` that
+    -- discarded a value the operation had already written -- which is
+    -- issue #139, fixed by PR #142 (`276fca0`).
+    (AlgStatus.merge
+      (if z1.pathExists then AlgStatus.identity else AlgStatus.none) valStatus true true, z1)
   else
     let selfB := z1.focusNode
     let r := PrunedMap.join ops selfB srcB
     let nodeSt := if PrunedMap.beqT ops r selfB then AlgStatus.identity else AlgStatus.element
     let z2 := if nodeSt == .identity then z1 else z1.withTrie (z1.trie.graftBelow z1.focus r)
-    (AlgStatus.merge nodeSt valStatus true valWasNone, z2)
+    (AlgStatus.merge nodeSt valStatus true true, z2)
 
 /-- `ZipperWriting::meet_into`: intersect the focus's subtrie with the source's.
 
