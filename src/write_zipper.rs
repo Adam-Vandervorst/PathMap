@@ -6505,7 +6505,7 @@ mod tests {
             let _w1 = zh.write_zipper_at_exclusive_path(&[1, 2]).unwrap();
         }
         map.write_zipper().join_k_path_into(1, false);
-        assert_eq!(map.get_val_at(&[0]), Some(&1));
+        assert_eq!(map.val_at(&[0]), Some(&1));
         assert_eq!(map.val_count(), 1);
     }
     /// `graft_child_maps` and `graft_masked_branches` below a root path too long for one node key
