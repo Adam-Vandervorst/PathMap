@@ -1674,7 +1674,8 @@ mod tests {
                 assert!(!w.descend_to_existing_byte(1), "prep {i}");
                 w.descend_to(&[7u8, 7]);
                 assert!(!w.path_exists(), "prep {i}");
-                assert_eq!(w.ascend_until(), 2, "prep {i}");
+                assert!(w.ascend_until(), "prep {i}");
+                assert!(w.at_root(), "prep {i}");
                 w.descend_to(&[7u8, 7]);
                 w.set_val(5);
             }
