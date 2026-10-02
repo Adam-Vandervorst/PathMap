@@ -185,7 +185,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
             let result = cf.take_val();
 
-            if prune_limit == 0 && !cf.has_rec() {
+            if prune_limit == 0 && cf.rec().map(|rec| rec.as_tagged().node_is_empty()).unwrap_or(true) {
                 self.mask.clear_bit(k);
                 self.values.remove(ix);
             }
@@ -1017,9 +1017,12 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                     }
                     true
                 },
-                (false, _) => {
+                (false, false) if prune_limit == 0 => {
+                    self.values.remove(ix);
+                    self.mask.clear_bit(k);
                     false
                 },
+                (false, _) => false,
             }
         } else {
             false

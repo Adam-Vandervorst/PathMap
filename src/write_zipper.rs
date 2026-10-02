@@ -1443,14 +1443,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         }
         let prune_limit = self.node_prune_limit(prune);
         let mut focus_node = self.focus_stack.top_mut().unwrap();
-        if let Some(result) = focus_node.node_remove_val(self.key.node_key(), prune_limit) {
-            if prune {
-                self.prune_path_internal(false);
-            }
-            Some(result)
-        } else {
-            None
+        let result = focus_node.node_remove_val(self.key.node_key(), prune_limit);
+        if prune && (result.is_some() || self.focus_stack.top().unwrap().node_is_empty()) {
+            self.prune_path_internal(false);
         }
+        result
     }
     /// See [WriteZipper::zipper_head]
     pub fn zipper_head<'z>(&'z mut self) -> ZipperHead<'z, 'a, V, A> {
@@ -2037,6 +2034,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
         };
 
+        if prune && node_was_none {
+            // No node operation ran at an already dangling focus.
+            self.prune_path();
+        }
+
         #[cfg(not(feature = "graft_root_vals"))]
         return node_status;
         #[cfg(feature = "graft_root_vals")]
@@ -2156,6 +2158,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
         };
 
+        if prune && node_was_none {
+            // No node operation ran at an already dangling focus.
+            self.prune_path();
+        }
+
         #[cfg(not(feature = "graft_root_vals"))]
         return node_status;
         #[cfg(feature = "graft_root_vals")]
@@ -2215,14 +2222,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         if node_key.len() > 0 {
             let prune_limit = self.node_prune_limit(prune);
             let mut focus_node = self.focus_stack.top_mut().unwrap();
-            if focus_node.node_remove_all_branches(node_key, prune_limit) {
-                if prune {
-                    self.prune_path_internal(false);
-                }
-                true
-            } else {
-                false
+            let removed = focus_node.node_remove_all_branches(node_key, prune_limit);
+            if prune {
+                self.prune_path_internal(false);
             }
+            removed
         } else {
             debug_assert_eq!(self.focus_stack.depth(), 1);
             if self.focus_stack.top().map(|node| node.node_is_empty()).unwrap_or(false) {
