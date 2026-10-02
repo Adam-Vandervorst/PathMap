@@ -113,52 +113,44 @@ where
     BuildF: FnOnce(&'a TrieNodeODRc<V, A>, &[u8], Option<&'a V>, A) -> R,
     InvalidF: FnOnce(A) -> R,
 {
-    // A temporary buffer on the stack, if we need to assemble a combined key from both the `node_key` and `path`.
+    // A focus key longer than any key in a node cannot exist here.
+    if node_key.len() > MAX_NODE_KEY_BYTES {
+        return invalid(alloc);
+    }
+    let mut path = path;
+    let node_key_len = node_key.len();
+    let path_len = path.len();
     let mut temp_key_buf: [MaybeUninit<u8>; MAX_NODE_KEY_BYTES] = [MaybeUninit::uninit(); MAX_NODE_KEY_BYTES];
-    let mut node_key: &[u8] = node_key;
-    let mut path: &[u8] = path;
-
-    // Copy the existing node key and the first chunk of the path into the temporary buffer, then try to descend one step.
-    // No child key is longer than `MAX_NODE_KEY_BYTES`, so the first `MAX_NODE_KEY_BYTES` bytes of the
-    // combined key decide every step, however long the combined key is.
-    while !node_key.is_empty() && !path.is_empty() {
-        let node_key_len = node_key.len();
-        let path_len = path.len();
-        let key_from_node = node_key_len.min(MAX_NODE_KEY_BYTES);
-        let key_from_path = path_len.min(MAX_NODE_KEY_BYTES - key_from_node);
-        let next_node_path = unsafe {
-            // SAFETY: `key_from_node + key_from_path <= MAX_NODE_KEY_BYTES`, and we copy that many bytes
-            // from two valid slices into `temp_key_buf`, so the resulting slice is initialized and in bounds.
-            let dst_ptr = temp_key_buf.as_mut_ptr().cast::<u8>();
-            core::ptr::copy_nonoverlapping(node_key.as_ptr(), dst_ptr, key_from_node);
-            core::ptr::copy_nonoverlapping(path.as_ptr(), dst_ptr.add(key_from_node), key_from_path);
-            core::slice::from_raw_parts(dst_ptr, key_from_node + key_from_path)
-        };
-
-        match node.as_tagged().node_get_child(next_node_path) {
-            // Only step into the child if path remains, or we'd answer with the focus value.
-            Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt >= node_key_len && consumed_byte_cnt < node_key_len + path_len => {
-                node = next_node;
-                path = &path[consumed_byte_cnt-node_key_len..];
-                node_key = &[];
-            }
-            // The child begins within `node_key`, so step into it and keep going with the rest
-            Some((consumed_byte_cnt, next_node)) if consumed_byte_cnt < node_key_len => {
-                node = next_node;
-                node_key = &node_key[consumed_byte_cnt..];
-            }
-            _ => {
-                // The combined key can't be walked any further from here, so it's the remaining key
-                // at `node`, and a key longer than a node key can't be there
-                if node_key_len + path_len > MAX_NODE_KEY_BYTES {
-                    return invalid(alloc);
+    if node_key_len > 0 && path_len > 0 {
+        let available = MAX_NODE_KEY_BYTES - node_key_len;
+        if path_len <= available {
+            // The candidate fits in the node-key buffer. Let the normal walker handle child boundaries.
+            path = unsafe {
+                // SAFETY: node_key_len + path_len <= MAX_NODE_KEY_BYTES.
+                let dst = temp_key_buf.as_mut_ptr().cast::<u8>();
+                core::ptr::copy_nonoverlapping(node_key.as_ptr(), dst, node_key_len);
+                core::ptr::copy_nonoverlapping(path.as_ptr(), dst.add(node_key_len), path_len);
+                core::slice::from_raw_parts(dst, node_key_len + path_len)
+            };
+        } else {
+            let next_node_path = unsafe {
+                // SAFETY: the copies exactly fill the stack buffer.
+                let dst = temp_key_buf.as_mut_ptr().cast::<u8>();
+                core::ptr::copy_nonoverlapping(node_key.as_ptr(), dst, node_key_len);
+                core::ptr::copy_nonoverlapping(path.as_ptr(), dst.add(node_key_len), available);
+                core::slice::from_raw_parts(dst, MAX_NODE_KEY_BYTES)
+            };
+            match node.as_tagged().node_get_child(next_node_path) {
+                // The combined key is longer than the buffer, so a child found within
+                // this buffer necessarily leaves part of `path` to traverse.
+                Some((consumed, next)) if consumed >= node_key_len => {
+                    node = next;
+                    path = &path[consumed - node_key_len..];
                 }
-                path = next_node_path;
-                node_key = &[];
+                _ => return invalid(alloc),
             }
         }
-    }
-    if path.is_empty() {
+    } else if path_len == 0 {
         path = node_key;
     }
 
@@ -1474,6 +1466,7 @@ mod tests {
         rz.descend_to(&[7u8; 60]);
         assert_eq!(rz.val_at(&[1u8]), None);
         assert_eq!(rz.val_at(&[7u8; 60]), None);
+        assert!(!rz.trie_ref_at_path(&[1u8]).path_exists());
     }
 
     /// `is_shared` where the focus is the empty sentinel node
