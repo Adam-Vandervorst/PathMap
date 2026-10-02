@@ -1503,6 +1503,22 @@ mod tests {
         drop(rz);
     }
 
+    #[test]
+    fn cleanup_write_zipper_at_emptied_link() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8], 1);
+        map.set_val_at(&[0u8, 0, 1], 2);
+        map.write_zipper_at_path(&[0u8, 0]).remove_branches(false);
+        assert!(map.read_zipper_at_path(&[0u8, 0]).path_exists());
+
+        let zh = map.zipper_head();
+        let wz = zh.write_zipper_at_exclusive_path(&[0u8, 0]).unwrap();
+        zh.cleanup_write_zipper(wz);
+
+        assert!(!zh.read_zipper_at_path(&[0u8, 0]).unwrap().path_exists());
+        assert_eq!(zh.read_zipper_at_path(&[0u8]).unwrap().val(), Some(&1));
+    }
+
     /// A ZipperHead turns the parent node into a CellByteNode; joining a list node with it must not
     /// treat the cell node as a DenseByteNode
     #[test]
@@ -1635,6 +1651,36 @@ mod tests {
                     assert_eq!(map.val_at(&full), Some(&(n as u64)), "setup {i} {paths:?}");
                 }
             }
+        }
+    }
+
+    /// An exclusive zipper rooted at a link emptied by `remove_branches`, `take_map` or a graft of nothing
+    #[test]
+    fn exclusive_zipper_at_emptied_link() {
+        let preps: [fn(&mut WriteZipperUntracked<u64>); 4] = [
+            |z| { z.remove_branches(false); },
+            |z| { z.take_map(false); },
+            |z| { let e = PathMap::<u64>::new(); z.graft(&e.read_zipper()); },
+            |z| { let e = PathMap::<u64>::new(); z.restrict(&e.read_zipper()); },
+        ];
+        for (i, prep) in preps.iter().enumerate() {
+            let mut map = PathMap::<u64>::new();
+            for p in [&[0u8, 0, 1][..], &[0, 0, 1, 2], &[0]] { map.set_val_at(p, 1); }
+            {
+                let mut wz = map.write_zipper_at_path(&[0u8, 0]);
+                prep(&mut wz);
+                let zh = wz.zipper_head();
+                let mut w = zh.write_zipper_at_exclusive_path(&[]).unwrap();
+                assert!(!w.descend_to_existing_byte(1), "prep {i}");
+                w.descend_to(&[7u8, 7]);
+                assert!(!w.path_exists(), "prep {i}");
+                assert_eq!(w.ascend_until(), 2, "prep {i}");
+                w.descend_to(&[7u8, 7]);
+                w.set_val(5);
+            }
+            assert_eq!(map.get(&[0u8, 0, 7, 7]), Some(&5), "prep {i}");
+            assert_eq!(map.get(&[0u8]), Some(&1), "prep {i}");
+            assert_eq!(map.val_count(), 2, "prep {i}");
         }
     }
 }
