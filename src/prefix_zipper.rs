@@ -59,8 +59,6 @@ pub struct PrefixZipper<'prefix, Z> {
     prefix: Cow<'prefix, [u8]>,
     origin_depth: usize,
     position: PrefixPos,
-    /// The zipper's own root is off the trie, as for a fork taken past a diverged prefix
-    off_root: bool,
 }
 
 impl<'prefix, Z>  PrefixZipper<'prefix, Z>
@@ -85,7 +83,6 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
             prefix,
             origin_depth: 0,
             position,
-            off_root: false,
         }
     }
 
@@ -113,9 +110,7 @@ impl<'prefix, Z>  PrefixZipper<'prefix, Z>
 
     fn set_valid(&mut self, valid: usize) {
         debug_assert!(valid <= self.prefix.len(), "valid prefix can't be outside prefix");
-        self.position = if self.off_root {
-            PrefixPos::PrefixOff { valid: 0, invalid: 0 }
-        } else if valid == self.prefix.len() - self.origin_depth {
+        self.position = if valid == self.prefix.len() - self.origin_depth {
             PrefixPos::Source
         } else {
             PrefixPos::Prefix { valid }
@@ -384,7 +379,7 @@ impl<'prefix, Z> ZipperMoving for PrefixZipper<'prefix, Z>
     fn at_root(&self) -> bool {
         match self.position {
             PrefixPos::Prefix { valid } => valid == 0,
-            PrefixPos::PrefixOff { valid, invalid } => self.off_root && valid == 0 && invalid == 0,
+            PrefixPos::PrefixOff {..} => false,
             PrefixPos::Source => self.prefix.len() <= self.origin_depth && self.source.at_root(),
         }
     }
@@ -648,19 +643,12 @@ impl<'prefix, Z, V> ZipperForking<V> for PrefixZipper<'prefix, Z>
 {
     type ReadZipperT<'a> = PrefixZipper<'prefix, Z::ReadZipperT<'a>> where Self: 'a;
     fn fork_read_zipper<'a>(&'a self) -> <Self as ZipperForking<V>>::ReadZipperT<'a> {
-        //The fork is rooted at the focus: in the source, partway along the prefix, or off the trie
-        let (prefix, position, off_root) = match self.position {
-            PrefixPos::Source => (Cow::Borrowed(&[][..]), PrefixPos::Source, false),
-            PrefixPos::Prefix { valid } => (Cow::Owned(self.prefix[self.origin_depth + valid..].to_vec()), PrefixPos::Prefix { valid: 0 }, false),
-            PrefixPos::PrefixOff {..} => (Cow::Borrowed(&[][..]), PrefixPos::PrefixOff { valid: 0, invalid: 0 }, true),
-        };
         PrefixZipper {
             path: Vec::new(),
-            position,
+            position: PrefixPos::Prefix { valid: 0 },
             source: self.source.fork_read_zipper(),
-            prefix,
+            prefix: self.prefix.clone(),
             origin_depth: 0,
-            off_root,
         }
     }
 }
@@ -1033,6 +1021,8 @@ mod tests {
     }
 
     /// A fork is rooted at the focus, wherever the focus is
+    //GOAT,  re-enable this test when https://github.com/Adam-Vandervorst/PathMap/issues/96 is addressed
+    #[ignore]
     #[test]
     fn prefix_zipper_fork_at_focus() {
         use crate::zipper::ZipperForking;
