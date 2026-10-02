@@ -464,6 +464,16 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         }
         false
     }
+
+    /// The other slot can hold a value at this child's key only for a one-byte key.
+    #[inline]
+    fn other_slot_has_value_at<const SLOT: usize>(&self, key: &[u8]) -> bool {
+        match SLOT {
+            0 => self.is_used_value_1() && key.len() == 1 && self.key_len_1() == 1 && unsafe { self.key_unchecked::<1>()[0] } == key[0],
+            1 => self.is_used_value_0() && key.len() == 1 && self.key_len_0() == 1 && unsafe { self.key_unchecked::<0>()[0] } == key[0],
+            _ => unreachable!(),
+        }
+    }
     fn get_val(&self, key: &[u8]) -> Option<&V> {
         if self.is_used_value_0() {
             let node_key_0 = unsafe{ self.key_unchecked::<0>() };
@@ -1343,6 +1353,12 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
                 return match a_child.pjoin(b_child) {
                     //Two empty children are both just the dangling path
                     AlgebraicResult::None => AlgebraicResult::Identity(SELF_IDENT | COUNTER_IDENT),
+                    // An empty child contributes only its path. If the other
+                    // node also has a value there, its separate value pairing
+                    // already preserves that path.
+                    AlgebraicResult::Identity(mask) if
+                        mask & COUNTER_IDENT > 0 && b.other_slot_has_value_at::<BSLOT>(a_key) && a_child.is_empty() ||
+                        mask & SELF_IDENT > 0 && a.other_slot_has_value_at::<ASLOT>(b_key) && b_child.is_empty() => AlgebraicResult::None,
                     joined => joined.map(|new_child| (a_key, ValOrChild::Child(new_child))),
                 }
             },
@@ -1374,6 +1390,7 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
             AlgebraicResult::Element(joined) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(joined))),
             //`b`'s child already held `a`'s payload, so `b`'s slot is the result
             AlgebraicResult::Identity(mask) if mask & SELF_IDENT > 0 => AlgebraicResult::Identity(COUNTER_IDENT),
+            AlgebraicResult::Identity(_) if a.other_slot_has_value_at::<ASLOT>(b_key) && b_child.is_empty() => AlgebraicResult::None,
             AlgebraicResult::Identity(_) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(intermediate_node))),
             AlgebraicResult::None => unreachable!(), //`intermediate_node` is never empty
         }
@@ -1389,6 +1406,7 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
             AlgebraicResult::Element(joined) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(joined))),
             //Mirror of the case above: `a`'s slot is the result
             AlgebraicResult::Identity(mask) if mask & SELF_IDENT > 0 => AlgebraicResult::Identity(SELF_IDENT),
+            AlgebraicResult::Identity(_) if b.other_slot_has_value_at::<BSLOT>(a_key) && a_child.is_empty() => AlgebraicResult::None,
             AlgebraicResult::Identity(_) => AlgebraicResult::Element((&a_key[0..overlap], ValOrChild::Child(intermediate_node))),
             AlgebraicResult::None => unreachable!(), //`intermediate_node` is never empty
         }
@@ -1437,25 +1455,16 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
     let (self_key0, self_key1) = a.get_both_keys();
     let (other_key0, other_key1) = b.get_both_keys();
 
-    // A value subsumes a dangling sentinel at the same key.  Ignore that
-    // sentinel in every pairing: otherwise it could also merge with another
-    // slot of the value's node.
-    let ignored = [
-        a.is_used_child_0() && unsafe{ a.child_in_slot::<0>().is_empty() } && b.contains_val(self_key0),
-        a.is_used_child_1() && unsafe{ a.child_in_slot::<1>().is_empty() } && b.contains_val(self_key1),
-        b.is_used_child_0() && unsafe{ b.child_in_slot::<0>().is_empty() } && a.contains_val(other_key0),
-        b.is_used_child_1() && unsafe{ b.child_in_slot::<1>().is_empty() } && a.contains_val(other_key1),
-    ];
     let mut entries: [MaybeUninit<(&[u8], ValOrChild<V, A>)>; 4] = [MaybeUninit::uninit(), MaybeUninit::uninit(), MaybeUninit::uninit(), MaybeUninit::uninit()];
     let mut entry_cnt = 0;
-    let mut used = ignored; //[self_0, self_1, other_0, other_1]
+    let mut used = [false; 4]; //[self_0, self_1, other_0, other_1]
     let mut identity_masks: [u64; 4] = [0; 4];
 
     // Try each pairing in self and other, to see if there is a key-join that can happen
     // We can assume two keys in the same node can't merge, because they would have already been merged,
     // and therefore we can also assume that if a key can be merged with one key of a node it can't be
     // merged with the other
-    match if ignored[0] || ignored[2] { AlgebraicResult::None } else { try_merge::<V, A, 0, 0>(self_key0, a, other_key0, b) } {
+    match try_merge::<V, A, 0, 0>(self_key0, a, other_key0, b) {
         AlgebraicResult::Element(joined) => {
             entries[entry_cnt] = MaybeUninit::new(joined);
             entry_cnt += 1;
@@ -1476,7 +1485,7 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
         },
         AlgebraicResult::None => { }
     }
-    match if ignored[0] || ignored[3] { AlgebraicResult::None } else { try_merge::<V, A, 0, 1>(self_key0, a, other_key1, b) } {
+    match try_merge::<V, A, 0, 1>(self_key0, a, other_key1, b) {
         AlgebraicResult::Element(joined) => {
             entries[entry_cnt] = MaybeUninit::new(joined);
             entry_cnt += 1;
@@ -1499,7 +1508,7 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
         },
         AlgebraicResult::None => {}
     }
-    match if ignored[1] || ignored[2] { AlgebraicResult::None } else { try_merge::<V, A, 1, 0>(self_key1, a, other_key0, b) } {
+    match try_merge::<V, A, 1, 0>(self_key1, a, other_key0, b) {
         AlgebraicResult::Element(joined) => {
             entries[entry_cnt] = MaybeUninit::new(joined);
             entry_cnt += 1;
@@ -1522,7 +1531,7 @@ fn merge_list_nodes<V: Clone + Send + Sync + Lattice, A: Allocator>(a: &LineList
         },
         AlgebraicResult::None => {}
     }
-    match if ignored[1] || ignored[3] { AlgebraicResult::None } else { try_merge::<V, A, 1, 1>(self_key1, a, other_key1, b) } {
+    match try_merge::<V, A, 1, 1>(self_key1, a, other_key1, b) {
         AlgebraicResult::Element(joined) => {
             entries[entry_cnt] = MaybeUninit::new(joined);
             entry_cnt += 1;
@@ -4044,6 +4053,34 @@ mod tests {
         assert_valid_trie(joined.root());
         assert_eq!(joined.val_at(b"a"), Some(&1));
         assert_eq!(joined.val_at(b"ax"), Some(&2));
+    }
+
+    #[test]
+    fn join_dangling_child_with_value_and_descendants() {
+        use crate::PathMap;
+        use crate::trie_node::assert_valid_trie;
+        use crate::zipper::ZipperValuesAt;
+
+        for (key, two_descendants) in [(b'a', false), (b'a', true), (b'z', false), (b'z', true)] {
+            let other = if key == b'a' { b'z' } else { b'a' };
+            let mut dangling = PathMap::<u64>::new();
+            dangling.create_path([key]);
+            dangling.set_val_at([other], 4);
+
+            let mut valued = PathMap::<u64>::new();
+            valued.set_val_at([key], 1);
+            valued.set_val_at([key, b'x'], 2);
+            if two_descendants { valued.set_val_at([key, b'y'], 3); }
+
+            for (left, right) in [(&dangling, &valued), (&valued, &dangling)] {
+                let joined = left.join(right);
+                assert_valid_trie(joined.root());
+                assert_eq!(joined.val_at([key]), Some(&1));
+                assert_eq!(joined.val_at([key, b'x']), Some(&2));
+                assert_eq!(joined.val_at([key, b'y']), two_descendants.then_some(&3));
+                assert_eq!(joined.val_at([other]), Some(&4));
+            }
+        }
     }
 
     /// Issue #85: `restrict` panicked when a child-link slot was followed into `other` and
