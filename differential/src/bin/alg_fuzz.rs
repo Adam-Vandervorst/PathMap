@@ -9,6 +9,21 @@
 //! Everything runs in process.  There is no oracle to start and no child to
 //! talk to, so a case costs a few microseconds and a run is bounded by how many
 //! tries it can build rather than by IPC.
+//!
+//! # Soundness limit
+//!
+//! That in-process design has a known hole: **a run that catches panics can
+//! abort with heap corruption**, reproducibly, after enough of them.  Every
+//! panic the fuzzer catches fired *mid-mutation* inside `pathmap`'s node code --
+//! a `debug_assert!` in a merge, or `merkleize`'s `unwrap` -- and unwinding out
+//! of a half-updated node leaves a trie that is not safe to drop.  Measured by
+//! elimination: it tracks the number of panics caught, not the build profile,
+//! the thread count or the value type, and a run that catches none is clean.
+//!
+//! So treat the first panic in a run as the end of the useful output.  Findings
+//! printed before it are valid; a run that aborts has lost whatever it had not
+//! yet printed.  `ALGEBRAIC_FUZZING.md` has the table and the intended fix,
+//! which is to make panics terminal and rare rather than caught and counted.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -22,8 +37,10 @@ use differential::algebraic::{self, Class, Outcome, Rng, signatures};
 ///
 /// `Shape` is not among them.  Whether a dangling path survives an operation is
 /// unsettled in the crate -- `SPEC_WARTS.md` and the `meet_into-keeps-dangling*`
-/// corpus entries are the same question -- and routes that graft whole subtries
-/// will keep structure that routes walking path by path cannot.  Those are
+/// corpus entries are the same question.  The two families answer it differently
+/// and consistently: the lockstep traversals in `experimental::zipper_algebra`
+/// discard dangling structure, and `PathMap`'s whole-map operations and the
+/// write-zipper forms preserve it (`bin/alg_bug_repros` case 7).  Those are
 /// counted and printed, so a change in them is visible, but they do not turn a
 /// run red unless `--shape` asks them to.  A wrong *value* is never ambiguous
 /// and always fails.
@@ -125,13 +142,17 @@ impl Tally {
         Tally { cases: 0, by_signature: BTreeMap::new(), examples: Vec::new() }
     }
 
-    fn record(&mut self, bytes: &[u8], outcome: Outcome) {
-        self.cases += 1;
+    /// Record one outcome.  `cases` counts inputs, not outcomes, so only the
+    /// first value type of each input increments it.
+    fn record(&mut self, type_name: &str, bytes: &[u8], outcome: Outcome, count: bool) {
+        if count {
+            self.cases += 1;
+        }
         let findings: Vec<(String, String)> = match outcome {
             Outcome::Clean => return,
             Outcome::Panicked(p, site, msg) => {
                 vec![(
-                    algebraic::panic_signature(p, &site),
+                    algebraic::panic_signature(type_name, p, &site),
                     format!("panicked at {site}: {msg}"),
                 )]
             }
@@ -184,18 +205,20 @@ fn main() {
                 eprintln!("{}: {e}", f.display());
                 std::process::exit(2)
             });
-            let outcome = algebraic::run(&bytes);
-            let label = match &outcome {
-                Outcome::Clean => "clean".to_string(),
-                Outcome::Diverged(d) => {
-                    format!("{} finding(s)", d.len())
-                }
-                Outcome::Panicked(p, site, m) => {
-                    format!("panic in {} at {site}: {m}", p.tag())
-                }
-            };
-            println!("{}: {label}", f.display());
-            tally.record(&bytes, outcome);
+            let mut labels = Vec::new();
+            let mut first = true;
+            algebraic::run_all(&bytes, &mut |name, outcome| {
+                labels.push(match &outcome {
+                    Outcome::Clean => format!("{name}: clean"),
+                    Outcome::Diverged(d) => format!("{name}: {} finding(s)", d.len()),
+                    Outcome::Panicked(p, site, m) => {
+                        format!("{name}: panic in {} at {site}: {m}", p.tag())
+                    }
+                });
+                tally.record(name, &bytes, outcome, first);
+                first = false;
+            });
+            println!("{}: {}", f.display(), labels.join(", "));
         }
     }
 
@@ -212,8 +235,11 @@ fn main() {
                 let mut t = Tally::new();
                 for _ in 0..n {
                     let bytes = rng.input();
-                    let outcome = algebraic::run(&bytes);
-                    t.record(&bytes, outcome);
+                    let mut first = true;
+                    algebraic::run_all(&bytes, &mut |name, outcome| {
+                        t.record(name, &bytes, outcome, first);
+                        first = false;
+                    });
                 }
                 let _ = tx.send(t);
             }));
@@ -245,6 +271,8 @@ fn report(args: &Args, tally: &mut Tally) {
         }
     }
 
+    value_type_comparison(tally);
+
     if let Err(e) = std::fs::create_dir_all(&args.out) {
         eprintln!("cannot create {}: {e}", args.out.display());
     }
@@ -260,7 +288,7 @@ fn report(args: &Args, tally: &mut Tally) {
         // `panic:build` finding panics again.  Catch it: the reproducer is
         // still worth writing, it just cannot describe itself.
         let described = panic::catch_unwind(AssertUnwindSafe(|| {
-            algebraic::describe(&algebraic::decode(bytes))
+            algebraic::describe_as(algebraic::value_type_of(sig), bytes)
         }))
         .unwrap_or_else(|_| "<operands panic while being built>\n".to_string());
         let body = format!("signature: {sig}\n\n{described}\n{detail}\n");
@@ -292,6 +320,91 @@ fn report(args: &Args, tally: &mut Tally) {
 /// `--strict` fails on anything.  Otherwise a signature in `algebraic::KNOWN`
 /// is excused, a panic or a wrong value is fatal, and a dangling-path-only
 /// divergence is fatal only under `--shape`.
+/// Print which findings each value type sees, which is the question the two
+/// instantiations exist to answer.
+///
+/// A signature under `u64` alone is an artefact of its lattice instances, which
+/// are not a lattice: `pjoin` and `pmeet` both return the left operand, so
+/// `a | b == a & b` and several identities cannot hold.  A signature under the
+/// lawful type -- alone, or under both -- is a defect in the crate.
+///
+/// The counts matter as much as the membership.  A law that fails 3000 times
+/// under `u64` and 12 times under `bits` is one defect amplified by the value
+/// type, not two findings: under a commutative join, picking the wrong operand
+/// is invisible except where one operand already contains the other, so only
+/// that residue survives.
+fn value_type_comparison(tally: &Tally) {
+    let types = algebraic::VALUE_TYPES;
+    if types.len() < 2 {
+        return;
+    }
+
+    // Strip the value-type prefix: `u64:values:pw1` -> `values:pw1`.
+    let rest = |sig: &str| sig.splitn(2, ':').nth(1).unwrap_or(sig).to_string();
+    let per_type: Vec<BTreeMap<String, usize>> = types
+        .iter()
+        .map(|t| {
+            tally
+                .by_signature
+                .iter()
+                .filter(|(sig, _)| algebraic::value_type_of(sig) == *t)
+                .map(|(sig, n)| (rest(sig), *n))
+                .collect()
+        })
+        .collect();
+
+    let mut all: Vec<String> = per_type.iter().flat_map(|m| m.keys().cloned()).collect();
+    all.sort();
+    all.dedup();
+    if all.is_empty() {
+        return;
+    }
+
+    let lawful: Vec<&str> =
+        types.iter().copied().filter(|t| *t != "u64").collect();
+    println!("\nby value type -- {} are lawful, u64 is not:", lawful.join(" and "));
+    print!("  {:<38}", "finding");
+    for t in types {
+        print!(" {t:>9}");
+    }
+    println!();
+
+    // Which types see each finding, so the groups below can be built by subset.
+    let mut by_subset: BTreeMap<Vec<&str>, Vec<String>> = BTreeMap::new();
+    for k in &all {
+        print!("  {k:<38}");
+        let mut seen = Vec::new();
+        for (i, t) in types.iter().enumerate() {
+            match per_type[i].get(k) {
+                Some(n) => {
+                    print!(" {n:>9}");
+                    seen.push(*t);
+                }
+                None => print!(" {:>9}", "-"),
+            }
+        }
+        println!();
+        by_subset.entry(seen).or_default().push(k.clone());
+    }
+
+    println!("\nseen under:");
+    for (subset, findings) in &by_subset {
+        let note = if subset.len() == types.len() {
+            "  <- value-independent, or one defect amplified; read the counts"
+        } else if subset == &["u64"] {
+            "  <- artefacts: u64's instances are not a lattice"
+        } else if subset.contains(&"u64") {
+            ""
+        } else {
+            "  <- REAL, and u64 was hiding them"
+        };
+        println!("  {:<22}{note}", subset.join(" + "));
+        for f in findings {
+            println!("      {f}");
+        }
+    }
+}
+
 fn is_fatal(sig: &str, args: &Args) -> bool {
     if args.strict {
         return true;
@@ -299,13 +412,17 @@ fn is_fatal(sig: &str, args: &Args) -> bool {
     if algebraic::known(sig).is_some() {
         return false;
     }
-    if sig.starts_with("panic:") {
-        return true;
+    // The class is the *second* field: signatures are `<value type>:<class>:...`.
+    // Matching against the start of the whole signature silently stopped working
+    // when the value-type prefix was added, which made every class fall through
+    // to "not fatal" and left the gate passing runs that had turned up new
+    // findings.  Parse the field rather than the prefix.
+    let class = sig.split(':').nth(1).unwrap_or("");
+    match class {
+        "panic" => true,
+        "shape" => args.shape_fatal,
+        c => DEFAULT_FATAL.iter().any(|f| f.tag() == c),
     }
-    if sig.starts_with("shape:") {
-        return args.shape_fatal;
-    }
-    DEFAULT_FATAL.iter().any(|c| sig.starts_with(c.tag()))
 }
 
 fn sanitize(sig: &str) -> String {
@@ -414,18 +531,18 @@ fn do_shrink(path: &Path, want: Option<&str>) {
     eprintln!("shrunk to {} bytes -> {}", best.len(), out.display());
 
     let described = panic::catch_unwind(AssertUnwindSafe(|| {
-        algebraic::describe(&algebraic::decode(&best))
+        algebraic::describe_as(algebraic::value_type_of(&target), &best)
     }))
     .unwrap_or_else(|_| "<operands panic while being built>\n".to_string());
     print!("{described}");
-    match algebraic::run(&best) {
-        Outcome::Clean => println!("(no longer diverges)"),
-        Outcome::Panicked(p, site, m) => println!("panic in {} at {site}: {m}", p.tag()),
+    algebraic::run_all(&best, &mut |name, outcome| match outcome {
+        Outcome::Clean => println!("{name}: no divergence"),
+        Outcome::Panicked(p, site, m) => println!("{name}: panic in {} at {site}: {m}", p.tag()),
         Outcome::Diverged(d) => {
             for div in d {
                 println!("[{}] {}\n{}", div.class.tag(), div.signature, div.detail);
             }
         }
-    }
+    });
     let _ = std::io::stdout().flush();
 }

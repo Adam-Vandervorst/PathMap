@@ -108,19 +108,124 @@ baseline in an interesting way — the baseline is what everyone is compared
 against. `meet-distributes-over-join` has no baseline to be fooled by: it puts
 the operands on different sides of a meet and notices.
 
-### The value semantics are not set semantics
+### Three value types, and the difference between them is a measurement
 
-Three laws are checked on path presence only, and three plausible ones are
-deliberately absent. Both follow from `u64`'s lattice instances in
-`pathmap::ring`, which are left-biased: `pjoin` keeps the left value where the
-two differ, and `pmeet` keeps the left value *unconditionally*. So join and
-meet are not commutative in the value they produce, only in their path set.
-`laws.rs` documents each case, including the identities that look true and are
-not.
+Every case runs once per value type, and signatures are prefixed with the type
+(`u64:values:pw1`, `bits:law:join-associative`). That is the fuzzer's main
+discriminator:
 
-Getting this wrong is the main way to write a harness that reports its own
-mistakes as crate defects, and it happened twice while this one was being
-built — see "Harness invariants" below.
+* **`bits`** is a 64-bit set under `|`, `&` and `& !`, with an empty result
+  collapsing to bottom — i.e. to an absent value, the convention `SetLattice`'s
+  documentation already states. A genuine Boolean algebra, so every lattice
+  identity holds and a law that fails here is a real defect. It lives in
+  `src/algebraic/value.rs` rather than in `pathmap`, because a value type defined
+  outside the crate is what a real caller has.
+
+* **`unit`** is `PathMap<()>`: the set case, also lawful, since `Option<()>` is
+  the two-element Boolean algebra. It earns its own slot for a reason neither of
+  the others covers: `()`'s `pjoin` and `pmeet` return
+  `Identity(SELF_IDENT | COUNTER_IDENT)` — *both* identity bits — on every single
+  combination, where `u64` and `bits` do so only for equal values. That saturates
+  the "either operand will do" path the node code uses to decide it can hand back
+  an operand unchanged and keep sharing it, which is precisely the machinery
+  findings 4 and 6 are about. It is also what `unit-value-optimizations` and
+  `unit-size` are about; neither is on `master`, so today this covers the generic
+  path, and if they land it is the only thing covering the specialised one.
+  Nothing in `zipper_algebra.rs` tests `()` at all — every test there uses `u64`.
+
+* **`u64`** is what the rest of this crate's fuzzing uses, and its instances in
+  `pathmap::ring` are **not a lattice**: `pjoin` is `left_biased_pjoin`, `pmeet`
+  is `Identity(SELF_IDENT)` — both return the left operand, so `a | b == a & b`
+  for every pair, which in a lattice forces `a == b`. It is kept because it is
+  what callers use today, and because it reaches `Identity`-heavy paths that the
+  lawful type does not.
+
+A finding under `u64` alone is an artefact. One under a lawful type is a defect. `alg_fuzz` prints the split at the end of every run:
+
+```
+by value type -- bits is lawful, u64 is not:
+  finding                                       u64       bits
+  law:absorb-join-meet                           82          -
+  law:join-associative                         3131         12
+  law:join-distributes-over-meet               2077          1
+  law:meet-distributes-over-join               1603          -
+  law:sym-diff-is-join-minus-meet              6684          5
+  panic:build:line_list_node.rs:1745          13476      13476
+  values:model                                 1258          2
+  values:pw1                                  30849      36071
+  ...
+```
+
+Read the counts, not just the membership. `law:join-associative` failing 3131
+times under `u64` and 12 under `bits` is **one** defect amplified by the value
+type: under a commutative join, picking the wrong operand is invisible except
+where one operand already contains the other, so only that residue survives. And
+every one of those residues shrinks to a value present on one side of the
+identity and *absent* on the other — which is finding 4, a lost value, not a
+misplaced one.
+
+So far: five findings are `u64`-only, nothing is `bits`-only, and `values:model`
+drops from 1258 to 2 — the flat reference model and the trie agree on values
+almost everywhere once the value algebra is lawful.
+
+### Why a bitmask and not some other lawful lattice
+
+Lawfulness is not sufficient, and this is the part worth remembering.
+`max`/`min` on a total order is a perfectly good distributive lattice, every
+identity holds, and it is **useless here**: `max(a, b)` and `min(a, b)` are
+always one of the operands, so they can only return
+`AlgebraicResult::Identity`, and every code path that allocates and stores a
+genuinely combined value stays unreachable. `a | b` is a new value, so a bitmask
+reaches them. `bin/alg_lattice_check` prints the table:
+
+```
+  type           pjoin   pmeet  psubtract
+  u64              NO      NO         yes     <- and PR #115 makes that NO too
+  bool             NO      NO         NO
+  MinMax           NO      NO         NO      <- lawful, still useless
+  Bits             yes     yes        yes
+  ByteMask         yes     yes        yes
+```
+
+`pathmap::utils` already implements exactly this for `[u64; 4]` and `ByteMask`,
+via `bitmask_algebraic_result`; `Bits` is the same construction at 64 bits.
+
+### What the lawful type unlocked
+
+Four identities are checked **only** for a lawful value type, in
+`laws::lawful_only` — De Morgan for relative complement both ways,
+`a - b == a - (a & b)`, and symmetric difference being associative on *values*
+rather than only on paths. Each fails for `u64`, for the same reason everything
+else does.
+
+**Three of the four hold** across several million cases in both profiles:
+`subtract-over-meet`, `subtract-is-subtract-meet` and `sym-diff-associative`.
+They are the strongest laws the harness has and are deliberately absent from
+`KNOWN`, so one of them firing is news.
+
+The fourth, `subtract-over-join`, fires about once per two million cases under
+`unit` — and is cause 2 rather than a bad identity. Its shrunk case has a
+dangling-only `b` and a `c` that is `b` plus one value, so `b | c` is exactly
+finding 4.
+
+The `Level::Paths` laws are also promoted to `Level::Values` for a lawful type,
+so commutativity of join and meet is checked on values there.
+
+### One thing the lawful type cannot do
+
+`OverlayZipper`'s mapping has signature
+`Fn(Option<&'a AV>, Option<&'a BV>) -> Option<&'a OutV>` — it returns a
+*reference*, so it has nowhere to put a value it would have to create. The
+module's own comment says as much. So an overlay can stand in for a join only
+when the join never creates anything, and for a real lattice it cannot be a join
+at all. The strategy therefore *declines* for `bits` rather than answering
+wrongly, which is why `pw5` applies to fewer cases there. That is a limitation of
+the zipper, not a defect, and not reported as one.
+
+Note that declining is what keeps route numbers comparable. An earlier version
+shortened the join strategy table for such types, which silently renumbered every
+later route — so `pw4` and `pw5` meant different strategy mixes under the two
+types, and comparing their findings compared different things.
 
 ## Generated operands
 
@@ -160,9 +265,19 @@ instead of cloned. A generator that only wrote fresh tries would find neither.
 
 `shape` is separated because the semantics are genuinely unsettled — see
 `../SPEC_WARTS.md` and the `meet_into-keeps-dangling*` corpus entries, which are
-the same question — and because routes that graft whole subtries will keep
-structure that routes walking path by path cannot. A wrong *value* is never
-ambiguous.
+the same question. The two families answer it differently and *consistently*,
+which is worth knowing because it says which side has to change once the question
+is settled:
+
+* the lockstep traversals in `experimental::zipper_algebra` **discard** dangling
+  structure;
+* `PathMap`'s whole-map operations and the write-zipper forms (`join_into`,
+  `meet_into`, `subtract_into`) **preserve** it.
+
+`bin/alg_bug_repros` case 7 shows three of them side by side, the sharpest being
+`d ^ {}`: symmetric difference with the empty trie ought to be the identity, and
+`zipper_sym_diff` returns nothing where `(d | e) - (d & e)` returns `d`. A wrong
+*value* is never ambiguous.
 
 Signatures are `class:route`, and nothing more. An earlier version appended the
 operators the expression used, which looked more informative and was much
@@ -170,6 +285,51 @@ worse: one defect in `meet` produced dozens of signatures because it surfaced
 under every operator combination containing a meet. The expression, the
 operands and the diff all live in the saved `.txt`; the signature's only job is
 to collapse a million inputs onto a handful of lines.
+
+## Soundness limit: catching a panic in process is not safe
+
+**A long run that catches panics can abort with heap corruption.** Reproducibly:
+
+```
+$ ./alg_fuzz --random 2000000 --seed 55 --jobs 8      # debug-assertions build
+malloc(): unaligned tcache chunk detected
+Aborted (core dumped)
+```
+
+Narrowed by elimination, each at 2M cases, seed 55, 8 jobs:
+
+| build | `merkleize` in the generator | caught panics | result |
+| --- | --- | --- | --- |
+| debug assertions | yes | ~27k | **abort** |
+| debug assertions | no | ~100 | **abort** |
+| release | yes | ~27k | **abort** |
+| release | no | 0 | clean, exit 0 |
+
+So it tracks the *number of panics caught*, not the build profile, the thread
+count or the value type. The cause is that `catch_unwind` resumes after a panic
+that fired **mid-mutation inside `pathmap`'s node code**: unwinding out of a
+half-updated node leaves a trie that is not safe to drop, and the damage shows up
+later as an invalid free. Every panic the fuzzer catches is one of these — a
+`debug_assert!` inside a merge, or `merkleize`'s `unwrap`, both of which are
+"this cannot happen" sites rather than supported unwind paths.
+
+That is a limitation of *this* harness, not an independent defect. The crash
+fuzzer does not have it because AFL runs one input per process and so never
+continues after a panic.
+
+**Until this is fixed, treat the first panic in a run as the end of the useful
+output.** Findings reported before it are valid — the signature counts and
+reproducers are written as they are found — but anything after the first caught
+panic is suspect, and a run that aborts has lost whatever it had not yet printed.
+A release-profile run on a generator without `merkleize` catches nothing and is
+unaffected.
+
+The fix is to make panics terminal and rare, the way a crash fuzzer treats them:
+stop the run on the first one, and stop generating the one panic that is already
+documented with a standalone reproducer (`merkleize`, repro 5) so that the
+remaining ones are rare enough for stopping to cost nothing. That needs the
+corpus replay to run one input per process, so it is a design change rather than
+a patch, and it is not done yet.
 
 ## Debug assertions are a separate mode
 
@@ -194,8 +354,8 @@ expects the `panic:eval:*` signatures.
 ## Findings
 
 Six defects on `master` at `b4a6abd`, reproduced without the fuzzer in
-`src/bin/alg_bug_repros.rs`. `algebraic::KNOWN` maps every signature onto one of
-them.
+`src/bin/alg_bug_repros.rs`, plus the unsettled dangling-path question as case 7.
+`algebraic::KNOWN` maps every signature onto one of them.
 
 1. **`join_into` drops the source's root value when the destination is empty.**
    `PathMap::new().join(&src)` keeps it; the write-zipper spelling does not.
@@ -226,19 +386,8 @@ them.
    `merge_from_list_node` returns `AlgebraicStatus::None` from nodes that are not
    empty (`line_list_node.rs:2669` and `:2720`), and a cofree `pjoin` returns
    `None` while the left side still has a non-empty onward node
-   (`dense_byte_node.rs:2080`).
-
-### Reading a report
-
-Every signature is printed with its count, known or not, and a `<-- NEW` marker
-on anything absent from `KNOWN`. Exit status is 1 if anything is new;
-`--strict` makes every finding fatal. Counts matter even for known findings: a
-known defect that starts firing ten times more often is a change worth seeing,
-and it does not turn the run red.
-
-`KNOWN` is a snapshot, not a closed list. A longer sweep may well reach a new
-assertion site — the three in finding 6 appeared at 500 000, 3 000 000 and
-roughly 400 000 cases respectively. A new signature is the fuzzer working.
+   (`dense_byte_node.rs:2080`). Debug-assertions builds only, so it has no
+   standalone reproducer — replay the `panic-eval-*` corpus inputs.
 
 ## Harness invariants
 
@@ -269,12 +418,16 @@ disagrees with the rest, suspect the route first.
 | `src/algebraic/expr.rs` | the expression language and the shape recognisers |
 | `src/algebraic/routes.rs` | the routes, and one arm per strategy |
 | `src/algebraic/laws.rs` | the identities, and the ones deliberately absent |
-| `src/algebraic/model.rs` | flat `BTreeMap` semantics |
+| `src/algebraic/model.rs` | flat `BTreeMap` semantics, delegating to the value algebra |
+| `src/algebraic/value.rs` | the `FuzzValue` trait and the lawful `Bits` type |
 | `src/algebraic/shape.rs` | what "the same result" means |
 | `src/bin/alg_fuzz.rs` | the driver: generation, replay, shrinking, reporting |
-| `src/bin/alg_bug_repros.rs` | the findings as plain `pathmap` calls |
+| `src/bin/alg_bug_repros.rs` | every cause in `KNOWN` as plain `pathmap` calls |
+| `src/bin/alg_lattice_check.rs` | whether a divergence is the crate's fault or `u64`'s |
 | `tests/algebraic.rs` | the corpus gate and the harness invariants |
 | `algebraic-corpus/` | one minimised input per signature |
+
+Nothing outside `differential/` is touched.
 
 Byte decoding reuses `harness::Dec`. The wire format is *not* the one
 `harness.rs` shares with `PathMapModel.Fuzz`: this fuzzer has no model to stay
