@@ -1,5 +1,5 @@
 name = "pathmap-model"
-defaultTargets = ["PathMapModel", "pathmap-oracle"]
+defaultTargets = ["PathMapModel", "pathmap-oracle", "PrunedModel", "pruned-oracle"]
 
 [[lean_lib]]
 name = "PathMapModel"
@@ -7,3 +7,13 @@ name = "PathMapModel"
 [[lean_exe]]
 name = "pathmap-oracle"
 root = "Main"
+
+# The dangling-path-free model: a second, independent specification covering
+# only the subset of the API that cannot leave a dangling path.  See
+# PrunedModel/Map.lean.
+[[lean_lib]]
+name = "PrunedModel"
+
+[[lean_exe]]
+name = "pruned-oracle"
+root = "PrunedMain"
