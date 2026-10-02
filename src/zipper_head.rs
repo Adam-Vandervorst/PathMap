@@ -1503,6 +1503,22 @@ mod tests {
         drop(rz);
     }
 
+    #[test]
+    fn cleanup_write_zipper_at_emptied_link() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8], 1);
+        map.set_val_at(&[0u8, 0, 1], 2);
+        map.write_zipper_at_path(&[0u8, 0]).remove_branches(false);
+        assert!(map.read_zipper_at_path(&[0u8, 0]).path_exists());
+
+        let zh = map.zipper_head();
+        let wz = zh.write_zipper_at_exclusive_path(&[0u8, 0]).unwrap();
+        zh.cleanup_write_zipper(wz);
+
+        assert!(!zh.read_zipper_at_path(&[0u8, 0]).unwrap().path_exists());
+        assert_eq!(zh.read_zipper_at_path(&[0u8]).unwrap().val(), Some(&1));
+    }
+
     /// A ZipperHead turns the parent node into a CellByteNode; joining a list node with it must not
     /// treat the cell node as a DenseByteNode
     #[test]
