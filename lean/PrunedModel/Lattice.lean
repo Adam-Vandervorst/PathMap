@@ -370,6 +370,19 @@ structure IsLatticeVals {V : Type} (ops : ValOps V) : Prop where
   joinDistribMeet : ∀ x y z : Option V,
     joinVal ops x (meetVal ops y z) = meetVal ops (joinVal ops x y) (joinVal ops x z)
 
+/-- The *mirrored* absorption law: `meet (join a b) a = a`, with the join on the
+left of the meet.
+
+In a commutative lattice this is `absorbMeetJoin` read backwards and needs no
+separate assumption.  `pathmap`'s join is not commutative, so the two
+orientations are genuinely different statements, and only one of them is a
+standard lattice axiom.  Nothing in §3 needs this one — it is here because
+*nesting* does: `PrunedModel/Nested.lean` lifts the lattice structure to tries
+whose values are tries, and the one case of `joinDistribMeet` that no longer
+collapses is exactly this law.  Both of `pathmap`'s instances satisfy it. -/
+structure IsFlipAbsorb {V : Type} (ops : ValOps V) : Prop where
+  absorbMeetJoinFlip : ∀ x y : Option V, meetVal ops (joinVal ops x y) x = x
+
 /-- The extra law a *commutative* value type satisfies.  `unitOps` does;
 `u64Ops` does not. -/
 structure IsCommVals {V : Type} (ops : ValOps V) : Prop where
@@ -422,6 +435,11 @@ theorem absorb_meet_join (h : IsLatticeVals ops) (a b : PrunedMap V) : Agree (me
 
 theorem absorb_join_meet (h : IsLatticeVals ops) (a b : PrunedMap V) : Agree (join ops a (meet ops a b)) a := by
   intro k; rw [valAt_join, valAt_meet]; exact h.absorbJoinMeet _ _
+
+/-- The mirrored absorption, at trie level. -/
+theorem absorb_meet_join_flip (hf : IsFlipAbsorb ops) (a b : PrunedMap V) :
+    Agree (meet ops (join ops a b) a) a := by
+  intro k; rw [valAt_meet, valAt_join]; exact hf.absorbMeetJoinFlip _ _
 
 /-! ### Distributivity, both ways -/
 
@@ -481,6 +499,13 @@ theorem u64_not_isComm : ¬ IsCommVals u64Ops := by
   simp only [joinVal, u64Ops, ValRes.resolve, Option.some.injEq] at h12
   exact absurd h12 (by decide)
 
+/-- `u64Ops` satisfies the mirrored absorption too, even though it is not
+commutative: a left-biased `pjoin` makes `join x y` agree with `x` wherever `x`
+has a value, which is exactly where the meet then looks. -/
+theorem u64_isFlipAbsorb : IsFlipAbsorb u64Ops where
+  absorbMeetJoinFlip x y := by
+    cases x <;> cases y <;> simp [joinVal, meetVal, u64Ops, ValRes.resolve]
+
 /-- `pathmap`'s `()` instance gives a distributive lattice… -/
 theorem unit_isLattice : IsLatticeVals unitOps where
   joinAssoc x y z := by
@@ -499,6 +524,10 @@ theorem unit_isLattice : IsLatticeVals unitOps where
     cases x <;> cases y <;> cases z <;> simp [joinVal, meetVal, unitOps, ValRes.resolve]
   joinDistribMeet x y z := by
     cases x <;> cases y <;> cases z <;> simp [joinVal, meetVal, unitOps, ValRes.resolve]
+
+theorem unit_isFlipAbsorb : IsFlipAbsorb unitOps where
+  absorbMeetJoinFlip x y := by
+    cases x <;> cases y <;> simp [joinVal, meetVal, unitOps, ValRes.resolve]
 
 /-- …and a **commutative** one.  There is only one value, so there is nothing for
 a biased projection to be biased about. -/
@@ -740,6 +769,10 @@ theorem absorb_meet_join_eq (h : IsLatticeVals ops) {a : PrunedMap V} (ha : Cano
 theorem absorb_join_meet_eq (h : IsLatticeVals ops) {a : PrunedMap V} (ha : Canonical a)
     (b : PrunedMap V) : join ops a (meet ops a b) = a :=
   eq_of_agree (canonical_join _ _) ha (absorb_join_meet h a b)
+
+theorem absorb_meet_join_flip_eq (hf : IsFlipAbsorb ops) {a : PrunedMap V} (ha : Canonical a)
+    (b : PrunedMap V) : meet ops (join ops a b) a = a :=
+  eq_of_agree (canonical_meet _ _) ha (absorb_meet_join_flip hf a b)
 
 theorem meet_distrib_join_eq (h : IsLatticeVals ops) (a b c : PrunedMap V) :
     meet ops a (join ops b c) = join ops (meet ops a b) (meet ops a c) :=
