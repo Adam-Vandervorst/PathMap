@@ -556,5 +556,252 @@ relative complement that would make it a *generalized* Boolean algebra is
 `PrunedMap.sub`, whose pointwise characterisation needs the canonicity
 hypothesis that §1's `DistinctKeys` supplies; it is not proved here. -/
 
+
+/-! ## 6. From "equal at every path" to equal
+
+`Agree` is the honest observational statement, but the model's own equality is
+structural — `beqT`, which decides `AlgebraicStatus::Identity`, compares entry
+lists. The two coincide because the canonical form is *unique*: a sorted,
+duplicate-free association list is determined by its lookup function.  That is
+where `Path.lt_total` and `Path.lt_trans` are needed. -/
+
+/-- Entry keys strictly increasing.  Strictness folds distinctness in, so this
+one predicate is the whole canonical-form invariant. -/
+def SortedKeys : List (Path × V) → Prop
+  | [] => True
+  | kv :: rest => (∀ x ∈ rest.map (·.1), Path.lt kv.1 x = true) ∧ SortedKeys rest
+
+/-- A path strictly below every key of a list is not one of them. -/
+theorem notMem_keys_of_all_lt {l : List (Path × V)} {k : Path}
+    (h : ∀ x ∈ l.map (·.1), Path.lt k x = true) : k ∉ l.map (·.1) := by
+  intro hm
+  have := h k hm
+  rw [Path.lt_irrefl] at this
+  exact Bool.noConfusion this
+
+/-- …so it looks up to nothing. -/
+theorem lookup_eq_none_of_all_lt {l : List (Path × V)} {k : Path}
+    (h : ∀ x ∈ l.map (·.1), Path.lt k x = true) : l.lookup k = none :=
+  lookup_eq_none_of_not_mem_keys (notMem_keys_of_all_lt h)
+
+/-- A sorted list's head key is below every key after it, and so is anything
+below the head key. -/
+theorem all_lt_of_lt_head {kv : Path × V} {rest : List (Path × V)} {k : Path}
+    (hs : SortedKeys (kv :: rest)) (hlt : Path.lt k kv.1 = true) :
+    ∀ x ∈ (kv :: rest).map (·.1), Path.lt k x = true := by
+  intro x hx
+  simp only [List.map_cons, List.mem_cons] at hx
+  rcases hx with hx | hx
+  · exact hx ▸ hlt
+  · exact Path.lt_trans hlt (hs.1 x hx)
+
+theorem sortedKeys_insertValSorted :
+    ∀ (kv : Path × V) (acc : List (Path × V)), SortedKeys acc → kv.1 ∉ acc.map (·.1) →
+      SortedKeys (insertValSorted kv acc)
+  | kv, [], _, _ => ⟨by simp, trivial⟩
+  | kv, kv' :: rest, hs, hfresh => by
+      have hne : kv.1 ≠ kv'.1 := fun h => hfresh (by simp [h])
+      have hrest : kv.1 ∉ rest.map (·.1) := fun h => hfresh (by simp [h])
+      rw [insertValSorted]
+      cases hlt : Path.lt kv.1 kv'.1 with
+      | true =>
+          exact ⟨all_lt_of_lt_head hs hlt, hs⟩
+      | false =>
+          -- not below `kv'`, and not equal to it, so strictly above it
+          have hgt : Path.lt kv'.1 kv.1 = true := by
+            rcases Path.lt_total kv.1 kv'.1 with h | h | h
+            · rw [h] at hlt; exact Bool.noConfusion hlt
+            · exact absurd h hne
+            · exact h
+          refine ⟨?_, sortedKeys_insertValSorted kv rest hs.2 hrest⟩
+          intro x hx
+          rcases (mem_keys_insertValSorted kv rest x).mp hx with hx | hx
+          · exact hx ▸ hgt
+          · exact hs.1 x hx
+
+private theorem sortedKeys_sortAux :
+    ∀ (ds acc : List (Path × V)), DistinctKeys ds → SortedKeys acc →
+      (∀ x ∈ ds.map (·.1), x ∉ acc.map (·.1)) →
+      SortedKeys (ds.foldl (fun acc kv => insertValSorted kv acc) acc)
+  | [], acc, _, hs, _ => hs
+  | kv :: rest, acc, hd, hs, hdisj => by
+      have hfresh : kv.1 ∉ acc.map (·.1) := hdisj kv.1 (by simp)
+      have hdisj' : ∀ x ∈ rest.map (·.1), x ∉ (insertValSorted kv acc).map (·.1) := by
+        intro x hx hmem
+        rcases (mem_keys_insertValSorted kv acc x).mp hmem with h | h
+        · exact hd.1 (h ▸ hx)
+        · exact hdisj x (by simp [hx]) h
+      rw [List.foldl_cons]
+      exact sortedKeys_sortAux rest _ hd.2 (sortedKeys_insertValSorted kv acc hs hfresh) hdisj'
+
+/-- Canonicalisation really does canonicalise. -/
+theorem sortedKeys_normVals (l : List (Path × V)) : SortedKeys (normVals l) := by
+  rw [normVals]
+  exact sortedKeys_sortAux (dedupVals l) [] (distinctKeys_dedupVals l) trivial (by simp)
+
+/-- **The canonical form is unique.**  Two sorted entry lists with the same
+lookup are the same list. -/
+theorem eq_of_sortedKeys_of_lookup :
+    ∀ (l₁ l₂ : List (Path × V)), SortedKeys l₁ → SortedKeys l₂ →
+      (∀ k, l₁.lookup k = l₂.lookup k) → l₁ = l₂
+  | [], [], _, _, _ => rfl
+  | [], (k₂, v₂) :: r₂, _, _, h => by
+      have := h k₂; simp at this
+  | (k₁, v₁) :: r₁, [], _, _, h => by
+      have := h k₁; simp at this
+  | (k₁, v₁) :: r₁, (k₂, v₂) :: r₂, hs₁, hs₂, h => by
+      -- Neither head key can be the smaller one, so they are equal.
+      have hkey : k₁ = k₂ := by
+        rcases Path.lt_total k₁ k₂ with hlt | heq | hgt
+        · exact absurd (h k₁) (by
+            rw [lookup_eq_none_of_all_lt (all_lt_of_lt_head hs₂ hlt)]
+            simp)
+        · exact heq
+        · exact absurd (h k₂) (by
+            rw [lookup_eq_none_of_all_lt (all_lt_of_lt_head hs₁ hgt)]
+            simp)
+      subst hkey
+      have hval : v₁ = v₂ := by
+        have := h k₁; simp at this; exact this
+      subst hval
+      -- The tails then agree everywhere: at `k₁` both are `none` by strictness.
+      have htail : r₁ = r₂ := by
+        refine eq_of_sortedKeys_of_lookup r₁ r₂ hs₁.2 hs₂.2 (fun k => ?_)
+        by_cases hk : k = k₁
+        · subst hk
+          rw [lookup_eq_none_of_not_mem_keys (notMem_keys_of_all_lt hs₁.1),
+            lookup_eq_none_of_not_mem_keys (notMem_keys_of_all_lt hs₂.1)]
+        · have := h k
+          simp only [List.lookup_cons, show (k == k₁) = false by simp [hk]] at this
+          exact this
+      rw [htail]
+
+/-- A trie is canonical when its entries are sorted; everything `mk'` builds is. -/
+def Canonical (a : PrunedMap V) : Prop := SortedKeys a.entries
+
+theorem canonical_mk' (l : List (Path × V)) : Canonical (mk' l) := sortedKeys_normVals l
+
+theorem canonical_empty : Canonical (empty : PrunedMap V) := trivial
+
+theorem canonical_join (a b : PrunedMap V) : Canonical (join ops a b) := canonical_mk' _
+theorem canonical_meet (a b : PrunedMap V) : Canonical (meet ops a b) := canonical_mk' _
+
+/-- **Agreement is equality**, for the canonical maps the model builds. -/
+theorem eq_of_agree {a b : PrunedMap V} (ha : Canonical a) (hb : Canonical b)
+    (hab : Agree a b) : a = b := by
+  cases a; cases b
+  exact congrArg PrunedMap.mk (eq_of_sortedKeys_of_lookup _ _ ha hb hab)
+
+
+/-! ## 7. The laws, as equations
+
+The same ten laws as §3, now as `=`.  Where the right-hand side is an operation's
+output it is canonical by construction and there is no side condition; where it
+is the bare `a` — idempotence, the `empty` identity, both absorptions — `a` has
+to be canonical, and the hypothesis is not a technicality: a trie whose entry
+list binds a key twice is genuinely not equal to its own join, because the join
+keeps only the first binding.  Everything the model constructs is canonical. -/
+
+theorem canonical_setVal (t : PrunedMap V) (p : Path) (v : V) :
+    Canonical (t.setVal p v).2 := canonical_mk' _
+theorem canonical_removeVal (t : PrunedMap V) (p : Path) :
+    Canonical (t.removeVal p).2 := canonical_mk' _
+theorem canonical_subtrie (t : PrunedMap V) (p : Path) :
+    Canonical (t.subtrie p) := canonical_mk' _
+
+theorem join_assoc_eq (h : IsLatticeVals ops) (a b c : PrunedMap V) :
+    join ops (join ops a b) c = join ops a (join ops b c) :=
+  eq_of_agree (canonical_join _ _) (canonical_join _ _) (join_assoc h a b c)
+
+theorem meet_assoc_eq (h : IsLatticeVals ops) (a b c : PrunedMap V) :
+    meet ops (meet ops a b) c = meet ops a (meet ops b c) :=
+  eq_of_agree (canonical_meet _ _) (canonical_meet _ _) (meet_assoc h a b c)
+
+theorem join_idem_eq (h : IsLatticeVals ops) {a : PrunedMap V} (ha : Canonical a) :
+    join ops a a = a :=
+  eq_of_agree (canonical_join _ _) ha (join_idem h a)
+
+theorem meet_idem_eq (h : IsLatticeVals ops) {a : PrunedMap V} (ha : Canonical a) :
+    meet ops a a = a :=
+  eq_of_agree (canonical_meet _ _) ha (meet_idem h a)
+
+theorem join_empty_eq (h : IsLatticeVals ops) {a : PrunedMap V} (ha : Canonical a) :
+    join ops a empty = a :=
+  eq_of_agree (canonical_join _ _) ha (join_empty h a)
+
+theorem meet_empty_eq (h : IsLatticeVals ops) (a : PrunedMap V) :
+    meet ops a empty = (empty : PrunedMap V) :=
+  eq_of_agree (canonical_meet _ _) canonical_empty (meet_empty h a)
+
+theorem absorb_meet_join_eq (h : IsLatticeVals ops) {a : PrunedMap V} (ha : Canonical a)
+    (b : PrunedMap V) : meet ops a (join ops a b) = a :=
+  eq_of_agree (canonical_meet _ _) ha (absorb_meet_join h a b)
+
+theorem absorb_join_meet_eq (h : IsLatticeVals ops) {a : PrunedMap V} (ha : Canonical a)
+    (b : PrunedMap V) : join ops a (meet ops a b) = a :=
+  eq_of_agree (canonical_join _ _) ha (absorb_join_meet h a b)
+
+theorem meet_distrib_join_eq (h : IsLatticeVals ops) (a b c : PrunedMap V) :
+    meet ops a (join ops b c) = join ops (meet ops a b) (meet ops a c) :=
+  eq_of_agree (canonical_meet _ _) (canonical_join _ _) (meet_distrib_join h a b c)
+
+theorem join_distrib_meet_eq (h : IsLatticeVals ops) (a b c : PrunedMap V) :
+    join ops a (meet ops b c) = meet ops (join ops a b) (join ops a c) :=
+  eq_of_agree (canonical_join _ _) (canonical_meet _ _) (join_distrib_meet h a b c)
+
+theorem join_comm_eq (hc : IsCommVals ops) (a b : PrunedMap V) :
+    join ops a b = join ops b a :=
+  eq_of_agree (canonical_join _ _) (canonical_join _ _) (join_comm hc a b)
+
+theorem meet_comm_eq (hc : IsCommVals ops) (a b : PrunedMap V) :
+    meet ops a b = meet ops b a :=
+  eq_of_agree (canonical_meet _ _) (canonical_meet _ _) (meet_comm hc a b)
+
+/-! ### Both instances, with nothing left abstract
+
+`PrunedMap Unit` is a distributive lattice with a least element, commutative; and
+a trie over `()` *is* a finite set of paths (§5).  `PrunedMap UInt64` is the same
+minus commutativity, which `u64_not_isComm` rules out. -/
+
+section Instances
+variable (a b c : PrunedMap Unit) (x y z : PrunedMap UInt64)
+
+example : join unitOps (join unitOps a b) c = join unitOps a (join unitOps b c) :=
+  join_assoc_eq unit_isLattice a b c
+example : meet unitOps (meet unitOps a b) c = meet unitOps a (meet unitOps b c) :=
+  meet_assoc_eq unit_isLattice a b c
+example : join unitOps a b = join unitOps b a := join_comm_eq unit_isComm a b
+example : meet unitOps a b = meet unitOps b a := meet_comm_eq unit_isComm a b
+example (ha : Canonical a) : join unitOps a a = a := join_idem_eq unit_isLattice ha
+example (ha : Canonical a) : meet unitOps a a = a := meet_idem_eq unit_isLattice ha
+example (ha : Canonical a) : join unitOps a empty = a := join_empty_eq unit_isLattice ha
+example : meet unitOps a empty = empty := meet_empty_eq unit_isLattice a
+example (ha : Canonical a) : meet unitOps a (join unitOps a b) = a :=
+  absorb_meet_join_eq unit_isLattice ha b
+example (ha : Canonical a) : join unitOps a (meet unitOps a b) = a :=
+  absorb_join_meet_eq unit_isLattice ha b
+example : meet unitOps a (join unitOps b c) = join unitOps (meet unitOps a b) (meet unitOps a c) :=
+  meet_distrib_join_eq unit_isLattice a b c
+example : join unitOps a (meet unitOps b c) = meet unitOps (join unitOps a b) (join unitOps a c) :=
+  join_distrib_meet_eq unit_isLattice a b c
+
+example : join u64Ops (join u64Ops x y) z = join u64Ops x (join u64Ops y z) :=
+  join_assoc_eq u64_isLattice x y z
+example : meet u64Ops (meet u64Ops x y) z = meet u64Ops x (meet u64Ops y z) :=
+  meet_assoc_eq u64_isLattice x y z
+example (hx : Canonical x) : join u64Ops x x = x := join_idem_eq u64_isLattice hx
+example (hx : Canonical x) : meet u64Ops x x = x := meet_idem_eq u64_isLattice hx
+example (hx : Canonical x) : join u64Ops x empty = x := join_empty_eq u64_isLattice hx
+example : meet u64Ops x empty = empty := meet_empty_eq u64_isLattice x
+example (hx : Canonical x) : meet u64Ops x (join u64Ops x y) = x :=
+  absorb_meet_join_eq u64_isLattice hx y
+example (hx : Canonical x) : join u64Ops x (meet u64Ops x y) = x :=
+  absorb_join_meet_eq u64_isLattice hx y
+example : meet u64Ops x (join u64Ops y z) = join u64Ops (meet u64Ops x y) (meet u64Ops x z) :=
+  meet_distrib_join_eq u64_isLattice x y z
+example : join u64Ops x (meet u64Ops y z) = meet u64Ops (join u64Ops x y) (join u64Ops x z) :=
+  join_distrib_meet_eq u64_isLattice x y z
+end Instances
+
 end PrunedMap
 end PrunedModel

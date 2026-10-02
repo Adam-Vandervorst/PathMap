@@ -140,10 +140,7 @@ theorem isPrefixOf_append (p q : Path) : p ≼ (p ++ q) := by
   | nil => simp [isPrefixOf]
   | cons a as ih => simp [isPrefixOf, ih]
 
-@[simp] theorem lt_irrefl (p : Path) : Path.lt p p = false := by
-  induction p with
-  | nil => simp [Path.lt]
-  | cons a as ih => simp [Path.lt, ih]
+-- `Path.lt_irrefl` now lives in Basic.lean, beside `lt_trans` and `lt_total`.
 
 end Path
 
