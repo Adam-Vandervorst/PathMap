@@ -61,7 +61,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Removes the value at the zipper's focus.  Does not affect any onward branches.  Returns `Some(val)`
     /// with the value that was removed, otherwise returns `None`
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn remove_val(&mut self, prune: bool) -> Option<V>;
 
     /// Deprecated alias for [ZipperWriting::remove_val]
@@ -182,7 +183,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Joins the subtrie below the focus of `src_zipper` into the subtrie below the focus of `self`,
     /// consuming the subtrie from the `src_zipper`
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created in `src_zipper`.
+    /// `prune=false` leaves an emptied source focus dangling; `true` applies
+    /// `src_zipper.prune_path()` afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn join_into_take<Z: ZipperInfallibleSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice;
 
     /// Collapses all the paths below the zipper's focus by removing the leading `byte_cnt` bytes from
@@ -200,12 +202,18 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Returns `true` if the focus has at least one downstream continuation, otherwise returns `false`.
     ///
     /// NOTE: for legacy reasons, this operation is sometimes called `drop_head`
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice;
 
     /// Collapses all the paths below the zipper's focus by removing the leading `byte_cnt` bytes from
     /// each path and meets together all of the downstream subtries
     ///
     /// Returns `true` if the focus has at least one downstream continuation, otherwise returns `false`.
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice;
 
     /// Deprecated alias for [ZipperWriting::join_k_path_into]
@@ -237,6 +245,9 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Meets (retains the intersection of) the subtrie below the zipper's focus with the subtrie downstream
     /// from the focus of `read_zipper`
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice;
 
     /// Deprecated alias for [ZipperWriting::meet_into].  May be replaced in the future with a different method
@@ -255,6 +266,9 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Subtracts the subtrie downstream of the focus of `read_zipper` from the subtrie below the `self` zipper's
     /// focus
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice;
 
     /// Deprecated alias for [ZipperWriting::subtract_into]
@@ -284,7 +298,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Creates a new [PathMap] from the zipper's focus, removing all downstream branches from the zipper
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     ///
     /// GOAT: This method's behavior is affected by the `graft_root_vals` feature
     /// A value at the zipper's focus will not be affected, and will not be included in the resulting map.
@@ -294,14 +309,16 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Removes all branches below the zipper's focus.  Does not affect the value if there is one.  Returns `true`
     /// if a branch was removed, otherwise returns `false`
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn remove_branches(&mut self, prune: bool) -> bool;
 
     /// Removes multiple branches below the zipper's focus based on the supplied 256-bit `mask`
     ///
     /// Key bytes for which the corresponding `mask` bit is `0` will be removed.
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn remove_unmasked_branches(&mut self, mask: ByteMask, prune: bool);
 
     /// Creates a dangling path to the current zipper focus.  Returns `true` if new path bytes were created, or

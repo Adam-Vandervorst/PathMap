@@ -364,7 +364,8 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
 
     /// Removes the value at `path` from the map and returns it, or returns `None` if there was no value at `path`
     ///
-    /// If `prune` is `true`, the path will be pruned, otherwise it will be left dangling.
+    /// `prune=false` leaves `path` dangling if emptied; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [path guide](https://pathmap-rs.github.io/1.00.01_basics.html#creating-and-removing-paths).
     pub fn remove_val_at<K: AsRef<[u8]>>(&mut self, path: K, prune: bool) -> Option<V> {
         let path = path.as_ref();
         //NOTE: we're descending the zipper rather than creating it at the path so it will be allowed to
@@ -455,7 +456,8 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     ///
     /// Returns `true` if at least one branch was removed.
     ///
-    /// If `prune` is `true`, the path will be pruned, otherwise it will be left dangling.
+    /// `prune=false` leaves `path` dangling if emptied; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [path guide](https://pathmap-rs.github.io/1.00.01_basics.html#creating-and-removing-paths).
     pub fn remove_branches_at<K: AsRef<[u8]>>(&mut self, path: K, prune: bool) -> bool {
         let path = path.as_ref();
         //NOTE: we're descending the zipper rather than creating it at the path so it will be allowed to
