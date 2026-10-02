@@ -757,51 +757,95 @@ theorem meet_comm_eq (hc : IsCommVals ops) (a b : PrunedMap V) :
     meet ops a b = meet ops b a :=
   eq_of_agree (canonical_meet _ _) (canonical_meet _ _) (meet_comm hc a b)
 
-/-! ### Both instances, with nothing left abstract
+/-! ### Both instances, named
 
-`PrunedMap Unit` is a distributive lattice with a least element, commutative; and
-a trie over `()` *is* a finite set of paths (§5).  `PrunedMap UInt64` is the same
-minus commutativity, which `u64_not_isComm` rules out. -/
+Everything above is stated for an abstract `ops` under a hypothesis, so this is
+where the two value types the crate provides get their own theorems — citable
+rather than merely checked.  `PrunedMap Unit` gets all twelve laws;
+`PrunedMap UInt64` gets ten, and the two it does not get are *proved* unavailable
+below. -/
 
 section Instances
 variable (a b c : PrunedMap Unit) (x y z : PrunedMap UInt64)
 
-example : join unitOps (join unitOps a b) c = join unitOps a (join unitOps b c) :=
+theorem unit_join_assoc : join unitOps (join unitOps a b) c = join unitOps a (join unitOps b c) :=
   join_assoc_eq unit_isLattice a b c
-example : meet unitOps (meet unitOps a b) c = meet unitOps a (meet unitOps b c) :=
+theorem unit_meet_assoc : meet unitOps (meet unitOps a b) c = meet unitOps a (meet unitOps b c) :=
   meet_assoc_eq unit_isLattice a b c
-example : join unitOps a b = join unitOps b a := join_comm_eq unit_isComm a b
-example : meet unitOps a b = meet unitOps b a := meet_comm_eq unit_isComm a b
-example (ha : Canonical a) : join unitOps a a = a := join_idem_eq unit_isLattice ha
-example (ha : Canonical a) : meet unitOps a a = a := meet_idem_eq unit_isLattice ha
-example (ha : Canonical a) : join unitOps a empty = a := join_empty_eq unit_isLattice ha
-example : meet unitOps a empty = empty := meet_empty_eq unit_isLattice a
-example (ha : Canonical a) : meet unitOps a (join unitOps a b) = a :=
+theorem unit_join_comm : join unitOps a b = join unitOps b a := join_comm_eq unit_isComm a b
+theorem unit_meet_comm : meet unitOps a b = meet unitOps b a := meet_comm_eq unit_isComm a b
+theorem unit_join_idem (ha : Canonical a) : join unitOps a a = a := join_idem_eq unit_isLattice ha
+theorem unit_meet_idem (ha : Canonical a) : meet unitOps a a = a := meet_idem_eq unit_isLattice ha
+theorem unit_join_empty (ha : Canonical a) : join unitOps a empty = a :=
+  join_empty_eq unit_isLattice ha
+theorem unit_meet_empty : meet unitOps a empty = empty := meet_empty_eq unit_isLattice a
+theorem unit_absorb_meet_join (ha : Canonical a) : meet unitOps a (join unitOps a b) = a :=
   absorb_meet_join_eq unit_isLattice ha b
-example (ha : Canonical a) : join unitOps a (meet unitOps a b) = a :=
+theorem unit_absorb_join_meet (ha : Canonical a) : join unitOps a (meet unitOps a b) = a :=
   absorb_join_meet_eq unit_isLattice ha b
-example : meet unitOps a (join unitOps b c) = join unitOps (meet unitOps a b) (meet unitOps a c) :=
+theorem unit_meet_distrib_join :
+    meet unitOps a (join unitOps b c) = join unitOps (meet unitOps a b) (meet unitOps a c) :=
   meet_distrib_join_eq unit_isLattice a b c
-example : join unitOps a (meet unitOps b c) = meet unitOps (join unitOps a b) (join unitOps a c) :=
+theorem unit_join_distrib_meet :
+    join unitOps a (meet unitOps b c) = meet unitOps (join unitOps a b) (join unitOps a c) :=
   join_distrib_meet_eq unit_isLattice a b c
 
-example : join u64Ops (join u64Ops x y) z = join u64Ops x (join u64Ops y z) :=
+theorem u64_join_assoc : join u64Ops (join u64Ops x y) z = join u64Ops x (join u64Ops y z) :=
   join_assoc_eq u64_isLattice x y z
-example : meet u64Ops (meet u64Ops x y) z = meet u64Ops x (meet u64Ops y z) :=
+theorem u64_meet_assoc : meet u64Ops (meet u64Ops x y) z = meet u64Ops x (meet u64Ops y z) :=
   meet_assoc_eq u64_isLattice x y z
-example (hx : Canonical x) : join u64Ops x x = x := join_idem_eq u64_isLattice hx
-example (hx : Canonical x) : meet u64Ops x x = x := meet_idem_eq u64_isLattice hx
-example (hx : Canonical x) : join u64Ops x empty = x := join_empty_eq u64_isLattice hx
-example : meet u64Ops x empty = empty := meet_empty_eq u64_isLattice x
-example (hx : Canonical x) : meet u64Ops x (join u64Ops x y) = x :=
+theorem u64_join_idem (hx : Canonical x) : join u64Ops x x = x := join_idem_eq u64_isLattice hx
+theorem u64_meet_idem (hx : Canonical x) : meet u64Ops x x = x := meet_idem_eq u64_isLattice hx
+theorem u64_join_empty (hx : Canonical x) : join u64Ops x empty = x :=
+  join_empty_eq u64_isLattice hx
+theorem u64_meet_empty : meet u64Ops x empty = empty := meet_empty_eq u64_isLattice x
+theorem u64_absorb_meet_join (hx : Canonical x) : meet u64Ops x (join u64Ops x y) = x :=
   absorb_meet_join_eq u64_isLattice hx y
-example (hx : Canonical x) : join u64Ops x (meet u64Ops x y) = x :=
+theorem u64_absorb_join_meet (hx : Canonical x) : join u64Ops x (meet u64Ops x y) = x :=
   absorb_join_meet_eq u64_isLattice hx y
-example : meet u64Ops x (join u64Ops y z) = join u64Ops (meet u64Ops x y) (meet u64Ops x z) :=
+theorem u64_meet_distrib_join :
+    meet u64Ops x (join u64Ops y z) = join u64Ops (meet u64Ops x y) (meet u64Ops x z) :=
   meet_distrib_join_eq u64_isLattice x y z
-example : join u64Ops x (meet u64Ops y z) = meet u64Ops (join u64Ops x y) (join u64Ops x z) :=
+theorem u64_join_distrib_meet :
+    join u64Ops x (meet u64Ops y z) = meet u64Ops (join u64Ops x y) (join u64Ops x z) :=
   join_distrib_meet_eq u64_isLattice x y z
 end Instances
+
+/-! ### Commutativity fails over `UInt64`, at the trie level
+
+`u64_not_isComm` rules out the *value* hypothesis, which is not quite the same
+claim: a priori the asymmetry could have been invisible once lifted to tries.  It
+is not.  Two single-path tries disagreeing only in their value are a
+counterexample, so `join` and `meet` over `UInt64` are genuinely
+non-commutative operations and the missing pair of laws is missing for a reason. -/
+
+private def one : PrunedMap UInt64 := mk' [([0], 1)]
+private def two : PrunedMap UInt64 := mk' [([0], 2)]
+
+theorem u64_join_not_comm : ¬ ∀ a b : PrunedMap UInt64, join u64Ops a b = join u64Ops b a := by
+  intro h
+  have hv := congrArg (fun m => m.valAt [0]) (h one two)
+  simp only [one, two, valAt_join, valAt_mk'] at hv
+  simp [joinVal, u64Ops, ValRes.resolve] at hv
+
+theorem u64_meet_not_comm : ¬ ∀ a b : PrunedMap UInt64, meet u64Ops a b = meet u64Ops b a := by
+  intro h
+  have hv := congrArg (fun m => m.valAt [0]) (h one two)
+  simp only [one, two, valAt_meet, valAt_mk'] at hv
+  simp [meetVal, u64Ops, ValRes.resolve] at hv
+
+-- The same counterexample, run rather than reasoned about: `beqT` is the
+-- equality the model uses to decide `AlgebraicStatus::Identity`, and it says the
+-- two orders give different tries.
+#guard !(beqT u64Ops (join u64Ops one two) (join u64Ops two one))
+#guard !(beqT u64Ops (meet u64Ops one two) (meet u64Ops two one))
+#guard (join u64Ops one two).entries == [([0], (1 : UInt64))]
+#guard (join u64Ops two one).entries == [([0], (2 : UInt64))]
+-- …and that it is the *values* that differ, not the paths: over `()` the same
+-- two tries are the same trie.
+#guard beqT unitOps (join unitOps (mk' [([0], ())]) (mk' [([0], ())]))
+                    (join unitOps (mk' [([0], ())]) (mk' [([0], ())]))
+
 
 end PrunedMap
 end PrunedModel
