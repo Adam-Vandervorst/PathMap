@@ -71,6 +71,22 @@ def u64Ops : ValOps UInt64 where
   psub a b := if a == b then .none else .elem a
   beq a b := a == b
 
+/-- The instance `pathmap` provides for `()` (see `impl Lattice for ()` in `src/ring.rs`).
+
+Both `pjoin` and `pmeet` return `Identity(SELF_IDENT | COUNTER_IDENT)` — with only
+one value there is nothing to choose between, so each operand is equally "the
+answer", and the node algebra is told so.  `psubtract` of two `()`s annihilates,
+which `src/ring.rs`'s own `option_subtract_test` asserts.
+
+This is the instance under which a trie is exactly a *set of paths*, and it is
+the one for which the lattice laws hold in full — including commutativity, which
+`u64Ops` does not satisfy.  See `PrunedModel/Lattice.lean`. -/
+def unitOps : ValOps Unit where
+  pjoin _ _ := .identity true true
+  pmeet _ _ := .identity true true
+  psub _ _ := .none
+  beq _ _ := true
+
 /-! ## Prefix order -/
 
 /-- `p ≼ q`: `p` is a prefix of `q`. -/
