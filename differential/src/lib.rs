@@ -8,8 +8,13 @@
 //! * [`server`] is the resident-process protocol the driver speaks.
 //! * [`repro`] turns an input back into standalone `pathmap` calls.
 //! * [`act`] is the `ArenaCompactTree` read source behind `act_trace`.
+//!
+//! [`algebraic`] is a third fuzzer with a different question.  It has no
+//! oracle: it evaluates one algebraic expression every way the crate offers and
+//! requires the answers to match.  `bin/alg_fuzz.rs` drives it.
 
 pub mod act;
+pub mod algebraic;
 pub mod harness;
 pub mod repro;
 pub mod server;
