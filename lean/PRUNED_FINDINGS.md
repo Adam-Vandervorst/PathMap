@@ -231,7 +231,38 @@ harness is run.
   recurrence reports as new.
 
 * **`Identity` is not reported where nothing changed**, in `subtract_into` and
-  `meet_into`.  `FINDINGS.md` #8.  8 of 4000 inputs.
+  `meet_into`.  `FINDINGS.md` #8.  686 of 200 000 inputs.
+  `subtract_into-status-element-when-unchanged.bin`, 22 bytes:
+
+      map0 = {[] ↦ 0, [1] ↦ 0}      the destination
+      map1 = {[1,1] ↦ 1}, read zipper rooted at [1], so the source node is {[1] ↦ 1}
+
+      0 subtract_into ret=Identity   MAP0 _:0,01:0       model
+      0 subtract_into ret=Element    MAP0 _:0,01:0       crate
+
+  The two dumps are identical: `psubtract(0, 1)` keeps the destination's `0`, so
+  nothing anywhere changed, and the model reports `Identity` while the crate
+  reports `Element`.
+
+  The status is *weaker* than the truth rather than wrong — `Element` only
+  claims "`self` holds the output", which it does — so this costs work, not
+  correctness.  It costs real work, though: the `Identity` arm of
+  `subtract_into` returns without calling `graft_internal` at all, while the
+  `Element` arm grafts the freshly built node over the old one, so a destination
+  that was structurally shared with another trie is copied apart for no reason.
+
+  It comes from two layers.  At the value level,
+  `impl DistributiveLattice for u64` returns `AlgebraicResult::Element(*self)`
+  where the values differ — "here is a newly computed value", which happens to
+  be `self`'s own — rather than `Identity(SELF_IDENT)`, which `src/ring.rs`'s own
+  documentation says is the legal way for a non-commutative operation to report
+  no change.  `Basic.u64Ops.psub` mirrors that faithfully.  At the node level the
+  crate assembles its status compositionally as it walks and never asks whether
+  the node it assembled equals the one it is replacing, whereas
+  `nodeStatus` decides by comparing them — so the models recover a precision the
+  crate's path has already lost.  `fuzz-fixes-v3` fixes it at the value level
+  (`f8a4599`), which is the root; doing so requires `u64Ops` to move with it, or
+  the model reports `Element` where the crate then reports `Identity`.
 
   The `join_map_into` form of this, which `join_map_into-status-element-when-unchanged.bin`
   reproduces and which accounted for most of the class, **was not a crate
