@@ -5,7 +5,7 @@ import PathMapModel.Spec
 
 This module turns the model into an **oracle**: it decodes a raw fuzzer input
 into a program over two maps and two zippers, runs it, and emits a trace.  The
-Rust side (`differential/src/bin/pathmap_trace.rs`) decodes the *same bytes* with the *same*
+Rust side (`validation/differential/src/bin/pathmap_trace.rs`) decodes the *same bytes* with the *same*
 rules and emits the *same* trace format from the real crate, so any behavioural
 divergence shows up as a textual diff.
 
@@ -54,7 +54,7 @@ def ops : ValOps V := u64Ops
 
 Why an operation was skipped.  Every `skip` in the trace carries one of these,
 so a skipped op says which rule declined it rather than just that something
-declined it.  `differential/src/harness.rs` emits the same tokens; the two must
+declined it.  `validation/differential/src/harness.rs` emits the same tokens; the two must
 agree exactly or every input with a skip diverges.
 
 * `skip:act` — the ACT read source cannot be a merge source
@@ -221,7 +221,7 @@ def noPrune : Bool := false
 a following `u8 % 2` byte (`0` = write zipper, `1` = read zipper); ops `27`–`46`
 are write-zipper operations. -/
 
-/-- Number of distinct operations.  Must match `NOPS` in `differential/src/harness.rs`. -/
+/-- Number of distinct operations.  Must match `NOPS` in `validation/differential/src/harness.rs`. -/
 def nops : Nat := 56
 
 /-- A full `k`-path iteration: `descend_first_k_path` followed by

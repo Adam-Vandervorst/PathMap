@@ -1,0 +1,9 @@
+[package]
+name = "algebra-sharing-validation"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Developer validation of sharing across pathmap algebraic operations"
+
+[dependencies]
+pathmap = { path = "../.." }

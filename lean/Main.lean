@@ -9,7 +9,7 @@ One-shot:
     pathmap-oracle                    -- read the bytes from stdin
     pathmap-oracle --act <input-file> -- ArenaCompactTree mode: skip the
                                       -- operations an ACT read source cannot
-                                      -- serve, matching differential/src/bin/act_trace.rs
+                                      -- serve, matching validation/differential/src/bin/act_trace.rs
 
 Resident:
 
@@ -17,7 +17,7 @@ Resident:
 
 Spawning a fresh process per fuzzer input costs more than running the input
 does, so `differential.py` keeps the oracle resident and feeds it work over
-stdin.  The protocol matches `differential/src/server.rs`, one command per line:
+stdin.  The protocol matches `validation/differential/src/server.rs`, one command per line:
 
     run-input <timeout-ms> <hex>    run the decoded bytes, print the trace
     quit                            exit 0
@@ -29,9 +29,9 @@ only line beginning with `!`:
     !TIMEOUT                        exceeded <timeout-ms>
     !PANIC <one-line message>       malformed command
 
-Prints the trace produced by the model.  `differential/src/bin/pathmap_trace.rs` prints the
+Prints the trace produced by the model.  `validation/differential/src/bin/pathmap_trace.rs` prints the
 same trace from the real crate for the same input bytes, and
-`differential/src/bin/act_trace.rs` does the same with an `ArenaCompactTree` as the read
+`validation/differential/src/bin/act_trace.rs` does the same with an `ArenaCompactTree` as the read
 source; they are compared by `lean/differential.py`.
 -/
 
@@ -39,7 +39,7 @@ open PathMapModel
 
 /-! ## Why there is no in-process timeout here
 
-`differential/src/server.rs` runs each input on a thread it can abandon, so a
+`validation/differential/src/server.rs` runs each input on a thread it can abandon, so a
 hanging crate costs one input rather than the process.  The oracle does not, and
 not for want of trying: `IO.asTask` plus `IO.sleep` under `IO.waitAny` blocks on
 the work task in list order and never observes the timer, and polling with

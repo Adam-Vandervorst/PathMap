@@ -9,7 +9,7 @@ run that does not finish always fails the job.  For the first REPROS newly
 diverging inputs with distinct first-differing operations, the input is
 shrunk with lean/shrink.py and a standalone Rust reproducer is emitted with
 `pathmap_trace --repro` into the summary and $FUZZ_OUT/repro/.  The harness
-(differential/) and the model (lean/) are taken from HEAD for both sides, so
+(validation/) and the model (lean/) are taken from HEAD for both sides, so
 the only thing that differs is the crate under test in src/.  If BASE cannot
 be built with HEAD's harness, BASE's own harness is tried; if that fails too
 there is no baseline, which is reported loudly and does not fail the job.
@@ -95,16 +95,16 @@ class Fuzz:
 
     def prepare_base(self):
         """Build base with head's harness and model; fall back to base's own.  Returns the baseline kind."""
-        log(f"== building base ({self.short(self.base_sha)}) with head's differential/ and lean/")
-        for d in ('differential', 'lean'):
+        log(f"== building base ({self.short(self.base_sha)}) with head's validation/ and lean/")
+        for d in ('validation', 'lean'):
             shutil.rmtree(self.base_src / d)
             shutil.copytree(self.repo / d, self.base_src / d, symlinks=True,
                             ignore=shutil.ignore_patterns('.lake'))
         if self.build_side('base', self.base_src):
             return 'head-harness'
         log("== head's harness does not build against base; trying base's own")
-        git('checkout', '--', 'differential', 'lean', cwd=self.base_src)
-        git('clean', '-fdq', '--', 'differential', 'lean', cwd=self.base_src)
+        git('checkout', '--', 'validation', 'lean', cwd=self.base_src)
+        git('clean', '-fdq', '--', 'validation', 'lean', cwd=self.base_src)
         return 'base-harness' if self.build_side('base', self.base_src) else 'none'
 
     def run_side(self, side, src, label, n, flags):
