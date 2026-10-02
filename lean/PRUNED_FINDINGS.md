@@ -139,11 +139,28 @@ is which of the above it already answers.
 | #3, value bias | 7 | fixed (`3dae731`, "Make meet/join value bias independent of node layout") |
 | #3, `Identity` not reported | 87 | fixed |
 
-So the branch fixes the two classes this model inherited and neither of the two
-it found.  That is not surprising — `fuzz-fixes-v3` was driven by the other
-model, which *reproduces* dangling paths rather than forbidding them, so no
+So the branch fixes the one class this model genuinely inherited, and neither of
+the two it found.  That is not surprising — `fuzz-fixes-v3` was driven by the
+other model, which *reproduces* dangling paths rather than forbidding them, so no
 amount of fuzzing against it could have reported finding 1.  It is the clearest
 argument for keeping both models: they cannot find each other's bugs.
+
+Two attribution traps are worth writing down, because both caught me.
+
+* The `Identity` row needs a qualification.  Most of that class was **the models
+  describing a `join_map_into` status master had already changed** in PR #142
+  (`276fca0`, issue #139): its empty-source-node exit used to `return` the node
+  status on its own, discarding a value status for a value it had already
+  written, and master replaced that with
+  `node_status.merge(val_status, true, true)`.  Both models still described the
+  early return — corrected in the commit after this one, which takes the class
+  from 104 of 4000 to 8.  `fuzz-fixes-v3` predates PR #142, so it scored 0 on this
+  not by fixing anything but by still matching what the models said.
+* `3e839e8` ("Fix join_into replacing or misreporting a destination that holds
+  the source") looks like a candidate and is **already on master** as `1e3b1c3`
+  (PR #116); cherry-picking it yields only comment churn and duplicate tests.
+
+Check `git log master -S<string>` before attributing anything here to v3.
 
 Two things in the v3 column are **not** findings and should not be read as any:
 
