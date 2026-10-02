@@ -326,11 +326,24 @@ bug — see `tests/pathmap_algebra_differential.rs`. -/
 def restrictSelf (ops : ValOps V) (a : PathMap V) : Bool :=
   PathMap.beqT ops (Map.restrict a a) a
 
-/-- `take_map` followed by `graft_map` restores the trie exactly. -/
+/-- `take_map` followed by `graft_map` restores the trie exactly — provided
+there was something to take.
+
+The proviso is not a weakening to dodge a failure; it is where the round-trip
+genuinely stops being one.  `take_map(false)` at a focus that holds nothing
+leaves the location behind as a dangling path and returns `none`, and
+`graft_map` of an empty map now *reclaims* that location, because an operation
+whose result is nothing leaves no location behind (see
+lean/PRUNED_FINDINGS.md).  So on that one state the pair is not the identity, and
+the two halves disagree about a location rather than about any content.  The
+differential harness masks exactly this case on op 45 for the same reason. -/
 def takeThenGraft (ops : ValOps V) (z : Zip V) : Bool :=
   let (m, z1) := z.takeMap false
-  let z2 := z1.graftMap (m.getD PathMap.empty)
-  PathMap.beqT ops z2.trie z.trie
+  match m with
+  | none => true
+  | some m =>
+    let z2 := z1.graftMap m
+    PathMap.beqT ops z2.trie z.trie
 
 /-- Grafting one subtrie into two places makes two *independent* copies:
 writing under one leaves the other exactly as it was.

@@ -52,19 +52,17 @@ the path, so it is pure overhead to every traversal — and `val_count() == 0`
 beside `child_count() == 0` and `path_exists() == true` is a state no reader of
 the trait documentation would expect to have to handle.
 
-It is worth being precise about what this is, because "forgot to prune" is only
-half of it.  There are two cases, and the second is the one that matters:
+Every fingerprint in a trace is the state **after** the operation, so the `e0`
+on the model side is the model saying the location is gone, not that it was
+missing beforehand.  In every reproducer the focus existed and held content
+before the call: in the one above it held the value `0`, which `graft` correctly
+clears (the empty source has no root value) before leaving the emptied location
+behind.  So this is a missing prune throughout, and not — as an earlier reading
+of these traces had it — an operation creating a location from nothing.  A
+direct probe confirms it: `graft` of an empty source at a focus that genuinely
+does not exist creates nothing.
 
-* Where the focus **existed**, the operation empties it and leaves the chain
-  behind.  That is a missing prune.
-* Where the focus **did not exist**, the operation *creates* it — the write path
-  materialises the node chain down to the focus before discovering it has
-  nothing to put there, and then returns without undoing that.  The seven
-  reproducers above are all of this kind, because the shrinker found it the
-  cheaper shape to reach.  `graft` with an empty source is accidentally
-  `create_path`.
-
-`remove_prefix` shows the scale: it creates the whole chain, not just the tip.
+`remove_prefix` shows the scale: it leaves the whole chain, not just the tip.
 
     2 remove_prefix ret=1  MAP0 _:-                             model
     2 remove_prefix ret=1  MAP0 _:-,00:-,0000:-,000000:-        crate
@@ -78,32 +76,97 @@ asymmetry looks unintended rather than designed: `meet_into` and `meet_2` are
 the same operation with and without a destination, and only one of them can be
 told to prune.
 
-Two fixes are available and they are not equivalent.  Adding `prune` to the
-seven makes the behaviour reachable; making the empty write a no-op on a
-non-existent focus makes it correct, since an operation whose result is "nothing"
-has no business creating a location.  The second also fixes the `create_path`
-accident, which the first does not.
+## 2. `graft_masked_branches` keeps a child whose branch the source lacks
 
-## 2. `graft_masked_branches` creates a child for a branch the source lacks
-
-`graft_masked_branches-creates-dangling-child.bin`, 10 bytes.  Both maps empty,
-write zipper at the root, mask `{0x01}`, `remove_unset = false`:
+`graft_masked_branches-creates-dangling-child.bin`, 10 bytes.  `map0` is
+`{[1] ↦ 0}`, `map1` is empty, write zipper at the root, mask `{0x01}`,
+`remove_unset = false`:
 
     0 graft_masked_branches ret=01:0  W=_ o_ e1 v- c0 n0      model
     0 graft_masked_branches ret=01:0  W=_ o_ e1 v- c1 n0      crate
     MAP0 _:-                                                  model
     MAP0 _:-,01:-                                             crate
 
-This is finding 1's mechanism one level down, and it is worse there, because the
-location it creates is a *child of the focus* rather than the focus itself: the
-focus's `child_mask` now has a bit set for a branch that holds nothing, and
-`child_count() == 1` with `val_count() == 0`.  Every consumer that uses
-`child_mask` to decide where to recurse will now walk into it.
-
 Each set bit of the mask is specified as a `graft_src_at` of the source's
 corresponding child, and grafting nothing removes — so a set bit whose branch is
-absent from the source must leave that branch absent here.  Instead it is
-created.
+absent from the source must leave that branch absent here.  The value at `[1]`
+*is* removed, correctly; the child slot is not.
+
+It is finding 1's mechanism one level down, and worse there, because what
+survives is a *child of the focus* rather than the focus itself: the focus's
+`child_mask` now has a bit set for a branch that holds nothing, and
+`child_count() == 1` beside `val_count() == 0`.  Every consumer that uses
+`child_mask` to decide where to recurse walks into it.
+
+## The fix
+
+All of it funnels through one line.  `graft_internal` is the single place that
+learns "the result is empty", and fourteen sites across nine operations hand it a
+`None`:
+
+```rust
+pub(crate) fn graft_internal(&mut self, src: Option<TrieNodeODRc<V, A>>) {
+    match src {
+        Some(src) => { /* ... */ },
+        None => { self.remove_branches(false); }   // <-- here
+    }
+}
+```
+
+It cannot simply be flipped to `true`, because `meet_into` and `subtract_into`
+*are* documented to leave dangling paths when their own `prune` is `false`.  So
+`graft_internal` has to take the flag rather than decide it:
+
+* `graft_internal(src, prune)`, with the `None` arm as `remove_branches(prune)`.
+* The three operations that own a `prune` parameter forward it — which is also
+  how the codebase already reads, since each of them follows the call with
+  `if prune { self.prune_path(); }`.
+* The rest pass `true`.  They have no caller intent to honour, and a location
+  that leads nowhere is not something a caller can have asked for.
+
+Three places need the same change for the same reason, because they do their own
+removing rather than going through the funnel:
+
+* the value step of `graft` / `graft_src_at` / `graft_map` — `remove_val(false)`.
+  The node step cannot reclaim a location whose value is removed *after* it, so
+  both halves have to prune, and neither alone is enough: a focus with a value
+  and no children is fixed only by the value step, one with children and no value
+  only by the node step.
+* `graft_masked_branches`'s own `remove_branches` / `remove_unmasked_branches`
+  (and the identical pair in the `ZipperWriting` default implementation).
+* `graft_masked_branches`'s bulk arm, for masks of three bits or more, which
+  merges through a borrow of the focus node and so never reaches
+  `graft_internal` at all.  It needs a `prune_path()` after the merge —
+  `prune_path` is already a no-op unless the focus really is a dangling tip, so
+  that costs one `node_is_empty` check.
+
+Measured on 4000 random programs, seed 11: **901 divergences in this class
+become 0**, agreement rises from 3005 to 3888 of 4000, and the crate's own suite
+stays at 1030 passing.  The remainder is the two inherited classes in §3.
+
+### `meet_2` is left out, deliberately
+
+One call site is not changed, and it is worth saying why rather than quietly
+flipping it.  Pruning `meet_2` accounts for 100 of the 901, and it collides with
+two things:
+
+* `src/write_zipper.rs`'s own regression test
+  `write_zipper_subtract_into_dense_drops_reached_dangling_path` asserts "the
+  meet should leave `[2]` dangling", and uses `meet_2` to *construct* a dangling
+  path in a particular node representation so that the rest of the test can
+  subtract against it.  Pruning `meet_2` makes that setup impossible, and
+  rewriting it with `create_path` would reach a different representation and
+  silently weaken a representation-sensitive test.
+* the meet/prune semantics settled on `fuzz-fixes-v3` — "meet is an intersection
+  of locations, and prune is what drops dangling paths" — under which a meet
+  without a `prune` flag arguably *should* keep them.
+
+So the real defect at `meet_2` is that it has no `prune` parameter, where
+`meet_into` does: the same operation, with and without a destination, and only
+one of them lets the caller ask for a tidy trie.  Adding one is an API change
+and a decision rather than a bug fix, so it is left stated, not made.  Flipping
+it is a one-word change at the four `graft_internal(None, false)` sites in
+`meet_2`.
 
 ## 3. Pre-existing classes this model also reports
 

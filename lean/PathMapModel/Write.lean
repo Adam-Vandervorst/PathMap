@@ -100,6 +100,26 @@ def pruneAscend : Nat × Zip V :=
   let (n, z') := z.prunePath
   (n, (z'.ascend n).2)
 
+/-- Reclaim the focus when a write left it leading nowhere.
+
+`prune_path` is already a no-op unless the focus is a dangling tip, so this is
+exactly "prune if the write emptied the location".  The operations below that
+have no `prune` parameter end with it, because `graft_internal` now passes
+`prune = true` on its empty-source arm and the `graft` family's value step
+passes it too -- an operation whose result is nothing leaves no location behind.
+The ones that *do* take a flag (`meet_into`, `subtract_into`,
+`join_k_path_into`) still honour it, and `meet_2` deliberately does not prune;
+see lean/PRUNED_FINDINGS.md.
+
+The stop depth is the **zipper's root**, not the map root.  `prune_path_internal`
+breaks its ascent once the path reaches `root_len`, so an implicit prune cannot
+reclaim the zipper's own root even when nothing leads to it any more -- unlike
+the explicit `prune_path`, which `Zip.prunePath` models with stop depth `0`
+because it was measured rising above the root.  A write zipper rooted at `ab`
+whose subtrie is emptied therefore keeps `ab`, and the differential harness
+compares that. -/
+def tidy : Zip V := z.withTrie (z.trie.prunePath z.root.length z.focus).2
+
 /-- `ZipperWriting::remove_val`: removes the value, leaving the location as a
 dangling path unless `prune` reclaims it.
 
@@ -154,10 +174,10 @@ its root value becomes the focus value (or clears it), and its branches become
 the focus's branches.  This is `ZipperWriting::graft_map`. -/
 def graftMap (m : PathMap V) : Zip V :=
   let t := z.trie.graftBelow z.focus m
-  z.withTrie <|
+  (z.withTrie <|
     match m.valAt [] with
     | some v => (t.setVal z.focus v).2
-    | none => (t.removeVal z.focus).2
+    | none => (t.removeVal z.focus).2).tidy
 
 /-- `ZipperWriting::graft`: graft the subtrie at `src`'s focus, root value included. -/
 def graft (src : Zip V) : Zip V := z.graftMap src.makeMap
@@ -246,7 +266,7 @@ def removePrefix (n : Nat) : Bool × Zip V :=
   -- `ascend` now reports how far it got, so "were all `n` bytes removed" is a
   -- comparison rather than the flag it used to return directly.
   let (ascended, z1) := z.ascend n
-  (ascended == n, z1.withTrie (z1.trie.graftBelow z1.focus below))
+  (ascended == n, (z1.withTrie (z1.trie.graftBelow z1.focus below)).tidy)
 
 /-! ## Algebraic operations
 
@@ -431,13 +451,13 @@ a value at its focus.  The focus value of `self` is never touched. -/
 def restrict (src : Zip V) : AlgStatus × Zip V :=
   let srcB := src.focusNode
   let selfB := z.focusNode
-  if srcB.isEmptyMap then (.none, z.withTrie (z.trie.removeBelow z.focus))
+  if srcB.isEmptyMap then (.none, (z.withTrie (z.trie.removeBelow z.focus)).tidy)
   else if selfB.isEmptyMap then (.none, z)
   else
     let r := PathMap.restrictBelowRoot selfB srcB
     let st := nodeStatus ops selfB r
     if st == .identity then (.identity, z)
-    else (st, z.withTrie (z.trie.graftBelow z.focus r))
+    else (st, (z.withTrie (z.trie.graftBelow z.focus r)).tidy)
 
 /-- `ZipperWriting::restricting`: the mirror image — fill in `self`'s "stem"
 paths with the source's subtries.  `self`'s subtrie is replaced by the source's,
@@ -450,8 +470,8 @@ def restricting (src : Zip V) : Bool × Zip V :=
   -- FINDINGS.md #8.  The model specifies the common case.
   if src.focusNodeIsEmpty then (false, z)
   else if z.focusNodeIsEmpty then (false, z)
-  else (true, z.withTrie (z.trie.graftBelow z.focus
-    (PathMap.restrictBelowRoot src.focusNode z.focusNode)))
+  else (true, (z.withTrie (z.trie.graftBelow z.focus
+    (PathMap.restrictBelowRoot src.focusNode z.focusNode))).tidy)
 
 /-! ## Collapsing path segments -/
 
