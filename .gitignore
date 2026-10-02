@@ -11,3 +11,5 @@ whisper_benches/logs
 /lean/.lake
 /lean/.shrink.bin
 __pycache__/
+# Algebraic fuzzer reproducers: local only, written by alg_fuzz sweeps
+/differential/algebraic-corpus/
