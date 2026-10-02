@@ -1958,17 +1958,18 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             if key0.len() > key_len {
                 remove_0 = !mask.test_bit(key0[key_len]);
             } else {
-                //We can only get here if key0 == key, and the calling code should have descend
-                // through this node if that key specifies a non-dangling onward link
+                // An exact empty child is a dangling focus, which can be pruned here.
                 debug_assert!(!self.is_used_child_0() || unsafe{ self.child_in_slot::<0>().is_empty() });
+                remove_0 = prune_limit < key_len && self.is_used_child_0() && unsafe{ self.child_in_slot::<0>().is_empty() };
             }
         }
         if starts_with(key1, key) {
             if key1.len() > key_len {
                 remove_1 = !mask.test_bit(key1[key_len]);
             } else {
-                //See comment above
+                // See the exact-key case for slot 0.
                 debug_assert!(!self.is_used_child_1() || unsafe{ self.child_in_slot::<1>().is_empty() });
+                remove_1 = prune_limit < key_len && self.is_used_child_1() && unsafe{ self.child_in_slot::<1>().is_empty() };
             }
         }
         self.remove_subtries(remove_0, remove_1, key0_starts_with, prune_limit < key.len(), key.len());
