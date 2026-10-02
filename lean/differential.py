@@ -223,6 +223,17 @@ KNOWN = [
      "removed [empty_node_leak]"),
     (["take_map_restore"],
      "take_map() returns Some(empty map) at a dangling tip [empty_node_leak]"),
+    # The implicit prune the graft family and remove_prefix now do (see
+    # lean/PRUNED_FINDINGS.md): with `prune = true`, `node_prune_limit` reclaims
+    # a dangling key *inside* the node even where `node_remove_all_branches`
+    # reports removing nothing, so how deep the reclamation reaches depends on
+    # where the node boundary falls -- FINDINGS.md #7, now reachable through
+    # operations that prune unconditionally.  Only off-root write zippers are
+    # affected: 60000 inputs through lean/pruned_differential.py, whose write
+    # zipper is always at the map root, leave none of this.
+    (["remove_prefix"],
+     "the depth an implicit prune reaches is a function of node layout off the "
+     "map root (finding 7) [implicit_prune_node_layout]"),
     # Panics.  These only abort in a debug build; differential.py prefers the
     # release binary, so they normally surface as wrong values instead.
     (["src/zipper.rs", "subtract with overflow"],

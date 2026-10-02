@@ -100,6 +100,41 @@ def pruneAscend : Nat × Zip V :=
   let (n, z') := z.prunePath
   (n, (z'.ascend n).2)
 
+/-- Reclaim the focus when a write left it leading nowhere.
+
+`prune_path` is already a no-op unless the focus is a dangling tip, so this is
+exactly "prune if the write emptied the location".  The operations below that
+have no `prune` parameter end with it, because `graft_internal` now passes
+`prune = true` on its empty-source arm and the `graft` family's value step
+passes it too -- an operation whose result is nothing leaves no location behind.
+The ones that *do* take a flag (`meet_into`, `subtract_into`,
+`join_k_path_into`) still honour it, and `meet_2` deliberately does not prune;
+see lean/PRUNED_FINDINGS.md.
+
+The stop depth is the **zipper's root**, not the map root.  `prune_path_internal`
+breaks its ascent once the path reaches `root_len`, so an implicit prune cannot
+reclaim the zipper's own root even when nothing leads to it any more -- unlike
+the explicit `prune_path`, which `Zip.prunePath` models with stop depth `0`
+because it was measured rising above the root.  A write zipper rooted at `ab`
+whose subtrie is emptied therefore keeps `ab`, and the differential harness
+compares that. -/
+def tidy : Zip V := z.withTrie (z.trie.prunePath z.root.length z.focus).2
+
+/-! ### Why `tidy` is unconditional, which is not obvious
+
+`remove_branches(prune)` looks like it prunes only where
+`node_remove_all_branches` reported a removal, and `remove_val(prune)` returns
+early when there was no value -- so one would expect no pruning at a location
+that was *already* a dangling tip.  Guarding `tidy` on that was measured and is
+wrong: with `prune = true`, `node_prune_limit` hands a prune limit *into*
+`node_remove_all_branches`, which reclaims the dangling key inside the node and
+still reports `false`.  That is FINDINGS.md #7 -- the prune flag's in-node effect
+-- and it means the crate prunes in nearly all of these cases.  Guarding cost
+302 divergences in 8000 inputs; not guarding costs 5 in 30000, which are the
+cases where the in-node reclamation depends on where the node boundary falls.
+See `KNOWN` in lean/differential.py.
+-/
+
 /-- `ZipperWriting::remove_val`: removes the value, leaving the location as a
 dangling path unless `prune` reclaims it.
 
@@ -154,10 +189,10 @@ its root value becomes the focus value (or clears it), and its branches become
 the focus's branches.  This is `ZipperWriting::graft_map`. -/
 def graftMap (m : PathMap V) : Zip V :=
   let t := z.trie.graftBelow z.focus m
-  z.withTrie <|
+  (z.withTrie <|
     match m.valAt [] with
     | some v => (t.setVal z.focus v).2
-    | none => (t.removeVal z.focus).2
+    | none => (t.removeVal z.focus).2).tidy
 
 /-- `ZipperWriting::graft`: graft the subtrie at `src`'s focus, root value included. -/
 def graft (src : Zip V) : Zip V := z.graftMap src.makeMap
@@ -246,7 +281,7 @@ def removePrefix (n : Nat) : Bool × Zip V :=
   -- `ascend` now reports how far it got, so "were all `n` bytes removed" is a
   -- comparison rather than the flag it used to return directly.
   let (ascended, z1) := z.ascend n
-  (ascended == n, z1.withTrie (z1.trie.graftBelow z1.focus below))
+  (ascended == n, (z1.withTrie (z1.trie.graftBelow z1.focus below)).tidy)
 
 /-! ## Algebraic operations
 
@@ -284,7 +319,9 @@ It also short-circuits: when the map has no root node, the node status is
 returned directly and the value status computed above is discarded — even though
 the value has already been written. -/
 def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
-  let (valStatus, valWasNone, z1) :=
+  -- `merge` is called with both "was none" flags set, as the crate does, so the
+  -- second component is carried only for symmetry with the other operations.
+  let (valStatus, _valWasNone, z1) :=
     match z.val, m.valAt [] with
     | some sv, some mv =>
         let r := ops.pjoin sv mv
@@ -297,19 +334,26 @@ def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
     | none, none => (AlgStatus.none, true, z)
   let srcB := (m.removeVal []).2
   if srcB.isEmptyMap then
-    -- Short-circuit, and note the asymmetry with `join_into`: this branch tests
+    -- Note the asymmetry with `join_into`: this branch tests
     -- `self.get_focus().is_none()` (does a node exist at all?), not
     -- `node_is_empty()`.  So a *bare* focus reports `Identity` here, where
     -- `join_into` on the same state reports `None`.
-    (match z1.entry with
-     | .bare | .valued _ => AlgStatus.identity
-     | .absent => AlgStatus.none, z1)
+    --
+    -- The node status is *merged* with the value status rather than returned on
+    -- its own.  It used to be returned directly -- an early `return` that
+    -- discarded a value the operation had already written -- which is
+    -- issue #139, fixed by PR #142 (`276fca0`).  Both exits of the crate's
+    -- `join_map_into` now end in the same `merge`.
+    (AlgStatus.merge
+      (match z1.entry with
+       | .bare | .valued _ => AlgStatus.identity
+       | .absent => AlgStatus.none) valStatus true true, z1)
   else
     let selfB := z1.focusNode
     let r := PathMap.join ops selfB srcB
     let nodeStatus := if PathMap.beqT ops r selfB then AlgStatus.identity else AlgStatus.element
     let z2 := if nodeStatus == .identity then z1 else z1.withTrie (z1.trie.graftBelow z1.focus r)
-    (AlgStatus.merge nodeStatus valStatus true valWasNone, z2)
+    (AlgStatus.merge nodeStatus valStatus true true, z2)
 
 /-- `ZipperWriting::join_into_take`: like `join_into`, but the source subtrie is
 removed from the source zipper's trie.  Returns the updated destination *and*
@@ -422,13 +466,13 @@ a value at its focus.  The focus value of `self` is never touched. -/
 def restrict (src : Zip V) : AlgStatus × Zip V :=
   let srcB := src.focusNode
   let selfB := z.focusNode
-  if srcB.isEmptyMap then (.none, z.withTrie (z.trie.removeBelow z.focus))
+  if srcB.isEmptyMap then (.none, (z.withTrie (z.trie.removeBelow z.focus)).tidy)
   else if selfB.isEmptyMap then (.none, z)
   else
     let r := PathMap.restrictBelowRoot selfB srcB
     let st := nodeStatus ops selfB r
     if st == .identity then (.identity, z)
-    else (st, z.withTrie (z.trie.graftBelow z.focus r))
+    else (st, (z.withTrie (z.trie.graftBelow z.focus r)).tidy)
 
 /-- `ZipperWriting::restricting`: the mirror image — fill in `self`'s "stem"
 paths with the source's subtries.  `self`'s subtrie is replaced by the source's,
@@ -441,8 +485,8 @@ def restricting (src : Zip V) : Bool × Zip V :=
   -- FINDINGS.md #8.  The model specifies the common case.
   if src.focusNodeIsEmpty then (false, z)
   else if z.focusNodeIsEmpty then (false, z)
-  else (true, z.withTrie (z.trie.graftBelow z.focus
-    (PathMap.restrictBelowRoot src.focusNode z.focusNode)))
+  else (true, (z.withTrie (z.trie.graftBelow z.focus
+    (PathMap.restrictBelowRoot src.focusNode z.focusNode))).tidy)
 
 /-! ## Collapsing path segments -/
 

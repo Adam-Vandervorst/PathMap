@@ -40,8 +40,8 @@ inductive ValRes (V : Type) where
 These return `ValRes` rather than plain values because `pathmap` reports
 `AlgebraicStatus` to the caller, and the status depends on *which constructor*
 the value operation returned, not on whether the value changed.  `u64`'s
-`psubtract`, for instance, returns `Element(*self)` — an `Element` status even
-though the stored value is unchanged. -/
+`pjoin`, for instance, returns `Identity(SELF_IDENT)` rather than `Element` of
+the value it selected, so a join reports that nothing changed. -/
 structure ValOps (V : Type) where
   /-- `Lattice::pjoin` -/
   pjoin : V → V → ValRes V
@@ -63,13 +63,31 @@ def ValRes.resolve {V : Type} : ValRes V → V → V → Option V
 Both `pjoin` and `pmeet` return `Identity(SELF_IDENT)`: they are *left-biased
 projections* that ignore the counterpart value entirely.  `psubtract`
 annihilates only when the two values are equal, and otherwise returns
-`Element(*self)`.  This is the instance the differential fuzz target uses, so
-the model reproduces it exactly rather than assuming a "real" lattice. -/
+`Identity(SELF_IDENT)`: subtracting a value that is not there leaves the
+destination alone, and says so.  This is the instance the differential fuzz
+target uses, so the model reproduces it exactly rather than assuming a "real"
+lattice. -/
 def u64Ops : ValOps UInt64 where
   pjoin _ _ := .identity true false
   pmeet _ _ := .identity true false
-  psub a b := if a == b then .none else .elem a
+  psub a b := if a == b then .none else .identity true false
   beq a b := a == b
+
+/-- The instance `pathmap` provides for `()` (see `impl Lattice for ()` in `src/ring.rs`).
+
+Both `pjoin` and `pmeet` return `Identity(SELF_IDENT | COUNTER_IDENT)` — with only
+one value there is nothing to choose between, so each operand is equally "the
+answer", and the node algebra is told so.  `psubtract` of two `()`s annihilates,
+which `src/ring.rs`'s own `option_subtract_test` asserts.
+
+This is the instance under which a trie is exactly a *set of paths*, and it is
+the one for which the lattice laws hold in full — including commutativity, which
+`u64Ops` does not satisfy.  See `PrunedModel/Lattice.lean`. -/
+def unitOps : ValOps Unit where
+  pjoin _ _ := .identity true true
+  pmeet _ _ := .identity true true
+  psub _ _ := .none
+  beq _ _ := true
 
 /-! ## Prefix order -/
 
@@ -119,6 +137,79 @@ def Path.le (p q : Path) : Bool := Path.lt p q || p == q
 
 instance : LT Path := ⟨fun p q => Path.lt p q = true⟩
 instance : LE Path := ⟨fun p q => Path.le p q = true⟩
+
+/-! ### `Path.lt` is a strict total order
+
+Needed to show that the canonical form is *unique* — that two sorted,
+duplicate-free entry lists holding the same values are the same list — which is
+what lets `PrunedModel/Lattice.lean` state the lattice laws as equations rather
+than as "equal at every path".  Nothing else in the model needs them, which is
+why they were not here before. -/
+
+/-- `UInt8` order facts, routed through `toNat` so `omega` can see them. -/
+private theorem u8_lt_trans {a b c : UInt8} (h1 : a < b) (h2 : b < c) : a < c := by
+  rw [UInt8.lt_iff_toNat_lt] at *; omega
+private theorem u8_lt_irrefl (a : UInt8) : ¬ (a < a) := by
+  rw [UInt8.lt_iff_toNat_lt]; omega
+private theorem u8_eq_of_not_lt {a b : UInt8} (h1 : ¬ (a < b)) (h2 : ¬ (b < a)) : a = b := by
+  rw [UInt8.lt_iff_toNat_lt] at h1 h2
+  exact UInt8.toNat_inj.mp (by omega)
+private theorem u8_lt_of_lt_of_not_gt {a b c : UInt8} (h1 : a < b) (h2 : ¬ (c < b)) : a < c := by
+  rw [UInt8.lt_iff_toNat_lt] at *; omega
+
+theorem Path.lt_cons (a b : UInt8) (as bs : Path) :
+    Path.lt (a :: as) (b :: bs)
+      = if a < b then true else if b < a then false else Path.lt as bs := rfl
+
+@[simp] theorem Path.lt_irrefl : ∀ p : Path, Path.lt p p = false
+  | [] => rfl
+  | a :: as => by simp [Path.lt_cons, u8_lt_irrefl a, Path.lt_irrefl as]
+
+theorem Path.lt_trans : ∀ {p q r : Path},
+    Path.lt p q = true → Path.lt q r = true → Path.lt p r = true
+  | [], [], _, h1, _ => by simp [Path.lt] at h1
+  | [], _ :: _, [], _, h2 => by simp [Path.lt] at h2
+  | [], _ :: _, _ :: _, _, _ => rfl
+  | _ :: _, [], _, h1, _ => by simp [Path.lt] at h1
+  | _ :: _, _ :: _, [], _, h2 => by simp [Path.lt] at h2
+  | a :: as, b :: bs, c :: cs, h1, h2 => by
+      rw [Path.lt_cons] at h1 h2 ⊢
+      by_cases hab : a < b
+      · by_cases hcb : c < b
+        · -- the hypothesis forces `b < c`, which `c < b` contradicts
+          simp [hcb] at h2
+          exact absurd (u8_lt_trans h2 hcb) (u8_lt_irrefl b)
+        · simp [u8_lt_of_lt_of_not_gt hab hcb]
+      · by_cases hba : b < a
+        · simp [hab, hba] at h1
+        · -- a = b, so the comparison is decided one level down
+          have hab' : a = b := u8_eq_of_not_lt hab hba
+          subst hab'
+          simp only [hab] at h1
+          by_cases hac : a < c
+          · simp [hac]
+          · by_cases hca : c < a
+            · simp [hca] at h2
+              exact absurd (u8_lt_trans h2 hca) (u8_lt_irrefl a)
+            · simp only [hac, hca] at h2 ⊢
+              exact Path.lt_trans h1 h2
+
+theorem Path.lt_total : ∀ (p q : Path), Path.lt p q = true ∨ p = q ∨ Path.lt q p = true
+  | [], [] => Or.inr (Or.inl rfl)
+  | [], _ :: _ => Or.inl rfl
+  | _ :: _, [] => Or.inr (Or.inr rfl)
+  | a :: as, b :: bs => by
+      rw [Path.lt_cons, Path.lt_cons]
+      by_cases hab : a < b
+      · exact Or.inl (by simp [hab])
+      · by_cases hba : b < a
+        · exact Or.inr (Or.inr (by simp [hba]))
+        · have : a = b := u8_eq_of_not_lt hab hba
+          subst this
+          rcases Path.lt_total as bs with h | h | h
+          · exact Or.inl (by simp [hab, h])
+          · exact Or.inr (Or.inl (by simp [h]))
+          · exact Or.inr (Or.inr (by simp [hab, h]))
 
 /-- Insertion into a `Path.lt`-sorted list, dropping duplicates. -/
 def Path.insertSorted (p : Path) : List Path → List Path

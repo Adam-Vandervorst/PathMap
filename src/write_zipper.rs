@@ -141,7 +141,7 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// avoid unnecessarily large allocations.
     fn graft_masked_branches<Z: ZipperInfallibleSubtries<V, A>>(&mut self, src: &Z, child_mask: ByteMask, remove_unset: bool) {
         if remove_unset {
-            self.remove_branches(false);
+            self.remove_branches(true);
         }
 
         for child_byte in child_mask.iter() {
@@ -1506,35 +1506,35 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::graft]
     pub fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) {
-        self.graft_internal(read_zipper.get_focus().into_option());
+        self.graft_internal(read_zipper.get_focus().into_option(), true);
 
         #[cfg(feature = "graft_root_vals")]
         let _ = match read_zipper.val() {
             Some(src_val) => self.set_val(src_val.clone()),
-            None => self.remove_val(false)
+            None => self.remove_val(true)
         };
     }
     /// See [ZipperWriting::graft_src_at]
     fn graft_src_at<Z: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &Z, path: K) {
-        self.graft_internal(src.get_focus_at(&path).into_option());
+        self.graft_internal(src.get_focus_at(&path).into_option(), true);
 
         #[cfg(feature = "graft_root_vals")]
         let _ = match src.val_at(&path) {
             Some(src_val) => self.set_val(src_val.clone()),
-            None => self.remove_val(false)
+            None => self.remove_val(true)
         };
     }
     /// See [ZipperWriting::graft_map]
     pub fn graft_map(&mut self, map: PathMap<V, A>) {
         let (src_root_node, src_root_val) = map.into_root();
-        self.graft_internal(src_root_node);
+        self.graft_internal(src_root_node, true);
 
         #[cfg(not(feature = "graft_root_vals"))]
         let _ = src_root_val;
         #[cfg(feature = "graft_root_vals")]
         let _ = match src_root_val {
             Some(src_val) => self.set_val(src_val),
-            None => self.remove_val(false)
+            None => self.remove_val(true)
         };
     }
     /// Internal helper called by graft_masked_branches
@@ -1572,12 +1572,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         match child_mask.count_bits() {
             0 => {
                 if remove_unset {
-                    self.remove_branches(false);
+                    self.remove_branches(true);
                 }
             }
             1 => {
                 if remove_unset {
-                    self.remove_branches(false);
+                    self.remove_branches(true);
                 }
                 // SAFETY: this arm is selected only when `child_mask` has one bit.
                 let byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
@@ -1587,7 +1587,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
             2 => {
                 if remove_unset {
-                    self.remove_branches(false);
+                    self.remove_branches(true);
                 }
                 // SAFETY: this arm is selected only when `child_mask` has two bits.
                 let first_byte = unsafe { child_mask.indexed_bit::<true>(0).unwrap_unchecked() };
@@ -1662,23 +1662,31 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                             },
                             TaggedNodeRef::EmptyNode => {
                                 if remove_unset {
-                                    self.remove_branches(false);
+                                    self.remove_branches(true);
                                 } else {
-                                    self.remove_unmasked_branches(child_mask.not(), false);
+                                    self.remove_unmasked_branches(child_mask.not(), true);
                                 }
                             },
                         }
                         if let Some(node) = fresh_node {
                             if !node.as_tagged().node_is_empty() {
-                                self.graft_internal(Some(node));
+                                self.graft_internal(Some(node), true);
                             }
                         }
+                        // `merge_branches_into_focus` writes through a borrow of the
+                        // focus node, so there is no `graft_internal` on this path to
+                        // notice that the merge emptied it.  A mask bit whose branch
+                        // the source lacks removes that branch, and a mask of only
+                        // such bits removes them all -- leaving a focus that leads
+                        // nowhere.  `prune_path` is a no-op unless the focus really is
+                        // a dangling tip, so this costs a node_is_empty check.
+                        self.prune_path();
                     },
                     None => {
                         if remove_unset {
-                            self.remove_branches(false);
+                            self.remove_branches(true);
                         } else {
-                            self.remove_unmasked_branches(child_mask.not(), false);
+                            self.remove_unmasked_branches(child_mask.not(), true);
                         }
                     }
                 }
@@ -1712,11 +1720,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 }
             }
             let new_node_odrc = TrieNodeODRc::new_in(new_node, self.alloc.clone());
-            self.graft_internal(Some(new_node_odrc));
+            self.graft_internal(Some(new_node_odrc), true);
         } else {
             // If we don't have enough children to justify forcing a new ByteNode, just set the nodes
             if remove_unset {
-                self.remove_branches(false);
+                self.remove_branches(true);
             }
             let mut maps_iter = maps.into_iter();
             for child_byte in child_mask.iter() {
@@ -1792,7 +1800,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             Some(self_node) => {
                 match self_node.pjoin_dyn(src.as_tagged()) {
                     AlgebraicResult::Element(joined) => {
-                        self.graft_internal(Some(joined));
+                        self.graft_internal(Some(joined), true);
                         AlgebraicStatus::Element
                     }
                     AlgebraicResult::Identity(mask) => {
@@ -1800,18 +1808,18 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                             AlgebraicStatus::Identity
                         } else {
                             debug_assert!(mask & COUNTER_IDENT > 0);
-                            self.graft_internal(src.into_option());
+                            self.graft_internal(src.into_option(), true);
                             AlgebraicStatus::Element
                         }
                     },
                     AlgebraicResult::None => {
-                        self.graft_internal(None);
+                        self.graft_internal(None, true);
                         AlgebraicStatus::None
                     }
                 }
             },
             // No destination node, or an empty one: the result is the source.
-            None => { self.graft_internal(src.into_option()); AlgebraicStatus::Element }
+            None => { self.graft_internal(src.into_option(), true); AlgebraicStatus::Element }
         }
     }
     /// See [ZipperWriting::join_map_into]
@@ -1846,7 +1854,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             Some(self_node) => {
                 match self_node.pjoin_dyn(src.as_tagged()) {
                     AlgebraicResult::Element(joined) => {
-                        self.graft_internal(Some(joined));
+                        self.graft_internal(Some(joined), true);
                         AlgebraicStatus::Element
                     },
                     AlgebraicResult::Identity(mask) => {
@@ -1854,17 +1862,17 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                             AlgebraicStatus::Identity
                         } else {
                             debug_assert!(mask & COUNTER_IDENT > 0);
-                            self.graft_internal(Some(src));
+                            self.graft_internal(Some(src), true);
                             AlgebraicStatus::Element
                         }
                     },
                     AlgebraicResult::None => {
-                        self.graft_internal(None);
+                        self.graft_internal(None, true);
                         AlgebraicStatus::None
                     }
                 }
             },
-            None => { self.graft_internal(Some(src)); AlgebraicStatus::Element }
+            None => { self.graft_internal(Some(src), true); AlgebraicStatus::Element }
         };
 
         #[cfg(not(feature = "graft_root_vals"))]
@@ -1893,11 +1901,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     // made mutable; the join into nothing is the source itself
                     Some(mut self_node) if !self_node.as_tagged().node_is_empty() => {
                         let status = self_node.join_into(src);
-                        self.graft_internal(Some(self_node));
+                        self.graft_internal(Some(self_node), true);
                         status
                     },
                     _ => {
-                        self.graft_internal(Some(src));
+                        self.graft_internal(Some(src), true);
                         AlgebraicStatus::Element
                     }
                 }
@@ -1914,7 +1922,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     let new_node = self_node.make_mut().drop_head_dyn(byte_cnt)
                         .filter(|node| !node.as_tagged().node_is_empty());
                     let result = new_node.is_some();
-                    self.graft_internal(new_node);
+                    self.graft_internal(new_node, prune);
                     result
                 } else {
                     !self_node.as_tagged().node_is_empty()
@@ -2000,7 +2008,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     return true;
                 }
                 let prefixed = make_parents_in(prefix, focus_node, self.alloc.clone());
-                self.graft_internal(Some(prefixed));
+                self.graft_internal(Some(prefixed), true);
                 true
             },
             None => { false }
@@ -2013,7 +2021,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
         let fully_ascended = self.ascend(n) == n;
 
-        self.graft_internal(downstream_node);
+        self.graft_internal(downstream_node, true);
         fully_ascended
     }
     /// See [ZipperWriting::meet_into]
@@ -2043,7 +2051,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     node_was_none = false;
                     let src = read_zipper.get_focus();
                     if src.is_none() {
-                        self.graft_internal(None);
+                        self.graft_internal(None, prune);
                         if prune {
                             self.prune_path();
                         }
@@ -2051,11 +2059,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     } else {
                         match self_node.pmeet_dyn(src.as_tagged()) {
                             AlgebraicResult::Element(intersection) => {
-                                self.graft_internal(Some(intersection));
+                                self.graft_internal(Some(intersection), prune);
                                 AlgebraicStatus::Element
                             },
                             AlgebraicResult::None => {
-                                self.graft_internal(None);
+                                self.graft_internal(None, prune);
                                 if prune {
                                     self.prune_path();
                                 }
@@ -2066,7 +2074,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                                     AlgebraicStatus::Identity
                                 } else {
                                     debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be self or other
-                                    self.graft_internal(Some(src.into_option().unwrap()));
+                                    self.graft_internal(Some(src.into_option().unwrap()), prune);
                                     AlgebraicStatus::Element
                                 }
                             },
@@ -2094,7 +2102,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let a = match a_focus.try_as_tagged() {
             Some(src) => src,
             None => {
-                self.graft_internal(None);
+                self.graft_internal(None, false);
                 return AlgebraicStatus::None
             }
         };
@@ -2102,17 +2110,17 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let b = match b_focus.try_as_tagged() {
             Some(src) => src,
             None => {
-                self.graft_internal(None);
+                self.graft_internal(None, false);
                 return AlgebraicStatus::None
             }
         };
         match a.pmeet_dyn(b) {
             AlgebraicResult::Element(intersection) => {
-                self.graft_internal(Some(intersection));
+                self.graft_internal(Some(intersection), true);
                 AlgebraicStatus::Element
             },
             AlgebraicResult::None => {
-                self.graft_internal(None);
+                self.graft_internal(None, false);
                 AlgebraicStatus::None
             },
             AlgebraicResult::Identity(mask) => {
@@ -2124,12 +2132,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 };
                 match src {
                     Some(node) => {
-                        self.graft_internal(Some(node));
+                        self.graft_internal(Some(node), true);
                         AlgebraicStatus::Element
                     }
                     None => {
                         //An empty result subtrie means clear the destination
-                        self.graft_internal(None);
+                        self.graft_internal(None, false);
                         AlgebraicStatus::None
                     }
                 }
@@ -2179,11 +2187,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     node_was_none = false;
                     match self_node.psubtract_dyn(src.as_tagged()) {
                         AlgebraicResult::Element(diff) => {
-                            self.graft_internal(Some(diff));
+                            self.graft_internal(Some(diff), prune);
                             AlgebraicStatus::Element
                         },
                         AlgebraicResult::None => {
-                            self.graft_internal(None);
+                            self.graft_internal(None, prune);
                             if prune {
                                 self.prune_path();
                             }
@@ -2211,18 +2219,18 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn restrict<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus {
         let src = read_zipper.get_focus();
         if src.is_none() {
-            self.graft_internal(None);
+            self.graft_internal(None, true);
             return AlgebraicStatus::None
         }
         match self.get_focus().try_as_tagged() {
             Some(self_node) => {
                 match self_node.prestrict_dyn(src.as_tagged()) {
                     AlgebraicResult::Element(restricted) => {
-                        self.graft_internal(Some(restricted));
+                        self.graft_internal(Some(restricted), true);
                         AlgebraicStatus::Element
                     },
                     AlgebraicResult::None => {
-                        self.graft_internal(None);
+                        self.graft_internal(None, true);
                         AlgebraicStatus::None
                     },
                     AlgebraicResult::Identity(mask) => {
@@ -2243,11 +2251,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         match self.get_focus().try_as_tagged() {
             Some(self_node) => {
                 match src.as_tagged().prestrict_dyn(self_node) {
-                    AlgebraicResult::Element(restricted) => self.graft_internal(Some(restricted)),
-                    AlgebraicResult::None => self.graft_internal(None),
+                    AlgebraicResult::Element(restricted) => self.graft_internal(Some(restricted), true),
+                    AlgebraicResult::None => self.graft_internal(None, true),
                     AlgebraicResult::Identity(mask) => {
                         debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
-                        self.graft_internal(src.into_option())
+                        self.graft_internal(src.into_option(), true)
                     },
                 }
                 true
@@ -2413,7 +2421,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
     /// Internal implementation of graft, and other methods that do the same thing
     #[inline]
-    pub(crate) fn graft_internal(&mut self, src: Option<TrieNodeODRc<V, A>>) {
+    pub(crate) fn graft_internal(&mut self, src: Option<TrieNodeODRc<V, A>>, prune: bool) {
         match src {
             Some(src) => {
                 debug_assert!(!src.as_tagged().node_is_empty());
@@ -2441,7 +2449,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     *stack_root = src;
                 }
             },
-            None => { self.remove_branches(false); }
+            None => { self.remove_branches(prune); }
         }
     }
 
@@ -4194,6 +4202,31 @@ mod tests {
         drop(wz);
         let remaining: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
         assert_eq!(remaining, vec![(vec![0], 0), (vec![0, 0, 0], 0)]);
+    }
+
+    /// `subtract_into` where every value of the source collides with a *different* value in the
+    /// destination.  Nothing annihilates, so the destination comes back untouched and the status
+    /// has to be `Identity`.  The integer `psubtract` used to answer `Element(*self)`, and the node
+    /// algebra -- which propagates identity masks, not values -- turned that into `Element` for the
+    /// whole trie.
+    #[test]
+    fn write_zipper_subtract_into_unequal_values_is_identity() {
+        fn mk(ps: &[(&[u8], u64)]) -> PathMap<u64> { let mut m = PathMap::new(); for (p, v) in ps { m.set_val_at(p, *v); } m }
+        fn vals(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> { m.iter().map(|(k, v)| (k.to_vec(), *v)).collect() }
+
+        let mut dst = mk(&[(&[0], 1), (&[0, 0], 2), (&[1], 3), (&[2], 4)]);
+        let before = vals(&dst);
+        let src = mk(&[(&[0], 9), (&[0, 0], 9), (&[1], 9), (&[2], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.subtract_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::Identity);
+        assert_eq!(vals(&dst), before);
+
+        //An equal value still annihilates, and that is an `Element`, not an identity
+        let mut dst = mk(&[(&[0], 1), (&[0, 0], 2), (&[1], 3), (&[2], 4)]);
+        let src = mk(&[(&[0], 9), (&[0, 0], 2), (&[1], 9), (&[2], 9)]);
+        let st = { let mut wz = dst.write_zipper(); wz.subtract_into(&src.read_zipper(), false) };
+        assert_eq!(st, AlgebraicStatus::Element);
+        assert_eq!(vals(&dst), vec![(vec![0], 1), (vec![1], 3), (vec![2], 4)]);
     }
 
     /// Tests how `subtract_into` handles dangling paths, including situations with extraneous empty nodes hanging around

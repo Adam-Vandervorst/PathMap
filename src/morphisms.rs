@@ -999,7 +999,7 @@ pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: Alg
                 },
                 // Path from a graft, we shouldn't descend
                 WOrNode::Node(node) => {
-                    z.core().graft_internal(Some(node));
+                    z.core().graft_internal(Some(node), true);
                     z.ascend(child_path_len);
                 }
             }
