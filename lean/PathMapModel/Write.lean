@@ -120,6 +120,21 @@ whose subtrie is emptied therefore keeps `ab`, and the differential harness
 compares that. -/
 def tidy : Zip V := z.withTrie (z.trie.prunePath z.root.length z.focus).2
 
+/-! ### Why `tidy` is unconditional, which is not obvious
+
+`remove_branches(prune)` looks like it prunes only where
+`node_remove_all_branches` reported a removal, and `remove_val(prune)` returns
+early when there was no value -- so one would expect no pruning at a location
+that was *already* a dangling tip.  Guarding `tidy` on that was measured and is
+wrong: with `prune = true`, `node_prune_limit` hands a prune limit *into*
+`node_remove_all_branches`, which reclaims the dangling key inside the node and
+still reports `false`.  That is FINDINGS.md #7 -- the prune flag's in-node effect
+-- and it means the crate prunes in nearly all of these cases.  Guarding cost
+302 divergences in 8000 inputs; not guarding costs 5 in 30000, which are the
+cases where the in-node reclamation depends on where the node boundary falls.
+See `KNOWN` in lean/differential.py.
+-/
+
 /-- `ZipperWriting::remove_val`: removes the value, leaving the location as a
 dangling path unless `prune` reclaims it.
 

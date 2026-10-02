@@ -103,17 +103,17 @@ fn canon_mask(m: &[u8]) -> Vec<u8> {
 /// leaking operation to one step without a trace diff.
 pub fn check_no_dangling(map: &PathMap<u64>, label: &str) {
     let mut z = map.read_zipper();
-    // `to_next_step` visits every location below the root in depth-first order;
-    // the root itself is checked by the `is_empty` escape above.
-    loop {
+    // `to_next_step` visits every location strictly below the root in
+    // depth-first order, and the root is where the walk starts -- so step first
+    // and check after.  The root is deliberately not checked: `PathMap::new()`
+    // reports `path_exists() == true` there with nothing to lead to, which is
+    // the one location in this model that may exist without a value below it.
+    while z.to_next_step() {
         if z.child_count() == 0 && !z.is_val() {
             panic!(
                 "{label}: dangling path at {} -- a location with no value and no children",
                 hex_path(z.path())
             );
-        }
-        if !z.to_next_step() {
-            break;
         }
     }
 }

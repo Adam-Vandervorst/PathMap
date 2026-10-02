@@ -163,21 +163,24 @@ D.KNOWN = [
     (["DANGLING-FOCUS"],
      "an operation with no prune parameter materialises an empty location "
      "(PRUNED_FINDINGS.md #1, #2) [empty_write_materialises_focus]"),
-    # The two classes this model shares with the other one.  Both are live on
-    # master; `fuzz-fixes-v3` carries a fix for the value-bias one (3dae731).
+    # What is left of the two classes this model shares with the other one.
+    #
+    # VALUE-ONLY is deliberately *not* listed: the value-bias class is fixed on
+    # this branch by the cherry-pick of 3dae731, so a hit is a regression and
+    # should be reported as new rather than filed under a known note.
     #
     # The STATUS-ONLY shape is two-directional and the direction is what names
     # it, so read the report rather than the tag.  `Identity` from the model
-    # against `Element` from the crate is the FINDINGS.md #8 imprecision in
-    # `subtract_into` and `meet_into`.  The reverse direction appears only against
+    # against `Element` from the crate is the residual FINDINGS.md #8
+    # imprecision in `subtract_into` and `meet_into`.  The `join_map_into` form
+    # of it was never a crate defect: master changed that status in PR #142
+    # (276fca0, issue #139) and both models described the behaviour it replaced,
+    # which is now corrected.  The reverse direction appears only against
     # fuzz-fixes-v3, whose `u64::psubtract` (f8a4599) returns Identity where
     # `Basic.u64Ops` still says Element.
     (["STATUS-ONLY"],
      "AlgebraicStatus::Identity is not returned reliably when nothing changed, "
      "in subtract_into/meet_into (FINDINGS.md #8)"),
-    (["VALUE-ONLY"],
-     "a value collision resolves to the counterpart, by node layout rather than "
-     "by path (FINDINGS.md value bias); fuzz-fixes-v3 fixes it with 3dae731"),
 ]
 
 if __name__ == "__main__":

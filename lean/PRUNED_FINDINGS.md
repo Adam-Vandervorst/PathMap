@@ -140,9 +140,31 @@ removing rather than going through the funnel:
   `prune_path` is already a no-op unless the focus really is a dangling tip, so
   that costs one `node_is_empty` check.
 
-Measured on 4000 random programs, seed 11: **901 divergences in this class
-become 0**, agreement rises from 3005 to 3888 of 4000, and the crate's own suite
-stays at 1030 passing.  The remainder is the two inherited classes in §3.
+### Measured
+
+| | before | after |
+| --- | --- | --- |
+| this class, 4000 programs at seed 11 | 901 | **0** (with `meet_2`: see below) |
+| inputs agreeing, same 4000 | 3005 | 3888 |
+| `cargo test --lib` | 1030 pass | 1033 pass |
+
+At scale, and with the §3 value-bias cherry-pick in as well — **200 000 random
+programs, seed 7**:
+
+| | inputs |
+| --- | --- |
+| agree | 193 413 |
+| `meet_2`, left unchanged on purpose (below) | 5 901 |
+| `Identity` imprecision in `subtract_into`/`meet_into` (§3, untouched) | 686 |
+| value bias (§3, fixed) | **0** |
+| anything else | **0** |
+
+The old harness, 30 000 programs at the same seed: 28 989 agree, 0 unclassified.
+
+And without any oracle at all, `pruned_trace --check` asserts the invariant
+in-process on the finished trie.  Over 4000 programs it aborts on 16 — and on
+**0** once `meet_2` prunes too, which is the independent confirmation that
+`meet_2` is the only source left.
 
 ### `meet_2` is left out, deliberately
 
@@ -166,7 +188,25 @@ So the real defect at `meet_2` is that it has no `prune` parameter, where
 one of them lets the caller ask for a tidy trie.  Adding one is an API change
 and a decision rather than a bug fix, so it is left stated, not made.  Flipping
 it is a one-word change at the four `graft_internal(None, false)` sites in
-`meet_2`.
+`meet_2`, and it accounts for every dangling path the fixed crate still
+produces: 5901 of 200 000 inputs, and all 16 of the `--check` aborts above.
+
+### One residual, off the map root
+
+`FINDINGS.md` #7 — the `prune` flag's effect *inside* a node — becomes reachable
+through these operations now that they prune unconditionally.  With
+`prune = true`, `node_prune_limit` hands a prune limit into
+`node_remove_all_branches`, which reclaims a dangling key within the node even
+where it reports removing nothing, so how deep the reclamation reaches is a
+function of where the node boundary falls.
+
+This is invisible to the harness in this directory, whose write zipper is always
+at the map root: 200 000 inputs leave none of it.  The other harness allows
+off-root write zippers and sees it on 5 of 30 000, all in `remove_prefix`; it is
+filed in `lean/differential.py`'s `KNOWN` as `implicit_prune_node_layout`.  The
+same mechanism is why `PathMapModel`'s `tidy` is *unconditional* — guarding it on
+"did the removal report a removal" is the intuitive reading and costs 302
+divergences in 8000 inputs, against 5 in 30 000 for not guarding.
 
 ## 3. Pre-existing classes this model also reports
 
@@ -182,12 +222,26 @@ harness is run.
   `0301:0`).  Which location depends on node layout, not on the paths — see
   `FINDINGS.md` on value bias.  7 of 4000 inputs.
 
-* **`Identity` is not reported where nothing changed.**
-  `join_map_into-status-element-when-unchanged.bin`.  The source map is
-  `{[] ↦ v}` and the destination focus already holds `v`, so both the value step
-  and the node step are identities and the status must be `Identity`; the crate
-  says `Element`.  `FINDINGS.md` #8.  87 of 4000 inputs, across `join_map_into`
-  (most), `subtract_into` and `meet_into`.
+  **Fixed here** by cherry-picking `3dae731` ("Make meet/join value bias
+  independent of node layout") from `fuzz-fixes-v3`.  Three hunks in
+  `line_list_node.rs` conflicted; the commit message documents its own
+  resolutions, and master is newer in two of them (`clone_as_dense` for cell
+  nodes, and `preserve_prune_limit`), so those keep master's form and take only
+  the new `list_is_left` argument.  It is no longer in the driver's `KNOWN`, so a
+  recurrence reports as new.
+
+* **`Identity` is not reported where nothing changed**, in `subtract_into` and
+  `meet_into`.  `FINDINGS.md` #8.  8 of 4000 inputs.
+
+  The `join_map_into` form of this, which `join_map_into-status-element-when-unchanged.bin`
+  reproduces and which accounted for most of the class, **was not a crate
+  defect**: the empty-source-node exit of `join_map_into` used to `return` the
+  node status on its own, discarding a value status for a value it had already
+  written, and master fixed that in PR #142 (`276fca0`, issue #139) by ending
+  both exits in `node_status.merge(val_status, true, true)`.  Both models still
+  described the early return.  So master moved and the models lagged — the
+  reverse of what §4 of this file first claimed — and correcting them takes the
+  class from 104 of 4000 to 8.
 
 ## 4. Against `fuzz-fixes-v3`
 
@@ -200,7 +254,7 @@ is which of the above it already answers.
 | --- | --- | --- |
 | #1 + #2, empty write materialises a location | 897 + 64 | **not fixed** — 974, and all 8 reproducers still diverge |
 | #3, value bias | 7 | fixed (`3dae731`, "Make meet/join value bias independent of node layout") |
-| #3, `Identity` not reported | 87 | fixed |
+| #3, `Identity` not reported | 87 | 0, but see below |
 
 So the branch fixes the one class this model genuinely inherited, and neither of
 the two it found.  That is not surprising — `fuzz-fixes-v3` was driven by the
