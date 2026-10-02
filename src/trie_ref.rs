@@ -157,9 +157,8 @@ where
     let (node, key, val) = if path.is_empty() {
         (node, &[] as &[u8], root_val_f())
     } else {
-        node_along_path(node, path, None, true)
+        node_along_path(node, path, None, false)
     };
-    let (node, key, val) = node_along_path(node, key, val, false);
     if key.len() > MAX_NODE_KEY_BYTES ||
         (!key.is_empty() && !node.as_tagged().node_contains_partial_key(key))
     {
