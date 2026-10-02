@@ -5921,6 +5921,123 @@ mod tests {
         assert_eq!(wz.child_mask(), ByteMask::EMPTY);
     }
 
+    /// Make sure a WriteZipper method with `prune=true` results in exactly the same ending trie state as the same
+    /// method called with `prune=false` followed by a call to `prune_path`
+    #[test]
+    fn write_zipper_prune_flag_test() {
+        // Keep the minimal regression case easy to recognize.
+        for flag in [false, true] {
+            let mut map = PathMap::<u64>::new();
+            map.create_path([0]);
+            let mut wz = map.write_zipper();
+            wz.descend_to(&[0]);
+            wz.remove_unmasked_branches(ByteMask::EMPTY, flag);
+            if !flag {
+                assert_eq!(wz.prune_path(), 1);
+            }
+            assert!(
+                !wz.path_exists(),
+                "remove_unmasked_branches with prune={flag} left a dangling focus"
+            );
+        }
+
+        #[cfg(miri)]
+        const CASE_COUNT: usize = 10;
+        #[cfg(not(miri))]
+        const CASE_COUNT: usize = 400;
+        const OPS: [&str; 8] = [
+            "remove_val", "remove_branches", "remove_unmasked_branches", "take_map",
+            "join_k_path_into", "meet_into", "subtract_into", "join_into_take",
+        ];
+
+        use rand::prelude::*;
+        let mut rng = StdRng::from_seed([53; 32]);
+        let mut failures = Vec::new();
+        'cases: for case_idx in 0..CASE_COUNT {
+            let alphabet = rng.random_range(2..=5u8);
+            let mut map = PathMap::<u64>::new();
+            let mut source = PathMap::<u64>::new();
+            let mut paths = Vec::new();
+            for path_idx in 0..rng.random_range(1..=12usize) {
+                let len = if case_idx % 8 == 0 && path_idx == 0 {
+                    rng.random_range(48..=55usize)
+                } else {
+                    rng.random_range(0..=7usize)
+                };
+                let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
+                map.set_val_at(&path, 1u64 << rng.random_range(0..8));
+                if rng.random_bool(0.5) {
+                    source.set_val_at(&path, 1u64 << rng.random_range(0..8));
+                }
+                paths.push(path);
+            }
+            for _ in 0..rng.random_range(0..=4usize) {
+                let len = rng.random_range(1..=7usize);
+                let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
+                map.create_path(&path);
+                paths.push(path);
+            }
+            for _ in 0..rng.random_range(0..=4usize) {
+                let len = rng.random_range(0..=7usize);
+                let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
+                source.set_val_at(&path, 1u64 << rng.random_range(0..8));
+            }
+            let chosen = &paths[rng.random_range(0..paths.len())];
+            let mut focus = chosen[..rng.random_range(0..=chosen.len())].to_vec();
+            if rng.random_bool(0.2) { focus.push(alphabet); } // An off-trie focus.
+            let root_len = rng.random_range(0..=focus.len());
+            let mask = ByteMask::from_iter((0..=alphabet).filter(|_| rng.random_bool(0.5)));
+            let k = rng.random_range(0..=4usize);
+
+            for (op_idx, op) in OPS.iter().enumerate() {
+                let run = |prune: bool| {
+                    let mut dst = map.clone();
+                    let mut src = source.clone();
+                    {
+                        let mut wz = dst.write_zipper_at_path(&focus[..root_len]);
+                        wz.descend_to(&focus[root_len..]);
+                        match op_idx {
+                            0 => { wz.remove_val(prune); },
+                            1 => { wz.remove_branches(prune); },
+                            2 => { wz.remove_unmasked_branches(mask, prune); },
+                            3 => { wz.take_map(prune); },
+                            4 => { wz.join_k_path_into(k, prune); },
+                            5 => { wz.meet_into(&src.read_zipper_at_path(&focus), prune); },
+                            6 => { wz.subtract_into(&src.read_zipper_at_path(&focus), prune); },
+                            7 => {
+                                let mut src_wz = src.write_zipper_at_path(&focus[..root_len]);
+                                src_wz.descend_to(&focus[root_len..]);
+                                wz.join_into_take(&mut src_wz, prune);
+                                if !prune { src_wz.prune_path(); }
+                            },
+                            _ => unreachable!(),
+                        }
+                        if !prune && op_idx != 7 { wz.prune_path(); }
+                    }
+                    assert_valid_trie(dst.root());
+                    assert_valid_trie(src.root());
+                    (all_locations(&dst), all_locations(&src))
+                };
+                if run(true) != run(false) {
+                    failures.push(format!("case={case_idx} op={op} focus={focus:?} root_len={root_len} k={k}"));
+                    if failures.len() == 20 { break 'cases; }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn remove_unmasked_prunes_dangling_focus_below_zipper_root() {
+        let mut map = PathMap::<u64>::new();
+        map.create_path([0, 1, 2]);
+        let mut wz = map.write_zipper_at_path(&[0, 1]);
+        wz.descend_to(&[2]);
+        wz.remove_unmasked_branches(ByteMask::EMPTY, true);
+        assert!(!wz.path_exists());
+        assert!(map.path_exists_at(&[0, 1]));
+    }
+
     /// Tests [`ZipperInfallibleSubtries::get_focus`] and [`ZipperInfallibleSubtries::try_borrow_focus`] internal APIs on [`WriteZipperCore`]
     #[test]
     fn write_zipper_focus_nodes() {

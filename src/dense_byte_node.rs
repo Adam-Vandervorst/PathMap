@@ -1181,9 +1181,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         (Some(&ALL_BYTES[prefix..=prefix]), cf.rec().map(|cf| cf.as_tagged()))
     }
 
-    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, _prune_limit: usize) {
+    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune_limit: usize) {
         if key.len() > 0 {
-            //We're in a non-existent path below this node
+            // A one-byte key may name an existing dangling child.  With pruning
+            // enabled, remove it even though it has no branches to mask.
+            if key.len() == 1 && prune_limit == 0 {
+                self.node_remove_dangling(key, prune_limit);
+            }
             return
         }
         // in the future we can use `drain_filter`, but that's experimental
