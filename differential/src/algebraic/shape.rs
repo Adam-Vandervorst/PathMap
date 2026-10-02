@@ -24,11 +24,13 @@ use pathmap::PathMap;
 use pathmap::zipper::{ZipperMoving, ZipperPath, ZipperValues};
 use std::collections::BTreeMap;
 
+use super::value::FuzzValue;
+
 /// Every path in a trie, in depth-first order, with the value at it if any.
-pub type Shape = Vec<(Vec<u8>, Option<u64>)>;
+pub type Shape<V> = Vec<(Vec<u8>, Option<V>)>;
 
 /// The paths of a trie that carry values.
-pub type Values = BTreeMap<Vec<u8>, u64>;
+pub type Values<V> = BTreeMap<Vec<u8>, V>;
 
 /// Cap on paths recorded per trie.  A generated case that needs more than this
 /// is not interesting enough to be worth the comparison cost; the cap is
@@ -46,12 +48,12 @@ pub const TRUNCATED: &[u8] = b"<TRUNCATED>";
 ///
 /// The root is recorded explicitly: `to_next_step` moves before it reports, so
 /// a loop driven by it alone would miss the value at the empty path.
-pub fn shape_of_zipper<Z>(z: &mut Z) -> Shape
+pub fn shape_of_zipper<V: FuzzValue, Z>(z: &mut Z) -> Shape<V>
 where
-    Z: ZipperMoving + ZipperPath + ZipperValues<u64>,
+    Z: ZipperMoving + ZipperPath + ZipperValues<V>,
 {
     z.reset();
-    let mut out: Shape = vec![(Vec::new(), z.val().copied())];
+    let mut out: Shape<V> = vec![(Vec::new(), z.val().cloned())];
     loop {
         if out.len() >= SHAPE_CAP {
             out.push((TRUNCATED.to_vec(), None));
@@ -67,26 +69,26 @@ where
             out.push((ESCAPED_ROOT.to_vec(), None));
             break;
         }
-        out.push((z.path().to_vec(), z.val().copied()));
+        out.push((z.path().to_vec(), z.val().cloned()));
     }
     out
 }
 
-pub fn shape_of_map(m: &PathMap<u64>) -> Shape {
+pub fn shape_of_map<V: FuzzValue>(m: &PathMap<V>) -> Shape<V> {
     shape_of_zipper(&mut m.read_zipper())
 }
 
 /// The value-carrying subset of a [`Shape`].
-pub fn values_of_shape(s: &Shape) -> Values {
+pub fn values_of_shape<V: FuzzValue>(s: &Shape<V>) -> Values<V> {
     s.iter()
-        .filter_map(|(p, v)| v.map(|v| (p.clone(), v)))
+        .filter_map(|(p, v)| v.clone().map(|v| (p.clone(), v)))
         .collect()
 }
 
 /// The paths of a [`Shape`], values ignored.  Used by the laws that hold only
-/// up to path presence, because `u64`'s `pjoin` and `pmeet` are left-biased
-/// and so neither is commutative in the value it picks.
-pub fn paths_of_shape(s: &Shape) -> Vec<Vec<u8>> {
+/// up to path presence, which is how the laws that depend on join and meet being
+/// different functions are checked when the value type is not a lattice.
+pub fn paths_of_shape<V: FuzzValue>(s: &Shape<V>) -> Vec<Vec<u8>> {
     s.iter().map(|(p, _)| p.clone()).collect()
 }
 
@@ -101,25 +103,25 @@ pub fn show_path(p: &[u8]) -> String {
     }
 }
 
-pub fn show_shape(s: &Shape) -> String {
+pub fn show_shape<V: FuzzValue>(s: &Shape<V>) -> String {
     s.iter()
         .map(|(p, v)| match v {
-            Some(v) => format!("{}:{v}", show_path(p)),
+            Some(v) => format!("{}:{}", show_path(p), v.show()),
             None => format!("{}:-", show_path(p)),
         })
         .collect::<Vec<_>>()
         .join(",")
 }
 
-pub fn show_values(v: &Values) -> String {
+pub fn show_values<V: FuzzValue>(v: &Values<V>) -> String {
     v.iter()
-        .map(|(p, v)| format!("{}:{v}", show_path(p)))
+        .map(|(p, v)| format!("{}:{}", show_path(p), v.show()))
         .collect::<Vec<_>>()
         .join(",")
 }
 
 /// First point at which two shapes differ, for the failure report.
-pub fn first_shape_diff(a: &Shape, b: &Shape) -> Option<String> {
+pub fn first_shape_diff<V: FuzzValue>(a: &Shape<V>, b: &Shape<V>) -> Option<String> {
     for i in 0..a.len().max(b.len()) {
         match (a.get(i), b.get(i)) {
             (Some(x), Some(y)) if x == y => continue,
@@ -127,9 +129,9 @@ pub fn first_shape_diff(a: &Shape, b: &Shape) -> Option<String> {
                 return Some(format!(
                     "at #{i}: {}:{} vs {}:{}",
                     show_path(&x.0),
-                    x.1.map(|v| v.to_string()).unwrap_or("-".into()),
+                    x.1.as_ref().map(|v| v.show()).unwrap_or("-".into()),
                     show_path(&y.0),
-                    y.1.map(|v| v.to_string()).unwrap_or("-".into()),
+                    y.1.as_ref().map(|v| v.show()).unwrap_or("-".into()),
                 ));
             }
             (Some(x), None) => {
@@ -145,7 +147,7 @@ pub fn first_shape_diff(a: &Shape, b: &Shape) -> Option<String> {
 }
 
 /// First point at which two value maps differ.
-pub fn first_values_diff(a: &Values, b: &Values) -> Option<String> {
+pub fn first_values_diff<V: FuzzValue>(a: &Values<V>, b: &Values<V>) -> Option<String> {
     let mut keys: Vec<&Vec<u8>> = a.keys().chain(b.keys()).collect();
     keys.sort();
     keys.dedup();
@@ -155,8 +157,8 @@ pub fn first_values_diff(a: &Values, b: &Values) -> Option<String> {
             return Some(format!(
                 "at {}: {} vs {}",
                 show_path(k),
-                x.map(|v| v.to_string()).unwrap_or("-".into()),
-                y.map(|v| v.to_string()).unwrap_or("-".into()),
+                x.map(|v| v.show()).unwrap_or("-".into()),
+                y.map(|v| v.show()).unwrap_or("-".into()),
             ));
         }
     }

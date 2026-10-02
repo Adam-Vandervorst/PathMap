@@ -9,10 +9,12 @@
 //! cargo run --release -p differential --bin alg_bug_repros
 //! ```
 //!
-//! Exit status is 1 while any of them still reproduces.
+//! Exit status is 1 while any of them still reproduces.  Case 7 is an unsettled
+//! question rather than a defect and never counts as a failure.
 
 use pathmap::PathMap;
-use pathmap::zipper::{ZipperMoving, ZipperValues, ZipperWriting};
+use pathmap::experimental::zipper_algebra::{zipper_join, zipper_meet, zipper_sym_diff};
+use pathmap::zipper::{ZipperMoving, ZipperPath, ZipperValues, ZipperWriting};
 
 /// A trie holding only dangling paths: structure written with `create_path`
 /// and no value anywhere.
@@ -36,6 +38,22 @@ fn with_val(path: &[u8], v: u64) -> PathMap<u64> {
 
 fn val_at(m: &PathMap<u64>, path: &[u8]) -> Option<u64> {
     m.read_zipper_at_path(path).val().copied()
+}
+
+/// Every path in a trie, with `=v` on the ones carrying a value, so a
+/// dangling-path difference is visible.
+fn shape(m: &PathMap<u64>) -> Vec<String> {
+    let mut z = m.read_zipper();
+    let mut out = Vec::new();
+    z.reset();
+    while z.to_next_step() {
+        out.push(format!(
+            "{}{}",
+            z.path().iter().map(|b| format!("{b}")).collect::<String>(),
+            if z.val().is_some() { "=v" } else { "" }
+        ));
+    }
+    out
 }
 
 struct Report {
@@ -175,6 +193,80 @@ fn main() {
             "no panic".to_string(),
             if res.is_ok() { "no panic".to_string() } else { "panic".to_string() },
         );
+    }
+
+    // ---------------------------------------------------------------- 6
+    // Finding 6 has no standalone reproducer: it is three `debug_assert!`s
+    // inside the merge primitives, so there is nothing to compare and nothing
+    // to print -- the assertion either fires or it does not.  Build with
+    // `-C debug-assertions=yes` and replay the three `panic-eval-*` inputs in
+    // `algebraic-corpus/`.
+    println!(
+        "\n6. join reporting an empty result from non-empty nodes\n            => debug-assertions only; replay algebraic-corpus/panic-eval-*.bin"
+    );
+
+    // ---------------------------------------------------------------- 7
+    // The `shape` class, which is the largest one the fuzzer reports and had no
+    // reproducer until now.
+    //
+    // Not a defect: whether a dangling path -- structure written with
+    // `create_path`, carrying no value and with nothing below it -- survives an
+    // operation is unsettled in the crate.  What the fuzzer establishes is that
+    // the two families answer differently and consistently so:
+    //
+    //   * the lockstep traversals in `experimental::zipper_algebra` **discard**
+    //     dangling structure;
+    //   * `PathMap`'s whole-map operations and the write-zipper forms
+    //     (`join_into`, `meet_into`, `subtract_into`) **preserve** it.
+    //
+    // Worth having concretely, because whichever way the question is settled, one
+    // of those two families has to change, and this says which operations are on
+    // each side.
+    {
+        let d2 = dangling(&[&[0], &[1]]);
+        let dv = {
+            let mut m = dangling(&[&[0, 0]]);
+            m.write_zipper_at_path(&[1]).set_val(7);
+            m
+        };
+
+        println!("\n7. dangling paths: the zipper traversals drop them, the map operations keep them");
+        println!("   operands: d2 = {{dangling 0, 1}}, dv = {{dangling 0, 00; value at 1}}");
+
+        let mut zj = PathMap::<u64>::new();
+        {
+            let (mut a, mut b) = (d2.read_zipper(), dv.read_zipper());
+            let mut wz = zj.write_zipper();
+            zipper_join(&mut a, &mut b, &mut wz);
+        }
+        println!("   d2 | dv    zipper_join {:?}", shape(&zj));
+        println!("              PathMap::join {:?}", shape(&d2.join(&dv)));
+
+        let mut zm = PathMap::<u64>::new();
+        {
+            let (mut a, mut b) = (d2.read_zipper(), dv.read_zipper());
+            let mut wz = zm.write_zipper();
+            zipper_meet(&mut a, &mut b, &mut wz);
+        }
+        println!("   d2 & dv    zipper_meet {:?}", shape(&zm));
+        println!("              PathMap::meet {:?}", shape(&d2.meet(&dv)));
+
+        // The sharpest form: symmetric difference with the empty trie should be
+        // the identity, and for structure it is not.
+        let d = dangling(&[&[0]]);
+        let empty = PathMap::<u64>::new();
+        let mut zx = PathMap::<u64>::new();
+        {
+            let (mut a, mut b) = (d.read_zipper(), empty.read_zipper());
+            let mut wz = zx.write_zipper();
+            zipper_sym_diff(&mut a, &mut b, &mut wz);
+        }
+        println!("   d ^ {{}}     zipper_sym_diff {:?}", shape(&zx));
+        println!(
+            "              (d|e)-(d&e)    {:?}",
+            shape(&d.join(&empty).subtract(&d.meet(&empty)))
+        );
+        println!("   => not counted as a failure; the crate has not settled this");
     }
 
     println!("\n{} of 6 still reproduce", r.failed);
