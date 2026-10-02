@@ -180,7 +180,9 @@ D.KNOWN = [
     # `Basic.u64Ops` still says Element.
     (["STATUS-ONLY"],
      "AlgebraicStatus::Identity is not returned reliably when nothing changed, "
-     "in subtract_into/meet_into (FINDINGS.md #8)"),
+     "in subtract_into/meet_into -- what is left of FINDINGS.md #8 once the "
+     "value level is fixed: the node algebra does not notice that the node it "
+     "assembled equals the one it replaces.  8 of 200000 inputs"),
 ]
 
 if __name__ == "__main__":

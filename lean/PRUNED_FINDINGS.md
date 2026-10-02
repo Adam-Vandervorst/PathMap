@@ -154,9 +154,10 @@ programs, seed 7**:
 | | inputs |
 | --- | --- |
 | agree | 193 413 |
-| `meet_2`, left unchanged on purpose (below) | 5 901 |
-| `Identity` imprecision in `subtract_into`/`meet_into` (§3, untouched) | 686 |
+| `meet_2`, left unchanged on purpose (below) | 5 921 |
+| residual node-level `Identity` imprecision (§3) | 8 |
 | value bias (§3, fixed) | **0** |
+| value-level `Identity` imprecision (§3, fixed) | **0** |
 | anything else | **0** |
 
 The old harness, 30 000 programs at the same seed: 28 989 agree, 0 unclassified.
@@ -251,18 +252,33 @@ harness is run.
   `Element` arm grafts the freshly built node over the old one, so a destination
   that was structurally shared with another trie is copied apart for no reason.
 
-  It comes from two layers.  At the value level,
-  `impl DistributiveLattice for u64` returns `AlgebraicResult::Element(*self)`
+  It comes from two layers.  At the **value** level,
+  `impl DistributiveLattice for u64` returned `AlgebraicResult::Element(*self)`
   where the values differ — "here is a newly computed value", which happens to
   be `self`'s own — rather than `Identity(SELF_IDENT)`, which `src/ring.rs`'s own
   documentation says is the legal way for a non-commutative operation to report
-  no change.  `Basic.u64Ops.psub` mirrors that faithfully.  At the node level the
-  crate assembles its status compositionally as it walks and never asks whether
-  the node it assembled equals the one it is replacing, whereas
-  `nodeStatus` decides by comparing them — so the models recover a precision the
-  crate's path has already lost.  `fuzz-fixes-v3` fixes it at the value level
-  (`f8a4599`), which is the root; doing so requires `u64Ops` to move with it, or
-  the model reports `Element` where the crate then reports `Identity`.
+  no change.  The node algebra propagates identity *masks*, not values, so one
+  `Element` below a node forces the whole node, and with it `subtract_into`, to
+  report `Element` for a byte-identical trie.  At the **node** level the crate
+  assembles its status compositionally as it walks and never asks whether the
+  node it assembled equals the one it replaces, whereas `nodeStatus` decides by
+  comparing them — so the models recover a precision the crate's path has already
+  lost.
+
+  **Mostly fixed here** by cherry-picking `f8a4599` from `fuzz-fixes-v3`, which
+  is the value level: two lines, `Element(*self)` → `Identity(SELF_IDENT)` in the
+  `u64` and `u16` instances.  `bool` in the same file already did this; the
+  integer instances were the outliers.  `Basic.u64Ops.psub` is a transcription of
+  that instance rather than an independent claim, so it moves with it in the same
+  commit — otherwise the model asserts the behaviour of a version that no longer
+  exists.  Both models share `Basic.lean`, so one line covers both.
+
+  That takes the class from 686 of 200 000 inputs to **8** — 6 `meet_into` and 2
+  `subtract_into`, 0.004%.  What is left is the node level: rarer shapes where
+  the assembled node equals the one it replaces and nothing notices.  Fixing
+  those is per node type, and `fuzz-fixes-v3` has a commit for each
+  (`7662195`, `15a392d`, `c882a38`, `618f8ce`, `9f382a6`, `3a98201`); they are not
+  picked here.
 
   The `join_map_into` form of this, which `join_map_into-status-element-when-unchanged.bin`
   reproduces and which accounted for most of the class, **was not a crate
