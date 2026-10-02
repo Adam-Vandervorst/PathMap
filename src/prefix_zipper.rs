@@ -864,7 +864,7 @@ mod tests {
         let mut map = PathMap::<u64>::new();
         map.set_val_at(&[5u8], 1);
         map.set_val_at(&[5u8, 6], 2);
-        fn steps<Z: ZipperMoving + ZipperPath>(z: &mut Z) -> Vec<Vec<u8>> {
+        fn steps<Z: ZipperMoving>(z: &mut Z) -> Vec<Vec<u8>> {
             let mut v = vec![];
             while z.to_next_step() { v.push(z.path().to_vec()); assert!(v.len() < 16); }
             v
@@ -883,7 +883,7 @@ mod tests {
             assert_eq!(f.path_exists(), z.path_exists(), "{at:?}");
             assert_eq!(steps(&mut f), want, "{at:?}");
             f.descend_to(&[1u8, 1]);
-            assert_eq!(f.ascend(5), 2, "{at:?}");
+            assert!(!f.ascend(5), "{at:?}");
             assert!(f.at_root(), "{at:?}");
         }
         //An empty prefix
