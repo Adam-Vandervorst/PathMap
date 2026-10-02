@@ -1494,13 +1494,32 @@ mod tests {
     /// Every split of a long path into a focus and a lookup path agrees with a lookup from the root
     #[test]
     fn trie_ref_long_key_every_split() {
+        #[cfg(miri)]
+        const KEY_LENGTHS: &[(u8, usize)] = &[(0, 49)];
+        #[cfg(not(miri))]
+        const KEY_LENGTHS: &[(u8, usize)] = &[(0, 100), (1, 130), (2, 49), (3, 48), (4, 47)];
+
+        #[cfg(miri)]
+        const BRANCH_POINTS: &[usize] = &[30];
+        #[cfg(not(miri))]
+        const BRANCH_POINTS: &[usize] = &[30, 48, 49, 96];
+
+        #[cfg(miri)]
+        fn rest_lengths(remaining: usize) -> impl Iterator<Item = usize> {
+            [0, remaining, remaining + 1].into_iter()
+        }
+        #[cfg(not(miri))]
+        fn rest_lengths(remaining: usize) -> impl Iterator<Item = usize> {
+            0..=(remaining + 1).min(120)
+        }
+
         let mut map = PathMap::<u64>::new();
         let mut keys: Vec<Vec<u8>> = vec![];
-        for (n, len) in [(0u8, 100usize), (1, 130), (2, 49), (3, 48), (4, 47)] {
+        for &(n, len) in KEY_LENGTHS {
             let mut k = vec![n; len];
             keys.push(k.clone());
             //A branch part way along, and one just past a node key's length
-            for at in [30usize, 48, 49, 96] {
+            for &at in BRANCH_POINTS {
                 if at < len { k[at] = 9; keys.push(k[..(at + 5).min(len)].to_vec()); k[at] = n; }
             }
         }
@@ -1509,7 +1528,7 @@ mod tests {
             for focus in 0..=k.len() {
                 let mut rz = map.read_zipper();
                 rz.descend_to(&k[..focus]);
-                for rest in 0..=(k.len() - focus + 1).min(120) {
+                for rest in rest_lengths(k.len() - focus) {
                     let mut path = k[focus..].iter().copied().take(rest).collect::<Vec<u8>>();
                     while path.len() < rest { path.push(7); }
                     let mut full = k[..focus].to_vec();
