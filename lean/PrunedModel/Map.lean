@@ -1,4 +1,4 @@
-import PathMapModel.Basic
+import PrunedModel.Canon
 
 /-!
 # A trie with no dangling paths
@@ -55,45 +55,63 @@ open PathMapModel
 
 /-- A `pathmap` trie with no dangling paths: a finite path→value map.
 
-The set of locations that exist is the prefix closure of the keys, plus the
-root; it is derived by `paths` rather than stored.  Canonical: sorted by
-`Path.lt`, no duplicate keys. -/
+Two things are *derived* rather than stored, and that is the whole design.
+
+The set of locations that exist is the prefix closure of the keys, plus the root;
+`paths` computes it.  So a dangling path is not merely absent from the model, it
+is unrepresentable — which is what this model is for.
+
+Canonical form is carried in the type rather than asserted in a docstring.
+`sorted` says the keys strictly increase in `Path.lt`, which by
+`distinctKeys_of_sortedKeys` also rules out a key bound twice.  Two consequences:
+there is no junk inhabitant, so `PrunedMap` *is* the finite path→value map rather
+than a representation of one; and structural equality is observational equality
+(`eq_of_sortedKeys_of_lookup`), which is what lets the lattice laws in
+`Lattice.lean` be equations with no side conditions.  The field used to be a bare
+list with a `Canonical` predicate the laws carried as a hypothesis. -/
 structure PrunedMap (V : Type) where
   /-- Every location that carries a value, with it, in depth-first order. -/
   entries : List (Path × V)
-deriving Repr
+  /-- Keys strictly increasing: the canonical-form invariant. -/
+  sorted : SortedKeys entries
 
 namespace PrunedMap
 
 variable {V : Type}
 
-/-! ## Canonicalisation -/
+/-! ## Construction
 
-/-- Deduplicate an association list, keeping the *first* binding for each key.
-Left-biased, matching `pathmap`'s `Identity(SELF_IDENT)` value instances. -/
-def dedupVals (l : List (Path × V)) : List (Path × V) :=
-  l.foldl (fun acc kv => if acc.any (fun x => x.1 == kv.1) then acc else acc ++ [kv]) []
+`normVals` and its lemmas live in `PrunedModel/Canon.lean`; the only thing to do
+here is carry the proof it supplies. -/
 
-/-- Insert into a key-sorted association list (assumes the key is not present). -/
-def insertValSorted (kv : Path × V) : List (Path × V) → List (Path × V)
-  | [] => [kv]
-  | kv' :: rest =>
-      if Path.lt kv.1 kv'.1 then kv :: kv' :: rest
-      else kv' :: insertValSorted kv rest
-
-/-- Canonicalise a raw association list: keep the first binding per key, sort by key. -/
-def normVals (l : List (Path × V)) : List (Path × V) :=
-  (dedupVals l).foldl (fun acc kv => insertValSorted kv acc) []
-
-/-- Build a canonical map from a raw, possibly unsorted association list.
+/-- Build a map from a raw, possibly unsorted, possibly duplicate-keyed
+association list.
 
 This is the *only* constructor, and it takes no path argument: there is nothing
-to say about which locations exist, because the keys already say it. -/
-def mk' (vals : List (Path × V)) : PrunedMap V := { entries := normVals vals }
+to say about which locations exist, because the keys already say it.  The proof
+field comes from `sortedKeys_normVals` — canonicalisation is what establishes the
+invariant, so every map in the model is canonical by construction. -/
+def mk' (vals : List (Path × V)) : PrunedMap V := ⟨normVals vals, sortedKeys_normVals vals⟩
 
 /-- The empty trie.  Its root still exists — `PathMap::new().read_zipper()`
 reports `path_exists() == true` — but nothing else does. -/
-def empty : PrunedMap V := { entries := [] }
+def empty : PrunedMap V := ⟨[], trivial⟩
+
+/-- **Equality is observational.**  Two tries holding the same value at every path
+are the same trie: the entry lists are sorted, so each is the unique sorted
+enumeration of its own contents, and the `sorted` fields are proofs of a `Prop`
+and so equal automatically.
+
+This is why `Lattice.lean` can state the lattice laws as `=`. -/
+theorem ext {a b : PrunedMap V} (h : ∀ k, a.entries.lookup k = b.entries.lookup k) : a = b := by
+  cases a; cases b
+  cases eq_of_sortedKeys_of_lookup _ _ ‹SortedKeys _› ‹SortedKeys _› h
+  rfl
+
+/-- Printed as its entry list: the `sorted` field is a `Prop` and carries no
+information, so `deriving Repr` cannot be used and there is nothing to lose. -/
+instance [Repr V] : Repr (PrunedMap V) where
+  reprPrec t n := reprPrec t.entries n
 
 instance : Inhabited (PrunedMap V) := ⟨empty⟩
 
