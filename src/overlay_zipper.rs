@@ -200,27 +200,37 @@ impl<AV, BV, OutV, AZipper, BZipper, Mapping> ZipperMoving
 
     fn descend_to_val<K: AsRef<[u8]>>(&mut self, path: K) -> usize {
         let path = path.as_ref();
-        let depth_a = self.a.descend_to_val(path);
-        let depth_o = self.b.descend_to_val(path);
-        if depth_a < depth_o {
-            if self.a.is_val() {
-                self.b.ascend(depth_o - depth_a);
-                depth_a
+        let mut descended = 0;
+        while descended < path.len() {
+            let remaining = &path[descended..];
+            let depth_a = self.a.descend_to_val(remaining);
+            let depth_b = self.b.descend_to_val(remaining);
+            // A source at a value can return zero without finding a new value along the path.
+            let advanced = if depth_a < depth_b {
+                if depth_a > 0 && self.a.is_val() {
+                    self.b.ascend(depth_b - depth_a);
+                    depth_a
+                } else {
+                    self.a.descend_to(&remaining[depth_a..depth_b]);
+                    depth_b
+                }
+            } else if depth_b < depth_a {
+                if depth_b > 0 && self.b.is_val() {
+                    self.a.ascend(depth_a - depth_b);
+                    depth_b
+                } else {
+                    self.b.descend_to(&remaining[depth_b..depth_a]);
+                    depth_a
+                }
             } else {
-                self.a.descend_to(&path[depth_a..depth_o]);
-                depth_o
-            }
-        } else if depth_o < depth_a {
-            if self.b.is_val() {
-                self.a.ascend(depth_a - depth_o);
-                depth_o
-            } else {
-                self.b.descend_to(&path[depth_o..depth_a]);
                 depth_a
+            };
+            descended += advanced;
+            if advanced == 0 || self.is_val() {
+                break;
             }
-        } else {
-            depth_a
         }
+        descended
     }
 
     fn descend_to_byte(&mut self, k: u8) {
@@ -414,6 +424,7 @@ mod tests {
             zipper_moving_tests,
             ZipperMoving,
             ZipperPath,
+            ZipperValues,
             OverlayZipper
         },
     };
@@ -614,5 +625,32 @@ mod tests {
             assert_eq!(z.ascend(3), 3);
             assert_eq!(z.depth(), 0);
         }
+    }
+
+    #[test]
+    fn overlay_descend_to_val_skips_values_filtered_by_mapping() {
+        fn only_a<'a>(a: Option<&'a u64>, _: Option<&'a u64>) -> Option<&'a u64> { a }
+        fn only_b<'a>(_: Option<&'a u64>, b: Option<&'a u64>) -> Option<&'a u64> { b }
+
+        let mut a = PathMap::<u64>::new();
+        a.set_val_at(&[1u8, 2, 3], 3);
+        let mut b = PathMap::<u64>::new();
+        b.set_val_at(&[1u8], 1);
+
+        let mut z = OverlayZipper::with_mapping(a.read_zipper(), b.read_zipper(), only_a);
+        assert_eq!(z.descend_to_val(&[1u8, 2, 3]), 3);
+        assert_eq!(z.path(), &[1u8, 2, 3]);
+        assert_eq!(z.val(), Some(&3));
+
+        let mut a = PathMap::<u64>::new();
+        a.set_val_at(&[1u8], 1);
+        a.set_val_at(&[1u8, 2], 2);
+        let mut b = PathMap::<u64>::new();
+        b.set_val_at(&[1u8, 2, 3], 3);
+
+        let mut z = OverlayZipper::with_mapping(a.read_zipper(), b.read_zipper(), only_b);
+        assert_eq!(z.descend_to_val(&[1u8, 2, 3]), 3);
+        assert_eq!(z.path(), &[1u8, 2, 3]);
+        assert_eq!(z.val(), Some(&3));
     }
 }
