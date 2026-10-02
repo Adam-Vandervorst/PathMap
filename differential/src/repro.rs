@@ -170,33 +170,33 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                     else { "rz.make_map().val_count();".to_string() } }
             26 => { let t = g!(d.modn(2)); format!("{}.fork_read_zipper();", z!(t)) }
             27 => { let v = g!(d.u8()) as u64; format!("wz.set_val({v});") }
-            28 => { let _pr = g!(d.boolean()); "wz.remove_val(false);".to_string() }
+            28 => { let pr = g!(d.boolean()); format!("wz.remove_val({pr});") }
             29 => "wz.create_path();".to_string(),
             30 => "wz.prune_path();".to_string(),
             31 => "wz.prune_ascend();".to_string(),
-            32 => { let _pr = g!(d.boolean()); "wz.remove_branches(false);".to_string() }
-            33 => { let n = g!(d.modn(4)); let m = g!(d.path_n(n)); let _pr = g!(d.boolean());
-                    format!("wz.remove_unmasked_branches(ByteMask::from_iter({}.iter().copied()), false);", rs_mask(&m)) }
+            32 => { let pr = g!(d.boolean()); format!("wz.remove_branches({pr});") }
+            33 => { let n = g!(d.modn(4)); let m = g!(d.path_n(n)); let pr = g!(d.boolean());
+                    format!("wz.remove_unmasked_branches(ByteMask::from_iter({}.iter().copied()), {pr});", rs_mask(&m)) }
             34 => "wz.graft(&rz);".to_string(),
             35 => { let p = g!(d.path(6));
                     format!("wz.graft_src_at(&rz, {});", rs_bytes(&p)) }
             36 => "wz.join_into(&rz);".to_string(),
             37 => "wz.join_map_into(rz.make_map());".to_string(),
-            38 => { let _pr = g!(d.boolean()); "wz.meet_into(&rz, false);".to_string() }
-            39 => { let _pr = g!(d.boolean()); "wz.subtract_into(&rz, false);".to_string() }
+            38 => { let pr = g!(d.boolean()); format!("wz.meet_into(&rz, {pr});") }
+            39 => { let pr = g!(d.boolean()); format!("wz.subtract_into(&rz, {pr});") }
             40 => "wz.restrict(&rz);".to_string(),
             41 => "wz.restricting(&rz);".to_string(),
-            42 => { let k = g!(d.modn(4)); let _pr = g!(d.boolean());
+            42 => { let k = g!(d.modn(4)); let pr = g!(d.boolean());
                     if k == 0 { "// join_k_path_into(0): skipped by the harness".to_string() }
-                    else { format!("wz.join_k_path_into({k}, false);") } }
+                    else { format!("wz.join_k_path_into({k}, {pr});") } }
             43 => { let p = g!(d.path(6));
                     if p.is_empty() { "// insert_prefix(\"\"): skipped by the harness".to_string() }
                     else { format!("wz.insert_prefix({});", rs_bytes(&p)) } }
             44 => { let n = g!(d.modn(6)); format!("wz.remove_prefix({n});") }
-            45 => { let _pr = g!(d.boolean());
-                    "if let Some(m) = wz.take_map(false) { wz.graft_map(m); }".to_string() }
-            46 => { let k = g!(d.modn(4)); let _pr = g!(d.boolean());
-                    format!("if {k} != 0 && wz.child_count() != 0 {{ wz.meet_k_path_into({k}, false); }}") }
+            45 => { let pr = g!(d.boolean());
+                    format!("if let Some(m) = wz.take_map({pr}) {{ wz.graft_map(m); }}") }
+            46 => { let k = g!(d.modn(4)); let pr = g!(d.boolean());
+                    format!("if {k} != 0 && wz.child_count() != 0 {{ wz.meet_k_path_into({k}, {pr}); }}") }
             47 => { let t = g!(d.modn(2));
                     format!("{{ let mut obs = Vec::new(); {}.descend_until_observed(&mut obs); }}", z!(t)) }
             48 => { let v = g!(d.u8()) as u64;

@@ -151,8 +151,6 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
 /// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
-/// * `skip:off-root-prune` — a prune on a write zipper not rooted at the map
-///   root, where the depth pruned is a function of internal node layout.
 /// * `skip:quarantined` — the op is disabled outright (op 54).
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
@@ -161,7 +159,6 @@ pub const SKIP_AT_ROOT: &str = "skip:at-root";
 pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
 pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
-pub const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
 pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 
 /// Does the focus have no descendants at all?
@@ -465,14 +462,8 @@ pub fn run_ops<R: ReadSource>(
     {
         let mut wz = map0.write_zipper_at_path(root0);
         let mut step = 0usize;
-        // Explicit pruning is only well-defined for a zipper at the map root;
-        // off it the depth pruned depends on internal node layout.
-        let pruneable = root0.is_empty();
-        // The `prune` flag on the other operations is passed straight to
-        // `node_remove_*`, which prunes within the node even when it finds
-        // nothing and reports `None` -- so its effect is a function of node
-        // layout, not of the trie.  Always false.  See lean/FINDINGS.md #7.
-        let no_prune = false;
+        // Run pruning at every zipper root so layout-dependent defects remain
+        // visible to the differential comparison.
 
         macro_rules! get {
             ($e:expr) => {
@@ -676,40 +667,28 @@ pub fn run_ops<R: ReadSource>(
                     ("set_val", show_val(wz.set_val(v).as_ref()))
                 }
                 28 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    ("remove_val", show_val(wz.remove_val(no_prune).as_ref()))
+                    let pr = get!(d.boolean());
+                    ("remove_val", show_val(wz.remove_val(pr).as_ref()))
                 }
                 29 => ("create_path", show_bool(wz.create_path()).to_string()),
-                30 => {
-                    if pruneable {
-                        ("prune_path", format!("{}", wz.prune_path()))
-                    } else {
-                        ("prune_path", SKIP_OFF_ROOT_PRUNE.to_string())
-                    }
-                }
-                31 => {
-                    if pruneable {
-                        ("prune_ascend", format!("{}", wz.prune_ascend()))
-                    } else {
-                        ("prune_ascend", SKIP_OFF_ROOT_PRUNE.to_string())
-                    }
-                }
+                30 => ("prune_path", format!("{}", wz.prune_path())),
+                31 => ("prune_ascend", format!("{}", wz.prune_ascend())),
                 32 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     let leaky = focus_node_empty(&wz);
-                    let r = wz.remove_branches(no_prune);
+                    let r = wz.remove_branches(pr);
                     let s = if leaky { "?".to_string() } else { show_bool(r).to_string() };
                     ("remove_branches", s)
                 }
                 33 => {
                     let n = get!(d.modn(4));
                     let m = get!(d.path_n(n));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    let mask = ByteMask::from_iter(m.iter().copied());
-                    wz.remove_unmasked_branches(mask, no_prune);
+                    let pr = get!(d.boolean());
                     let mut canon: Vec<u8> = m.clone();
                     canon.sort_unstable();
                     canon.dedup();
+                    let mask = ByteMask::from_iter(m.iter().copied());
+                    wz.remove_unmasked_branches(mask, pr);
                     ("remove_unmasked_branches", hex_path(&canon))
                 }
                 34 => {
@@ -737,15 +716,12 @@ pub fn run_ops<R: ReadSource>(
                     ("join_map_into", s)
                 }
                 38 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, no_prune)))
+                    let pr = get!(d.boolean());
+                    ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, pr)))
                 }
                 39 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    (
-                        "subtract_into",
-                        show_status_opt((*rz).do_subtract_into(&mut wz, no_prune)),
-                    )
+                    let pr = get!(d.boolean());
+                    ("subtract_into", show_status_opt((*rz).do_subtract_into(&mut wz, pr)))
                 }
                 40 => {
                     let leaky = focus_node_empty(&wz);
@@ -771,13 +747,13 @@ pub fn run_ops<R: ReadSource>(
                 }
                 42 => {
                     let k = get!(d.modn(4));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     // `join_k_path_into(0)` destroys the subtrie in pathmap 0.3.1.
                     if k == 0 {
                         ("join_k_path_into", SKIP_K0.to_string())
                     } else {
                         // The bool leaks node materialisation; see FINDINGS.md #8.
-                        let r = wz.join_k_path_into(k, no_prune);
+                        let r = wz.join_k_path_into(k, pr);
                         let s = if focus_node_empty(&wz) {
                             "?".to_string()
                         } else {
@@ -800,9 +776,9 @@ pub fn run_ops<R: ReadSource>(
                     ("remove_prefix", show_bool(wz.remove_prefix(n)).to_string())
                 }
                 45 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     let leaky = focus_node_empty(&wz) && wz.val().is_none();
-                    let r = match wz.take_map(no_prune) {
+                    let r = match wz.take_map(pr) {
                         Some(m) => {
                             wz.graft_map(m);
                             "1"
@@ -813,7 +789,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 46 => {
                     let k = get!(d.modn(4));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     // `meet_k_path_into` spins forever when the focus has no
                     // children, and escapes the focus subtree when k == 0.
                     // See `Zip.meetKPathUnspecified`.
@@ -824,7 +800,7 @@ pub fn run_ops<R: ReadSource>(
                     } else {
                         (
                             "meet_k_path_into",
-                            show_bool(wz.meet_k_path_into(k, no_prune)).to_string(),
+                            show_bool(wz.meet_k_path_into(k, pr)).to_string(),
                         )
                     }
                 }

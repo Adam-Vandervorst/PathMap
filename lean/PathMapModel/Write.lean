@@ -15,9 +15,9 @@ invariants shape the whole API and are worth stating up front:
    the model assumes throughout.  Note the resulting asymmetry: `graft` adopts
    the source's focus value but `join_into` does **not** join focus values.
 
-2. **Pruning is opt-in and local.**  A write leaves dangling paths behind unless
-   `prune` is passed, and even then `prune_path` only fires when the focus is a
-   dangling tip.  Pruning stops at the zipper's root and never rises above it.
+2. **Pruning is opt-in and root-bounded.**  A write leaves dangling paths behind
+   unless `prune` is passed.  Passing `true` means running the operation with
+   `false`, then calling `prunePath` at the resulting focus, even after a no-op.
 -/
 
 namespace PathMapModel
@@ -71,28 +71,12 @@ def getValOrSetMutWith (d : V) : V × Bool × Zip V :=
   | some v => (v, false, z)
   | none => (d, true, (z.setVal d).2)
 
-/-- `ZipperWriting::prune_path`: delete the dangling chain ending at the focus,
-stopping at the first location above it that carries a value or branches.  The
-focus does **not** move.
-
-Two things about this differ from the doc comment on `ZipperWriting::prune_path`,
-both verified against `pathmap` 0.3.1:
-
-* **It prunes above the zipper's root.**  The doc says "This method cannot prune
-  the trie above the zipper's root", but a write zipper rooted at `ab` whose
-  focus is a dangling tip deletes `a` and `ab` too, right up to the nearest
-  branch or value in the *whole map*.  The model therefore passes `0`, not
-  `z.root.length`, as the stop depth.
-* **The returned count is not well-defined** when the zipper's root is non-empty.
-  `prune_path` returns `max(node_pruned_bytes, trie_pruned_bytes)`, and
-  `node_pruned_bytes` depends on where the internal node holding the focus
-  happens to begin.  Empirically, a 40-byte dangling chain under a zipper rooted
-  at depth 5 reports 40 (absolute) while a 100-byte one reports 95 (relative).
-  The *effect* is the same in both cases; only the number differs.  The model
-  reports the absolute count, and the differential harness compares the count
-  only for zippers rooted at the map root. -/
+/-- `ZipperWriting::prune_path`: remove the dangling suffix ending at the focus.
+The first valued or branching ancestor survives; the zipper root is also a hard
+stop.  Return the number of bytes removed, relative to the focus, without moving
+the cursor.  An absent, valued, or branching focus returns zero. -/
 def prunePath : Nat × Zip V :=
-  let (n, t) := z.trie.prunePath 0 z.focus
+  let (n, t) := z.trie.prunePath z.root.length z.focus
   (n, z.withTrie t)
 
 /-- `ZipperWriting::prune_ascend`: `prune_path` followed by ascending that far. -/
@@ -100,20 +84,11 @@ def pruneAscend : Nat × Zip V :=
   let (n, z') := z.prunePath
   (n, (z'.ascend n).2)
 
-/-- `ZipperWriting::remove_val`: removes the value, leaving the location as a
-dangling path unless `prune` reclaims it.
-
-Pruning only happens when a value was actually removed: `remove_val` returns
-early on the `None` branch, so `remove_val(true)` at a location with no value
-leaves any dangling path in place. -/
+/-- `ZipperWriting::remove_val`: remove the value, then optionally prune. -/
 def removeVal (prune : Bool) : Option V × Zip V :=
-  match z.entry with
-  -- Nothing to remove.  Note the `prune` flag does not fire here: `remove_val`
-  -- returns early on this branch, so a dangling path is left in place.
-  | .absent | .bare => (none, z)
-  | .valued v =>
-    let z' := z.withTrie (z.trie.removeVal z.focus).2
-    (some v, if prune then (z'.prunePath).2 else z')
+  let (old, t) := z.trie.removeVal z.focus
+  let z' := z.withTrie t
+  (old, if prune then (z'.prunePath).2 else z')
 
 /-- `ZipperWriting::create_path`: make the focus exist as a dangling path.
 Returns whether new bytes were created.
@@ -208,17 +183,15 @@ def graftChildMaps (maps : List (ByteMask × PathMap V)) (removeUnset : Bool) : 
 /-- `ZipperWriting::take_map`: remove the subtrie at the focus (value included)
 and return it as a `PathMap`.  Returns `none` when there was nothing to take. -/
 def takeMap (prune : Bool) : Option (PathMap V) × Zip V :=
-  let rv := z.entry.val
-  let z1 := z.withTrie (z.trie.removeVal z.focus).2
-  let z2 := if prune then (z1.prunePath).2 else z1
-  let below := z2.focusNode
-  let z3 := z2.withTrie (z2.trie.removeBelow z2.focus)
-  let z4 := if prune then (z3.prunePath).2 else z3
+  let (rv, z1) := z.removeVal false
+  let below := z1.focusNode
+  let (_, z2) := z1.removeBranches false
   let taken :=
     match rv with
     | some v => (below.setVal [] v).2
     | none => below
-  (if below.isEmptyMap && rv.isNone then none else some taken, z4)
+  (if below.isEmptyMap && rv.isNone then none else some taken,
+    if prune then (z2.prunePath).2 else z2)
 
 /-! ## Path surgery -/
 
@@ -331,7 +304,7 @@ def joinIntoTake (src : Zip V) (prune : Bool) : AlgStatus × Zip V × Zip V :=
 The value step runs first and can prune the focus out from under the node step.
 A meet drops every dangling path, since a location only survives if it leads to
 a surviving value. -/
-def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
+def meetIntoWithoutPrune (src : Zip V) : AlgStatus × Zip V :=
   let (valStatus, valWasNone, z1) :=
     match z.val, src.val with
     | some sv, some ov =>
@@ -339,9 +312,9 @@ def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
         (AlgStatus.ofValRes r, false,
           match r.resolve sv ov with
           | some v => (z.setVal v).2
-          | none => (z.removeVal prune).2)
+          | none => (z.removeVal false).2)
     | none, some _ => (AlgStatus.none, true, z)
-    | some _, none => (AlgStatus.none, false, (z.removeVal prune).2)
+    | some _, none => (AlgStatus.none, false, (z.removeVal false).2)
     | none, none => (AlgStatus.none, true, z)
   let selfB := z1.focusNode
   let srcB := src.focusNode
@@ -349,8 +322,7 @@ def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
     (AlgStatus.merge .none valStatus true valWasNone, z1)
   else if srcB.isEmptyMap then
     let z2 := z1.withTrie (z1.trie.removeBelow z1.focus)
-    let z3 := if prune then (z2.prunePath).2 else z2
-    (AlgStatus.merge .none valStatus false valWasNone, z3)
+    (AlgStatus.merge .none valStatus false valWasNone, z2)
   else
     let r := PathMap.meet ops selfB srcB
     let st := nodeStatus ops selfB r
@@ -358,15 +330,20 @@ def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
       if st == .identity then z1
       else
         let zg := z1.withTrie (z1.trie.graftBelow z1.focus r)
-        if st == .none && prune then (zg.prunePath).2 else zg
+        zg
     (AlgStatus.merge st valStatus false valWasNone, z2)
+
+/-- A true flag is exactly an explicit prune after the meet. -/
+def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
+  let (st, z') := z.meetIntoWithoutPrune ops src
+  (st, if prune then (z'.prunePath).2 else z')
 
 /-- `ZipperWriting::subtract_into`: remove the source's subtrie from the focus's.
 
 Where the source has no node at all, `self`'s subtree survives untouched —
 dangling paths included.  Where it does, only locations leading to a surviving
 value are kept. -/
-def subtractInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
+def subtractIntoWithoutPrune (src : Zip V) : AlgStatus × Zip V :=
   let (valStatus, valWasNone, z1) :=
     match z.val, src.val with
     | some sv, some ov =>
@@ -374,7 +351,7 @@ def subtractInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
         (AlgStatus.ofValRes r, false,
           match r.resolve sv ov with
           | some v => (z.setVal v).2
-          | none => (z.removeVal prune).2)
+          | none => (z.removeVal false).2)
     | none, some _ => (AlgStatus.none, true, z)
     | some _, none => (AlgStatus.identity, false, z)
     | none, none => (AlgStatus.none, true, z)
@@ -392,8 +369,13 @@ def subtractInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
       if st == .identity then z1
       else
         let zg := z1.withTrie (z1.trie.graftBelow z1.focus r)
-        if st == .none && prune then (zg.prunePath).2 else zg
+        zg
     (AlgStatus.merge st valStatus false valWasNone, z2)
+
+/-- A true flag is exactly an explicit prune after the subtraction. -/
+def subtractInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
+  let (st, z') := z.subtractIntoWithoutPrune ops src
+  (st, if prune then (z'.prunePath).2 else z')
 
 /-- `ZipperWriting::meet_2`: meet two *source* subtries and write the result at
 the focus.
@@ -463,7 +445,7 @@ def joinKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
     else
       let r := PathMap.dropHead ops below k
       (!r.isEmptyMap, z.withTrie (z.trie.graftBelow z.focus r))
-  (res, if prune && !res then (z1.prunePath).2 else z1)
+  (res, if prune then (z1.prunePath).2 else z1)
 
 /-- `meet_k_path_into` is **not implementable** for these arguments: its
 provisional implementation drives `descend_first_k_path` through the
@@ -486,9 +468,11 @@ def meetKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
       match acc with
       | none => some m
       | some a => some (PathMap.meet ops a m)) none
-  match result with
-  | some m => if m.isEmptyMap then (false, (z.removeBranches prune).2) else (true, z.graftMap m)
-  | none => (false, (z.removeBranches prune).2)
+  let (b, z') :=
+    match result with
+    | some m => if m.isEmptyMap then (false, (z.removeBranches false).2) else (true, z.graftMap m)
+    | none => (false, (z.removeBranches false).2)
+  (b, if prune then (z'.prunePath).2 else z')
 
 end Zip
 end PathMapModel

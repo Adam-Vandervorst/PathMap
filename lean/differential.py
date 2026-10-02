@@ -280,6 +280,9 @@ KNOWN = [
      "an algebraic op keeps a dangling child the spec drops: an empty child "
      "node meets/subtracts to itself rather than disappearing "
      "[meet_keeps_dangling]"),
+    (["DANGLING-FOCUS-KEPT"],
+     "meet_into() keeps an empty materialized focus that the spec removes "
+     "[meet_keeps_dangling]"),
     (["CONTENT-DROPPED"],
      "subtract_into() drops a value under a path present in the source "
      "[subtract_drops_value]"),
@@ -290,6 +293,15 @@ KNOWN = [
     (["FOCUS-VALUE-FOR-DANGLING"],
      "val_at()/get_val_at() return the focus value for a dangling child path "
      "[val_at_dangling]"),
+    (["PRUNE-FLAG-VAL"],
+     "remove_val(true) left a dangling focus; see corpus/prune-flag-remove-val*.bin "
+     "[prune_flag]"),
+    (["PRUNE-FLAG-UNMASKED"],
+     "remove_unmasked_branches(true) left a dangling focus; "
+     "see corpus/prune-flag-unmasked.bin [prune_flag]"),
+    (["PRUNE-FLAG-SUBTRACT"],
+     "subtract_into(true) left a dangling focus after producing None; "
+     "see corpus/prune-flag-subtract.bin [prune_flag]"),
 ]
 
 
@@ -371,6 +383,17 @@ def divergence_shape(a, b):
         if all(x[1:].isdigit() and y[1:].isdigit() for x, y in diff):
             return "VALUE-ONLY"
         return None
+    if keys == {"e"} and len(diff) == 1 and diff[0] == ("e0", "e1"):
+        if len(ta) > 2 and ta[1] == "remove_val":
+            return "PRUNE-FLAG-VAL"
+        if len(ta) > 2 and ta[1] == "remove_unmasked_branches":
+            return "PRUNE-FLAG-UNMASKED"
+        if len(ta) > 2 and ta[1] == "subtract_into" and "ret=None" in ta:
+            return "PRUNE-FLAG-SUBTRACT"
+    if (keys == {"e"} and len(diff) == 1 and len(ta) > 2
+            and ta[1] == "meet_into" and "ret=None" in ta
+            and diff[0] == ("e0", "e1")):
+        return "DANGLING-FOCUS-KEPT"
     if keys <= {"ret", "c", "n"} and ({"c", "n"} & keys):
         # `c` (child_count) when it moved, else `n` (val_count): a dangling
         # child adds a child without adding a value, a dropped value the

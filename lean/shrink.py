@@ -56,7 +56,11 @@ def signature(blob):
             strip = lambda t: re.sub(r" n\d+", " n?", t)
             vc = (len(pa) == 2 and len(pb) == 2 and pa[0] == pb[0]
                   and strip(pa[1]) == strip(pb[1]))
-            return "DIFF %s%s" % ("valcount-only " if vc else "", a.split()[1])
+            fields = a.split()
+            op = fields[1] if len(fields) > 1 and fields[0].isdigit() else (fields[0] if fields else "blank")
+            if op == "remove_val" and any(t.startswith("ret=") and t != "ret=-" for t in fields):
+                op += " valued"
+            return "DIFF %s%s" % ("valcount-only " if vc else "", op)
     if len(ml) != len(cl):
         return "DIFF length"
     return None
