@@ -30,6 +30,7 @@ use pathmap::experimental::zipper_algebra::{
     zipper_n_join, zipper_n_meet, zipper_n_subtract, zipper_n_sym_diff, zipper_subtract,
     zipper_subtract3, zipper_sym_diff, zipper_sym_diff3, ZipperMergeF,
 };
+use pathmap::fuse::FuseExpr;
 use pathmap::zipper::{
     OverlayZipper, ReadZipperUntracked, ZipperMoving, ZipperPath, ZipperValues, ZipperWriting,
 };
@@ -87,6 +88,14 @@ pub enum Route {
     NaryPoly,
     /// `zipper_merge_dnf` on a join of meets.
     Dnf,
+    /// The whole expression as a `pathmap::fuse` program: compiled to SSA form
+    /// and evaluated bottom-up over trie *nodes*, below the zipper layer
+    /// entirely.
+    Fuse,
+    /// The same program after `distribute_and_over_or`.  Rewriting
+    /// `(a | b) & c` into `(a & c) | (b & c)` must not change the answer, which
+    /// makes the rewrite pass itself checkable.
+    FuseDistributed,
     /// Flat `BTreeMap` semantics, no trie.  Values only; abstains on structure.
     Model,
 }
@@ -99,6 +108,8 @@ impl Route {
             Route::Nary,
             Route::NaryPoly,
             Route::Dnf,
+            Route::Fuse,
+            Route::FuseDistributed,
             Route::Model,
         ]);
         v
@@ -126,6 +137,8 @@ impl Route {
             Route::Nary => "nary".into(),
             Route::NaryPoly => "nary_poly".into(),
             Route::Dnf => "dnf".into(),
+            Route::Fuse => "fuse".into(),
+            Route::FuseDistributed => "fuse_distributed".into(),
             Route::Model => "model".into(),
         }
     }
@@ -164,6 +177,8 @@ pub fn eval<V: FuzzValue>(route: Route, e: &Expr, operands: &[PathMap<V>]) -> Op
         Route::Nary => nary(e, operands, false).map(|m| Outcome::from_map(&m)),
         Route::NaryPoly => nary(e, operands, true).map(|m| Outcome::from_map(&m)),
         Route::Dnf => dnf(e, operands).map(|m| Outcome::from_map(&m)),
+        Route::Fuse => fuse(e, operands, false).map(|m| Outcome::from_map(&m)),
+        Route::FuseDistributed => fuse(e, operands, true).map(|m| Outcome::from_map(&m)),
         Route::Model => {
             let vals: Vec<Values<V>> =
                 operands.iter().map(|m| values_of_shape(&shape_of_map(m))).collect();
@@ -451,6 +466,54 @@ fn nary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>], poly: bool) -> Option<P
         }
     }
     Some(out)
+}
+
+/// The whole expression as a `pathmap::fuse` program.
+///
+/// The only route that leaves the zipper layer altogether: `fuse` evaluates
+/// bottom-up over `TrieNodeODRc` nodes, combining each step with `pjoin_dyn`,
+/// `pmeet_dyn` and `psubtract_dyn` directly.  So it checks the node-level
+/// primitives against the zipper traversals that are supposed to agree with
+/// them, which nothing else here does.
+///
+/// `distributed` runs the program through `distribute_and_over_or` first.  That
+/// rewrite is only supposed to be a performance choice, so the two must give
+/// the same answer and the pass gets checked for free.
+///
+/// Declines an expression containing `restrict`: `FuseOp` has no counterpart,
+/// and restrict is not a lattice operation.
+fn fuse<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>], distributed: bool) -> Option<PathMap<V>> {
+    let (prog, out) = to_fuse_expr(e)?.compile();
+    let inputs: Vec<&PathMap<V>> = operands.iter().collect();
+    let mut results = if distributed {
+        prog.eval_distributed(&inputs, &[out])
+    } else {
+        prog.eval(&inputs, &[out])
+    };
+    debug_assert_eq!(results.len(), 1);
+    results.pop()
+}
+
+/// Map the expression language onto `FuseOp`.
+///
+/// Both languages are trees over the same operands, so this is one-to-one
+/// except for `restrict`, which `fuse` has no operation for.  The operand order
+/// is preserved, which matters: every one of these is left-biased in its
+/// values.
+fn to_fuse_expr(e: &Expr) -> Option<FuseExpr> {
+    Some(match e {
+        Expr::Var(i) => FuseExpr::leaf(*i),
+        Expr::Bin(op, l, r) => {
+            let (l, r) = (to_fuse_expr(l)?, to_fuse_expr(r)?);
+            match op {
+                Op::Join => FuseExpr::or(l, r),
+                Op::Meet => FuseExpr::and(l, r),
+                Op::Subtract => FuseExpr::and_not(l, r),
+                Op::SymDiff => FuseExpr::xor(l, r),
+                Op::Restrict => return None,
+            }
+        }
+    })
 }
 
 /// A join of meets through `zipper_merge_dnf`.

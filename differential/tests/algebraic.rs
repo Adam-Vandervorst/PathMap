@@ -173,7 +173,7 @@ fn dnf_rejects_non_monotone_operators() {
 
 /// The lawful value type has to actually be lawful, or every "real defect" the
 /// comparison attributes to the crate could be its fault instead.
-/// The `shape` class's characterisation, as `bin/alg_bug_repros` case 7 states it:
+/// The `shape` class's characterisation, as `bin/alg_bug_repros` case 9 states it:
 /// the lockstep traversals discard dangling structure and the whole-map
 /// operations preserve it.
 ///
@@ -397,6 +397,24 @@ fn route_numbering_is_the_same_for_every_value_type() {
     // values, because OverlayZipper's mapping returns a reference.
     assert!(!<Bits as FuzzValue>::JOIN_PICKS_LEFT);
     assert!(<u64 as FuzzValue>::JOIN_PICKS_LEFT);
+}
+
+#[test]
+fn fuse_routes_decline_restrict_and_accept_everything_else() {
+    use differential::algebraic::routes::{eval, Route};
+    use pathmap::PathMap;
+
+    let operands: Vec<PathMap<u64>> = (0..4).map(|_| PathMap::new()).collect();
+    for op in Op::ALL {
+        let e = Expr::bin(op, var(0), var(1));
+        let got = eval(Route::Fuse, &e, &operands).is_some();
+        // `FuseOp` has no restrict, and restrict is not a lattice operation, so
+        // the route has to decline rather than approximate it.
+        assert_eq!(got, op != Op::Restrict, "{op:?}");
+    }
+    // A bare operand compiles to `FuseRef::Input`, which `eval` must still
+    // handle -- it is the one case with no steps at all.
+    assert!(eval(Route::Fuse, &var(2), &operands).is_some());
 }
 
 #[test]

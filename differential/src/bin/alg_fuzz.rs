@@ -40,7 +40,7 @@ use differential::algebraic::{self, Class, Outcome, Rng, signatures};
 /// corpus entries are the same question.  The two families answer it differently
 /// and consistently: the lockstep traversals in `experimental::zipper_algebra`
 /// discard dangling structure, and `PathMap`'s whole-map operations and the
-/// write-zipper forms preserve it (`bin/alg_bug_repros` case 7).  Those are
+/// write-zipper forms preserve it (`bin/alg_bug_repros` case 9).  Those are
 /// counted and printed, so a change in them is visible, but they do not turn a
 /// run red unless `--shape` asks them to.  A wrong *value* is never ambiguous
 /// and always fails.

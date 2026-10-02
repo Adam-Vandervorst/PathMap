@@ -10,9 +10,10 @@
 //! evaluated by every route in `routes.rs` that applies to it -- eagerly on
 //! whole maps, in place through a write zipper, as a lockstep traversal of two
 //! read zippers, as a single n-ary traversal, through the DNF engine, through a
-//! lazy `OverlayZipper` over a virtual trie, and over a flat `BTreeMap` with no
-//! trie at all.  Then `laws.rs` evaluates pairs of expressions that must agree
-//! whatever the operands, which catches the mistakes every route shares.
+//! lazy `OverlayZipper` over a virtual trie, as a `pathmap::fuse` program over
+//! trie nodes below the zipper layer, and over a flat `BTreeMap` with no trie at
+//! all.  Then `laws.rs` evaluates pairs of expressions that must agree whatever
+//! the operands, which catches the mistakes every route shares.
 //!
 //! No Lean build is needed and there is no oracle: a divergence says the
 //! implementations disagree, not which one is wrong.
@@ -535,12 +536,18 @@ pub struct Known {
 const BIAS: &str = "value bias by node layout, u64-only (repro 3)";
 const LOSS: &str = "join loses a value across shared structure (repro 4)";
 const ROOT: &str = "write-zipper forms lose root values (repros 1, 2)";
-const DANGLING: &str = "zipper traversals drop dangling paths, map ops keep them (repro 7)";
+const DANGLING: &str = "zipper traversals drop dangling paths, map ops keep them (repro 9)";
 const MERKLEIZE: &str = "merkleize panics on dangling-only structure (repro 5)";
 /// Re-nesting a join moves which operand is on the left *and* which pair of
 /// tries meets a shared node first, so both cause 1 and cause 2 reach these.
 /// Under the lawful type only cause 2 survives, which is why the counts collapse.
 const BIAS_OR_LOSS: &str = "value bias or lost value (repros 3, 4)";
+/// `fuse`'s `Xor` is `(l \\ r) | (r \\ l)`.  Cause 2 reaches the join on the end of
+/// that construction.  Under `u64` it *also* disagrees with `zipper_sym_diff`,
+/// because the two standard formulas for symmetric difference are only equal in a
+/// real lattice -- which is a fact about `u64`, not about either implementation.
+const FUSE_XOR: &str = "fuse Xor: cause 2, amplified under u64 by its non-lattice (repros 7, 8)";
+
 pub const KNOWN: &[Known] = &[
     // ---------------------------------------------------------------- u64
     // Root values lost by the write-zipper forms.  Value-type-independent.
@@ -557,6 +564,8 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "u64:values:nary_poly", cause: BIAS },
     Known { signature: "u64:values:dnf", cause: BIAS },
     Known { signature: "u64:values:model", cause: BIAS },
+    Known { signature: "u64:values:fuse", cause: FUSE_XOR },
+    Known { signature: "u64:values:fuse_distributed", cause: FUSE_XOR },
     Known { signature: "u64:shape:pw1", cause: DANGLING },
     Known { signature: "u64:shape:pw2", cause: DANGLING },
     Known { signature: "u64:shape:pw3", cause: DANGLING },
@@ -566,6 +575,8 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "u64:shape:nary", cause: DANGLING },
     Known { signature: "u64:shape:nary_poly", cause: DANGLING },
     Known { signature: "u64:shape:dnf", cause: DANGLING },
+    Known { signature: "u64:shape:fuse", cause: DANGLING },
+    Known { signature: "u64:shape:fuse_distributed", cause: DANGLING },
     Known { signature: "u64:law:join-associative", cause: BIAS_OR_LOSS },
     Known { signature: "u64:law:join-distributes-over-meet", cause: BIAS_OR_LOSS },
     Known { signature: "u64:law:majority-is-pairwise-meets", cause: BIAS_OR_LOSS },
@@ -599,6 +610,8 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "bits:values:nary_poly", cause: LOSS },
     Known { signature: "bits:values:dnf", cause: LOSS },
     Known { signature: "bits:values:model", cause: LOSS },
+    Known { signature: "bits:values:fuse", cause: LOSS },
+    Known { signature: "bits:values:fuse_distributed", cause: LOSS },
     Known { signature: "bits:shape:pw1", cause: DANGLING },
     Known { signature: "bits:shape:pw2", cause: DANGLING },
     Known { signature: "bits:shape:pw3", cause: DANGLING },
@@ -608,6 +621,8 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "bits:shape:nary", cause: DANGLING },
     Known { signature: "bits:shape:nary_poly", cause: DANGLING },
     Known { signature: "bits:shape:dnf", cause: DANGLING },
+    Known { signature: "bits:shape:fuse", cause: DANGLING },
+    Known { signature: "bits:shape:fuse_distributed", cause: DANGLING },
     Known { signature: "bits:law:join-associative", cause: LOSS },
     Known { signature: "bits:law:join-commutative", cause: LOSS },
     Known { signature: "bits:law:join-distributes-over-meet", cause: LOSS },
@@ -631,6 +646,8 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "unit:values:nary_poly", cause: LOSS },
     Known { signature: "unit:values:dnf", cause: LOSS },
     Known { signature: "unit:values:model", cause: LOSS },
+    Known { signature: "unit:values:fuse", cause: LOSS },
+    Known { signature: "unit:values:fuse_distributed", cause: LOSS },
     Known { signature: "unit:shape:pw1", cause: DANGLING },
     Known { signature: "unit:shape:pw2", cause: DANGLING },
     Known { signature: "unit:shape:pw3", cause: DANGLING },
@@ -640,6 +657,8 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "unit:shape:nary", cause: DANGLING },
     Known { signature: "unit:shape:nary_poly", cause: DANGLING },
     Known { signature: "unit:shape:dnf", cause: DANGLING },
+    Known { signature: "unit:shape:fuse", cause: DANGLING },
+    Known { signature: "unit:shape:fuse_distributed", cause: DANGLING },
     Known { signature: "unit:law:join-associative", cause: LOSS },
     Known { signature: "unit:law:join-commutative", cause: LOSS },
     Known { signature: "unit:law:join-distributes-over-meet", cause: LOSS },

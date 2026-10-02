@@ -9,11 +9,13 @@
 //! cargo run --release -p differential --bin alg_bug_repros
 //! ```
 //!
-//! Exit status is 1 while any of them still reproduces.  Case 7 is an unsettled
-//! question rather than a defect and never counts as a failure.
+//! Exit status is 1 while any of them still reproduces.  Cases 8 and 9 are not
+//! defects -- one is a property of the value type, the other an unsettled
+//! question -- and never count as a failure.
 
 use pathmap::PathMap;
 use pathmap::experimental::zipper_algebra::{zipper_join, zipper_meet, zipper_sym_diff};
+use pathmap::fuse::FuseExpr;
 use pathmap::zipper::{ZipperMoving, ZipperPath, ZipperValues, ZipperWriting};
 
 /// A trie holding only dangling paths: structure written with `create_path`
@@ -200,12 +202,72 @@ fn main() {
     // inside the merge primitives, so there is nothing to compare and nothing
     // to print -- the assertion either fires or it does not.  Build with
     // `-C debug-assertions=yes` and replay the three `panic-eval-*` inputs in
-    // `algebraic-corpus/`.
+    // `algebraic-corpus/`.  Case 7 below is its visible consequence.
     println!(
         "\n6. join reporting an empty result from non-empty nodes\n            => debug-assertions only; replay algebraic-corpus/panic-eval-*.bin"
     );
 
     // ---------------------------------------------------------------- 7
+    // Finding 4 again, reached without cloning anything, and with a visible
+    // consequence.  `fuse`'s `Xor` is `(l \ r) | (r \ l)`.  With `c` holding no
+    // values at all and `a` holding one, `c \ a` comes out as dangling-only
+    // structure and `a \ c` keeps the value -- so the join at the end is
+    // exactly the shape of finding 4, and it loses the value.
+    //
+    // Worth having separately because every PathMap-level spelling of the same
+    // thing keeps it: `a - c`, `(c | a) - (c & a)` and `(c - a) | (a - c)` are
+    // all correct here.  Only the node-level composition loses it, and
+    // `join_into_dyn` reports `AlgebraicStatus::Element` while doing so, so a
+    // caller cannot detect it from the status either.
+    {
+        let mut a = dangling(&[&[0, 0, 0, 0, 0]]);
+        a.write_zipper_at_path(&[0]).set_val(1);
+        let c = dangling(&[&[1]]);
+
+        let (prog, out) = FuseExpr::xor(FuseExpr::leaf(0), FuseExpr::leaf(1)).compile();
+        let fused = prog.eval(&[&c, &a], &[out]).pop().unwrap();
+
+        let eager = c.join(&a).subtract(&c.meet(&a));
+        r.case(
+            "7",
+            "fuse Xor loses a value only one operand has, at [0]",
+            format!("Some(1), as (c|a)-(c&a) gives {:?}", val_at(&eager, &[0])),
+            format!("{:?}", val_at(&fused, &[0])),
+        );
+    }
+
+    // ---------------------------------------------------------------- 8
+    // Not a defect in either operation: a symptom of the *value type*.
+    //
+    // `(a | b) \ (a & b)` and `(a \ b) | (b \ a)` are equal in any distributive
+    // lattice with a relative complement, so symmetric difference is not
+    // ambiguous and there is no convention to choose.  They come apart for
+    // `u64` because `u64`'s `Lattice` impl is not a lattice: `pjoin` is
+    // `left_biased_pjoin` and `pmeet` is `Identity(SELF_IDENT)`, so both are
+    // "return the left operand" and `a | b == a & b` for every pair -- which in
+    // a lattice would force `a == b`.  With the two collapsed into one function
+    // the first formula becomes `a \ a` and vanishes, while the second stays `a`.
+    //
+    // `zipper_sym_diff` follows the first; `fuse`'s `Xor` follows the second.
+    // Both are right, and the premise is wrong.  `bin/alg_lattice_check.rs`
+    // prints the same comparison for `bool`, a real Boolean algebra, where all
+    // four inputs agree.
+    {
+        let c = with_val(&[], 2);
+        let a = with_val(&[], 1);
+
+        let (prog, out) = FuseExpr::xor(FuseExpr::leaf(0), FuseExpr::leaf(1)).compile();
+        let fused = prog.eval(&[&c, &a], &[out]).pop().unwrap();
+        let by_definition = c.join(&a).subtract(&c.meet(&a));
+
+        println!("\n8. symmetric difference of {{_:2}} and {{_:1}}: u64 is not a lattice");
+        println!("   (c|a)-(c&a) root value: {:?}  (cancels)", val_at(&by_definition, &[]));
+        println!("   fuse Xor    root value: {:?}  (keeps the left)", val_at(&fused, &[]));
+        println!("   => both formulas are correct; u64's pjoin == pmeet makes them differ");
+        println!("      see bin/alg_lattice_check, where bool agrees on all inputs");
+    }
+
+    // ---------------------------------------------------------------- 9
     // The `shape` class, which is the largest one the fuzzer reports and had no
     // reproducer until now.
     //
@@ -230,7 +292,7 @@ fn main() {
             m
         };
 
-        println!("\n7. dangling paths: the zipper traversals drop them, the map operations keep them");
+        println!("\n9. dangling paths: the zipper traversals drop them, the map operations keep them");
         println!("   operands: d2 = {{dangling 0, 1}}, dv = {{dangling 0, 00; value at 1}}");
 
         let mut zj = PathMap::<u64>::new();
@@ -269,7 +331,7 @@ fn main() {
         println!("   => not counted as a failure; the crate has not settled this");
     }
 
-    println!("\n{} of 6 still reproduce", r.failed);
+    println!("\n{} of 7 still reproduce", r.failed);
     if r.failed > 0 {
         std::process::exit(1);
     }

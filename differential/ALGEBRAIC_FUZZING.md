@@ -86,7 +86,21 @@ is ever built:
 | `nary` | a chain of any length | `zipper_n_join` and friends |
 | `nary_poly` | the same chain | `ZipperMergeF::join_n` and friends, via the `PolyZipper` enum |
 | `dnf` | a join of meets | `zipper_merge_dnf` |
+| `fuse` | anything but `restrict` | a `pathmap::fuse` SSA program over trie *nodes* |
+| `fuse_distributed` | the same | that program after `distribute_and_over_or` |
 | `model` | anything | a flat `BTreeMap`, no trie at all |
+
+`fuse` is the only route that leaves the zipper layer altogether. It compiles
+the expression to the SSA form in `src/fuse.rs` and evaluates it bottom-up over
+`TrieNodeODRc` nodes, combining each step with `pjoin_dyn`, `pmeet_dyn` and
+`psubtract_dyn` directly — so it checks the node-level primitives against the
+zipper traversals that are supposed to agree with them, which nothing else here
+does. `FuseOp` maps onto the expression language one-to-one apart from
+`restrict`, which it has no operation for.
+
+`fuse_distributed` is nearly free and worth having: rewriting `(a | b) & c` into
+`(a & c) | (b & c)` is supposed to be a performance choice, so the rewrite pass
+is checkable by requiring the answer not to change.
 
 The `model` route is the fourth opinion. Every other route goes through
 `pathmap`, so a defect common to the whole algebra layer would make them agree
@@ -274,7 +288,7 @@ is settled:
 * `PathMap`'s whole-map operations and the write-zipper forms (`join_into`,
   `meet_into`, `subtract_into`) **preserve** it.
 
-`bin/alg_bug_repros` case 7 shows three of them side by side, the sharpest being
+`bin/alg_bug_repros` case 9 shows three of them side by side, the sharpest being
 `d ^ {}`: symmetric difference with the empty trie ought to be the identity, and
 `zipper_sym_diff` returns nothing where `(d | e) - (d & e)` returns `d`. A wrong
 *value* is never ambiguous.
@@ -353,9 +367,9 @@ expects the `panic:eval:*` signatures.
 
 ## Findings
 
-Six defects on `master` at `b4a6abd`, reproduced without the fuzzer in
-`src/bin/alg_bug_repros.rs`, plus the unsettled dangling-path question as case 7.
-`algebraic::KNOWN` maps every signature onto one of them.
+Seven defects on `master` at `b4a6abd`, plus one unchosen convention, reproduced
+without the fuzzer in `src/bin/alg_bug_repros.rs`. `algebraic::KNOWN` maps every
+signature onto one of them.
 
 1. **`join_into` drops the source's root value when the destination is empty.**
    `PathMap::new().join(&src)` keeps it; the write-zipper spelling does not.
@@ -388,6 +402,71 @@ Six defects on `master` at `b4a6abd`, reproduced without the fuzzer in
    `None` while the left side still has a non-empty onward node
    (`dense_byte_node.rs:2080`). Debug-assertions builds only, so it has no
    standalone reproducer — replay the `panic-eval-*` corpus inputs.
+
+7. **`fuse`'s `Xor` loses a value only one operand has.** Finding 4 again, with
+   no clone involved and a visible consequence. `Xor` is `(l \ r) | (r \ l)`; with
+   `c` holding no values and `a` holding one, `c \ a` comes out dangling-only and
+   `a \ c` keeps the value, so the join at the end is exactly finding 4's shape.
+   Every `PathMap`-level spelling — `a - c`, `(c | a) - (c & a)`, `(c - a) | (a -
+   c)` — is correct here; only the node-level composition loses it, and
+   `join_into_dyn` returns `AlgebraicStatus::Element` while doing so, so a caller
+   cannot detect it from the status.
+
+**And one that is not a defect at all, which is now visible as such.** `zipper_sym_diff` cancels a coincident
+path carrying *different* values; `fuse`'s `Xor` keeps the left value. It is
+tempting to call that two conventions for symmetric difference, and an earlier
+version of this document did. That was wrong: `(a | b) - (a & b)` and
+`(a - b) | (b - a)` are equal in any distributive lattice with a relative
+complement, so there is nothing to choose between them. They come apart only
+because `u64` is not a lattice — with `pjoin` and `pmeet` collapsed into one
+function, the first formula becomes `a - a` and vanishes while the second stays
+`a`. Both implementations are right and the premise was wrong. See "`u64` is not
+a lattice" above; `bin/alg_lattice_check` shows `bool` agreeing on all four
+inputs. Reported, counted, and not a bug.
+
+### Reading a report
+
+A value divergence also says which side the `model` route backs. That line is
+worth reading first: the baseline is `PathMap::join` and friends, which have
+defects of their own, so "route X disagrees with the baseline" points at the
+wrong file about as often as the right one. When the model sides with the route,
+the baseline is where to look. When it agrees with neither, suspect a shared
+primitive — or the model.
+
+Every signature is printed with its count, known or not, and a `<-- NEW` marker
+on anything absent from `KNOWN`. Exit status is 1 if anything is new;
+`--strict` makes every finding fatal. Counts matter even for known findings: a
+known defect that starts firing ten times more often is a change worth seeing,
+and it does not turn the run red.
+
+`KNOWN` is a snapshot, not a closed list. A longer sweep may well reach a new
+assertion site — the three in finding 6 appeared at 500 000, 3 000 000 and
+roughly 400 000 cases respectively. A new signature is the fuzzer working.
+
+## What this changed in `src/fuse.rs`
+
+`fuse.rs` is ported from the `trie-fusion-ops` branch at `e94915c`, which is 448
+commits behind `master`; only the module itself came across, not that branch's
+`cbm_stream` work, its `utils` additions, or its reduction of the workspace
+member list. Two changes were made to it:
+
+* **`combine_val` now delegates to the lattice operations**, through the
+  `Option<V>` impls in `pathmap::ring`, mirroring `combine_node` arm for arm. It
+  used to decide the root value by presence alone: `And` kept the *right* value
+  and `AndNot` dropped the left value whenever the right side had any value at
+  all. Correct for a set, but it meant a root value and a value one byte deeper
+  were combined by different rules — and for `u64`, where `pmeet` is
+  `Identity(SELF_IDENT)` and `psubtract` is `None` only for *equal* values, both
+  arms were simply wrong. With this fixed, the `fuse` routes agree with
+  everything else on join, meet and subtract; disabling `SymDiff` in the
+  generator makes both `fuse` signatures disappear entirely.
+
+* The module header described a fused byte-by-byte walk that an earlier revision
+  reverted. It now describes the bottom-up whole-node evaluator that is actually
+  there, and records why the byte-level version cannot be written against the
+  `TrieNode` trait: `LineListNode` stores compressed multi-byte keys, so
+  `node_get_child(&[byte])` returns `None` for a byte `node_branches_mask`
+  reports as present.
 
 ## Harness invariants
 
@@ -427,7 +506,8 @@ disagrees with the rest, suspect the route first.
 | `tests/algebraic.rs` | the corpus gate and the harness invariants |
 | `algebraic-corpus/` | one minimised input per signature |
 
-Nothing outside `differential/` is touched.
+`src/fuse.rs` in the parent crate is the one file outside `differential/` this
+work touches; see above.
 
 Byte decoding reuses `harness::Dec`. The wire format is *not* the one
 `harness.rs` shares with `PathMapModel.Fuzz`: this fuzzer has no model to stay
