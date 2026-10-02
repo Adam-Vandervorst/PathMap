@@ -1505,7 +1505,7 @@ mod tests {
                     while path.len() < rest { path.push(7); }
                     let mut full = k[..focus].to_vec();
                     full.extend(&path);
-                    let want = map.val_at(&full);
+                    let want = map.get_val_at(&full);
                     assert_eq!(rz.val_at(&path), want, "focus {focus} rest {rest} key {}", k.len());
                     assert_eq!(rz.trie_ref_at_path(&path).val(), want, "focus {focus} rest {rest} key {}", k.len());
                 }
