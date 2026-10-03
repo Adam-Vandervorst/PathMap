@@ -185,7 +185,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
             let result = cf.take_val();
 
-            if prune_limit == 0 && !cf.has_rec() {
+            if prune_limit == 0 && cf.rec().map(|rec| rec.as_tagged().node_is_empty()).unwrap_or(true) {
                 self.mask.clear_bit(k);
                 self.values.remove(ix);
             }
@@ -1003,10 +1003,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         if self.mask.test_bit(k) {
             let ix = self.mask.index_of(k) as usize;
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
+            let had_branches = cf.rec().is_some_and(|node| !node.as_tagged().node_is_empty());
             match (cf.has_rec(), cf.has_val()) {
                 (true, true) => {
                     cf.set_rec_option(None);
-                    true
+                    had_branches
                 },
                 (true, false) => {
                     if prune_limit == 0 {
@@ -1015,11 +1016,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                     } else {
                         cf.set_rec_option(None);
                     }
-                    true
+                    had_branches
                 },
-                (false, _) => {
+                (false, false) if prune_limit == 0 => {
+                    self.values.remove(ix);
+                    self.mask.clear_bit(k);
                     false
                 },
+                (false, _) => false,
             }
         } else {
             false
@@ -1181,9 +1185,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         (Some(&ALL_BYTES[prefix..=prefix]), cf.rec().map(|cf| cf.as_tagged()))
     }
 
-    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, _prune_limit: usize) {
+    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune_limit: usize) {
         if key.len() > 0 {
-            //We're in a non-existent path below this node
+            // A one-byte key may name an existing dangling child.  With pruning
+            // enabled, remove it even though it has no branches to mask.
+            if key.len() == 1 && prune_limit == 0 {
+                self.node_remove_dangling(key, prune_limit);
+            }
             return
         }
         // in the future we can use `drain_filter`, but that's experimental

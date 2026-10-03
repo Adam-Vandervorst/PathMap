@@ -69,7 +69,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Removes the value at the zipper's focus.  Does not affect any onward branches.  Returns `Some(val)`
     /// with the value that was removed, otherwise returns `None`
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn remove_val(&mut self, prune: bool) -> Option<V>;
 
     /// Deprecated alias for [ZipperWriting::remove_val]
@@ -190,7 +191,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Joins the subtrie below the focus of `src_zipper` into the subtrie below the focus of `self`,
     /// consuming the subtrie from the `src_zipper`
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created in `src_zipper`.
+    /// `prune=false` leaves an emptied source focus dangling; `true` applies
+    /// `src_zipper.prune_path()` afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn join_into_take<Z: ZipperInfallibleSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice;
 
     /// Collapses all the paths below the zipper's focus by removing the leading `byte_cnt` bytes from
@@ -208,12 +210,18 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Returns `true` if the focus has at least one downstream continuation, otherwise returns `false`.
     ///
     /// NOTE: for legacy reasons, this operation is sometimes called `drop_head`
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice;
 
     /// Collapses all the paths below the zipper's focus by removing the leading `byte_cnt` bytes from
     /// each path and meets together all of the downstream subtries
     ///
     /// Returns `true` if the focus has at least one downstream continuation, otherwise returns `false`.
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice;
 
     /// Deprecated alias for [ZipperWriting::join_k_path_into]
@@ -245,6 +253,9 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Meets (retains the intersection of) the subtrie below the zipper's focus with the subtrie downstream
     /// from the focus of `read_zipper`
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice;
 
     /// Deprecated alias for [ZipperWriting::meet_into].  May be replaced in the future with a different method
@@ -263,6 +274,9 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Subtracts the subtrie downstream of the focus of `read_zipper` from the subtrie below the `self` zipper's
     /// focus
+    ///
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice;
 
     /// Deprecated alias for [ZipperWriting::subtract_into]
@@ -292,7 +306,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Creates a new [PathMap] from the zipper's focus, removing all downstream branches from the zipper
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     ///
     /// GOAT: This method's behavior is affected by the `graft_root_vals` feature
     /// A value at the zipper's focus will not be affected, and will not be included in the resulting map.
@@ -302,14 +317,16 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Removes all branches below the zipper's focus.  Does not affect the value if there is one.  Returns `true`
     /// if a branch was removed, otherwise returns `false`
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn remove_branches(&mut self, prune: bool) -> bool;
 
     /// Removes multiple branches below the zipper's focus based on the supplied 256-bit `mask`
     ///
     /// Key bytes for which the corresponding `mask` bit is `0` will be removed.
     ///
-    /// Pass `true` to the `prune` argument to automatically remove any dangling path created by this operation.
+    /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
+    /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
     fn remove_unmasked_branches(&mut self, mask: ByteMask, prune: bool);
 
     /// Creates a dangling path to the current zipper focus.  Returns `true` if new path bytes were created, or
@@ -1474,14 +1491,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         }
         let prune_limit = self.node_prune_limit(prune);
         let mut focus_node = self.focus_stack.top_mut().unwrap();
-        if let Some(result) = focus_node.node_remove_val(self.key.node_key(), prune_limit) {
-            if prune {
-                self.prune_path_internal(false);
-            }
-            Some(result)
-        } else {
-            None
+        let result = focus_node.node_remove_val(self.key.node_key(), prune_limit);
+        if prune {
+            self.prune_path_internal(false);
         }
+        result
     }
     /// See [WriteZipper::zipper_head]
     pub fn zipper_head<'z>(&'z mut self) -> ZipperHead<'z, 'a, V, A> {
@@ -2083,6 +2097,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
         };
 
+        if prune && node_was_none {
+            // No node operation ran at an already dangling focus.
+            self.prune_path();
+        }
+
         #[cfg(not(feature = "graft_root_vals"))]
         return node_status;
         #[cfg(feature = "graft_root_vals")]
@@ -2202,6 +2221,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
         };
 
+        if prune && node_was_none {
+            // No node operation ran at an already dangling focus.
+            self.prune_path();
+        }
+
         #[cfg(not(feature = "graft_root_vals"))]
         return node_status;
         #[cfg(feature = "graft_root_vals")]
@@ -2261,14 +2285,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         if node_key.len() > 0 {
             let prune_limit = self.node_prune_limit(prune);
             let mut focus_node = self.focus_stack.top_mut().unwrap();
-            if focus_node.node_remove_all_branches(node_key, prune_limit) {
-                if prune {
-                    self.prune_path_internal(false);
-                }
-                true
-            } else {
-                false
+            let removed = focus_node.node_remove_all_branches(node_key, prune_limit);
+            if prune {
+                self.prune_path_internal(false);
             }
+            removed
         } else {
             debug_assert_eq!(self.focus_stack.depth(), 1);
             if self.focus_stack.top().map(|node| node.node_is_empty()).unwrap_or(false) {
@@ -2621,10 +2642,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             };
 
             let prune_limit = if stopped_at_zipper_root { root_len.saturating_sub(node_key_start + consumed) } else { 0 };
-            let removed = container_node.node_remove_all_branches(next_node_key, prune_limit);
-
-            //If we got here, we should have either removed something, or we should be at the top of the zipper
-            debug_assert!(removed || self.focus_stack.depth()==1);
+            container_node.node_remove_all_branches(next_node_key, prune_limit);
         }
         debug_assert!(temp_path.len() >= root_len);
         let pruned_bytes = path_buf.len() - temp_path.len();
@@ -5988,6 +6006,123 @@ mod tests {
         assert_eq!(wz.child_mask(), ByteMask::EMPTY);
     }
 
+    /// Make sure a WriteZipper method with `prune=true` results in exactly the same ending trie state as the same
+    /// method called with `prune=false` followed by a call to `prune_path`
+    #[test]
+    fn write_zipper_prune_flag_test() {
+        // Keep the minimal regression case easy to recognize.
+        for flag in [false, true] {
+            let mut map = PathMap::<u64>::new();
+            map.create_path([0]);
+            let mut wz = map.write_zipper();
+            wz.descend_to(&[0]);
+            wz.remove_unmasked_branches(ByteMask::EMPTY, flag);
+            if !flag {
+                assert_eq!(wz.prune_path(), 1);
+            }
+            assert!(
+                !wz.path_exists(),
+                "remove_unmasked_branches with prune={flag} left a dangling focus"
+            );
+        }
+
+        #[cfg(miri)]
+        const CASE_COUNT: usize = 10;
+        #[cfg(not(miri))]
+        const CASE_COUNT: usize = 400;
+        const OPS: [&str; 8] = [
+            "remove_val", "remove_branches", "remove_unmasked_branches", "take_map",
+            "join_k_path_into", "meet_into", "subtract_into", "join_into_take",
+        ];
+
+        use rand::prelude::*;
+        let mut rng = StdRng::from_seed([53; 32]);
+        let mut failures = Vec::new();
+        'cases: for case_idx in 0..CASE_COUNT {
+            let alphabet = rng.random_range(2..=5u8);
+            let mut map = PathMap::<u64>::new();
+            let mut source = PathMap::<u64>::new();
+            let mut paths = Vec::new();
+            for path_idx in 0..rng.random_range(1..=12usize) {
+                let len = if case_idx % 8 == 0 && path_idx == 0 {
+                    rng.random_range(48..=55usize)
+                } else {
+                    rng.random_range(0..=7usize)
+                };
+                let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
+                map.set_val_at(&path, 1u64 << rng.random_range(0..8));
+                if rng.random_bool(0.5) {
+                    source.set_val_at(&path, 1u64 << rng.random_range(0..8));
+                }
+                paths.push(path);
+            }
+            for _ in 0..rng.random_range(0..=4usize) {
+                let len = rng.random_range(1..=7usize);
+                let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
+                map.create_path(&path);
+                paths.push(path);
+            }
+            for _ in 0..rng.random_range(0..=4usize) {
+                let len = rng.random_range(0..=7usize);
+                let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
+                source.set_val_at(&path, 1u64 << rng.random_range(0..8));
+            }
+            let chosen = &paths[rng.random_range(0..paths.len())];
+            let mut focus = chosen[..rng.random_range(0..=chosen.len())].to_vec();
+            if rng.random_bool(0.2) { focus.push(alphabet); } // An off-trie focus.
+            let root_len = rng.random_range(0..=focus.len());
+            let mask = ByteMask::from_iter((0..=alphabet).filter(|_| rng.random_bool(0.5)));
+            let k = rng.random_range(0..=4usize);
+
+            for (op_idx, op) in OPS.iter().enumerate() {
+                let run = |prune: bool| {
+                    let mut dst = map.clone();
+                    let mut src = source.clone();
+                    {
+                        let mut wz = dst.write_zipper_at_path(&focus[..root_len]);
+                        wz.descend_to(&focus[root_len..]);
+                        match op_idx {
+                            0 => { wz.remove_val(prune); },
+                            1 => { wz.remove_branches(prune); },
+                            2 => { wz.remove_unmasked_branches(mask, prune); },
+                            3 => { wz.take_map(prune); },
+                            4 => { wz.join_k_path_into(k, prune); },
+                            5 => { wz.meet_into(&src.read_zipper_at_path(&focus), prune); },
+                            6 => { wz.subtract_into(&src.read_zipper_at_path(&focus), prune); },
+                            7 => {
+                                let mut src_wz = src.write_zipper_at_path(&focus[..root_len]);
+                                src_wz.descend_to(&focus[root_len..]);
+                                wz.join_into_take(&mut src_wz, prune);
+                                if !prune { src_wz.prune_path(); }
+                            },
+                            _ => unreachable!(),
+                        }
+                        if !prune && op_idx != 7 { wz.prune_path(); }
+                    }
+                    assert_valid_trie(dst.root());
+                    assert_valid_trie(src.root());
+                    (all_locations(&dst), all_locations(&src))
+                };
+                if run(true) != run(false) {
+                    failures.push(format!("case={case_idx} op={op} focus={focus:?} root_len={root_len} k={k}"));
+                    if failures.len() == 20 { break 'cases; }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn remove_unmasked_prunes_dangling_focus_below_zipper_root() {
+        let mut map = PathMap::<u64>::new();
+        map.create_path([0, 1, 2]);
+        let mut wz = map.write_zipper_at_path(&[0, 1]);
+        wz.descend_to(&[2]);
+        wz.remove_unmasked_branches(ByteMask::EMPTY, true);
+        assert!(!wz.path_exists());
+        assert!(map.path_exists_at(&[0, 1]));
+    }
+
     /// Tests [`ZipperInfallibleSubtries::get_focus`] and [`ZipperInfallibleSubtries::try_borrow_focus`] internal APIs on [`WriteZipperCore`]
     #[test]
     fn write_zipper_focus_nodes() {
@@ -7414,5 +7549,155 @@ mod tests {
             (vec![], None), (vec![0], Some(0)), (vec![0, 0], None), (vec![0, 0, 0], None),
             (vec![0, 0, 0, 0], None), (vec![0, 0, 0, 0, 0], Some(0)),
         ]);
+    }
+
+    #[test]
+    fn write_zipper_prune_after_graft_masked() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0, 0], 0);
+        // [] (no value) -> [0] (no value) -> [0, 0] (value 0).
+        let empty = PathMap::<u64>::new();
+        let rz = empty.read_zipper();
+        let mut wz = map.write_zipper();
+        wz.descend_to_byte(0);
+        // Focus is [0]; the trie still has the value at [0, 0].
+        wz.graft_masked_branches(&rz, ByteMask::from_iter([0, 1, 3]), true);
+        // The empty source replaces the downstream subtrie
+        // The focus is still [0], but now it should be dangling, with no downstream values or children.
+        assert!(wz.path_exists(), "graft should leave the focus dangling");
+        assert_eq!(wz.remove_val(true), None);
+        // remove_val has no value to remove, but the focus should be the tip of a dangling path, which should be pruned
+        assert!(!wz.path_exists(), "remove_val(true) should prune the dangling focus");
+    }
+
+    /// A masked graft can leave an allocated but empty node at the focus.  Each
+    /// prune-aware operation must handle that state, regardless of the shape of
+    /// the focus and its ancestors.
+    #[test]
+    fn write_zipper_prune_flag_after_masked_graft_shapes() {
+        let empty = PathMap::<u64>::new();
+        let focus = [10u8, 20];
+        let cases: &[(&str, &[u8], &[u8], &[u8], bool)] = &[
+            ("single child, list parent", &[0], &[21], &[30], false),
+            ("two children, list parent", &[0, 1], &[21], &[30], false),
+            ("four children, dense parent", &[0, 1, 2, 3], &[21, 22, 23], &[30, 31, 32], true),
+        ];
+        let ops = [
+            "remove_val", "remove_branches", "remove_unmasked_branches", "take_map",
+            "meet_into", "subtract_into",
+        ];
+
+        for &(shape, children, siblings, root_siblings, dense_parent) in cases {
+            let mut original = PathMap::<u64>::new();
+            for &child in children {
+                original.set_val_at(&[10, 20, child], child as u64);
+            }
+            for &sibling in siblings {
+                original.set_val_at(&[10, sibling], sibling as u64);
+            }
+            for &sibling in root_siblings {
+                original.set_val_at(&[sibling], sibling as u64);
+            }
+
+            let root = original.root().unwrap().as_tagged();
+            let (consumed, parent) = root.node_get_child(&[10]).unwrap();
+            assert_eq!(consumed, 1, "{shape}");
+            if dense_parent {
+                assert!(root.as_dense().is_some(), "{shape}: root should be dense");
+                assert!(parent.as_tagged().as_dense().is_some(), "{shape}: focus parent should be dense");
+            } else {
+                #[cfg(not(feature = "all_dense_nodes"))]
+                {
+                    assert!(root.as_list().is_some(), "{shape}: root should be a list");
+                    assert!(parent.as_tagged().as_list().is_some(), "{shape}: focus parent should be a list");
+                }
+            }
+
+            let mut expected = PathMap::<u64>::new();
+            for &sibling in siblings {
+                expected.set_val_at(&[10, sibling], sibling as u64);
+            }
+            for &sibling in root_siblings {
+                expected.set_val_at(&[sibling], sibling as u64);
+            }
+
+            for root_len in [0, 1] {
+                for (op_idx, op) in ops.iter().enumerate() {
+                    let run = |prune: bool| {
+                        let mut map = original.clone();
+                        {
+                            let mut wz = map.write_zipper_at_path(&focus[..root_len]);
+                            wz.descend_to(&focus[root_len..]);
+                            assert!(wz.path_exists(), "{shape}, {op}: missing focus before graft");
+                            assert_eq!(wz.child_count(), children.len(), "{shape}, {op}: wrong starting shape");
+
+                            wz.graft_masked_branches(
+                                &empty.read_zipper(),
+                                ByteMask::from_iter([0, 1, 2, 3]),
+                                true,
+                            );
+                            assert!(wz.path_exists(), "{shape}, {op}: graft removed focus");
+                            assert!(!wz.is_val(), "{shape}, {op}: graft added a value");
+                            assert_eq!(wz.child_count(), 0, "{shape}, {op}: graft left children");
+
+                            match op_idx {
+                                0 => { assert_eq!(wz.remove_val(prune), None); },
+                                1 => { wz.remove_branches(prune); },
+                                2 => { wz.remove_unmasked_branches(ByteMask::EMPTY, prune); },
+                                3 => { wz.take_map(prune); },
+                                4 => { wz.meet_into(&empty.read_zipper(), prune); },
+                                5 => { wz.subtract_into(&empty.read_zipper(), prune); },
+                                _ => unreachable!(),
+                            }
+                            if !prune { wz.prune_path(); }
+                            assert!(!wz.path_exists(), "{shape}, {op}, prune={prune}: dangling focus survived");
+                        }
+                        assert_valid_trie(map.root());
+                        all_locations(&map)
+                    };
+                    let with_flag = run(true);
+                    assert_eq!(with_flag, run(false), "{shape}, {op}, root_len={root_len}");
+                    assert_eq!(with_flag, all_locations(&expected), "{shape}, {op}, root_len={root_len}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remove_branches_at_dangling_focus_reports_no_branches() {
+        for (shape, siblings, allocated_child) in [
+            ("list sentinel", &[1u8][..], false),
+            ("list allocated child", &[1u8][..], true),
+            ("dense sentinel", &[1u8, 2, 3][..], false),
+            ("dense allocated child", &[1u8, 2, 3][..], true),
+        ] {
+            for prune in [false, true] {
+                let mut map = PathMap::<u64>::new();
+                if allocated_child {
+                    map.set_val_at(&[0, 4], 4);
+                } else {
+                    map.create_path([0]);
+                }
+                for &sibling in siblings {
+                    map.set_val_at(&[sibling], sibling as u64);
+                }
+                let empty = PathMap::<u64>::new();
+                let mut wz = map.write_zipper();
+                wz.descend_to_byte(0);
+                if allocated_child {
+                    wz.graft_masked_branches(&empty.read_zipper(), ByteMask::from_iter([4, 5, 6]), true);
+                }
+                assert!(wz.path_exists(), "{shape}");
+                assert!(!wz.is_val(), "{shape}");
+                assert_eq!(wz.child_count(), 0, "{shape}");
+
+                assert!(!wz.remove_branches(prune), "{shape}, prune={prune}: no branches existed");
+                assert_eq!(wz.path_exists(), !prune, "{shape}, prune={prune}");
+                drop(wz);
+                for &sibling in siblings {
+                    assert_eq!(map.val_at(&[sibling]), Some(&(sibling as u64)), "{shape}");
+                }
+            }
+        }
     }
 }
