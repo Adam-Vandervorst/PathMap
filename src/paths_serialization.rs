@@ -23,6 +23,10 @@ mod paths_serialization_nightly;
 #[cfg(feature="nightly")]
 pub use paths_serialization_nightly::*;
 
+#[path="paths_serialization_sort.rs"]
+mod paths_serialization_sort;
+pub use paths_serialization_sort::sort_paths;
+
 /// Statistics from a `serialize` operation
 #[derive(Debug, Clone, Copy)]
 pub struct SerializationStats {
