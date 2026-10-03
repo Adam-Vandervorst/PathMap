@@ -1998,10 +1998,12 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         let key0_starts_with = starts_with(key0, key);
         let remove_0 = key0_starts_with && (key0.len() > key_len || self.is_child_ptr::<0>());
         let remove_1 = starts_with(key1, key) && (key1.len() > key_len || self.is_child_ptr::<1>());
+        let had_branches = (remove_0 && (key0.len() > key_len || !unsafe{ self.child_in_slot::<0>().as_tagged().node_is_empty() })) ||
+            (remove_1 && (key1.len() > key_len || !unsafe{ self.child_in_slot::<1>().as_tagged().node_is_empty() }));
         self.remove_subtries(remove_0, remove_1, key0_starts_with, prune_limit < key.len(), key);
         if prune_limit > 0 && prune_limit < key_len && (remove_0 || remove_1) { self.preserve_prune_limit(key, prune_limit); }
         debug_assert!(validate_node(self));
-        remove_0 || remove_1
+        had_branches
     }
 
     fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune_limit: usize) {
@@ -3193,6 +3195,28 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(_node: &LineLi
 mod tests {
     use crate::alloc::{global_alloc, Allocator, GlobalAlloc};
     use super::*;
+
+    #[test]
+    fn remove_branches_at_dangling_child_reports_no_branches() {
+        for allocated_child in [false, true] {
+            for prune_limit in [usize::MAX, 0] {
+                let mut node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+                node.node_set_val(b"b", 7).unwrap_or_else(|_| panic!());
+                if allocated_child {
+                    let empty = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
+                    assert!(node.node_set_branch(b"a", TrieNodeODRc::new_in(empty, global_alloc())).is_ok());
+                } else {
+                    assert!(node.node_create_dangling(b"a").is_ok());
+                }
+                assert!(node.node_contains_partial_key(b"a"));
+                assert_eq!(crate::trie_node::node_count_branches_recursive(node.as_tagged(), b"a"), 0);
+
+                assert!(!node.node_remove_all_branches(b"a", prune_limit), "allocated_child={allocated_child}, prune_limit={prune_limit}");
+                assert_eq!(node.node_contains_partial_key(b"a"), prune_limit != 0);
+                assert_eq!(node.node_get_val(b"b"), Some(&7));
+            }
+        }
+    }
 
     fn get_recursive<'a, 'b, V: Clone + Send + Sync, A: Allocator + 'b>(key: &'a [u8], node: TaggedNodeRef<'b, V, A>) -> (&'a [u8], TaggedNodeRef<'b, V, A>, usize) {
         let mut remaining_key = key;

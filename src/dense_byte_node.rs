@@ -1003,10 +1003,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         if self.mask.test_bit(k) {
             let ix = self.mask.index_of(k) as usize;
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
+            let had_branches = cf.rec().is_some_and(|node| !node.as_tagged().node_is_empty());
             match (cf.has_rec(), cf.has_val()) {
                 (true, true) => {
                     cf.set_rec_option(None);
-                    true
+                    had_branches
                 },
                 (true, false) => {
                     if prune_limit == 0 {
@@ -1015,7 +1016,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                     } else {
                         cf.set_rec_option(None);
                     }
-                    true
+                    had_branches
                 },
                 (false, false) if prune_limit == 0 => {
                     self.values.remove(ix);
