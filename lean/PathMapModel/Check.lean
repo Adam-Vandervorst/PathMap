@@ -75,14 +75,29 @@ and below it (the location does not exist). -/
 #guard ((zipAt pruneT2b [] [0,0,0,1,2,3]).prunePath).1 == 0
 #guard ((zipAt pruneT2b [] [0,0,0,1,2,3,4,5]).prunePath).1 == 0
 
-/-! Pruning *does* rise above the zipper's root, contradicting the doc comment
-on `ZipperWriting::prune_path`.  A zipper rooted at `[0,0]` looking at the
-dangling tip of the same chain prunes all 7 bytes, back to the map root — not
-the 5 that lie below its own root.  Verified against pathmap 0.3.1; see
-`Zip.prunePath`. -/
+/-! The zipper root bounds pruning, even for a dangling chain continuing above it. -/
 
-#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).1 == 7
-#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).2.trie.isEmptyMap
+#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).1 == 5
+#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).2.trie.pathExists [0,0]
+#guard !((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).2.trie.pathExists [0,0,0]
+
+/-! The flag is an explicit prune after the operation, including a no-op.
+`false` preserves a dangling path. -/
+
+#guard (((zipAt pruneT2 [] [0,0,1,0,0]).removeVal true).2.trie.pathExists [0,0,1]) == false
+#guard (((zipAt pruneT2 [] [0,0,1,0,0]).removeVal false).2.trie.pathExists [0,0,1,0,0])
+#guard !(((zipAt pruneT2b [] [0,0,0,1,2,3,4]).removeVal true).2.trie.pathExists [0,0,0,1,2,3,4])
+#guard !(((zipAt pruneT2b [] []).removeBranches true).2.trie.pathExists [0])
+#guard (((zipAt pruneT2b [] []).removeBranches false).2.trie.pathExists [])
+#guard (((zipAt pruneT2b [] [0,0,0,1,2,3,4]).removeUnmaskedBranches
+  (ByteMask.ofList []) true).trie.pathExists [0,0,0,1,2,3,4]) == false
+#guard !(((zipAt pruneT2b [] [0,0,0,1,2,3,4]).takeMap true).2.trie.pathExists
+  [0,0,0,1,2,3,4])
+#guard !(((zipAt pruneT2b [] [0,0,0,1,2,3,4]).joinKPathInto ops 1 true).2.trie.pathExists
+  [0,0,0,1,2,3,4])
+#guard (((zipAt pruneT2b [0,0] [0,1,2,3,4]).removeVal true).2.trie.pathExists [0,0])
+#guard !(((zipAt pruneT2b [0,0] [0,1,2,3,4]).removeVal true).2.trie.pathExists
+  [0,0,0])
 
 /-! `write_zipper_drop_head_test3`: `[[0,0],[0,1],[1,0],[1,1]]` with
 `join_k_path_into(1)` collapses to 2 values. -/

@@ -187,54 +187,22 @@ The native `ReadZipper` overrides these with a token-based iterator that does
 terminate, so the hang is reachable through `meet_k_path_into` and through any
 zipper type that inherits the default `ZipperIteration` implementation.
 
-## 7. `prune_path` prunes above the zipper's root, and its count is unspecifiable
+## 7. Historical pruning defect and current flag discrepancies
 
-`case: prune_reach` — **documentation is wrong; return value is unspecifiable**
+The original `prune_reach` case described an older implementation where
+`prune_path` crossed the zipper root and returned a node-layout-dependent
+count.  It is fixed in the current checkout.  Current Rust tests
+`prune_should_not_cross_zipper_root`,
+`prune_should_not_cross_zipper_root_across_nodes`, and
+`prune_flags_preserve_zipper_root` cover that boundary.  The differential
+harness exercises explicit pruning at every zipper root.
 
-`ZipperWriting::prune_path` says "This method cannot prune the trie above the
-zipper's root."  It can and does:
-
-```rust
-map.insert(b"abcd", 1);
-let mut wz = map.write_zipper_at_path(b"ab");   // root at depth 2
-wz.descend_to(b"cd");
-wz.remove_val(false);
-wz.prune_path();                                // -> 4; the map is now empty
-```
-
-Worse, the number returned is `max(node_pruned_bytes, trie_pruned_bytes)`, and
-`node_pruned_bytes` depends on where the internal node holding the focus begins:
-
-| dangling chain | zipper root depth | returned | absolute | relative |
-| --- | --- | --- | --- | --- |
-| 8 bytes | 0 | 8 | 8 | 8 |
-| 8 bytes | 5 | 8 | 8 | 3 |
-| 100 bytes | 0 | 100 | 100 | 100 |
-| 100 bytes | 5 | **95** | 100 | 95 |
-
-The *effect* is the same in every row (the map ends up empty); only the reported
-count changes, switching between absolute and relative purely on node layout.
-The reach of the effect is layout-dependent too, in other shapes — a
-`remove_val(true)` under a zipper rooted at depth 3 was observed leaving one byte
-of a dangling chain behind where the same operation at the map root removes it.
-
-The `prune` **flag** on the other operations is worse than the explicit call.
-It is handed straight to `node_remove_val` / `node_remove_all_branches`, which
-prune within the node whether or not they found anything to remove:
-
-```rust
-// map = { [0] = 0 }, plus a dangling [1]
-let mut wz = map.write_zipper();
-wz.descend_to(&[1]);
-wz.remove_val(true);      // -> None, and yet [1] is gone
-```
-
-So `remove_val(true)` can delete a location while reporting that it removed
-nothing, and whether it does depends on where the node boundary falls.
-
-Consequence for anyone specifying this API: pruning is only well-defined for the
-explicit `prune_path` on a zipper rooted at the map root.  The harness passes
-`prune = false` everywhere else.
+The current flag contract is `operation(false)` followed by `prune_path`, even
+after a no-op.  Minimal inputs in `corpus/prune-flag-remove-val.bin`,
+`corpus/prune-flag-remove-val-valued.bin`, `corpus/prune-flag-unmasked.bin`, and
+`corpus/prune-flag-subtract.bin` show current Rust discrepancies: each leaves a
+dangling focus that the explicit `prune_path` would remove.  The Rust
+implementation is unchanged.
 
 ## 8. Several return values report on node materialisation, not on trie state
 

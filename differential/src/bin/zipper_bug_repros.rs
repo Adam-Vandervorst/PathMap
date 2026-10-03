@@ -38,7 +38,7 @@ const CASES: &[(&str, &str)] = &[
     ("root_escape", "a read zipper whose root does not exist walks out of its own root"),
     ("insert_prefix_empty", "insert_prefix(b\"\") destroys the subtrie instead of doing nothing"),
     ("drop_head_zero", "join_k_path_into(0) destroys the subtrie instead of doing nothing"),
-    ("prune_reach", "prune_path's depth and reported byte count depend on internal node layout"),
+    ("prune_reach", "historical prune_path root-boundary bug (fixed in current pathmap)"),
     ("empty_node_leak", "remove_branches / take_map report on node materialisation, not trie state"),
     ("ascend_until_wz", "ascend_until corrupts a write zipper rooted at a node boundary"),
     ("to_next_k_path_borrowed", "to_next_k_path underflows path_len on a borrowed-path zipper"),
@@ -200,10 +200,8 @@ fn run(name: &str) {
             println!("  join_k_path_into(0)->{r}; after: {}   <-- expected unchanged", vals(&map));
         }
 
-        // `prune_path` is documented not to prune above the zipper's root, and to
-        // return the number of bytes removed.  It does prune above the root, and
-        // the count it returns switches between absolute and relative depending
-        // on where the internal node holding the focus begins.
+        // Historical reproducer: the current implementation stays within the
+        // zipper root and returns the relative number of bytes removed.
         "prune_reach" => {
             for len in [8usize, 100] {
                 for rootlen in [0usize, 5] {

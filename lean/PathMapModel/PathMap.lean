@@ -271,8 +271,8 @@ def addPath (t : PathMap V) (p : Path) : PathMap V := mk' t.vals (p :: t.paths)
 
 `prune_path` deletes the dangling chain ending at the focus, stopping at the
 first location above it that carries a value, that branches, or that is the
-zipper's root.  It is a no-op unless the focus is a *dangling tip*: it exists,
-has no value, and has no children. -/
+zipper's root.  The root itself is retained.  It is a no-op unless the focus is
+a *dangling tip* below that root: it exists, has no value, and has no children. -/
 
 /-- Is `p` a dangling tip — an existing location with neither value nor children? -/
 def isDanglingTip (t : PathMap V) (p : Path) : Bool :=
