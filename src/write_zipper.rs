@@ -1492,7 +1492,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let prune_limit = self.node_prune_limit(prune);
         let mut focus_node = self.focus_stack.top_mut().unwrap();
         let result = focus_node.node_remove_val(self.key.node_key(), prune_limit);
-        if prune && (result.is_some() || self.focus_stack.top().unwrap().node_is_empty()) {
+        if prune {
             self.prune_path_internal(false);
         }
         result
@@ -7552,5 +7552,24 @@ mod tests {
             (vec![], None), (vec![0], Some(0)), (vec![0, 0], None), (vec![0, 0, 0], None),
             (vec![0, 0, 0, 0], None), (vec![0, 0, 0, 0, 0], Some(0)),
         ]);
+    }
+
+    #[test]
+    fn write_zipper_prune_after_graft_masked() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0, 0], 0);
+        // [] (no value) -> [0] (no value) -> [0, 0] (value 0).
+        let empty = PathMap::<u64>::new();
+        let rz = empty.read_zipper();
+        let mut wz = map.write_zipper();
+        wz.descend_to_byte(0);
+        // Focus is [0]; the trie still has the value at [0, 0].
+        wz.graft_masked_branches(&rz, ByteMask::from_iter([0, 1, 3]), true);
+        // The empty source replaces the downstream subtrie
+        // The focus is still [0], but now it should be dangling, with no downstream values or children.
+        assert!(wz.path_exists(), "graft should leave the focus dangling");
+        assert_eq!(wz.remove_val(true), None);
+        // remove_val has no value to remove, but the focus should be the tip of a dangling path, which should be pruned
+        assert!(!wz.path_exists(), "remove_val(true) should prune the dangling focus");
     }
 }
