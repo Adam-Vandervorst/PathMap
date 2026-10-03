@@ -1851,48 +1851,64 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         //Removing a value is one of the ways a node can be left holding two onward children
         // under one key, so check the node over on the way out
         debug_assert!(validate_node(self));
-        let (key0, key1) = self.get_both_keys();
-        let value0 = self.is_used_value_0() && key0 == key;
-        let value1 = self.is_used_value_1() && key1 == key;
-        let can_prune = prune_limit < key.len();
-        let check_dangling = can_prune && !value0 && !value1;
-        let dangling0 = check_dangling && self.is_used_child_0() && key0 == key && unsafe{ self.child_in_slot::<0>().is_empty() };
-        let dangling1 = check_dangling && self.is_used_child_1() && key1 == key && unsafe{ self.child_in_slot::<1>().is_empty() };
+        if prune_limit >= key.len() {
+            // Valid list-node keys share at most one leading byte.  In this
+            // path we only need to ask whether the other slot keeps the focus.
+            if self.is_used_value_0() {
+                let key0 = unsafe{ self.key_unchecked::<0>() };
+                if key0 == key {
+                    let other_keeps_path = key0.len() == 1 && self.is_used::<1>() &&
+                        unsafe{ self.key_unchecked::<1>() }.first() == key0.first();
+                    let result = if other_keeps_path {
+                        self.take_payload::<0>().unwrap().into_val()
+                    } else {
+                        self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val()
+                    };
+                    debug_assert!(validate_node(self));
+                    return Some(result)
+                }
+            }
+            if self.is_used_value_1() {
+                let key1 = unsafe{ self.key_unchecked::<1>() };
+                if key1 == key {
+                    let other_keeps_path = key1.len() == 1 &&
+                        unsafe{ self.key_unchecked::<0>() }.first() == key1.first();
+                    let result = if other_keeps_path {
+                        self.take_payload::<1>().unwrap().into_val()
+                    } else {
+                        self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val()
+                    };
+                    debug_assert!(validate_node(self));
+                    return Some(result)
+                }
+            }
+            return None
+        }
 
-        let (result, removed) = if value0 || dangling0 {
-            if can_prune {
-                let payload = self.take_payload::<0>().unwrap();
-                (match payload { ValOrChild::Val(val) => Some(val), ValOrChild::Child(_) => None }, true)
-            } else {
-                let overlap = find_prefix_overlap(key0, key1);
-                let val = if key0.len() == overlap {
-                    self.take_payload::<0>().unwrap().into_val()
-                } else {
-                    self.swap_payload::<0>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val()
-                };
-                (Some(val), true)
-            }
-        } else if value1 || dangling1 {
-            if can_prune {
-                let payload = self.take_payload::<1>().unwrap();
-                (match payload { ValOrChild::Val(val) => Some(val), ValOrChild::Child(_) => None }, true)
-            } else {
-                let overlap = find_prefix_overlap(key1, key0);
-                let val = if key1.len() == overlap {
-                    self.take_payload::<1>().unwrap().into_val()
-                } else {
-                    self.swap_payload::<1>(ValOrChild::Child(TrieNodeODRc::new_empty())).into_val()
-                };
-                (Some(val), true)
-            }
+        // Prefer a value if both slots have the same key.  Compare each
+        // candidate key once, then consider an empty child only if no value matched.
+        let (key0, key1) = self.get_both_keys();
+        let key0_matches = self.is_used::<0>() && key0 == key;
+        let slot = if key0_matches && self.is_used_value_0() {
+            0
         } else {
-            (None, false)
+            let key1_matches = self.is_used::<1>() && key1 == key;
+            if key1_matches && self.is_used_value_1() {
+                1
+            } else if key0_matches && self.is_used_child_0() && unsafe{ self.child_in_slot::<0>().as_tagged().node_is_empty() } {
+                0
+            } else if key1_matches && self.is_used_child_1() && unsafe{ self.child_in_slot::<1>().as_tagged().node_is_empty() } {
+                1
+            } else {
+                return None
+            }
         };
-        if prune_limit > 0 && can_prune && removed {
+        let payload = if slot == 0 { self.take_payload::<0>().unwrap() } else { self.take_payload::<1>().unwrap() };
+        if prune_limit > 0 {
             self.preserve_prune_limit(key, prune_limit);
         }
         debug_assert!(validate_node(self));
-        result
+        match payload { ValOrChild::Val(val) => Some(val), ValOrChild::Child(_) => None }
     }
 
     #[inline]
