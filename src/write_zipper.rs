@@ -2577,10 +2577,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             };
 
             let prune_limit = if stopped_at_zipper_root { root_len.saturating_sub(node_key_start + consumed) } else { 0 };
-            let removed = container_node.node_remove_all_branches(next_node_key, prune_limit);
-
-            //If we got here, we should have either removed something, or we should be at the top of the zipper
-            debug_assert!(removed || self.focus_stack.depth()==1);
+            container_node.node_remove_all_branches(next_node_key, prune_limit);
         }
         debug_assert!(temp_path.len() >= root_len);
         let pruned_bytes = path_buf.len() - temp_path.len();
@@ -7305,5 +7302,136 @@ mod tests {
         assert_eq!(wz.remove_val(true), None);
         // remove_val has no value to remove, but the focus should be the tip of a dangling path, which should be pruned
         assert!(!wz.path_exists(), "remove_val(true) should prune the dangling focus");
+    }
+
+    /// A masked graft can leave an allocated but empty node at the focus.  Each
+    /// prune-aware operation must handle that state, regardless of the shape of
+    /// the focus and its ancestors.
+    #[test]
+    fn write_zipper_prune_flag_after_masked_graft_shapes() {
+        let empty = PathMap::<u64>::new();
+        let focus = [10u8, 20];
+        let cases: &[(&str, &[u8], &[u8], &[u8], bool)] = &[
+            ("single child, list parent", &[0], &[21], &[30], false),
+            ("two children, list parent", &[0, 1], &[21], &[30], false),
+            ("four children, dense parent", &[0, 1, 2, 3], &[21, 22, 23], &[30, 31, 32], true),
+        ];
+        let ops = [
+            "remove_val", "remove_branches", "remove_unmasked_branches", "take_map",
+            "meet_into", "subtract_into",
+        ];
+
+        for &(shape, children, siblings, root_siblings, dense_parent) in cases {
+            let mut original = PathMap::<u64>::new();
+            for &child in children {
+                original.set_val_at(&[10, 20, child], child as u64);
+            }
+            for &sibling in siblings {
+                original.set_val_at(&[10, sibling], sibling as u64);
+            }
+            for &sibling in root_siblings {
+                original.set_val_at(&[sibling], sibling as u64);
+            }
+
+            let root = original.root().unwrap().as_tagged();
+            let (consumed, parent) = root.node_get_child(&[10]).unwrap();
+            assert_eq!(consumed, 1, "{shape}");
+            if dense_parent {
+                assert!(root.as_dense().is_some(), "{shape}: root should be dense");
+                assert!(parent.as_tagged().as_dense().is_some(), "{shape}: focus parent should be dense");
+            } else {
+                #[cfg(not(feature = "all_dense_nodes"))]
+                {
+                    assert!(root.as_list().is_some(), "{shape}: root should be a list");
+                    assert!(parent.as_tagged().as_list().is_some(), "{shape}: focus parent should be a list");
+                }
+            }
+
+            let mut expected = PathMap::<u64>::new();
+            for &sibling in siblings {
+                expected.set_val_at(&[10, sibling], sibling as u64);
+            }
+            for &sibling in root_siblings {
+                expected.set_val_at(&[sibling], sibling as u64);
+            }
+
+            for root_len in [0, 1] {
+                for (op_idx, op) in ops.iter().enumerate() {
+                    let run = |prune: bool| {
+                        let mut map = original.clone();
+                        {
+                            let mut wz = map.write_zipper_at_path(&focus[..root_len]);
+                            wz.descend_to(&focus[root_len..]);
+                            assert!(wz.path_exists(), "{shape}, {op}: missing focus before graft");
+                            assert_eq!(wz.child_count(), children.len(), "{shape}, {op}: wrong starting shape");
+
+                            wz.graft_masked_branches(
+                                &empty.read_zipper(),
+                                ByteMask::from_iter([0, 1, 2, 3]),
+                                true,
+                            );
+                            assert!(wz.path_exists(), "{shape}, {op}: graft removed focus");
+                            assert!(!wz.is_val(), "{shape}, {op}: graft added a value");
+                            assert_eq!(wz.child_count(), 0, "{shape}, {op}: graft left children");
+
+                            match op_idx {
+                                0 => { assert_eq!(wz.remove_val(prune), None); },
+                                1 => { wz.remove_branches(prune); },
+                                2 => { wz.remove_unmasked_branches(ByteMask::EMPTY, prune); },
+                                3 => { wz.take_map(prune); },
+                                4 => { wz.meet_into(&empty.read_zipper(), prune); },
+                                5 => { wz.subtract_into(&empty.read_zipper(), prune); },
+                                _ => unreachable!(),
+                            }
+                            if !prune { wz.prune_path(); }
+                            assert!(!wz.path_exists(), "{shape}, {op}, prune={prune}: dangling focus survived");
+                        }
+                        assert_valid_trie(map.root());
+                        all_locations(&map)
+                    };
+                    let with_flag = run(true);
+                    assert_eq!(with_flag, run(false), "{shape}, {op}, root_len={root_len}");
+                    assert_eq!(with_flag, all_locations(&expected), "{shape}, {op}, root_len={root_len}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remove_branches_at_dangling_focus_reports_no_branches() {
+        for (shape, siblings, allocated_child) in [
+            ("list sentinel", &[1u8][..], false),
+            ("list allocated child", &[1u8][..], true),
+            ("dense sentinel", &[1u8, 2, 3][..], false),
+            ("dense allocated child", &[1u8, 2, 3][..], true),
+        ] {
+            for prune in [false, true] {
+                let mut map = PathMap::<u64>::new();
+                if allocated_child {
+                    map.set_val_at(&[0, 4], 4);
+                } else {
+                    map.create_path([0]);
+                }
+                for &sibling in siblings {
+                    map.set_val_at(&[sibling], sibling as u64);
+                }
+                let empty = PathMap::<u64>::new();
+                let mut wz = map.write_zipper();
+                wz.descend_to_byte(0);
+                if allocated_child {
+                    wz.graft_masked_branches(&empty.read_zipper(), ByteMask::from_iter([4, 5, 6]), true);
+                }
+                assert!(wz.path_exists(), "{shape}");
+                assert!(!wz.is_val(), "{shape}");
+                assert_eq!(wz.child_count(), 0, "{shape}");
+
+                assert!(!wz.remove_branches(prune), "{shape}, prune={prune}: no branches existed");
+                assert_eq!(wz.path_exists(), !prune, "{shape}, prune={prune}");
+                drop(wz);
+                for &sibling in siblings {
+                    assert_eq!(map.val_at(&[sibling]), Some(&(sibling as u64)), "{shape}");
+                }
+            }
+        }
     }
 }
