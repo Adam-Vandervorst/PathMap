@@ -168,15 +168,30 @@ Honest accounting, because it matters for how much the model is worth:
   separate the focus from its stop depth.
 * **Machine-checked on fixtures** (`Check.lean`): the metamorphic laws in
   `Spec.lean` §2, evaluated at build time over six trie shapes crossed with
-  eight focus positions — plus regression fixtures whose expected values are
+  eight focus positions — plus pruning contract checks, regression fixtures
   transcribed from `pathmap`'s own unit tests (`write_zipper_prune_path_test2`,
-  `write_zipper_drop_head_test1/3/6`) and the `restrict` oracle from
+  `write_zipper_drop_head_test1/3/6`), and the `restrict` oracle from
   `tests/pathmap_algebra_differential.rs`.
 * **Checked against the crate** (`differential.py`): everything else, on every
   generated program.
 
 The definitions themselves are the specification.  They are total and executable,
 so "the spec" and "the oracle" cannot drift apart.
+
+### Pruning contract
+
+`Zip.prunePath` removes a dangling suffix only when the focus exists and has
+neither a value nor children.  It stops at the closest valued or branching
+ancestor, or at the write zipper's root, whichever comes first.  It leaves the
+cursor at the focus and returns the number of removed path bytes;
+`Zip.pruneAscend` then ascends by that count.  The root itself survives.
+
+A `prune` flag means running the operation with `false`, then calling
+`prune_path` at the resulting focus.  This applies even when the operation
+returns `None` or otherwise changes nothing.  These rules are encoded in
+`PathMap.lean` and `Write.lean` and checked with fixtures in `Check.lean`.
+The harness runs pruning at every zipper root and reports disagreements with
+the Rust implementation.
 
 ## The differential harness
 
@@ -333,7 +348,6 @@ skips diverges:
 | `skip:empty-focus` | `meet_k_path_into` with no children (it does not terminate), and `restricting` when either side has nothing below its focus (the two branches differ in *effect*, not just in the reported bool). |
 | `skip:empty-path` | `insert_prefix("")` — should be the identity, destroys the subtrie. |
 | `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native read zipper leaves its own root there. |
-| `skip:off-root-prune` | `prune_path` / `prune_ascend`, and the `prune` flag on every other operation, for a write zipper not rooted at the map root — the depth pruned is a function of internal node layout, so there is nothing to specify. |
 | `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
 | `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
 
@@ -400,7 +414,7 @@ observed behaviour rather than intent, and are the places to distrust:
 | --- | --- |
 | `AlgStatus.merge` | transcribed line-for-line from `src/ring.rs` |
 | `joinVal` / `meetVal` / `subVal` | follow `Option<V>`'s impls in `src/ring.rs` |
-| `Zip.prunePath` | stop depth determined empirically; the doc comment is wrong |
+| `Zip.prunePath` | specifies the documented zipper-root bound and the count of removed bytes |
 | `Zip.toNextKPath` | deliberately follows the native `ReadZipper` over the trait default |
 | `PathMap.dropHead` | "values at depth exactly `k` are lost" is observed, not documented |
 | `Zip.joinMapInto` | the short-circuit asymmetry with `join_into` is observed |
@@ -512,9 +526,8 @@ happens to read the damaged location -- value bias, for instance, is reported by
 `meet_into` where it is introduced but by `dump`, `val_at` or the final map dump
 wherever it is later observed.  `divergence_shape` in `differential.py` decides
 those, and returning "no familiar shape" is its important case: it is what keeps
-a genuinely new defect out of the known buckets.  A shrunk reproducer for each
-class is in `lean/corpus/`, and `./lean/differential.py lean/corpus/*.bin`
-replays them all.
+a genuinely new defect out of the known buckets.  The remaining corpus inputs
+can be replayed with `./lean/differential.py lean/corpus/*.bin`.
 
 `differential.py` prints the breakdown itself, so new divergences stay visible as
 the known ones are fixed.

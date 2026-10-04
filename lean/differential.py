@@ -271,7 +271,7 @@ KNOWN = [
      "[act: last_path_overshoots]"),
     # Shape classes, from `divergence_shape`.  Last on purpose: every entry
     # above is more specific, and these are meant to catch only what none of
-    # them explain.  Reproducers for each are in lean/corpus/.
+    # them explain.
     (["STATUS-ONLY"],
      "AlgebraicStatus::Identity is not returned reliably when nothing changed "
      "(finding 8); meet_into/subtract_into, status only, effects agree "
@@ -279,6 +279,9 @@ KNOWN = [
     (["DANGLING-KEPT"],
      "an algebraic op keeps a dangling child the spec drops: an empty child "
      "node meets/subtracts to itself rather than disappearing "
+     "[meet_keeps_dangling]"),
+    (["DANGLING-FOCUS-KEPT"],
+     "meet_into() keeps an empty materialized focus that the spec removes "
      "[meet_keeps_dangling]"),
     (["CONTENT-DROPPED"],
      "subtract_into() drops a value under a path present in the source "
@@ -371,6 +374,10 @@ def divergence_shape(a, b):
         if all(x[1:].isdigit() and y[1:].isdigit() for x, y in diff):
             return "VALUE-ONLY"
         return None
+    if (keys == {"e"} and len(diff) == 1 and len(ta) > 2
+            and ta[1] == "meet_into" and "ret=None" in ta
+            and diff[0] == ("e0", "e1")):
+        return "DANGLING-FOCUS-KEPT"
     if keys <= {"ret", "c", "n"} and ({"c", "n"} & keys):
         # `c` (child_count) when it moved, else `n` (val_count): a dangling
         # child adds a child without adding a value, a dropped value the
