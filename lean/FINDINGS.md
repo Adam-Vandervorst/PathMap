@@ -187,7 +187,7 @@ The native `ReadZipper` overrides these with a token-based iterator that does
 terminate, so the hang is reachable through `meet_k_path_into` and through any
 zipper type that inherits the default `ZipperIteration` implementation.
 
-## 7. Historical pruning defect and current flag discrepancies
+## 7. Pruning contract
 
 The original `prune_reach` case described an older implementation where
 `prune_path` crossed the zipper root and returned a node-layout-dependent
@@ -197,12 +197,9 @@ count.  It is fixed in the current checkout.  Current Rust tests
 `prune_flags_preserve_zipper_root` cover that boundary.  The differential
 harness exercises explicit pruning at every zipper root.
 
-The current flag contract is `operation(false)` followed by `prune_path`, even
-after a no-op.  Minimal inputs in `corpus/prune-flag-remove-val.bin`,
-`corpus/prune-flag-remove-val-valued.bin`, `corpus/prune-flag-unmasked.bin`, and
-`corpus/prune-flag-subtract.bin` show current Rust discrepancies: each leaves a
-dangling focus that the explicit `prune_path` would remove.  The Rust
-implementation is unchanged.
+The model specifies the prune flag as `operation(false)` followed by
+`prune_path`, even after a no-op.  Lean guards in `PathMapModel/Check.lean` and
+Rust tests in `src/write_zipper.rs` cover pruning at and below the zipper root.
 
 ## 8. Several return values report on node materialisation, not on trie state
 

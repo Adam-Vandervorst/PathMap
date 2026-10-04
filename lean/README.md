@@ -526,9 +526,8 @@ happens to read the damaged location -- value bias, for instance, is reported by
 `meet_into` where it is introduced but by `dump`, `val_at` or the final map dump
 wherever it is later observed.  `divergence_shape` in `differential.py` decides
 those, and returning "no familiar shape" is its important case: it is what keeps
-a genuinely new defect out of the known buckets.  A shrunk reproducer for each
-class is in `lean/corpus/`, and `./lean/differential.py lean/corpus/*.bin`
-replays them all.
+a genuinely new defect out of the known buckets.  The remaining corpus inputs
+can be replayed with `./lean/differential.py lean/corpus/*.bin`.
 
 `differential.py` prints the breakdown itself, so new divergences stay visible as
 the known ones are fixed.

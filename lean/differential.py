@@ -271,7 +271,7 @@ KNOWN = [
      "[act: last_path_overshoots]"),
     # Shape classes, from `divergence_shape`.  Last on purpose: every entry
     # above is more specific, and these are meant to catch only what none of
-    # them explain.  Reproducers for each are in lean/corpus/.
+    # them explain.
     (["STATUS-ONLY"],
      "AlgebraicStatus::Identity is not returned reliably when nothing changed "
      "(finding 8); meet_into/subtract_into, status only, effects agree "
@@ -293,15 +293,6 @@ KNOWN = [
     (["FOCUS-VALUE-FOR-DANGLING"],
      "val_at()/get_val_at() return the focus value for a dangling child path "
      "[val_at_dangling]"),
-    (["PRUNE-FLAG-VAL"],
-     "remove_val(true) left a dangling focus; see corpus/prune-flag-remove-val*.bin "
-     "[prune_flag]"),
-    (["PRUNE-FLAG-UNMASKED"],
-     "remove_unmasked_branches(true) left a dangling focus; "
-     "see corpus/prune-flag-unmasked.bin [prune_flag]"),
-    (["PRUNE-FLAG-SUBTRACT"],
-     "subtract_into(true) left a dangling focus after producing None; "
-     "see corpus/prune-flag-subtract.bin [prune_flag]"),
 ]
 
 
@@ -383,13 +374,6 @@ def divergence_shape(a, b):
         if all(x[1:].isdigit() and y[1:].isdigit() for x, y in diff):
             return "VALUE-ONLY"
         return None
-    if keys == {"e"} and len(diff) == 1 and diff[0] == ("e0", "e1"):
-        if len(ta) > 2 and ta[1] == "remove_val":
-            return "PRUNE-FLAG-VAL"
-        if len(ta) > 2 and ta[1] == "remove_unmasked_branches":
-            return "PRUNE-FLAG-UNMASKED"
-        if len(ta) > 2 and ta[1] == "subtract_into" and "ret=None" in ta:
-            return "PRUNE-FLAG-SUBTRACT"
     if (keys == {"e"} and len(diff) == 1 and len(ta) > 2
             and ta[1] == "meet_into" and "ret=None" in ta
             and diff[0] == ("e0", "e1")):
