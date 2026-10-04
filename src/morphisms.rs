@@ -1842,7 +1842,7 @@ mod tests {
             },
             |_mask, _, path| {
                 // println!("alg: {path:?}");
-                assert_eq!(path, &[]);
+                assert_eq!(path, &[] as &[u8]);
             },
             |sub_path, _, path| {
                 // println!("jump: over {sub_path:?} to {path:?}");

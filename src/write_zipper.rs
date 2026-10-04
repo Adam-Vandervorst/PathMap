@@ -7429,7 +7429,7 @@ mod tests {
                 assert_eq!(wz.path_exists(), !prune, "{shape}, prune={prune}");
                 drop(wz);
                 for &sibling in siblings {
-                    assert_eq!(map.val_at(&[sibling]), Some(&(sibling as u64)), "{shape}");
+                    assert_eq!(map.get_val_at(&[sibling]), Some(&(sibling as u64)), "{shape}");
                 }
             }
         }

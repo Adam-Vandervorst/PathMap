@@ -4065,7 +4065,7 @@ mod tests {
         assert!(wz.remove_branches(false));
         drop(wz);
         assert_valid_trie(removed_branches.root());
-        assert_eq!(removed_branches.val_at(b"a"), Some(&1));
+        assert_eq!(removed_branches.get_val_at(b"a"), Some(&1));
         assert!(!removed_branches.path_exists_at(b"ab"));
 
         let mut taken = PathMap::<u64>::new();
@@ -4074,7 +4074,7 @@ mod tests {
         let mut destination = PathMap::<u64>::new();
         destination.write_zipper().join_into_take(&mut taken.write_zipper_at_path(b"a"), true);
         assert_valid_trie(taken.root());
-        assert_eq!(taken.val_at(b"a"), Some(&1));
+        assert_eq!(taken.get_val_at(b"a"), Some(&1));
         assert!(!taken.path_exists_at(b"ab"));
 
         let mut dropped = PathMap::<u64>::new();
@@ -4082,7 +4082,7 @@ mod tests {
         dropped.create_path(b"cb");
         dropped.write_zipper().join_k_path_into(1, false);
         assert_valid_trie(dropped.root());
-        assert_eq!(dropped.val_at(b"b"), Some(&1));
+        assert_eq!(dropped.get_val_at(b"b"), Some(&1));
 
         let mut dangling = PathMap::<u64>::new();
         dangling.create_path(b"a");
@@ -4091,15 +4091,14 @@ mod tests {
         valued.set_val_at(b"ax", 2);
         let joined = dangling.join(&valued);
         assert_valid_trie(joined.root());
-        assert_eq!(joined.val_at(b"a"), Some(&1));
-        assert_eq!(joined.val_at(b"ax"), Some(&2));
+        assert_eq!(joined.get_val_at(b"a"), Some(&1));
+        assert_eq!(joined.get_val_at(b"ax"), Some(&2));
     }
 
     #[test]
     fn join_dangling_child_with_value_and_descendants() {
         use crate::PathMap;
         use crate::trie_node::assert_valid_trie;
-        use crate::zipper::ZipperValuesAt;
 
         for (key, two_descendants) in [(b'a', false), (b'a', true), (b'z', false), (b'z', true)] {
             let other = if key == b'a' { b'z' } else { b'a' };
@@ -4115,10 +4114,10 @@ mod tests {
             for (left, right) in [(&dangling, &valued), (&valued, &dangling)] {
                 let joined = left.join(right);
                 assert_valid_trie(joined.root());
-                assert_eq!(joined.val_at([key]), Some(&1));
-                assert_eq!(joined.val_at([key, b'x']), Some(&2));
-                assert_eq!(joined.val_at([key, b'y']), two_descendants.then_some(&3));
-                assert_eq!(joined.val_at([other]), Some(&4));
+                assert_eq!(joined.get_val_at([key]), Some(&1));
+                assert_eq!(joined.get_val_at([key, b'x']), Some(&2));
+                assert_eq!(joined.get_val_at([key, b'y']), two_descendants.then_some(&3));
+                assert_eq!(joined.get_val_at([other]), Some(&4));
             }
         }
     }
