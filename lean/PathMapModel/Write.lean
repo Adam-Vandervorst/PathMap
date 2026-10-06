@@ -257,7 +257,9 @@ It also short-circuits: when the map has no root node, the node status is
 returned directly and the value status computed above is discarded — even though
 the value has already been written. -/
 def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
-  let (valStatus, valWasNone, z1) :=
+  -- `merge` is called with both "was none" flags set, as the crate does, so the
+  -- second component is carried only for symmetry with the other operations.
+  let (valStatus, _valWasNone, z1) :=
     match z.val, m.valAt [] with
     | some sv, some mv =>
         let r := ops.pjoin sv mv
@@ -270,19 +272,26 @@ def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
     | none, none => (AlgStatus.none, true, z)
   let srcB := (m.removeVal []).2
   if srcB.isEmptyMap then
-    -- Short-circuit, and note the asymmetry with `join_into`: this branch tests
+    -- Note the asymmetry with `join_into`: this branch tests
     -- `self.get_focus().is_none()` (does a node exist at all?), not
     -- `node_is_empty()`.  So a *bare* focus reports `Identity` here, where
     -- `join_into` on the same state reports `None`.
-    (match z1.entry with
-     | .bare | .valued _ => AlgStatus.identity
-     | .absent => AlgStatus.none, z1)
+    --
+    -- The node status is *merged* with the value status rather than returned on
+    -- its own.  It used to be returned directly -- an early `return` that
+    -- discarded a value the operation had already written -- which is
+    -- issue #139, fixed by PR #142 (`276fca0`).  Both exits of the crate's
+    -- `join_map_into` now end in the same `merge`.
+    (AlgStatus.merge
+      (match z1.entry with
+       | .bare | .valued _ => AlgStatus.identity
+       | .absent => AlgStatus.none) valStatus true true, z1)
   else
     let selfB := z1.focusNode
     let r := PathMap.join ops selfB srcB
     let nodeStatus := if PathMap.beqT ops r selfB then AlgStatus.identity else AlgStatus.element
     let z2 := if nodeStatus == .identity then z1 else z1.withTrie (z1.trie.graftBelow z1.focus r)
-    (AlgStatus.merge nodeStatus valStatus true valWasNone, z2)
+    (AlgStatus.merge nodeStatus valStatus true true, z2)
 
 /-- `ZipperWriting::join_into_take`: like `join_into`, but the source subtrie is
 removed from the source zipper's trie.  Returns the updated destination *and*
