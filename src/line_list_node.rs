@@ -1365,7 +1365,9 @@ fn merge_guts<'a, V: Clone + Lattice + Send + Sync, A: Allocator, const ASLOT: u
             (false, false) => { //both are values, so join them
                 let a_val = unsafe{ a.val_in_slot::<ASLOT>() };
                 let b_val = unsafe{ b.val_in_slot::<BSLOT>() };
-                return a_val.pjoin(b_val).map(|new_val| (a_key, ValOrChild::Val(new_val)))
+                let result = a_val.pjoin(b_val);
+                debug_assert!(!result.is_none(), "Lattice::pjoin returned None for a join");
+                return result.map(|new_val| (a_key, ValOrChild::Val(new_val)))
             },
             (true, false) if unsafe{ a.child_in_slot::<ASLOT>() }.is_empty() => {
                 return AlgebraicResult::Element((a_key, b.clone_payload::<BSLOT>().unwrap()))
@@ -2881,10 +2883,10 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let payload1 = temp_node.take_payload::<1>().unwrap();
                 let payload0 = temp_node.take_payload::<0>().unwrap();
                 let merged = match (payload0, payload1) {
-                    (ValOrChild::Val(v0), ValOrChild::Val(v1)) => match v0.pjoin(&v1) {
-                        AlgebraicResult::Element(v) => Some(ValOrChild::Val(v)),
-                        AlgebraicResult::Identity(mask) => Some(ValOrChild::Val(if mask & SELF_IDENT > 0 { v0 } else { v1 })),
-                        AlgebraicResult::None => None,
+                    (ValOrChild::Val(mut v0), ValOrChild::Val(v1)) => {
+                        let status = v0.join_into(v1);
+                        debug_assert!(!status.is_none(), "Lattice::join_into returned None for a join");
+                        Some(ValOrChild::Val(v0))
                     },
                     (ValOrChild::Child(c0), ValOrChild::Child(c1)) => match c0.pjoin(&c1) {
                         AlgebraicResult::Element(c) => Some(ValOrChild::Child(c)),
@@ -3126,12 +3128,13 @@ pub(crate) fn validate_node<V: Clone + Send + Sync, A: Allocator>(node: &LineLis
         panic!()
     }
 
-    //Two slots may share a key (that is how a value and the onward child at the same path are
-    // stored) but only one of them may be the onward child, otherwise the byte leads to two
-    // different subtries and every accessor is free to pick a different one
-    if node.is_used_child_0() && node.is_used_child_1() && key0 == key1 {
-        println!("Invalid node - two onward children under the same key. {node:?}");
-        panic!()
+    //Two slots may share a key only for the legal value-and-onward-child representation.  Two values
+    // make iteration see the path once while val_count sees it twice; two children make accessors free
+    // to choose different subtries.
+    if node.is_used::<1>() && key0 == key1 {
+        assert_eq!(key0.len(), 1, "Invalid node - Identical keys with >1 byte overlap {node:?}");
+        assert_eq!(key1.len(), 1, "Invalid node - Identical keys with >1 byte overlap {node:?}");
+        assert_ne!(node.is_child_ptr::<0>(), node.is_child_ptr::<1>(), "Invalid node - duplicate payload kind under the same key. {node:?}");
     }
 
     // An empty onward link is a dangling sentinel.  A value at the same key
