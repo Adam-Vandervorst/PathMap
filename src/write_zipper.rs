@@ -275,8 +275,7 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.subtract_into(read_zipper, true)
     }
 
-    /// Restricts paths in the subtrie downstream of the `self` focus to paths prefixed by a path to a value in
-    /// `read_zipper`
+    /// Restricts paths in the subtrie at the `self` focus to paths prefixed by a path to a value in `read_zipper`
     ///
     /// NOTE: In the future this method is likely to be replaced by a "restrict" policy which may
     /// be passed as an argument to [ZipperWriting::meet_into]
@@ -2217,14 +2216,26 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [WriteZipper::restrict]
     pub fn restrict<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus {
+        if read_zipper.is_val() {
+            return if self.is_val() || self.child_count() > 0 {
+                AlgebraicStatus::Identity
+            } else {
+                AlgebraicStatus::None
+            }
+        }
+        let removed_val = self.remove_val(false).is_some();
         let src = read_zipper.get_focus();
-        if src.is_none() {
+        if src.is_none() || src.as_tagged().node_is_empty() {
             self.graft_internal(None);
             return AlgebraicStatus::None
         }
-        match self.get_focus().try_as_tagged() {
+        match self.get_focus().try_as_tagged().filter(|n| !n.node_is_empty()) {
             Some(self_node) => {
                 match self_node.prestrict_dyn(src.as_tagged()) {
+                    AlgebraicResult::Element(restricted) if restricted.as_tagged().node_is_empty() => {
+                        self.graft_internal(None);
+                        AlgebraicStatus::None
+                    },
                     AlgebraicResult::Element(restricted) => {
                         self.graft_internal(Some(restricted));
                         AlgebraicStatus::Element
@@ -2235,7 +2246,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     },
                     AlgebraicResult::Identity(mask) => {
                         debug_assert_eq!(mask, SELF_IDENT); //restrict is non-commutative
-                        AlgebraicStatus::Identity
+                        if removed_val { AlgebraicStatus::Element } else { AlgebraicStatus::Identity }
                     },
                 }
             },
@@ -4455,6 +4466,78 @@ mod tests {
         use crate::zipper::ZipperIteration;
         while rz.to_next_val() { count += 1; }
         assert!(count > 0);
+    }
+
+    #[test]
+    fn write_zipper_restrict_focus_values_match_map() {
+        let paths: &[&[u8]] = &[b"", b"k", b"k/", b"k/leaf", b"k/dangling",
+            b"other", b"other/", b"other/dangling"];
+        for dst_path in [b"".as_slice(), b"destination/deep"] {
+            for src_path in [b"".as_slice(), b"source/deep"] {
+                for dst_val in [false, true] {
+                    for src_val in [false, true] {
+                        for dst_branches in 0..4 {
+                            for src_branches in 0..4 {
+                                let mut dst_subtrie = PathMap::<bool>::new();
+                                if dst_val { dst_subtrie.insert(b"", true); }
+                                match dst_branches {
+                                    1 => { dst_subtrie.insert(b"k/leaf", true); },
+                                    2 => { dst_subtrie.create_path(b"k/dangling"); },
+                                    3 => {
+                                        dst_subtrie.insert(b"k/leaf", true);
+                                        dst_subtrie.insert(b"other", false);
+                                        dst_subtrie.create_path(b"other/dangling");
+                                    },
+                                    _ => {},
+                                }
+                                let mut src_subtrie = PathMap::<bool>::new();
+                                // Presence, rather than the boolean's contents, validates every path.
+                                if src_val { src_subtrie.insert(b"", false); }
+                                match src_branches {
+                                    1 => { src_subtrie.insert(b"k", false); },
+                                    2 => { src_subtrie.insert(b"unmatched", true); },
+                                    3 => { src_subtrie.create_path(b"k"); },
+                                    _ => {},
+                                }
+                                let expected = dst_subtrie.restrict(&src_subtrie);
+                                let unchanged = paths.iter().all(|path|
+                                    dst_subtrie.val_at(path) == expected.val_at(path) &&
+                                    dst_subtrie.path_exists_at(path) == expected.path_exists_at(path));
+                                let expected_status = if expected.is_empty() {
+                                    AlgebraicStatus::None
+                                } else if unchanged {
+                                    AlgebraicStatus::Identity
+                                } else {
+                                    AlgebraicStatus::Element
+                                };
+                                assert_eq!(crate::ring::Quantale::prestrict(&dst_subtrie, &src_subtrie).status(), expected_status);
+
+                                let mut dst = PathMap::<bool>::new();
+                                let mut src = PathMap::<bool>::new();
+                                dst.write_zipper_at_path(dst_path).graft_map(dst_subtrie);
+                                src.write_zipper_at_path(src_path).graft_map(src_subtrie);
+                                if !dst_path.is_empty() { dst.insert(b"outside", false); }
+                                let original_src = src.clone();
+                                let mut wz = dst.write_zipper();
+                                wz.descend_to(dst_path);
+                                assert_eq!(wz.restrict(&src.read_zipper_at_path(src_path)), expected_status,
+                                    "dst={dst_path:?}, src={src_path:?}, focus values={dst_val}/{src_val}, branches={dst_branches}/{src_branches}");
+                                assert_eq!(wz.path(), dst_path);
+                                let actual = wz.make_map();
+                                assert!(actual.iter().eq(expected.iter()));
+                                for path in paths.iter().filter(|path| !path.is_empty()) {
+                                    assert_eq!(actual.path_exists_at(path), expected.path_exists_at(path));
+                                }
+                                drop(wz);
+                                if !dst_path.is_empty() { assert_eq!(dst.val_at(b"outside"), Some(&false)); }
+                                assert!(src.iter().eq(original_src.iter()));
+                                assert_valid_trie(dst.root());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Tests how `restrict` handles dangling path arguments (no values, just path structure)

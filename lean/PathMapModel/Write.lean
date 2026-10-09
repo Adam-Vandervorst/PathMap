@@ -402,23 +402,25 @@ def meet2 (a b : Zip V) : AlgStatus × Zip V :=
     if r.isEmptyMap then (.none, z.withTrie (z.trie.removeBelow z.focus))
     else (.element, z.withTrie (z.trie.graftBelow z.focus r))
 
-/-- `ZipperWriting::restrict`: keep only the paths below the focus that are
-prefixed by a path to a value in the source's subtrie.
-
-The empty prefix does **not** validate here: the source's *focus value* is
-invisible to a node-level `prestrict`.  `PathMap::restrict` does consult the
-root value (see `Map.restrict`), so the two disagree exactly when the source has
-a value at its focus.  The focus value of `self` is never touched. -/
+/-- `ZipperWriting::restrict`: keep only paths in the destination subtrie
+prefixed by a path to a value in the source subtrie, as in `PathMap::restrict`.
+A source focus value retains the whole destination subtrie. Without one, the
+destination focus value is removed. An empty result always reports `None`. -/
 def restrict (src : Zip V) : AlgStatus × Zip V :=
-  let srcB := src.focusNode
-  let selfB := z.focusNode
-  if srcB.isEmptyMap then (.none, z.withTrie (z.trie.removeBelow z.focus))
-  else if selfB.isEmptyMap then (.none, z)
+  if src.val.isSome then
+    (if z.makeMap.isEmptyMap then .none else .identity, z)
   else
-    let r := PathMap.restrictBelowRoot selfB srcB
-    let st := nodeStatus ops selfB r
-    if st == .identity then (.identity, z)
-    else (st, z.withTrie (z.trie.graftBelow z.focus r))
+    let (removedVal, z1) := z.removeVal false
+    let srcB := src.focusNode
+    let selfB := z1.focusNode
+    if srcB.isEmptyMap then (.none, z1.withTrie (z1.trie.removeBelow z1.focus))
+    else if selfB.isEmptyMap then (.none, z1)
+    else
+      let r := PathMap.restrictBelowRoot selfB srcB
+      let st := nodeStatus ops selfB r
+      if st == .identity then
+        (if removedVal.isSome then .element else .identity, z1)
+      else (st, z1.withTrie (z1.trie.graftBelow z1.focus r))
 
 /-- `ZipperWriting::restricting`: the mirror image — fill in `self`'s "stem"
 paths with the source's subtries.  `self`'s subtrie is replaced by the source's,
