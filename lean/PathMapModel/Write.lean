@@ -11,8 +11,7 @@ invariants shape the whole API and are worth stating up front:
    they never see or touch the value *at* the focus.  Operations that do affect
    the focus value (`graft`, `graft_map`, `make_map`, `take_map`,
    `join_map_into`, `meet_into`, `subtract_into`) do it in a separate step —
-   this is the `graft_root_vals` cargo feature, which is on by default and which
-   the model assumes throughout.  Note the resulting asymmetry: `graft` adopts
+   this behavior is unconditional.  Note the resulting asymmetry: `graft` adopts
    the source's focus value but `join_into` does **not** join focus values.
 
 2. **Pruning is opt-in and root-bounded.**  A write leaves dangling paths behind
