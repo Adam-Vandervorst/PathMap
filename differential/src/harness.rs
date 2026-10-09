@@ -24,8 +24,20 @@ use pathmap::zipper::*;
 // `str::lines()` recovers them then.
 use core::fmt::Write as _;
 
-/// Number of distinct operations. Must match `PathMapModel.Fuzz.nops`.
-pub const NOPS: usize = 56;
+/// Selector count for newly generated inputs. Keep operation IDs permanently assigned.
+pub const NOPS: usize = 57;
+/// Unversioned inputs retain their original operation decoding.
+pub const LEGACY_NOPS: usize = 56;
+/// Input header marker, followed by a little-endian u16 selector count (1..=256).
+pub const WIRE_MAGIC: &[u8] = b"PMFUZZ\x01\x00";
+
+/// Header for new inputs. Decoding always uses the recorded count, never `NOPS`.
+pub fn input_header() -> Vec<u8> {
+    assert!((1..=256).contains(&NOPS));
+    let mut header = WIRE_MAGIC.to_vec();
+    header.extend_from_slice(&(NOPS as u16).to_le_bytes());
+    header
+}
 /// Maximum operations executed. Must match the `maxSteps` default in `Fuzz.run`.
 pub const MAX_STEPS: usize = 256;
 /// Maximum entries in a `dump`. Must match `Fuzz.dumpAt`.
@@ -34,9 +46,24 @@ pub const DUMP_CAP: usize = 64;
 pub struct Dec<'a> {
     pub bytes: &'a [u8],
     pub pos: usize,
+    op_count: usize,
 }
 
 impl<'a> Dec<'a> {
+    pub fn new(bytes: &'a [u8]) -> Option<Self> {
+        let (pos, op_count) = if bytes.starts_with(WIRE_MAGIC) {
+            let count_bytes = bytes.get(WIRE_MAGIC.len()..WIRE_MAGIC.len() + 2)?;
+            let count = u16::from_le_bytes([count_bytes[0], count_bytes[1]]) as usize;
+            if !(1..=256).contains(&count) { return None; }
+            (WIRE_MAGIC.len() + 2, count)
+        } else {
+            (0, LEGACY_NOPS)
+        };
+        Some(Self { bytes, pos, op_count })
+    }
+    pub fn op(&mut self) -> Option<usize> {
+        self.modn(self.op_count)
+    }
     pub fn u8(&mut self) -> Option<u8> {
         let b = *self.bytes.get(self.pos)?;
         self.pos += 1;
@@ -427,7 +454,7 @@ pub fn decode_header(d: &mut Dec) -> Option<(PathMap<u64>, PathMap<u64>, Vec<u8>
 /// Decode and execute a fuzzer input against a `PathMap` read source.
 ///
 pub fn run(bytes: &[u8], check: bool) -> String {
-    let mut d = Dec { bytes, pos: 0 };
+    let Some(mut d) = Dec::new(bytes) else { return "EMPTY\n".to_string(); };
     let (mut map0, map1, root0, root1) = match decode_header(&mut d) {
         Some(x) => x,
         None => return "EMPTY\n".to_string(),
@@ -478,7 +505,7 @@ pub fn run_ops<R: ReadSource>(
             if step >= MAX_STEPS {
                 break;
             }
-            let op = get!(d.u8()) as usize % NOPS;
+            let op = get!(d.op());
             let (name, ret): (&str, String) = match op {
                 0 => {
                     let t = get!(d.modn(2));
@@ -903,6 +930,10 @@ pub fn run_ops<R: ReadSource>(
                     let p = get!(d.path(6));
                     ("meet_2", show_status_opt((*rz).do_meet_2(&mut wz, &p)))
                 }
+                56 => {
+                    let pr = get!(d.boolean());
+                    ("remove_subtrie", show_bool(wz.remove_subtrie(pr)).to_string())
+                }
                 47 => {
                     let t = get!(d.modn(2));
                     // The blind-zipper addition: `descend_until` reporting the
@@ -931,4 +962,90 @@ pub fn run_ops<R: ReadSource>(
         }
     }
 
+}
+
+#[cfg(test)]
+mod input_format_tests {
+    use super::*;
+    use crate::{emit_repro, run_act};
+
+    #[test]
+    fn unversioned_inputs_keep_legacy_operation_decoding() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        let mut d = Dec::new(&bytes).unwrap();
+        for byte in 0..=255 {
+            assert_eq!(d.op(), Some(byte % 56));
+        }
+    }
+
+    #[test]
+    fn input_header_count_controls_decoding_independently_of_current_operation_count() {
+        for count in [1u16, 32, 56, 57, 58, 256] {
+            let mut bytes = WIRE_MAGIC.to_vec();
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend(0..=255);
+            let mut d = Dec::new(&bytes).unwrap();
+            for byte in 0..=255 {
+                assert_eq!(d.op(), Some(byte % count as usize));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_or_truncated_input_headers_are_rejected() {
+        let mut bytes = WIRE_MAGIC.to_vec();
+        assert!(Dec::new(&bytes).is_none());
+        bytes.push(57);
+        assert!(Dec::new(&bytes).is_none());
+        for count in [0u16, 257, u16::MAX] {
+            let mut bytes = WIRE_MAGIC.to_vec();
+            bytes.extend_from_slice(&count.to_le_bytes());
+            assert!(Dec::new(&bytes).is_none());
+            assert_eq!(run(&bytes, true), "EMPTY\n");
+            assert_eq!(run_act(&bytes, true), "EMPTY\n");
+        }
+    }
+
+    #[test]
+    fn header_count_56_preserves_legacy_replay_and_reproducer() {
+        for legacy in [
+            include_bytes!("../../lean/corpus/status-imprecise-join_map_into.bin").as_slice(),
+            include_bytes!("../../lean/corpus/status-imprecise-restrict.bin").as_slice(),
+        ] {
+            let mut bytes = WIRE_MAGIC.to_vec();
+            bytes.extend_from_slice(&56u16.to_le_bytes());
+            bytes.extend_from_slice(legacy);
+            assert_eq!(run(&bytes, false), run(legacy, false));
+            assert_eq!(run_act(&bytes, false), run_act(legacy, false));
+            assert_eq!(emit_repro(&bytes, 256), emit_repro(legacy, 256));
+        }
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_headered_write_operations() {
+        // Clear [0] and its descendant, prune the dangling focus, then write there again.
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            4, 0, 9, 1, 0, 10, 2, 0, 1, 12, 1, 1, 11, // map0 entries.
+            1, 1, 2, 13, // map1 entry.
+            0, 0, // Zipper roots.
+            0, 0, 1, 0, // Descend to [0].
+            56, 0, 56, 1, 27, 14, // Remove, prune, then reuse.
+        ]);
+        let trace = run(&bytes, true);
+        assert!(
+            trace.contains("1 remove_subtrie ret=1 W=00 o00 e1 v- c0 n0"),
+            "{trace}"
+        );
+        assert!(
+            trace.contains("2 remove_subtrie ret=0 W=00 o00 e0 v- c0 n0"),
+            "{trace}"
+        );
+        assert!(trace.contains("MAP0 _:9,00:14,01:11"), "{trace}");
+        assert!(trace.contains("MAP1 _:-,02:13"), "{trace}");
+        let repro = emit_repro(&bytes, 256);
+        assert!(repro.contains("wz.remove_subtrie(false);"));
+        assert!(repro.contains("wz.remove_subtrie(true);"));
+        assert!(repro.contains("wz.set_val(14);"));
+    }
 }

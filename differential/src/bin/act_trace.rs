@@ -27,6 +27,10 @@ use differential::*;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--input-header") {
+        println!("{}", hex_path(&input_header()));
+        return;
+    }
     let check = args.iter().any(|a| a == "--check");
     // Resident mode: one process, many inputs over stdin.  See `serve`.
     if args.iter().any(|a| a == "--server") {
