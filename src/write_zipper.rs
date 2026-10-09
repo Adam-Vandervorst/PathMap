@@ -156,8 +156,7 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         }
     }
 
-    /// Joins (union of) the subtrie below the focus of `read_zipper` into the subtrie downstream from the
-    /// focus of `self`
+    /// Joins (union of) the subtrie at the focus of `read_zipper` into the subtrie at the focus of `self`
     ///
     /// If the `self` zipper is at a path that does not exist, this method behaves like [graft](ZipperWriting::graft).
     fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice;
@@ -179,8 +178,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.join_map_into(map)
     }
 
-    /// Joins the subtrie below the focus of `src_zipper` into the subtrie below the focus of `self`,
-    /// consuming the subtrie from the `src_zipper`
+    /// Joins the subtrie at the focus of `src_zipper` into the subtrie at the focus of `self`, consuming the
+    /// subtrie from the `src_zipper`
     ///
     /// `prune=false` leaves an emptied source focus dangling; `true` applies
     /// `src_zipper.prune_path()` afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
@@ -1781,19 +1780,28 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
     /// See [ZipperWriting::join_into]
     pub fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice {
+        let src_root_val = read_zipper.val().cloned();
+        let val_status = match (self.get_val_mut(), src_root_val) {
+            (Some(self_val), Some(src_val)) => { self_val.join_into(src_val) },
+            (None, Some(src_val)) => { self.set_val(src_val); AlgebraicStatus::Element },
+            (Some(_), None) => { AlgebraicStatus::Identity },
+            (None, None) => { AlgebraicStatus::None },
+        };
+
         let src = read_zipper.get_focus();
         let self_focus = self.get_focus();
         if src.is_none() || src.as_tagged().node_is_empty() {
-            if self_focus.is_none() || self_focus.as_tagged().node_is_empty() {
-                return AlgebraicStatus::None
+            let node_status = if self_focus.is_none() || self_focus.as_tagged().node_is_empty() {
+                AlgebraicStatus::None
             } else {
-                return AlgebraicStatus::Identity
-            }
+                AlgebraicStatus::Identity
+            };
+            return node_status.merge(val_status, true, true);
         }
         // `try_as_tagged` answers `Some` for a `BorrowedRc` whatever it holds, so an empty
         // destination must be treated the same as a missing destination. Unioning nothing with
         // the source produces the source; otherwise `pjoin_dyn` reports `SELF_IDENT` and drops it.
-        match self_focus.try_as_tagged().filter(|n| !n.node_is_empty()) {
+        let node_status = match self_focus.try_as_tagged().filter(|n| !n.node_is_empty()) {
             Some(self_node) => {
                 match self_node.pjoin_dyn(src.as_tagged()) {
                     AlgebraicResult::Element(joined) => {
@@ -1817,7 +1825,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             },
             // No destination node, or an empty one: the result is the source.
             None => { self.graft_internal(src.into_option()); AlgebraicStatus::Element }
-        }
+        };
+        node_status.merge(val_status, true, true)
     }
     /// See [ZipperWriting::join_map_into]
     pub fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice {
@@ -1870,23 +1879,27 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::join_into_take]
     pub fn join_into_take<Z: ZipperInfallibleSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice {
-        match src_zipper.take_focus(prune) {
+        // Remove the source value before taking its branches so pruning can empty the focus.
+        let val_status = match (self.get_val_mut(), src_zipper.remove_val(false)) {
+            (Some(self_val), Some(src_val)) => self_val.join_into(src_val),
+            (None, Some(src_val)) => { self.set_val(src_val); AlgebraicStatus::Element },
+            (Some(_), None) => AlgebraicStatus::Identity,
+            (None, None) => AlgebraicStatus::None,
+        };
+
+        // Dangling focuses may be represented by empty sentinel nodes, which cannot be grafted
+        // or made mutable. Treat them as absent branches on either side of the join.
+        let node_status = match src_zipper.take_focus(prune).filter(|n| !n.as_tagged().node_is_empty()) {
             None => {
-                if self.get_focus().is_none() {
-                    return AlgebraicStatus::None
+                let self_focus = self.get_focus();
+                if self_focus.is_none() || self_focus.as_tagged().node_is_empty() {
+                    AlgebraicStatus::None
                 } else {
-                    return AlgebraicStatus::Identity
+                    AlgebraicStatus::Identity
                 }
             },
             Some(src) => {
-                //A dangling source focus is taken as the empty sentinel: nothing to join, and not
-                // a node graft_internal may be handed
-                if src.as_tagged().node_is_empty() {
-                    return if self.get_focus().is_none() { AlgebraicStatus::None } else { AlgebraicStatus::Identity }
-                }
                 match self.take_focus(false) {
-                    //A dangling destination focus is taken as the sentinel too, which cannot be
-                    // made mutable; the join into nothing is the source itself
                     Some(mut self_node) if !self_node.as_tagged().node_is_empty() => {
                         let status = self_node.join_into(src);
                         self.graft_internal(Some(self_node));
@@ -1898,7 +1911,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     }
                 }
             }
-        }
+        };
+        node_status.merge(val_status, true, true)
     }
     /// See [ZipperWriting::join_k_path_into]
     pub fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice {
@@ -3535,6 +3549,86 @@ mod tests {
         assert_eq!(dst.val_at(b""), Some(&7));
         assert_eq!(dst.val_at(b"branch:leaf"), Some(&11));
         assert_eq!(status, AlgebraicStatus::Element);
+    }
+
+    /// Focus values participate in both the join and its status, independently of branches.
+    #[test]
+    fn write_zipper_join_focus_values() {
+        for dst_path in [b"".as_slice(), b"destination", b"destination/deep"] {
+            for src_path in [b"".as_slice(), b"source", b"source/deep"] {
+                for dst_val in [None, Some(false), Some(true)] {
+                    for src_val in [None, Some(false), Some(true)] {
+                        for branches in 0..4 {
+                            for take in [false, true] {
+                                for prune in [false, true] {
+                                    let mut dst = PathMap::<bool>::new();
+                                    let mut src = PathMap::<bool>::new();
+                                    if let Some(val) = dst_val { dst.insert(dst_path, val); }
+                                    if let Some(val) = src_val { src.insert(src_path, val); }
+                                    let dst_branch = [dst_path, b"/leaf"].concat();
+                                    let src_branch = [src_path, b"/leaf"].concat();
+                                    if branches & 1 != 0 { dst.insert(&dst_branch, true); }
+                                    if branches & 2 != 0 { src.insert(&src_branch, true); }
+                                    let original_src = src.clone();
+                                    let joined_val = match (dst_val, src_val) {
+                                        (Some(a), Some(b)) => Some(a | b),
+                                        (a, b) => a.or(b),
+                                    };
+                                    let expected_status = if joined_val != dst_val || branches == 2 {
+                                        AlgebraicStatus::Element
+                                    } else if joined_val.is_some() || branches != 0 {
+                                        AlgebraicStatus::Identity
+                                    } else {
+                                        AlgebraicStatus::None
+                                    };
+
+                                    let mut dst_z = dst.write_zipper();
+                                    dst_z.descend_to(dst_path);
+                                    let status = if take {
+                                        let mut src_z = src.write_zipper();
+                                        src_z.descend_to(src_path);
+                                        let status = dst_z.join_into_take(&mut src_z, prune);
+                                        assert_eq!(src_z.val(), None);
+                                        assert_eq!(src_z.child_count(), 0);
+                                        assert_eq!(src_z.path(), src_path);
+                                        if !src_path.is_empty() && (src_val.is_some() || branches & 2 != 0) {
+                                            assert_eq!(src_z.path_exists(), !prune);
+                                        }
+                                        status
+                                    } else {
+                                        dst_z.join_into(&src.read_zipper_at_path(src_path))
+                                    };
+                                    assert_eq!(status, expected_status,
+                                        "dst={dst_path:?}, src={src_path:?}, values={dst_val:?}/{src_val:?}, branches={branches}, take={take}, prune={prune}");
+                                    assert_eq!(dst_z.val().copied(), joined_val);
+                                    assert_eq!(dst_z.path(), dst_path);
+                                    drop(dst_z);
+                                    assert_eq!(dst.val_at(&dst_branch).copied(), (branches != 0).then_some(true));
+                                    if !take { assert!(src.iter().eq(original_src.iter())); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_zipper_join_focus_values_lattice_element() {
+        for take in [false, true] {
+            let mut dst = PathMap::single(b"focus", LatticeProbe(ProbeState::Original));
+            let mut src = PathMap::single(b"focus", LatticeProbe(ProbeState::Original));
+            let mut dst_z = dst.write_zipper_at_path(b"focus");
+            let status = if take {
+                dst_z.join_into_take(&mut src.write_zipper_at_path(b"focus"), true)
+            } else {
+                dst_z.join_into(&src.read_zipper_at_path(b"focus"))
+            };
+            assert_eq!(status, AlgebraicStatus::Element);
+            assert_eq!(dst_z.val(), Some(&LatticeProbe(ProbeState::Joined)));
+            assert_eq!(src.val_at(b"focus").is_some(), !take);
+        }
     }
 
     #[test]

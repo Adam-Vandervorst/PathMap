@@ -378,13 +378,13 @@ def joinEmptyIdentity (ops : ValOps V) (z : Zip V) : Bool :=
   let src : Zip V := { trie := PathMap.empty, root := [], path := [] }
   let (st, z') := z.joinInto ops src
   PathMap.beqT ops z'.trie z.trie &&
-    (st == (if z.focusNodeIsEmpty then AlgStatus.none else AlgStatus.identity))
+    (st == (if z.focusNodeIsEmpty && z.val.isNone then AlgStatus.none else AlgStatus.identity))
 
 /-- Joining a zipper into itself is the identity, and reports it. -/
 def joinSelfIdentity (ops : ValOps V) (z : Zip V) : Bool :=
   let (st, z') := z.joinInto ops z
   PathMap.beqT ops z'.trie z.trie &&
-    (st == (if z.focusNodeIsEmpty then AlgStatus.none else AlgStatus.identity))
+    (st == (if z.focusNodeIsEmpty && z.val.isNone then AlgStatus.none else AlgStatus.identity))
 
 /-- `remove_branches` empties the focus but preserves its value. -/
 def removeBranchesKeepsVal (ops : ValOps V) (z : Zip V) : Bool :=

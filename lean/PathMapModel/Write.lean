@@ -6,13 +6,8 @@ import PathMapModel.Zipper
 Everything here mutates `Zip.trie` through the focus `root ++ path`.  Two
 invariants shape the whole API and are worth stating up front:
 
-1. **A node is what lies strictly below a location.**  `get_focus`,
-   `graft_internal`, and every `*_dyn` algebraic primitive operate on nodes, so
-   they never see or touch the value *at* the focus.  Operations that do affect
-   the focus value (`graft`, `graft_map`, `make_map`, `take_map`,
-   `join_map_into`, `meet_into`, `subtract_into`) do it in a separate step —
-   this behavior is unconditional.  Note the resulting asymmetry: `graft` adopts
-   the source's focus value but `join_into` does **not** join focus values.
+1. **A subtrie includes the value at its root and all descendants.**  The
+   subtrie at a zipper's focus therefore includes the focus value.
 
 2. **Pruning is opt-in and root-bounded.**  A write leaves dangling paths behind
    unless `prune` is passed.  Passing `true` means running the operation with
@@ -244,22 +239,33 @@ def nodeStatus (before after : PathMap V) : AlgStatus :=
   else if PathMap.beqT ops after before then .identity
   else .element
 
-/-- `ZipperWriting::join_into`: union the source's subtrie into the focus's.
-
-The focus **values are not joined** — only the nodes below the focus are.  (The
-map-consuming variant `join_map_into` *does* join root values; see there.) -/
+/-- `ZipperWriting::join_into`: union the subtrie at the source's focus into
+the subtrie at the destination's focus. -/
 def joinInto (src : Zip V) : AlgStatus × Zip V :=
-  let selfB := z.focusNode
+  let (valStatus, z1) :=
+    match z.val, src.val with
+    | some sv, some mv =>
+        let r := ops.pjoin sv mv
+        (AlgStatus.ofValRes r,
+          match r.resolve sv mv with
+          | some v => (z.setVal v).2
+          | none => (z.removeVal false).2)
+    | none, some mv => (AlgStatus.element, (z.setVal mv).2)
+    | some _, none => (AlgStatus.identity, z)
+    | none, none => (AlgStatus.none, z)
+  let selfB := z1.focusNode
   let srcB := src.focusNode
-  if srcB.isEmptyMap then (if selfB.isEmptyMap then .none else .identity, z)
-  else
-    let r := PathMap.join ops selfB srcB
-    if PathMap.beqT ops r selfB then (.identity, z)
-    else (.element, z.withTrie (z.trie.graftBelow z.focus r))
+  let (nodeStatus, z2) :=
+    if srcB.isEmptyMap then (if selfB.isEmptyMap then AlgStatus.none else AlgStatus.identity, z1)
+    else
+      let r := PathMap.join ops selfB srcB
+      if PathMap.beqT ops r selfB then (AlgStatus.identity, z1)
+      else (AlgStatus.element, z1.withTrie (z1.trie.graftBelow z1.focus r))
+  (AlgStatus.merge nodeStatus valStatus true true, z2)
 
-/-- `ZipperWriting::join_map_into`: union a consumed `PathMap` into the focus.
+/-- `ZipperWriting::join_map_into`: union a consumed `PathMap` into the subtrie
+at the focus.
 
-Unlike `join_into` this *does* join the map's root value into the focus value.
 It also short-circuits: when the map has no root node, the node status is
 returned directly and the value status computed above is discarded — even though
 the value has already been written. -/
@@ -292,19 +298,14 @@ def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
     (AlgStatus.merge nodeStatus valStatus true valWasNone, z2)
 
 /-- `ZipperWriting::join_into_take`: like `join_into`, but the source subtrie is
-removed from the source zipper's trie.  Returns the updated destination *and*
+removed from the source zipper's trie. Returns the updated destination *and*
 source zippers. -/
 def joinIntoTake (src : Zip V) (prune : Bool) : AlgStatus × Zip V × Zip V :=
-  let srcB := src.focusNode
-  let src1 := src.withTrie (src.trie.removeBelow src.focus)
+  let (st, dst) := z.joinInto ops src
+  let src0 := (src.removeVal false).2
+  let src1 := src0.withTrie (src0.trie.removeBelow src0.focus)
   let src2 := if prune then (src1.prunePath).2 else src1
-  let selfB := z.focusNode
-  if srcB.isEmptyMap then
-    (if selfB.isEmptyMap then .none else .identity, z, src2)
-  else
-    let r := PathMap.join ops selfB srcB
-    let st := if PathMap.beqT ops r selfB then AlgStatus.identity else AlgStatus.element
-    (st, z.withTrie (z.trie.graftBelow z.focus r), src2)
+  (st, dst, src2)
 
 /-- `ZipperWriting::meet_into`: intersect the focus's subtrie with the source's.
 

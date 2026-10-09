@@ -4074,8 +4074,11 @@ mod tests {
         let mut destination = PathMap::<u64>::new();
         destination.write_zipper().join_into_take(&mut taken.write_zipper_at_path(b"a"), true);
         assert_valid_trie(taken.root());
-        assert_eq!(taken.val_at(b"a"), Some(&1));
+        assert_eq!(taken.val_at(b"a"), None);
         assert!(!taken.path_exists_at(b"ab"));
+        assert_valid_trie(destination.root());
+        assert_eq!(destination.val_at(b""), Some(&1));
+        assert_eq!(destination.val_at(b"b"), Some(&2));
 
         let mut dropped = PathMap::<u64>::new();
         dropped.set_val_at(b"ab", 1);
