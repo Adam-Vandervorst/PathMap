@@ -1313,10 +1313,7 @@ mod tests {
         wz.graft(&map1.read_zipper());
         drop(wz);
 
-        #[cfg(feature = "graft_root_vals")]
         assert_eq!(map0.val_at([]), Some(&0));
-        #[cfg(not(feature = "graft_root_vals"))]
-        assert_eq!(map0.get_val_at([]), None);
     }
 
     #[test]

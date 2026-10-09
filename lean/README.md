@@ -132,7 +132,7 @@ Two distinctions the model keeps explicit because `pathmap` depends on them:
   lives in its parent's cell.  `get_focus`, `graft_internal` and every `*_dyn`
   algebraic primitive operate on nodes, so they never touch the focus value;
   `PathMap.subtrie` includes it, `Zip.focusNode` does not.
-* **The `graft_root_vals` feature is on by default**, so `graft`, `graft_map`,
+* **Focus values are part of subtrie operations**, so `graft`, `graft_map`,
   `make_map`, `take_map`, `join_map_into`, `meet_into` and `subtract_into` handle
   the focus value in a separate step — while `join_into` does not.  The model
   reproduces that asymmetry rather than smoothing it over.

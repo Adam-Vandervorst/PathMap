@@ -224,8 +224,8 @@ def isEmptyMap (t : PathMap V) : Bool := t.vals.isEmpty && t.belowIsEmpty []
 /-! ## Sub-tries and grafting -/
 
 /-- The subtrie rooted at `p`, **including** the value at `p` as its root value.
-This is `make_map` / `take_map` under the default `graft_root_vals` feature, and
-also what a zipper rooted at `p` sees.  Yields `empty` when `p` does not exist. -/
+This is `make_map` / `take_map`, and also what a zipper rooted at `p` sees.
+Yields `empty` when `p` does not exist. -/
 def subtrie (t : PathMap V) (p : Path) : PathMap V :=
   mk' (t.vals.filterMap fun kv => (Path.stripPrefix p kv.1).map (·, kv.2))
       (t.paths.filterMap fun q => Path.stripPrefix p q)

@@ -84,6 +84,9 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Replaces the subtrie at the zipper's focus with the subtrie at the focus of `read_zipper`
     ///
+    /// The destination focus value is replaced with the source focus value, or removed if the
+    /// source has no focus value.
+    ///
     /// NOTE: If the `read_zipper` is not on an existing path (according to [Zipper::path_exists]) then the
     /// effect will be the same as calling [remove_subtrie](ZipperWriting::remove_subtrie) with
     /// `prune=false`.
@@ -156,11 +159,6 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Joins (union of) the subtrie below the focus of `read_zipper` into the subtrie downstream from the
     /// focus of `self`
     ///
-    /// GOAT: Should the ordinary zipper alg ops also be affected by `graft_root_vals` behavior?
-    /// In other words, should we join, meet, subtract, etc. the values at the zipper focus as well??
-    /// It actually makes sense that the answer should be yes.  If this is the decision, the `join_map_into`
-    /// method has an implementation that could likely be factord out and shared among all the ops.
-    ///
     /// If the `self` zipper is at a path that does not exist, this method behaves like [graft](ZipperWriting::graft).
     fn join_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus where V: Lattice;
 
@@ -173,14 +171,6 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Joins (union of) the contents of a [PathMap] into the trie below the zipper's focus,
     /// consuming the map
-    ///
-    /// GOAT: This method's behavior is affected by the `graft_root_vals` feature
-    /// GOAT QUESTION!!!!! Should this method join the map's root value into the value at the zipper's
-    /// focus?  The argument for `yes` is that a root value is part of a map.  The argument for `no` is
-    /// an analogy to `graft` and `graft_map` that currently don't bother the values.  Personally, I
-    /// believe `yes` is more conceptually correct, and that the behavior of `graft` and `graft_map`
-    /// should probably be revisited.  **HOWEVER** the currently implemented behavior is **NO**!
-    /// This is related to a question in [ZipperInfallibleSubtries::make_map]
     fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice;
 
     /// Depracated alias for [ZipperWriting::join_map_into]
@@ -305,14 +295,10 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     //GOAT, gotta document this much better and decide if a return of AlgebraicStatus is called for.  Probably.
     fn restricting<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> bool;
 
-    /// Creates a new [PathMap] from the zipper's focus, removing all downstream branches from the zipper
+    /// Creates a new [PathMap] from the zipper's focus, removing subtrie at the focus.
     ///
     /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
     /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
-    ///
-    /// GOAT: This method's behavior is affected by the `graft_root_vals` feature
-    /// A value at the zipper's focus will not be affected, and will not be included in the resulting map.
-    /// GOAT: See discussion in [ZipperInfallibleSubtries::make_map] about whether this behavior should be changed
     fn take_map(&mut self, prune: bool) -> Option<PathMap<V, A>>;
 
     /// Removes all branches below the zipper's focus.  Does not affect the value if there is one.  Returns `true`
@@ -324,7 +310,6 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
 
     /// Removes the subtrie at the zipper's focus, including its value and all downstream branches.
     /// Returns `true` if a value or branch was removed, otherwise returns `false`.
-    /// The focus value is removed regardless of the `graft_root_vals` feature.
     ///
     /// `prune=false` leaves an emptied focus dangling; `prune=true` applies [Self::prune_path]
     /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
@@ -1060,18 +1045,12 @@ impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<
 
 impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperCore<'a, '_, V, A> {
     fn make_map(&self) -> PathMap<V, A> {
-        #[cfg(not(feature = "graft_root_vals"))]
-        let root_val = None;
-        #[cfg(feature = "graft_root_vals")]
         let root_val = self.val().cloned();
 
         let root_node = self.get_focus().into_option();
         PathMap::new_with_root_in(root_node, root_val, self.alloc.clone())
     }
     fn get_trie_ref(&self) -> TrieRef<'_, V, A> {
-        #[cfg(not(feature = "graft_root_vals"))]
-        let root_val = None;
-        #[cfg(feature = "graft_root_vals")]
         let root_val = self.val().cloned();
 
         let root_node = self.get_focus().into_option();
@@ -1539,7 +1518,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) {
         self.graft_internal(read_zipper.get_focus().into_option());
 
-        #[cfg(feature = "graft_root_vals")]
         let _ = match read_zipper.val() {
             Some(src_val) => self.set_val(src_val.clone()),
             None => self.remove_val(false)
@@ -1549,7 +1527,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     fn graft_src_at<Z: ZipperInfallibleSubtries<V, A>, K: AsRef<[u8]>>(&mut self, src: &Z, path: K) {
         self.graft_internal(src.get_focus_at(&path).into_option());
 
-        #[cfg(feature = "graft_root_vals")]
         let _ = match src.val_at(&path) {
             Some(src_val) => self.set_val(src_val.clone()),
             None => self.remove_val(false)
@@ -1560,9 +1537,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         let (src_root_node, src_root_val) = map.into_root();
         self.graft_internal(src_root_node);
 
-        #[cfg(not(feature = "graft_root_vals"))]
-        let _ = src_root_val;
-        #[cfg(feature = "graft_root_vals")]
         let _ = match src_root_val {
             Some(src_val) => self.set_val(src_val),
             None => self.remove_val(false)
@@ -1848,9 +1822,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// See [ZipperWriting::join_map_into]
     pub fn join_map_into(&mut self, map: PathMap<V, A>) -> AlgebraicStatus where V: Lattice {
         let (src_root_node, src_root_val) = map.into_root();
-        #[cfg(not(feature = "graft_root_vals"))]
-        let _ = src_root_val;
-        #[cfg(feature = "graft_root_vals")]
         let val_status = match (self.get_val_mut(), src_root_val) {
             (Some(self_val), Some(src_val)) => { self_val.join_into(src_val) },
             (None, Some(src_val)) => { self.set_val(src_val); AlgebraicStatus::Element },
@@ -1867,9 +1838,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 } else {
                     AlgebraicStatus::Identity
                 };
-                #[cfg(not(feature = "graft_root_vals"))]
-                return node_status;
-                #[cfg(feature = "graft_root_vals")]
                 return node_status.merge(val_status, true, true);
             }
         };
@@ -1898,10 +1866,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             None => { self.graft_internal(Some(src)); AlgebraicStatus::Element }
         };
 
-        #[cfg(not(feature = "graft_root_vals"))]
-        return node_status;
-        #[cfg(feature = "graft_root_vals")]
-        return node_status.merge(val_status, true, true)
+        node_status.merge(val_status, true, true)
     }
     /// See [ZipperWriting::join_into_take]
     pub fn join_into_take<Z: ZipperInfallibleSubtries<V, A> + ZipperWriting<V, A>>(&mut self, src_zipper: &mut Z, prune: bool) -> AlgebraicStatus where V: Lattice {
@@ -2050,9 +2015,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// See [ZipperWriting::meet_into]
     pub fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice {
         let src_root_val = read_zipper.val();
-        #[cfg(not(feature = "graft_root_vals"))]
-        let _ = src_root_val;
-        #[cfg(feature = "graft_root_vals")]
         let (val_status, val_was_none) = match (self.get_val_mut(), src_root_val) {
             (Some(self_val), Some(src_val)) => {
                 let new_status = match self_val.pmeet(src_val) {
@@ -2119,10 +2081,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             self.prune_path();
         }
 
-        #[cfg(not(feature = "graft_root_vals"))]
-        return node_status;
-        #[cfg(feature = "graft_root_vals")]
-        return node_status.merge(val_status, node_was_none, val_was_none)
+        node_status.merge(val_status, node_was_none, val_was_none)
     }
     /// See [WriteZipper::meet_2]
     pub fn meet_2<ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice {
@@ -2175,9 +2134,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// See [ZipperWriting::subtract_into]
     pub fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice {
         let src_root_val = read_zipper.val();
-        #[cfg(not(feature = "graft_root_vals"))]
-        let _ = src_root_val;
-        #[cfg(feature = "graft_root_vals")]
         let (val_status, val_was_none) = match (self.get_val_mut(), src_root_val) {
             (Some(self_val), Some(src_val)) => {
                 let new_status = match self_val.psubtract(src_val) {
@@ -2243,10 +2199,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             self.prune_path();
         }
 
-        #[cfg(not(feature = "graft_root_vals"))]
-        return node_status;
-        #[cfg(feature = "graft_root_vals")]
-        return node_status.merge(val_status, node_was_none, val_was_none)
+        node_status.merge(val_status, node_was_none, val_was_none)
     }
     /// See [WriteZipper::restrict]
     pub fn restrict<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> AlgebraicStatus {
@@ -2345,9 +2298,6 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
     /// See [WriteZipper::take_map]
     pub fn take_map(&mut self, prune: bool) -> Option<PathMap<V, A>> {
-        #[cfg(not(feature = "graft_root_vals"))]
-        let root_val = None;
-        #[cfg(feature = "graft_root_vals")]
         let root_val = self.remove_val(prune);
 
         let root_node = self.take_focus(prune);
@@ -3156,7 +3106,6 @@ mod tests {
     /// The way the above shows up in practice: grafting into a path *inside*
     /// an already-grafted subtrie.  `graft` removes the focus value when the
     /// source has no root value, which is where the sentinel came from.
-    #[cfg(feature = "graft_root_vals")]
     #[test]
     fn write_zipper_graft_into_grafted_subtrie_test() {
         //A leaf whose root carries a value, so grafting it makes a node with a
@@ -6699,7 +6648,7 @@ mod tests {
             assert_eq!(map.val_at(&want), Some(&5), "root {root_len}");
             want.truncate(root_len);
             want.push(3);
-            assert_eq!(map.val_at(&want).is_some(), cfg!(feature = "graft_root_vals"), "root {root_len}");
+            assert_eq!(map.val_at(&want), Some(&6), "root {root_len}");
 
             let mut src = PathMap::<u64>::new();
             src.set_val_at([4u8, 4], 9);
