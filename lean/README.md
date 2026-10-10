@@ -132,7 +132,7 @@ Two distinctions the model keeps explicit because `pathmap` depends on them:
   lives in its parent's cell.  `get_focus`, `graft_internal` and every `*_dyn`
   algebraic primitive operate on nodes, so they never touch the focus value;
   `PathMap.subtrie` includes it, `Zip.focusNode` does not.
-* **The `graft_root_vals` feature is on by default**, so `graft`, `graft_map`,
+* **Focus values are part of subtrie operations**, so `graft`, `graft_map`,
   `make_map`, `take_map`, `join_map_into`, `meet_into` and `subtract_into` handle
   the focus value in a separate step — while `join_into` does not.  The model
   reproduces that asymmetry rather than smoothing it over.
@@ -211,6 +211,20 @@ body:
   repeated: op := u8 % 56 ; operands per op
 ```
 
+This is the headerless format, whose selector count is permanently 56. New
+inputs start with the eight bytes `PMFUZZ\x01\x00`, then a little-endian u16
+selector count (1 through 256), followed by the same map/zipper header. Operation
+bytes are reduced modulo the recorded count, independently of the running
+software's operation table. Truncated headers and invalid counts are rejected.
+Operation 56 is `remove_subtrie`, with one boolean prune operand.
+
+The random-input generator obtains the header from the selected Rust trace
+producer's `--input-header` option. `NOPS` in `differential/src/harness.rs` is
+the only definition of the current generation count; Lean and replay never
+consult it. Keep existing operation IDs and argument-decoding rules stable.
+Adding an operation requires its Lean/Rust handlers and reproducer entry, plus
+updating `NOPS`; the input format and old repros need no changes.
+
 Every path byte is masked to `b % 4`, so generated tries share prefixes heavily
 and actually branch — that is where the interesting shapes are (branch points,
 single-child runs, dangling chains).  Decoding stops when the input runs out.
@@ -222,6 +236,12 @@ is a textual diff.
 
 The op table lives in `Fuzz.lean` (`PathMapModel.Fuzz.step`) and
 `differential/src/harness.rs`; **the two must be changed together.**
+
+`Zip.removeSubtrie` clears the focus value and all descendants, then optionally
+prunes. Its boolean result counts removal of a value or branch, including a
+dangling descendant, but not pruning an already dangling focus. Build-time
+checks cover removal, unrelated content, cursor stability, and the zipper-root
+bound; differential operation 56 exercises the optimized Rust implementation.
 
 ### Front ends
 

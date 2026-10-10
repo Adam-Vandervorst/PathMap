@@ -224,8 +224,8 @@ def isEmptyMap (t : PathMap V) : Bool := t.vals.isEmpty && t.belowIsEmpty []
 /-! ## Sub-tries and grafting -/
 
 /-- The subtrie rooted at `p`, **including** the value at `p` as its root value.
-This is `make_map` / `take_map` under the default `graft_root_vals` feature, and
-also what a zipper rooted at `p` sees.  Yields `empty` when `p` does not exist. -/
+This is `make_map` / `take_map`, and also what a zipper rooted at `p` sees.
+Yields `empty` when `p` does not exist. -/
 def subtrie (t : PathMap V) (p : Path) : PathMap V :=
   mk' (t.vals.filterMap fun kv => (Path.stripPrefix p kv.1).map (·, kv.2))
       (t.paths.filterMap fun q => Path.stripPrefix p q)
@@ -390,24 +390,14 @@ def beqT (ops : ValOps V) (a b : PathMap V) : Bool :=
 
 /-! ## Path surgery -/
 
-/-- `ZipperWriting::insert_prefix`: put `k` in front of every path below the root. -/
-def insertPrefixBelow (t : PathMap V) (k : Path) : PathMap V :=
-  mk' (t.vals.filterMap fun kv => if kv.1 == ([] : Path) then none else some (k ++ kv.1, kv.2))
-      (t.paths.filterMap fun q => if q == ([] : Path) then none else some (k ++ q))
-
 /-- The existing locations exactly `k` bytes below the root, in depth-first order. -/
 def kPaths (t : PathMap V) (k : Nat) : List Path := t.paths.filter (fun q => q.length == k)
 
-/-- `drop_head` / `ZipperWriting::join_k_path_into` at node level: strip the first
-`k` bytes from every path and join the results.
-
-Values sitting at depth *exactly* `k` are **discarded** — the joined node has
-nowhere to put a root value.  (`meet_k_path_into` keeps them, because it routes
-through `take_map`/`graft_map`, which do carry root values.  The asymmetry is
-real; see `Spec.lean`.) -/
+/-- `drop_head` / `ZipperWriting::join_k_path_into`: strip the first `k` bytes
+from every path and join the resulting subtries, including their root values. -/
 def dropHead (t : PathMap V) (k : Nat) : PathMap V :=
   if k == 0 then t
-  else (t.kPaths k).foldl (fun acc q => join ops acc ((t.subtrie q).removeVal []).2) empty
+  else (t.kPaths k).foldl (fun acc q => join ops acc (t.subtrie q)) empty
 
 end PathMap
 end PathMapModel

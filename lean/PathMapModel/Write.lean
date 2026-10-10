@@ -6,14 +6,8 @@ import PathMapModel.Zipper
 Everything here mutates `Zip.trie` through the focus `root ++ path`.  Two
 invariants shape the whole API and are worth stating up front:
 
-1. **A node is what lies strictly below a location.**  `get_focus`,
-   `graft_internal`, and every `*_dyn` algebraic primitive operate on nodes, so
-   they never see or touch the value *at* the focus.  Operations that do affect
-   the focus value (`graft`, `graft_map`, `make_map`, `take_map`,
-   `join_map_into`, `meet_into`, `subtract_into`) do it in a separate step —
-   this is the `graft_root_vals` cargo feature, which is on by default and which
-   the model assumes throughout.  Note the resulting asymmetry: `graft` adopts
-   the source's focus value but `join_into` does **not** join focus values.
+1. **A subtrie includes the value at its root and all descendants.**  The
+   subtrie at a zipper's focus therefore includes the focus value.
 
 2. **Pruning is opt-in and root-bounded.**  A write leaves dangling paths behind
    unless `prune` is passed.  Passing `true` means running the operation with
@@ -114,6 +108,14 @@ def removeBranches (prune : Bool) : Bool × Zip V :=
   let z' := z.withTrie (z.trie.removeBelow z.focus)
   (removed, if prune then (z'.prunePath).2 else z')
 
+/-- `ZipperWriting::remove_subtrie`: remove the focus value and all descendants,
+then optionally prune. Returns whether a value or branch was removed; pruning
+alone does not count as removal. The cursor and zipper root do not move. -/
+def removeSubtrie (prune : Bool) : Bool × Zip V :=
+  let (branches, z1) := z.removeBranches false
+  let (value, z2) := z1.removeVal false
+  (branches || value.isSome, if prune then (z2.prunePath).2 else z2)
+
 /-- `ZipperWriting::remove_unmasked_branches`: keep only the child bytes set in
 `mask`; delete the rest along with their subtries. -/
 def removeUnmaskedBranches (mask : ByteMask) (prune : Bool) : Zip V :=
@@ -195,31 +197,29 @@ def takeMap (prune : Bool) : Option (PathMap V) × Zip V :=
 
 /-! ## Path surgery -/
 
-/-- `ZipperWriting::insert_prefix`: put `pre` in front of every path below the
-focus.  The focus value is untouched.  Returns `false` at a location with no
-descendants.
-
-BUG (`pathmap` 0.3.1): with an **empty** prefix this should be the identity, but
-`make_parents_in(b"", node)` discards the node — the subtrie below the focus is
-destroyed and `true` is still returned.  The model specifies the identity; the
-differential harness skips `insert_prefix("")` so the known divergence does not
-mask others. -/
+/-- `ZipperWriting::insert_prefix`: put `pre` in front of every path in the
+subtrie, including the path to the focus value. The subtrie root and cursor stay
+at the same path. An existing dangling tip is extended, including at an empty
+map's root. An empty prefix is an identity operation. Returns whether the
+focus path exists; a nonexistent focus leaves the trie unchanged. -/
 def insertPrefix (pre : Path) : Bool × Zip V :=
-  if z.focusNodeIsEmpty then (false, z)
-  else (true, z.withTrie (z.trie.graftBelow z.focus (z.focusNode.insertPrefixBelow pre)))
+  if !z.pathExists then (false, z)
+  else if pre.isEmpty then (true, z)
+  else
+    let t := z.makeMap
+    let shifted := PathMap.mk' (t.vals.map fun kv => (pre ++ kv.1, kv.2))
+      (t.paths.map fun q => pre ++ q)
+    (true, z.graftMap shifted)
 
-/-- `ZipperWriting::remove_prefix`: lift the subtrie below the focus up by `n`
-bytes, replacing whatever was below the new (ascended) focus.  Returns whether
-the full `n` bytes could be ascended.
-
-Note the value at the old focus is *not* carried up — it belonged to the parent
-cell, not to the node that gets moved. -/
-def removePrefix (n : Nat) : Bool × Zip V :=
-  let below := z.focusNode
-  -- `ascend` now reports how far it got, so "were all `n` bytes removed" is a
-  -- comparison rather than the flag it used to return directly.
+/-- `ZipperWriting::remove_prefix`: move the focused subtrie upward by `n`
+path bytes, deleting the intervening path segment, its associated values,
+and other branches descending from that segment. The original focus value
+replaces the value at the new focus, clearing it when absent. Returns the
+number of bytes ascended. -/
+def removePrefix (n : Nat) : Nat × Zip V :=
+  let subtrie := z.makeMap
   let (ascended, z1) := z.ascend n
-  (ascended == n, z1.withTrie (z1.trie.graftBelow z1.focus below))
+  (ascended, z1.graftMap subtrie)
 
 /-! ## Algebraic operations
 
@@ -237,22 +237,33 @@ def nodeStatus (before after : PathMap V) : AlgStatus :=
   else if PathMap.beqT ops after before then .identity
   else .element
 
-/-- `ZipperWriting::join_into`: union the source's subtrie into the focus's.
-
-The focus **values are not joined** — only the nodes below the focus are.  (The
-map-consuming variant `join_map_into` *does* join root values; see there.) -/
+/-- `ZipperWriting::join_into`: union the subtrie at the source's focus into
+the subtrie at the destination's focus. -/
 def joinInto (src : Zip V) : AlgStatus × Zip V :=
-  let selfB := z.focusNode
+  let (valStatus, z1) :=
+    match z.val, src.val with
+    | some sv, some mv =>
+        let r := ops.pjoin sv mv
+        (AlgStatus.ofValRes r,
+          match r.resolve sv mv with
+          | some v => (z.setVal v).2
+          | none => (z.removeVal false).2)
+    | none, some mv => (AlgStatus.element, (z.setVal mv).2)
+    | some _, none => (AlgStatus.identity, z)
+    | none, none => (AlgStatus.none, z)
+  let selfB := z1.focusNode
   let srcB := src.focusNode
-  if srcB.isEmptyMap then (if selfB.isEmptyMap then .none else .identity, z)
-  else
-    let r := PathMap.join ops selfB srcB
-    if PathMap.beqT ops r selfB then (.identity, z)
-    else (.element, z.withTrie (z.trie.graftBelow z.focus r))
+  let (nodeStatus, z2) :=
+    if srcB.isEmptyMap then (if selfB.isEmptyMap then AlgStatus.none else AlgStatus.identity, z1)
+    else
+      let r := PathMap.join ops selfB srcB
+      if PathMap.beqT ops r selfB then (AlgStatus.identity, z1)
+      else (AlgStatus.element, z1.withTrie (z1.trie.graftBelow z1.focus r))
+  (AlgStatus.merge nodeStatus valStatus true true, z2)
 
-/-- `ZipperWriting::join_map_into`: union a consumed `PathMap` into the focus.
+/-- `ZipperWriting::join_map_into`: union a consumed `PathMap` into the subtrie
+at the focus.
 
-Unlike `join_into` this *does* join the map's root value into the focus value.
 It also short-circuits: when the map has no root node, the node status is
 returned directly and the value status computed above is discarded — even though
 the value has already been written. -/
@@ -285,19 +296,14 @@ def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
     (AlgStatus.merge nodeStatus valStatus true valWasNone, z2)
 
 /-- `ZipperWriting::join_into_take`: like `join_into`, but the source subtrie is
-removed from the source zipper's trie.  Returns the updated destination *and*
+removed from the source zipper's trie. Returns the updated destination *and*
 source zippers. -/
 def joinIntoTake (src : Zip V) (prune : Bool) : AlgStatus × Zip V × Zip V :=
-  let srcB := src.focusNode
-  let src1 := src.withTrie (src.trie.removeBelow src.focus)
+  let (st, dst) := z.joinInto ops src
+  let src0 := (src.removeVal false).2
+  let src1 := src0.withTrie (src0.trie.removeBelow src0.focus)
   let src2 := if prune then (src1.prunePath).2 else src1
-  let selfB := z.focusNode
-  if srcB.isEmptyMap then
-    (if selfB.isEmptyMap then .none else .identity, z, src2)
-  else
-    let r := PathMap.join ops selfB srcB
-    let st := if PathMap.beqT ops r selfB then AlgStatus.identity else AlgStatus.element
-    (st, z.withTrie (z.trie.graftBelow z.focus r), src2)
+  (st, dst, src2)
 
 /-- `ZipperWriting::meet_into`: intersect the focus's subtrie with the source's.
 
@@ -377,40 +383,33 @@ def subtractInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
   let (st, z') := z.subtractIntoWithoutPrune ops src
   (st, if prune then (z'.prunePath).2 else z')
 
-/-- `ZipperWriting::meet_2`: meet two *source* subtries and write the result at
-the focus.
-
-Two things separate this from `meet_into`.  It does not consult what is already
-at the focus, so — as the implementation notes — it never reports `Identity`,
-only `Element` or `None`.  And it works on nodes, so neither source's focus value
-is consulted and the focus value here is left untouched. -/
+/-- `ZipperWriting::meet_2`: replace the subtrie at the focus with the meet of
+two source subtries, including their focus values. The destination's existing
+contents are not operands, so the result reports `Element` when nonempty and
+`None` when empty, never `Identity`. -/
 def meet2 (a b : Zip V) : AlgStatus × Zip V :=
-  let an := a.focusNode
-  let bn := b.focusNode
-  if an.isEmptyMap || bn.isEmptyMap then
-    (.none, z.withTrie (z.trie.removeBelow z.focus))
-  else
-    let r := PathMap.meet ops an bn
-    if r.isEmptyMap then (.none, z.withTrie (z.trie.removeBelow z.focus))
-    else (.element, z.withTrie (z.trie.graftBelow z.focus r))
+  let r := PathMap.meet ops a.makeMap b.makeMap
+  (if r.isEmptyMap then .none else .element, z.graftMap r)
 
-/-- `ZipperWriting::restrict`: keep only the paths below the focus that are
-prefixed by a path to a value in the source's subtrie.
-
-The empty prefix does **not** validate here: the source's *focus value* is
-invisible to a node-level `prestrict`.  `PathMap::restrict` does consult the
-root value (see `Map.restrict`), so the two disagree exactly when the source has
-a value at its focus.  The focus value of `self` is never touched. -/
+/-- `ZipperWriting::restrict`: keep only paths in the destination subtrie
+prefixed by a path to a value in the source subtrie, as in `PathMap::restrict`.
+A source focus value retains the whole destination subtrie. Without one, the
+destination focus value is removed. An empty result always reports `None`. -/
 def restrict (src : Zip V) : AlgStatus × Zip V :=
-  let srcB := src.focusNode
-  let selfB := z.focusNode
-  if srcB.isEmptyMap then (.none, z.withTrie (z.trie.removeBelow z.focus))
-  else if selfB.isEmptyMap then (.none, z)
+  if src.val.isSome then
+    (if z.makeMap.isEmptyMap then .none else .identity, z)
   else
-    let r := PathMap.restrictBelowRoot selfB srcB
-    let st := nodeStatus ops selfB r
-    if st == .identity then (.identity, z)
-    else (st, z.withTrie (z.trie.graftBelow z.focus r))
+    let (removedVal, z1) := z.removeVal false
+    let srcB := src.focusNode
+    let selfB := z1.focusNode
+    if srcB.isEmptyMap then (.none, z1.withTrie (z1.trie.removeBelow z1.focus))
+    else if selfB.isEmptyMap then (.none, z1)
+    else
+      let r := PathMap.restrictBelowRoot selfB srcB
+      let st := nodeStatus ops selfB r
+      if st == .identity then
+        (if removedVal.isSome then .element else .identity, z1)
+      else (st, z1.withTrie (z1.trie.graftBelow z1.focus r))
 
 /-- `ZipperWriting::restricting`: the mirror image — fill in `self`'s "stem"
 paths with the source's subtries.  `self`'s subtrie is replaced by the source's,
@@ -428,24 +427,15 @@ def restricting (src : Zip V) : Bool × Zip V :=
 
 /-! ## Collapsing path segments -/
 
-/-- `ZipperWriting::join_k_path_into` (a.k.a. `drop_head`): strip the leading
-`k` bytes from every path below the focus and join the results.
-
-Values sitting at depth exactly `k` are **lost**: the joined node has no root
-value slot.  Returns whether anything survives below the focus.
-
-BUG (`pathmap` 0.3.1): `k = 0` should be the identity — dropping no bytes — but
-`drop_head_dyn(0)` collapses the subtrie instead.  On `{[] ↦ 0, [0] ↦ 0,
-[0,0] ↦ 0, [1,0] ↦ 0}` it leaves `{[] ↦ 0, [0] ↦ 0}`.  The model specifies the
-identity; the harness skips `k = 0`. -/
+/-- `ZipperWriting::join_k_path_into` (a.k.a. `drop_head`): replace the subtrie
+at the focus with the join of the subtries `k` bytes below it. Values at exactly
+that depth replace the focus value; shallower values are discarded. A zero `k`
+is an identity operation. Returns whether the resulting subtrie is nonempty. -/
 def joinKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
-  let below := z.focusNode
-  let (res, z1) :=
-    if below.isEmptyMap then (false, z)
-    else
-      let r := PathMap.dropHead ops below k
-      (!r.isEmptyMap, z.withTrie (z.trie.graftBelow z.focus r))
-  (res, if prune then (z1.prunePath).2 else z1)
+  let r := PathMap.dropHead ops z.makeMap k
+  let z1 := if k == 0 then z else z.graftMap r
+  let res := !r.isEmptyMap
+  (res, if prune && !res then (z1.prunePath).2 else z1)
 
 /-- `meet_k_path_into` is **not implementable** for these arguments: its
 provisional implementation drives `descend_first_k_path` through the
@@ -457,9 +447,8 @@ def meetKPathUnspecified (k : Nat) : Bool := k == 0 || z.childCount == 0
 /-- `ZipperWriting::meet_k_path_into`: strip the leading `k` bytes from every
 path below the focus and meet the results.
 
-Unlike `join_k_path_into`, this routes through `take_map`/`graft_map`, so values
-at depth exactly `k` *are* carried — they become the focus value.  Only
-meaningful when `meetKPathUnspecified` is `false`. -/
+Values at depth exactly `k` become the focus value. Only meaningful when
+`meetKPathUnspecified` is `false`. -/
 def meetKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
   let kps := (z.trie.subtrie z.focus).kPaths k
   let result : Option (PathMap V) :=

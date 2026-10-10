@@ -481,8 +481,9 @@ class RandomInputs(InputSource):
     `randbytes` alone is ~39x faster than that loop.
     """
 
-    def __init__(self, seed, count, maxlen):
+    def __init__(self, seed, count, maxlen, input_header):
         self.seed, self.count, self.maxlen = seed, count, maxlen
+        self.input_header = input_header
 
     def __len__(self):
         return self.count
@@ -492,7 +493,7 @@ class RandomInputs(InputSource):
 
     def get(self, idx):
         rng = random.Random((self.seed << 32) ^ idx)
-        return rng.randbytes(rng.randrange(8, self.maxlen))
+        return self.input_header + rng.randbytes(rng.randrange(8, self.maxlen))
 
 
 class FileInputs(InputSource):
@@ -606,7 +607,9 @@ def main():
     if args.files:
         sources.append(FileInputs(args.files))
     if args.random:
-        sources.append(RandomInputs(args.seed, args.random, args.maxlen))
+        # The Rust producer owns the count for new inputs; never duplicate it here or in Lean.
+        header_hex = subprocess.check_output([trace_bin, "--input-header"], text=True).strip()
+        sources.append(RandomInputs(args.seed, args.random, args.maxlen, bytes.fromhex(header_hex)))
     source = ChainInputs(sources)
     n_inputs = len(source)
 

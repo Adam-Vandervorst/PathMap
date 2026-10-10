@@ -23,8 +23,13 @@ header:
   r0        := u8 % 4 ; r0 × pathbyte    -- write zipper root
   r1        := u8 % 4 ; r1 × pathbyte    -- read  zipper root
 body:
-  repeated: op := u8 % 56 ; operands per op (see `Op.decode`)
+  repeated: op := u8 % 56 ; operands per op (see `step`)
 ```
+
+Inputs prefixed with `PMFUZZ\x01\x00` followed by a little-endian u16 selector
+count (1..=256) use the same map/zipper header but decode operations modulo that
+recorded count. Headerless inputs use 56. Operation 56 is `remove_subtrie`,
+followed by a prune byte.
 
 Every **path byte** is masked to `b % 4`, so the generated tries share prefixes
 heavily — that is where the interesting trie shapes (branch points, dangling
@@ -115,6 +120,7 @@ def dumpAt (t : PathMap V) (root : Path) : String :=
 structure Dec where
   bytes : ByteArray
   pos : Nat
+  opCount : Nat := 56
 
 /-- Read one byte; `none` once the input is exhausted, which ends the program. -/
 def Dec.u8 (d : Dec) : Option (UInt8 × Dec) :=
@@ -188,12 +194,22 @@ def showBool (b : Bool) : String := if b then "1" else "0"
 
 /-! ## The operation table
 
-`op % 56` selects the operation.  Ops `0`–`26` act on a target zipper chosen by
-a following `u8 % 2` byte (`0` = write zipper, `1` = read zipper); ops `27`–`46`
-are write-zipper operations. -/
+`op % selector_count` selects the operation (56 for headerless inputs). Ops `0`–`26`
+act on a target zipper chosen by a following `u8 % 2` byte (`0` = write zipper,
+`1` = read zipper); ops `27`–`46` and `56` are write-zipper operations. -/
 
-/-- Number of distinct operations.  Must match `NOPS` in `differential/src/harness.rs`. -/
-def nops : Nat := 56
+/-- Input header marker. Must match `WIRE_MAGIC` in the Rust harness. -/
+def wireMagic : List UInt8 := [80, 77, 70, 85, 90, 90, 1, 0]
+
+def Dec.init (bytes : ByteArray) : Option Dec := do
+  if bytes.data.toList.take wireMagic.length == wireMagic then
+    let d : Dec := { bytes, pos := wireMagic.length }
+    let (lo, d) ← d.u8
+    let (hi, d) ← d.u8
+    let count := lo.toNat + 256 * hi.toNat
+    if count == 0 || count > 256 then none
+    else some { d with opCount := count }
+  else some { bytes, pos := 0 }
 
 /-- A full `k`-path iteration: `descend_first_k_path` followed by
 `to_next_k_path` until it runs out (capped at 32 stops).  Returns the locations
@@ -225,7 +241,7 @@ def getTarget (s : St) (t : Nat) : Zip V := if t == 0 then s.wz else s.rz
 which ends the program. -/
 def step (s : St) (d : Dec) : Option (St × Dec) := do
   let (opRaw, d) ← d.u8
-  let op := opRaw.toNat % nops
+  let op := opRaw.toNat % d.opCount
   match op with
   | 0 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
             let (_, s) := onTarget s t (fun z => ((), z.descendTo p))
@@ -422,7 +438,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit { s with wz := z } "insert_prefix" (showBool r), d)
   | 44 => do let (n, d) ← d.mod 6
              let (r, z) := s.wz.removePrefix n
-             some (emit { s with wz := z } "remove_prefix" (showBool r), d)
+             some (emit { s with wz := z } "remove_prefix" (toString r), d)
   | 45 => do let (pr, d) ← d.bool
              let leaky := s.wz.focusNodeIsEmpty && s.wz.val.isNone
              let (m, z) := s.wz.takeMap pr
@@ -510,6 +526,9 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                let b := { s.rz with path := s.rz.path ++ p }
                let (st, z) := s.wz.meet2 ops s.rz b
                some (emit { s with wz := z } "meet_2" (toString st), d)
+  | 56 => do let (pr, d) ← d.bool
+             let (removed, z) := s.wz.removeSubtrie pr
+             some (emit { s with wz := z } "remove_subtrie" (showBool removed), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/
@@ -553,7 +572,7 @@ def header (d : Dec) (act : Bool) : Option (St × Dec) := do
 
 /-- Decode and run a fuzzer input, returning the trace lines. -/
 def run (bytes : ByteArray) (maxSteps : Nat := 256) (act : Bool := false) : List String :=
-  match header { bytes, pos := 0 } act with
+  match Dec.init bytes >>= (fun d => header d act) with
   | none => ["EMPTY"]
   | some (s0, d) =>
       let s := loop maxSteps s0 d

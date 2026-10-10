@@ -363,8 +363,7 @@ def graftThenMakeMap (ops : ValOps V) (dst src : Zip V) : Bool :=
 `ZipperWriting::insert_prefix`.
 
 Only the *branches* are compared: `insert_prefix` does not move the focus value,
-and `drop_head` discards values at depth exactly `k`, so the focus value plays no
-part on either side. -/
+so dropping that prefix cannot restore the original focus value. -/
 def dropHeadUndoesInsertPrefix (ops : ValOps V) (z : Zip V) (pre : Path) : Bool :=
   if z.focusNodeIsEmpty || pre.isEmpty then true
   else
@@ -378,13 +377,13 @@ def joinEmptyIdentity (ops : ValOps V) (z : Zip V) : Bool :=
   let src : Zip V := { trie := PathMap.empty, root := [], path := [] }
   let (st, z') := z.joinInto ops src
   PathMap.beqT ops z'.trie z.trie &&
-    (st == (if z.focusNodeIsEmpty then AlgStatus.none else AlgStatus.identity))
+    (st == (if z.focusNodeIsEmpty && z.val.isNone then AlgStatus.none else AlgStatus.identity))
 
 /-- Joining a zipper into itself is the identity, and reports it. -/
 def joinSelfIdentity (ops : ValOps V) (z : Zip V) : Bool :=
   let (st, z') := z.joinInto ops z
   PathMap.beqT ops z'.trie z.trie &&
-    (st == (if z.focusNodeIsEmpty then AlgStatus.none else AlgStatus.identity))
+    (st == (if z.focusNodeIsEmpty && z.val.isNone then AlgStatus.none else AlgStatus.identity))
 
 /-- `remove_branches` empties the focus but preserves its value. -/
 def removeBranchesKeepsVal (ops : ValOps V) (z : Zip V) : Bool :=

@@ -1,0 +1,38 @@
+%%{init: {"themeVariables": {"fontSize": "14px"}, "flowchart": {"wrappingWidth": 620, "nodeSpacing": 18, "rankSpacing": 24, "padding": 6}}}%%
+flowchart TB
+    subgraph Before["Before"]
+        direction LR
+        BRoot[(PathMap)]
+        BRoot -->|a| BA((10))
+        BA -->|b| BAB((20))
+        BAB -->|c| BFocus["77<br/>focus: abc"]
+        BFocus -->|x| BX((88))
+        BFocus -->|y| BY((99))
+        BA -->|q| BQ((11))
+        BAB -->|r| BR((22))
+        BRoot -->|z| BZ((55))
+    end
+    subgraph After["After"]
+        direction LR
+        ARoot[(PathMap)]
+        ARoot -->|a| AFocus["77<br/>focus: a"]
+        AFocus -->|x| AX((88))
+        AFocus -->|y| AY((99))
+        ARoot -->|z| AZ((55))
+    end
+    Before ==>|"remove_prefix(2)<br/>returns 2"| After
+    Legend["<span style='background-color:rgb(224,242,223);padding:0 3px'>Green</span>: moved subtrie · <span style='background-color:rgb(253,228,228);padding:0 3px'>Red</span>: discarded values and branches<br/><span style='background-color:rgb(240,240,240);padding:0 3px'>Gray</span>: unchanged · <span style='background-color:rgb(224,242,223);border:2px solid rgb(36,95,168);padding:0 3px'>Blue</span> outline: zipper focus<br/>Numbers are stored values; edge labels are path bytes"]
+    After ~~~ Legend
+
+    classDef removed fill:#fde4e4,stroke:#a4262c,color:#751b20;
+    classDef moved fill:#e0f2df,stroke:#39783b,color:#1d4d20;
+    classDef focus fill:#e0f2df,stroke:#245fa8,stroke-width:3px,color:#173b67;
+    classDef unchanged fill:#f0f0f0,stroke:#666,color:#333;
+    class BA,BAB,BQ,BR removed;
+    class BX,BY,AX,AY moved;
+    class BFocus,AFocus focus;
+    class BRoot,ARoot,BZ,AZ unchanged;
+    style Before fill:transparent,stroke:none;
+    style After fill:transparent,stroke:none;
+    style Legend fill:transparent,stroke:none,color:#333;
+    linkStyle 1,2,5,6 stroke:#a4262c,stroke-width:2px,stroke-dasharray:5 3;

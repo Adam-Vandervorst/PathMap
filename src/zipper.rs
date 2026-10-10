@@ -126,23 +126,8 @@ pub trait ZipperSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Zi
     /// `false`.  When it returns `true` other methods in this trait should return `Some`.
     fn native_subtries(&self) -> bool;
 
-    /// Returns a new [PathMap] containing everything below the zipper's focus or `None` if the zipper doesn't
-    /// suppot creating a new `PathMap`.
-    ///
-    /// GOAT: This method's behavior is affected by the `graft_root_vals` feature
-    /// This method does not clone the value at the focus as the map's root.
-    /// GOAT QUESTION: Should this method include the focus value as the map's root value?  That
-    /// makes conceptual sense given the fact that maps have root values, however the main argument
-    /// for "no" is keeping compatibility with [ZipperWriting::graft_map] and keeping an analogous API
-    /// to [ZipperWriting::take_map].  Changing `ZipperWriting::graft_map` probably entails a corresponding
-    /// change to [ZipperWriting::graft] also, to keep API consistency.
-    /// Adam: It may not make conceptual sense, as was clear in the original cata definition; the subtrie
-    /// can be interpreted as living below a value. This also argues for not having a value at the empty path,
-    /// a change I'd also welcome. As for performance, graft is probably the most called zipper method.
-    ///
-    /// Luke: Personally I think it might make sense for all of the entry points to change behavior.
-    /// Perhaps the biggest argument against the change is that it effectively doubles the cost of
-    /// graft.  This is related to a similar question on [ZipperWriting::join_map_into]
+    /// Returns a new [PathMap] containing the entire subtrie at the zipper's focus, or `None` if the zipper
+    /// doesn't support creating a new `PathMap`.
     fn try_make_map(&self) -> Option<PathMap<V, A>>;
 
     /// Attempts to return a [TrieRef] from the current focus
@@ -871,7 +856,7 @@ pub struct OpaqueTrieNodeRef<'trie, V: Clone + Send + Sync, A: Allocator>(pub(cr
 
 /// Similar to [ZipperSubtries], but with the stronger guarantee that subtrie access will be constant-time and won't fail
 pub trait ZipperInfallibleSubtries<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: ZipperValuesAt<V> + Zipper {
-    /// Returns a new [PathMap] containing everything below the zipper's focus
+    /// Returns a new [PathMap] containing the subtrie at the zipper's focus
     fn make_map(&self) -> PathMap<V, A>;
 
     /// Return a [TrieRef] from the current focus
@@ -1972,9 +1957,6 @@ pub(crate) mod read_zipper_core {
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for ReadZipperCore<'_, '_, V, A> {
         fn make_map(&self) -> PathMap<V, A> {
-            #[cfg(not(feature = "graft_root_vals"))]
-            let root_val = None;
-            #[cfg(feature = "graft_root_vals")]
             let root_val = self.val().cloned();
 
             let root_node = self.get_focus().0.into_option();
