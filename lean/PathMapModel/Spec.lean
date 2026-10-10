@@ -363,8 +363,7 @@ def graftThenMakeMap (ops : ValOps V) (dst src : Zip V) : Bool :=
 `ZipperWriting::insert_prefix`.
 
 Only the *branches* are compared: `insert_prefix` does not move the focus value,
-and `drop_head` discards values at depth exactly `k`, so the focus value plays no
-part on either side. -/
+so dropping that prefix cannot restore the original focus value. -/
 def dropHeadUndoesInsertPrefix (ops : ValOps V) (z : Zip V) (pre : Path) : Bool :=
   if z.focusNodeIsEmpty || pre.isEmpty then true
   else

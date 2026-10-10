@@ -438,24 +438,15 @@ def restricting (src : Zip V) : Bool × Zip V :=
 
 /-! ## Collapsing path segments -/
 
-/-- `ZipperWriting::join_k_path_into` (a.k.a. `drop_head`): strip the leading
-`k` bytes from every path below the focus and join the results.
-
-Values sitting at depth exactly `k` are **lost**: the joined node has no root
-value slot.  Returns whether anything survives below the focus.
-
-BUG (`pathmap` 0.3.1): `k = 0` should be the identity — dropping no bytes — but
-`drop_head_dyn(0)` collapses the subtrie instead.  On `{[] ↦ 0, [0] ↦ 0,
-[0,0] ↦ 0, [1,0] ↦ 0}` it leaves `{[] ↦ 0, [0] ↦ 0}`.  The model specifies the
-identity; the harness skips `k = 0`. -/
+/-- `ZipperWriting::join_k_path_into` (a.k.a. `drop_head`): replace the subtrie
+at the focus with the join of the subtries `k` bytes below it. Values at exactly
+that depth replace the focus value; shallower values are discarded. A zero `k`
+is an identity operation. Returns whether the resulting subtrie is nonempty. -/
 def joinKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
-  let below := z.focusNode
-  let (res, z1) :=
-    if below.isEmptyMap then (false, z)
-    else
-      let r := PathMap.dropHead ops below k
-      (!r.isEmptyMap, z.withTrie (z.trie.graftBelow z.focus r))
-  (res, if prune then (z1.prunePath).2 else z1)
+  let r := PathMap.dropHead ops z.makeMap k
+  let z1 := if k == 0 then z else z.graftMap r
+  let res := !r.isEmptyMap
+  (res, if prune && !res then (z1.prunePath).2 else z1)
 
 /-- `meet_k_path_into` is **not implementable** for these arguments: its
 provisional implementation drives `descend_first_k_path` through the
@@ -467,9 +458,8 @@ def meetKPathUnspecified (k : Nat) : Bool := k == 0 || z.childCount == 0
 /-- `ZipperWriting::meet_k_path_into`: strip the leading `k` bytes from every
 path below the focus and meet the results.
 
-Unlike `join_k_path_into`, this routes through `take_map`/`graft_map`, so values
-at depth exactly `k` *are* carried — they become the focus value.  Only
-meaningful when `meetKPathUnspecified` is `false`. -/
+Values at depth exactly `k` become the focus value. Only meaningful when
+`meetKPathUnspecified` is `false`. -/
 def meetKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
   let kps := (z.trie.subtrie z.focus).kPaths k
   let result : Option (PathMap V) :=

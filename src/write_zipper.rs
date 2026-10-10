@@ -190,14 +190,12 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     ///
     /// ## Behavior
     ///
-    /// GOAT, The below behavior is not what we want.  See https://github.com/Adam-Vandervorst/PathMap/issues/104
-    /// Replaces the downstream branches with the join of the subtries `byte_cnt` bytes below
-    /// the focus.  Paths that end in fewer than `byte_cnt` bytes are removed entirely.
-    /// Values at exactly `byte_cnt` bytes are also removed; only the
-    /// selected subtries' descendants are retained. The value at the focus is unchanged. A
-    /// `byte_cnt` of zero is an identity operation.
+    /// Replaces the subtrie at the focus with the join of the subtries `byte_cnt` bytes below
+    /// the focus. Values at exactly that depth are joined to replace the focus value.
+    /// Paths ending before that depth are removed. A `byte_cnt` of zero is an identity operation.
     ///
-    /// Returns `true` if the focus has at least one downstream continuation, otherwise returns `false`.
+    /// Returns `true` if the resulting subtrie contains a focus value or downstream branches,
+    /// otherwise returns `false`.
     ///
     /// NOTE: for legacy reasons, this operation is sometimes called `drop_head`
     ///
@@ -1915,22 +1913,29 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::join_k_path_into]
     pub fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice {
-        let result = match self.get_focus().into_option() {
-            Some(mut self_node) => {
-                if byte_cnt > 0 {
-                    //An empty result means nothing remains below the focus: clear the branch rather than
-                    // grafting an empty node (`graft_internal` requires a non-empty source)
-                    let new_node = self_node.make_mut().drop_head_dyn(byte_cnt)
-                        .filter(|node| !node.as_tagged().node_is_empty());
-                    let result = new_node.is_some();
-                    self.graft_internal(new_node);
-                    result
-                } else {
-                    !self_node.as_tagged().node_is_empty()
-                }
-            },
-            None => { false }
-        };
+        if byte_cnt == 0 {
+            let result = self.is_val() || self.child_count() > 0;
+            if prune && !result { self.prune_path(); }
+            return result
+        }
+
+        let mut root_val = None;
+        let new_node = self.get_focus().into_option().and_then(|mut self_node| {
+            self_node.make_mut().drop_head_dyn(byte_cnt, &mut root_val)
+        }).filter(|node| !node.as_tagged().node_is_empty());
+        let result = root_val.is_some() || new_node.is_some();
+        self.graft_internal(new_node);
+        if self.key.node_key().is_empty() {
+            debug_assert!(self.at_root());
+            // At the map root, replace the separately stored value without another node lookup.
+            let root_val_ref = self.root_val.as_mut().unwrap();
+            unsafe { **root_val_ref = root_val; }
+        } else {
+            match root_val {
+                Some(val) => { self.set_val(val); },
+                None => { self.remove_val(false); },
+            }
+        }
         if prune && !result {
             self.prune_path();
         }
@@ -4882,33 +4887,104 @@ mod tests {
             vec![193, 191, 194, 194, 18, 9],
         ];
 
-        //Here, we're totally dropping the entirety of the map
-        let mut map: PathMap<()> = paths.iter().map(|k| (k, ())).collect();
-        let mut wz = map.write_zipper();
-        wz.descend_to([193, 191]);
-        assert_eq!(wz.path_exists(), true);
-        assert_eq!(wz.join_k_path_into(4, true), false);
-        assert_eq!(wz.val_count(), 0);
-        wz.reset();
-        assert_eq!(wz.child_mask(), ByteMask::EMPTY);
-        drop(wz);
+        // Values exactly four bytes below the focus collapse to its value, with no branches.
+        // A nonempty focus must survive both pruning modes.
+        for prune in [false, true] {
+            let mut map: PathMap<()> = paths.iter().map(|k| (k, ())).collect();
+            let mut wz = map.write_zipper();
+            wz.descend_to([193, 191]);
+            assert!(wz.join_k_path_into(4, prune));
+            assert_eq!(wz.val(), Some(&()));
+            assert_eq!(wz.val_count(), 1);
+            assert_eq!(wz.child_count(), 0);
+            assert!(wz.path_exists());
+            drop(wz);
+            assert_eq!(map.val_at([193, 191]), Some(&()));
+            assert_valid_trie(map.root());
+        }
+    }
 
-        //Here, we're keeping some dangling paths
-        let mut map: PathMap<()> = paths.iter().map(|k| (k, ())).collect();
-        let mut wz = map.write_zipper();
-        wz.descend_to([193, 191]);
-        assert_eq!(wz.path_exists(), true);
-        assert_eq!(wz.join_k_path_into(4, false), false);
-        assert_eq!(wz.val_count(), 0);
-        wz.reset();
-        assert_eq!(wz.child_mask(), ByteMask::from_iter([193]));
-        wz.descend_to_byte(193);
-        assert_eq!(wz.path_exists(), true);
-        assert_eq!(wz.child_mask(), ByteMask::from_iter([191]));
-        wz.descend_to_byte(191);
-        assert_eq!(wz.path_exists(), true);
-        assert_eq!(wz.child_mask(), ByteMask::EMPTY);
-        drop(wz);
+    #[test]
+    fn write_zipper_join_k_path_focus_values() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Flags(u64);
+        impl Lattice for Flags {
+            fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
+                AlgebraicResult::Element(Flags(self.0 | other.0))
+            }
+            fn pmeet(&self, other: &Self) -> AlgebraicResult<Self> {
+                AlgebraicResult::Element(Flags(self.0 & other.0))
+            }
+        }
+        let entries: &[(&[u8], u64)] = &[
+            (b"", 128), (b"a", 64), (b"ab", 1), (b"cd", 2), (b"ef", 4),
+            (b"abx", 8), (b"cdx", 16), (b"long", 32),
+        ];
+        for focus in [b"".as_slice(), b"focus/deep"] {
+            for shared in [false, true] {
+                for prune in [false, true] {
+                    for k in [0, 1, 2, 3, 4, 5, usize::MAX] {
+                        let mut map = PathMap::new();
+                        let mut expected = PathMap::new();
+                        for &(path, flags) in entries {
+                            map.insert([focus, path].concat(), Flags(flags));
+                            if path.len() >= k {
+                                let suffix = &path[k..];
+                                let joined = expected.val_at(suffix).map_or(flags, |v: &Flags| v.0 | flags);
+                                expected.insert(suffix, Flags(joined));
+                            }
+                        }
+                        if !focus.is_empty() { map.insert(b"outside", Flags(256)); }
+                        let original = shared.then(|| map.clone());
+                        let mut wz = map.write_zipper();
+                        wz.descend_to(focus);
+                        assert_eq!(wz.join_k_path_into(k, prune), !expected.is_empty());
+                        assert_eq!(wz.path(), focus);
+                        assert!(wz.make_map().iter().eq(expected.iter()),
+                            "focus={focus:?}, shared={shared}, prune={prune}, k={k}");
+                        if k == 2 { assert_eq!(wz.val(), Some(&Flags(7))); }
+                        if k == 4 { assert_eq!(wz.val(), Some(&Flags(32))); }
+                        drop(wz);
+                        if !focus.is_empty() {
+                            assert_eq!(map.val_at(b"outside"), Some(&Flags(256)));
+                            assert_eq!(map.path_exists_at(focus), !expected.is_empty() || !prune);
+                        }
+                        if let Some(original) = original {
+                            for &(path, flags) in entries {
+                                assert_eq!(original.val_at([focus, path].concat()), Some(&Flags(flags)));
+                            }
+                        }
+                        assert_valid_trie(map.root());
+                    }
+                }
+            }
+        }
+
+        // A single moved value replaces an existing focus value, even when the new value is false.
+        for focus in [b"".as_slice(), b"focus"] {
+            let mut map = PathMap::new();
+            map.insert(focus, true);
+            map.insert([focus, b"child"].concat(), false);
+            let mut wz = map.write_zipper_at_path(focus);
+            assert!(wz.join_k_path_into(5, true));
+            assert_eq!(wz.val(), Some(&false));
+            assert_eq!(wz.child_count(), 0);
+        }
+        // Positive depths clear a focus-only value, an empty focus, and a dangling focus.
+        for focus in [b"".as_slice(), b"tip", b"missing"] {
+            for valued in [false, true] {
+                for prune in [false, true] {
+                    let mut map = PathMap::<bool>::new();
+                    if valued { map.insert(focus, true); }
+                    else if focus == b"tip" { map.create_path(focus); }
+                    let mut wz = map.write_zipper();
+                    wz.descend_to(focus);
+                    assert!(!wz.join_k_path_into(1, prune));
+                    assert_eq!(wz.val(), None);
+                    assert_eq!(wz.child_count(), 0);
+                }
+            }
+        }
     }
 
     /// Calling join_k_path_into(0) is an identity. But passing `prune = true` should still prune an already
@@ -4923,12 +4999,12 @@ mod tests {
                 let expected_status = {
                     let mut zipper = expected.write_zipper();
                     zipper.descend_to(focus);
-                    let has_downstream = zipper.path_exists() && zipper.child_count() != 0;
+                    let nonempty = zipper.is_val() || zipper.child_count() != 0;
                     let focus_is_dangling = zipper.path_exists() && !zipper.is_val() && zipper.child_count() == 0;
                     if prune && focus_is_dangling {
                         zipper.prune_path();
                     }
-                    has_downstream
+                    nonempty
                 };
 
                 let mut map = source.clone();
@@ -7216,18 +7292,18 @@ mod tests {
         assert_valid_trie(with_pruning.root());
     }
 
-    /// Dropping head bytes over a dangling sentinel child, in both node types.  (Values that sit within
-    /// the dropped bytes are discarded by `join_k_path_into`; only the downstream subtries are joined.)
+    /// Dropping head bytes over a dangling sentinel child, in both node types. Values at the cut
+    /// become the focus value; values before it are discarded.
     #[test]
     fn write_zipper_drop_head_over_dangling_child() {
         //Both operations skip a dangling child while retaining downstream values.
         assert_drop_head_case(with_dangling_c(&[b"dx", b"dy", b"ex", b"fz"]), &[b"x", b"y", b"z"]); // DenseByteNode
         assert_drop_head_case(with_dangling_c(&[b"dx"]), &[b"x"]); // LineListNode
 
-        //Issue #82's exact node shapes: all ordinary values lie within the removed head byte, so the
-        //empty merge result must clear the branch instead of being handed to graft_internal.
-        assert_drop_head_case(dense_with_dangling_child(), &[]);
-        assert_drop_head_case(lln_with_dangling_child(), &[]);
+        //Issue #82's exact node shapes: the branches become empty, but the values at depth one
+        //are joined into the focus value.
+        assert_drop_head_case(dense_with_dangling_child(), &[b""]);
+        assert_drop_head_case(lln_with_dangling_child(), &[b""]);
 
         //A root with no visible values and only the dangling path exercises the minimal empty result.
         assert_drop_head_case(with_dangling_c(&[]), &[]);
@@ -7278,8 +7354,8 @@ mod tests {
             assert_valid_trie(a2.root());
 
             let k = rng.random_range(1..=2usize);
-            // values within the dropped bytes are discarded; only keys longer than k survive
-            let mut expected: Vec<Vec<u8>> = keys(&a).into_iter().filter(|key| key.len() > k).map(|key| key[k..].to_vec()).collect();
+            // Values at depth k become the root value; shallower values are discarded.
+            let mut expected: Vec<Vec<u8>> = keys(&a).into_iter().filter(|key| key.len() >= k).map(|key| key[k..].to_vec()).collect();
             expected.sort(); expected.dedup();
             let mut a3 = a.clone();
             a3.write_zipper().join_k_path_into(k, false);
@@ -7436,7 +7512,8 @@ mod tests {
         { let mut rz = other.read_zipper(); rz.descend_to(b"a"); let mut wz = map.write_zipper(); wz.graft(&rz); }
         assert!(map.write_zipper().join_k_path_into(1, false));
         let n = map.read_zipper().into_cata_cached(|_m, ws: &mut [usize], v: Option<&()>| ws.iter().sum::<usize>() + v.is_some() as usize);
-        assert_eq!(n, 3);
+        assert_eq!(n, 2);
+        assert_eq!(map.val_at(b""), None);
         assert_valid_trie(map.root());
     }
 

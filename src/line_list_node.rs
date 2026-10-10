@@ -2798,15 +2798,20 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         }
     }
 
-    fn drop_head_dyn(&mut self, byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
+    fn drop_head_dyn(&mut self, byte_cnt: usize, root_val: &mut Option<V>) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
         debug_assert!(byte_cnt > 0);
 
-        //If the node has any values with where `key_len <= byte_cnt`, we can discard those values now
+        // Values at the cut become the root value; values before it are discarded.
+        // Take slot 1 first because taking slot 0 can shift slot 1 into its place.
         if self.is_used_value_1() && self.key_len_1() <= byte_cnt {
-            let _ = self.take_payload::<1>();
+            let at_cut = self.key_len_1() == byte_cnt;
+            let val = self.take_payload::<1>().unwrap().into_val();
+            if at_cut { root_val.join_into(Some(val)); }
         }
         if self.is_used_value_0() && self.key_len_0() <= byte_cnt {
-            let _ = self.take_payload::<0>();
+            let at_cut = self.key_len_0() == byte_cnt;
+            let val = self.take_payload::<0>().unwrap().into_val();
+            if at_cut { root_val.join_into(Some(val)); }
         }
 
         //If the node is empty, we're done
@@ -2847,7 +2852,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                     return None
                 }
                 if remaining_bytes > 0 {
-                    return child.make_mut().drop_head_dyn(remaining_bytes)
+                    return child.make_mut().drop_head_dyn(remaining_bytes, root_val)
                 } else {
                     return Some(child)
                 }
@@ -2980,7 +2985,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
             if chop_bytes == byte_cnt {
                 return Some(child_node)
             } else {
-                return child_node.make_mut().drop_head_dyn(byte_cnt-chop_bytes)
+                return child_node.make_mut().drop_head_dyn(byte_cnt-chop_bytes, root_val)
             }
         }
 
@@ -3595,7 +3600,7 @@ mod tests {
         let mut new_node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
         assert_eq!(new_node.node_set_val(&full_key, 24).map_err(|_| 0), Ok((None, false)));
 
-        let mut shortened = new_node.drop_head_dyn(drop_bytes).unwrap().as_tagged().as_list().unwrap().clone();
+        let mut shortened = new_node.drop_head_dyn(drop_bytes, &mut None).unwrap().as_tagged().as_list().unwrap().clone();
         assert_eq!(shortened.key_len_0(), expected_key_len);
         assert!(!shortened.is_used::<1>());
         assert!(shortened.is_available_1());
@@ -4000,7 +4005,7 @@ mod tests {
         let mut source_node = LineListNode::<u64, GlobalAlloc>::new_in(global_alloc());
         source_node.node_set_val(b"1ab", 1).unwrap_or_else(|_| panic!());
         source_node.node_set_val(b"2ac", 2).unwrap_or_else(|_| panic!());
-        let dropped = source_node.drop_head_dyn(1).unwrap();
+        let dropped = source_node.drop_head_dyn(1, &mut None).unwrap();
 
         // Dropping the distinct leading bytes factors the shared "a" into an onward child.
         let dropped_ref = dropped.as_tagged();

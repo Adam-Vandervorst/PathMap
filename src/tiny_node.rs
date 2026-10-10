@@ -298,7 +298,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
         self.into_full().unwrap().pjoin_dyn(other)
     }
     fn join_into_dyn(&mut self, _other: TrieNodeODRc<V, A>) -> (AlgebraicStatus, Result<(), TrieNodeODRc<V, A>>) where V: Lattice { unreachable!() }
-    fn drop_head_dyn(&mut self, _byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice { unreachable!() }
+    fn drop_head_dyn(&mut self, _byte_cnt: usize, _root_val: &mut Option<V>) -> Option<TrieNodeODRc<V, A>> where V: Lattice { unreachable!() }
     fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
         //TODO, is this worth bespoke code to save some cycles?
         self.into_full().unwrap().pmeet_dyn(other)
