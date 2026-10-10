@@ -2402,14 +2402,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 None
             }
         } else {
-            if let Some(new_node) = focus_node.take_node_at_key(node_key, prune_limit) {
-                if prune {
-                    self.prune_path_internal(false);
-                }
-                Some(new_node)
-            } else {
-                None
+            let result = focus_node.take_node_at_key(node_key, prune_limit);
+            if prune {
+                self.prune_path_internal(false);
             }
+            result
         }
     }
 
