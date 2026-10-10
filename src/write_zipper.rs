@@ -218,17 +218,16 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.join_k_path_into(byte_cnt, true)
     }
 
-// GOAT QUESTION: Do we want to change the behavior to move the value as well?  Or do we want a variant
-//  of this method that moves the value?  The main guiding idea behind not shifting the value was the desire
-//  to preserve the property of being the inverse of drop_head.
-    /// Inserts `prefix` in front of every downstream path at the focus
+    /// Inserts `prefix` in front of every path in the subtrie at the focus, including
+    /// the path to the focus value.
     ///
-    /// This method does not affect a value at the focus, nor does it move the zipper's focus. Returns false
-    /// when at a none-existent place in the trie.
+    /// The zipper's focus does not move.  An empty prefix is a no-op.
+    /// An existing dangling tip is extended by `prefix`, including at an empty map's root.
+    /// Returns true if the focus path exists; otherwise returns false and leaves the trie unchanged.
     ///
-    /// NOTE: This is the inverse of [Self::drop_head], although it cannot perfectly undo `drop_head` because
-    /// `drop_head` loses information about the prior nested structure.  However, `drop_head` will undo this
-    /// operation.
+    /// NOTE: This is the inverse of [Self::join_k_path_into], although it cannot perfectly undo `join_k_path_into`
+    /// because `join_k_path_into` loses information about the prior nested structure.  However, `join_k_path_into`
+    /// will undo `insert_prefix`.
     fn insert_prefix<K: AsRef<[u8]>>(&mut self, prefix: K) -> bool;
 
     /// Deleted the `n` bytes from the path above the zipper's focus, including any subtries that descend
@@ -2007,18 +2006,25 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// See [ZipperWriting::insert_prefix]
     pub fn insert_prefix<K: AsRef<[u8]>>(&mut self, prefix: K) -> bool {
         let prefix = prefix.as_ref();
-        match self.get_focus().into_option() {
-            Some(focus_node) => {
-                // Inserting zero bytes is a no-op
-                if prefix.is_empty() {
-                    return true;
-                }
-                let prefixed = make_parents_in(prefix, focus_node, self.alloc.clone());
-                self.graft_internal(Some(prefixed));
-                true
-            },
-            None => { false }
+        if prefix.is_empty() {
+            return self.path_exists();
         }
+        let focus_node = self.get_focus().into_option();
+        let focus_val = self.remove_val(false);
+        if let Some(focus_node) = focus_node {
+            let prefixed = make_parents_in(prefix, focus_node, self.alloc.clone());
+            self.graft_internal(Some(prefixed));
+        } else if focus_val.is_none() {
+            if !self.path_exists() {
+                return false;
+            }
+            let prefixed = make_parents_in(prefix, TrieNodeODRc::new_empty(), self.alloc.clone());
+            self.graft_internal(Some(prefixed));
+        }
+        if let Some(val) = focus_val {
+            self.set_val_at(prefix, val);
+        }
+        true
     }
     /// See [ZipperWriting::remove_prefix]
     pub fn remove_prefix(&mut self, n: usize) -> bool {
@@ -5241,7 +5247,7 @@ mod tests {
     }
 
     #[test]
-    fn write_zipper_insert_prefix_keeps_focus_value() {
+    fn write_zipper_insert_prefix_moves_focus_value() {
         let mut map = PathMap::<()>::new();
         for key in [b"a".as_slice(), b"ab", b"ac"] {
             map.set_val_at(key, ());
@@ -5252,9 +5258,71 @@ mod tests {
         drop(wz);
         assert_eq!(
             map.iter().map(|(k, _)| k).collect::<Vec<Vec<u8>>>(),
-            vec![b"a".to_vec(), b"aZb".to_vec(), b"aZc".to_vec()]
+            vec![b"aZ".to_vec(), b"aZb".to_vec(), b"aZc".to_vec()]
         );
         assert_valid_trie(map.root());
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_value_only_and_round_trip() {
+        for focus in [b"".as_slice(), b"a", b"a/deep/focus"] {
+            for prefix in [b"".as_slice(), b"Z", b"long/prefix/"] {
+                for branches in [false, true] {
+                    let mut map = PathMap::<u64>::new();
+                    map.set_val_at(focus, 7);
+                    if branches {
+                        map.set_val_at([focus, b"child"].concat(), 9);
+                    }
+                    if !focus.is_empty() { map.set_val_at(b"outside", 11); }
+                    let before = map.clone();
+                    let mut wz = map.write_zipper();
+                    wz.descend_to(focus);
+                    assert!(wz.insert_prefix(prefix));
+                    assert_eq!(wz.path(), focus);
+                    assert!(wz.path_exists());
+                    assert_eq!(wz.val(), if prefix.is_empty() { Some(&7) } else { None });
+                    let shifted = wz.make_map();
+                    assert_eq!(shifted.val_at(prefix), Some(&7));
+                    assert_eq!(shifted.val_at([prefix, b"child"].concat()), branches.then_some(&9));
+                    assert_eq!(shifted.val_count(), if branches { 2 } else { 1 });
+                    assert!(wz.join_k_path_into(prefix.len(), false));
+                    assert_eq!(wz.path(), focus);
+                    drop(wz);
+                    assert_map_unchanged(&before, &map, &[]);
+                    assert_valid_trie(map.root());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_zipper_insert_prefix_dangling_and_missing_focus() {
+        for focus in [b"".as_slice(), b"a", b"long/dangling/path"] {
+            for prefix in [b"".as_slice(), b"Z", b"long/prefix/"] {
+                for exists in [false, true] {
+                    if focus.is_empty() && !exists { continue; }
+                    for root_len in [0, focus.len()] {
+                        let mut map = PathMap::<u64>::new();
+                        if !focus.is_empty() { map.set_val_at(b"outside", 11); }
+                        if exists { map.create_path(focus); }
+                        let mut expected = map.clone();
+                        if exists { expected.create_path([focus, prefix].concat()); }
+
+                        let mut wz = map.write_zipper_at_path(&focus[..root_len]);
+                        wz.descend_to(&focus[root_len..]);
+                        assert_eq!(wz.path_exists(), exists);
+                        assert_eq!(wz.insert_prefix(prefix), exists,
+                            "focus={focus:?}, prefix={prefix:?}, exists={exists}, root_len={root_len}");
+                        assert_eq!(wz.path(), &focus[root_len..]);
+                        assert_eq!(wz.path_exists(), exists);
+                        assert_eq!(wz.val(), None);
+                        drop(wz);
+                        assert_eq!(all_locations(&map), all_locations(&expected));
+                        assert_valid_trie(map.root());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -5306,7 +5374,7 @@ mod tests {
         let mut expected: Vec<Vec<u8>> = keys
             .iter()
             .map(|key| {
-                if key.starts_with(&focus) && key.len() > focus.len() {
+                if key.starts_with(&focus) {
                     [&focus[..], &prefix[..], &key[focus.len()..]].concat()
                 } else {
                     key.clone()

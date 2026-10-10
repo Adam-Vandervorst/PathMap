@@ -197,18 +197,19 @@ def takeMap (prune : Bool) : Option (PathMap V) × Zip V :=
 
 /-! ## Path surgery -/
 
-/-- `ZipperWriting::insert_prefix`: put `pre` in front of every path below the
-focus.  The focus value is untouched.  Returns `false` at a location with no
-descendants.
-
-BUG (`pathmap` 0.3.1): with an **empty** prefix this should be the identity, but
-`make_parents_in(b"", node)` discards the node — the subtrie below the focus is
-destroyed and `true` is still returned.  The model specifies the identity; the
-differential harness skips `insert_prefix("")` so the known divergence does not
-mask others. -/
+/-- `ZipperWriting::insert_prefix`: put `pre` in front of every path in the
+subtrie, including the path to the focus value. The subtrie root and cursor stay
+at the same path. An existing dangling tip is extended, including at an empty
+map's root. An empty prefix is an identity operation. Returns whether the
+focus path exists; a nonexistent focus leaves the trie unchanged. -/
 def insertPrefix (pre : Path) : Bool × Zip V :=
-  if z.focusNodeIsEmpty then (false, z)
-  else (true, z.withTrie (z.trie.graftBelow z.focus (z.focusNode.insertPrefixBelow pre)))
+  if !z.pathExists then (false, z)
+  else if pre.isEmpty then (true, z)
+  else
+    let t := z.makeMap
+    let shifted := PathMap.mk' (t.vals.map fun kv => (pre ++ kv.1, kv.2))
+      (t.paths.map fun q => pre ++ q)
+    (true, z.graftMap shifted)
 
 /-- `ZipperWriting::remove_prefix`: lift the subtrie below the focus up by `n`
 bytes, replacing whatever was below the new (ascended) focus.  Returns whether
