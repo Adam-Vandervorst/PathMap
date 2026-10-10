@@ -385,22 +385,13 @@ def subtractInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
   let (st, z') := z.subtractIntoWithoutPrune ops src
   (st, if prune then (z'.prunePath).2 else z')
 
-/-- `ZipperWriting::meet_2`: meet two *source* subtries and write the result at
-the focus.
-
-Two things separate this from `meet_into`.  It does not consult what is already
-at the focus, so — as the implementation notes — it never reports `Identity`,
-only `Element` or `None`.  And it works on nodes, so neither source's focus value
-is consulted and the focus value here is left untouched. -/
+/-- `ZipperWriting::meet_2`: replace the subtrie at the focus with the meet of
+two source subtries, including their focus values. The destination's existing
+contents are not operands, so the result reports `Element` when nonempty and
+`None` when empty, never `Identity`. -/
 def meet2 (a b : Zip V) : AlgStatus × Zip V :=
-  let an := a.focusNode
-  let bn := b.focusNode
-  if an.isEmptyMap || bn.isEmptyMap then
-    (.none, z.withTrie (z.trie.removeBelow z.focus))
-  else
-    let r := PathMap.meet ops an bn
-    if r.isEmptyMap then (.none, z.withTrie (z.trie.removeBelow z.focus))
-    else (.element, z.withTrie (z.trie.graftBelow z.focus r))
+  let r := PathMap.meet ops a.makeMap b.makeMap
+  (if r.isEmptyMap then .none else .element, z.graftMap r)
 
 /-- `ZipperWriting::restrict`: keep only paths in the destination subtrie
 prefixed by a path to a value in the source subtrie, as in `PathMap::restrict`.

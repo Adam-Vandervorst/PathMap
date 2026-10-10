@@ -252,8 +252,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
         self.meet_into(read_zipper, true)
     }
 
-    /// Replaces the subtrie below this zipper's focus with the intersection of the subtries below
-    /// the foci of `rz_a` and `rz_b`.
+    /// Replaces the subtrie at this zipper's focus with the intersection of the subtries at the foci
+    /// of `rz_a` and `rz_b`.
     ///
     /// This operation does not inspect the destination's existing contents. Consequently, it never
     /// returns [AlgebraicStatus::Identity]: it returns `Element` for a nonempty intersection and
@@ -2103,51 +2103,27 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [WriteZipper::meet_2]
     pub fn meet_2<ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice {
+        let root_val = match (rz_a.val(), rz_b.val()) {
+            (Some(a), Some(b)) => a.pmeet(b).into_option([a, b]),
+            _ => None,
+        };
         let a_focus = rz_a.get_focus();
-        let a = match a_focus.try_as_tagged() {
-            Some(src) => src,
-            None => {
-                self.graft_internal(None);
-                return AlgebraicStatus::None
-            }
-        };
         let b_focus = rz_b.get_focus();
-        let b = match b_focus.try_as_tagged() {
-            Some(src) => src,
-            None => {
-                self.graft_internal(None);
-                return AlgebraicStatus::None
-            }
-        };
-        match a.pmeet_dyn(b) {
-            AlgebraicResult::Element(intersection) => {
-                self.graft_internal(Some(intersection));
-                AlgebraicStatus::Element
-            },
-            AlgebraicResult::None => {
-                self.graft_internal(None);
-                AlgebraicStatus::None
-            },
-            AlgebraicResult::Identity(mask) => {
-                let src = if mask & SELF_IDENT > 0 {
-                    a_focus.into_option()
-                } else {
-                    debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be a or b
-                    b_focus.into_option()
-                };
-                match src {
-                    Some(node) => {
-                        self.graft_internal(Some(node));
-                        AlgebraicStatus::Element
-                    }
-                    None => {
-                        //An empty result subtrie means clear the destination
-                        self.graft_internal(None);
-                        AlgebraicStatus::None
-                    }
-                }
-            },
+        let intersection = match (a_focus.try_as_tagged(), b_focus.try_as_tagged()) {
+            (Some(a), Some(b)) => a.pmeet_dyn(b).map_into_option(|idx| match idx {
+                0 => a_focus.into_option(),
+                1 => b_focus.into_option(),
+                _ => unreachable!(),
+            }),
+            _ => None,
+        }.filter(|node| !node.as_tagged().node_is_empty());
+        let nonempty = root_val.is_some() || intersection.is_some();
+        self.graft_internal(intersection);
+        match root_val {
+            Some(val) => { self.set_val(val); },
+            None => { self.remove_val(false); },
         }
+        if nonempty { AlgebraicStatus::Element } else { AlgebraicStatus::None }
     }
     /// See [ZipperWriting::subtract_into]
     pub fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice {
@@ -3760,6 +3736,100 @@ mod tests {
         let rz = btm2.read_zipper();
         assert_eq!(rz.child_count(), 2);
         assert_eq!(rz.child_mask(), ByteMask::from_iter([0, 1]));
+    }
+
+    #[test]
+    fn write_zipper_meet_2_focus_values_match_map() {
+        for dst_path in [b"".as_slice(), b"destination/focus"] {
+            for (a_path, b_path) in [(b"".as_slice(), b"".as_slice()),
+                (b"left/focus".as_slice(), b"right/focus".as_slice())] {
+                for old_val in [None, Some(false), Some(true)] {
+                    for a_val in [None, Some(false), Some(true)] {
+                        for b_val in [None, Some(false), Some(true)] {
+                            for branches in 0..4 {
+                                let mut a_subtrie = PathMap::<bool>::new();
+                                let mut b_subtrie = PathMap::<bool>::new();
+                                if let Some(val) = a_val { a_subtrie.insert(b"", val); }
+                                if let Some(val) = b_val { b_subtrie.insert(b"", val); }
+                                if branches & 1 != 0 {
+                                    a_subtrie.insert(b"child", false);
+                                    a_subtrie.insert(b"left_only", true);
+                                }
+                                if branches & 2 != 0 {
+                                    b_subtrie.insert(b"child", true);
+                                    b_subtrie.insert(b"right_only", false);
+                                }
+                                let expected = a_subtrie.meet(&b_subtrie);
+                                let expected_status = if expected.is_empty() {
+                                    AlgebraicStatus::None
+                                } else {
+                                    AlgebraicStatus::Element
+                                };
+                                let mut a = PathMap::new();
+                                let mut b = PathMap::new();
+                                a.write_zipper_at_path(a_path).graft_map(a_subtrie);
+                                b.write_zipper_at_path(b_path).graft_map(b_subtrie);
+                                let before_a: Vec<_> = a.iter().map(|(k, v)| (k, *v)).collect();
+                                let before_b: Vec<_> = b.iter().map(|(k, v)| (k, *v)).collect();
+                                let mut dst = PathMap::new();
+                                if let Some(val) = old_val { dst.insert(dst_path, val); }
+                                dst.insert([dst_path, b"obsolete"].concat(), true);
+                                if !dst_path.is_empty() { dst.insert(b"outside", false); }
+
+                                let mut wz = dst.write_zipper();
+                                wz.descend_to(dst_path);
+                                let status = wz.meet_2(&a.read_zipper_at_path(a_path), &b.read_zipper_at_path(b_path));
+                                assert_eq!(status, expected_status,
+                                    "dst={dst_path:?}, sources={a_path:?}/{b_path:?}, values={old_val:?}/{a_val:?}/{b_val:?}, branches={branches}");
+                                assert_eq!(wz.path(), dst_path);
+                                assert!(wz.path_exists());
+                                assert!(wz.make_map().iter().eq(expected.iter()));
+                                drop(wz);
+                                if !dst_path.is_empty() { assert_eq!(dst.val_at(b"outside"), Some(&false)); }
+                                assert_eq!(a.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), before_a);
+                                assert_eq!(b.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), before_b);
+                                assert_valid_trie(dst.root());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_zipper_meet_2_new_focus_value() {
+        let a = PathMap::single(b"", LatticeProbe(ProbeState::Original));
+        let b = PathMap::single(b"", LatticeProbe(ProbeState::Original));
+        let mut dst = PathMap::single(b"", LatticeProbe(ProbeState::Joined));
+        let mut wz = dst.write_zipper();
+        assert_eq!(wz.meet_2(&a.read_zipper(), &b.read_zipper()), AlgebraicStatus::Element);
+        assert_eq!(wz.val(), Some(&LatticeProbe(ProbeState::Met)));
+        assert_eq!(wz.child_count(), 0);
+    }
+
+    #[test]
+    fn write_zipper_meet_2_disjoint_focus_values() {
+        use std::collections::HashSet;
+
+        for retain_child in [false, true] {
+            let mut a = PathMap::single(b"", HashSet::from([1u8]));
+            let mut b = PathMap::single(b"", HashSet::from([2u8]));
+            if retain_child {
+                a.insert(b"child", HashSet::from([3u8]));
+                b.insert(b"child", HashSet::from([3u8]));
+            }
+            let mut dst = PathMap::single(b"", HashSet::from([4u8]));
+            let mut wz = dst.write_zipper();
+            let expected_status = if retain_child { AlgebraicStatus::Element } else { AlgebraicStatus::None };
+            assert_eq!(wz.meet_2(&a.read_zipper(), &b.read_zipper()), expected_status);
+            assert_eq!(wz.val(), None);
+            assert_eq!(wz.child_count(), usize::from(retain_child));
+            if retain_child {
+                wz.descend_to(b"child");
+                assert_eq!(wz.val(), Some(&HashSet::from([3u8])));
+            }
+        }
     }
 
     #[test]
