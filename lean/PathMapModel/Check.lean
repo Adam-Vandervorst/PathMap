@@ -31,6 +31,20 @@ def zipAt (t : T) (root path : Path) : Zip UInt64 := { trie := t, root, path }
 
 /-! ## Fixtures -/
 
+/-- Moving a focused subtrie replaces both values and branches at its destination. -/
+def removePrefixT : T := mk [([], 11), ([0], 22), ([0,1], 77),
+  ([0,1,2], 88), ([0,3], 33), ([4], 99)]
+
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 2).1 == 2
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 2).2.trie.entries == (mk [([], 77), ([2], 88)]).entries
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 9).1 == 2
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 9).2.trie.entries == (mk [([], 77), ([2], 88)]).entries
+#guard ((zipAt removePrefixT [0] [1]).removePrefix 1).2.trie.entries ==
+  (mk [([], 11), ([0], 77), ([0,2], 88), ([4], 99)]).entries
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 0).2.trie.entries == removePrefixT.entries
+#guard ((zipAt (mk [([], 11), ([0], 77)]) [] [0]).removePrefix 1).2.trie.entries == (mk [([], 77)]).entries
+#guard ((zipAt (mk [([], 11), ([0,1], 88)]) [] [0]).removePrefix 1).2.trie.entries == (mk [([1], 88)]).entries
+
 /-- Branching at the root and at depth 1, with a value at an interior node. -/
 def fBranch : T := mk [([], 0), ([0], 1), ([0,0], 2), ([0,1], 3), ([1], 4)]
 /-- A single-child run: the shape `descend_until` / `ascend_until` care about. -/
