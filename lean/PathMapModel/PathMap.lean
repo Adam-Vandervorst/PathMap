@@ -398,16 +398,11 @@ def insertPrefixBelow (t : PathMap V) (k : Path) : PathMap V :=
 /-- The existing locations exactly `k` bytes below the root, in depth-first order. -/
 def kPaths (t : PathMap V) (k : Nat) : List Path := t.paths.filter (fun q => q.length == k)
 
-/-- `drop_head` / `ZipperWriting::join_k_path_into` at node level: strip the first
-`k` bytes from every path and join the results.
-
-Values sitting at depth *exactly* `k` are **discarded** — the joined node has
-nowhere to put a root value.  (`meet_k_path_into` keeps them, because it routes
-through `take_map`/`graft_map`, which do carry root values.  The asymmetry is
-real; see `Spec.lean`.) -/
+/-- `drop_head` / `ZipperWriting::join_k_path_into`: strip the first `k` bytes
+from every path and join the resulting subtries, including their root values. -/
 def dropHead (t : PathMap V) (k : Nat) : PathMap V :=
   if k == 0 then t
-  else (t.kPaths k).foldl (fun acc q => join ops acc ((t.subtrie q).removeVal []).2) empty
+  else (t.kPaths k).foldl (fun acc q => join ops acc (t.subtrie q)) empty
 
 end PathMap
 end PathMapModel

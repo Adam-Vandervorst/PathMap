@@ -121,14 +121,14 @@ def dropT3 : T := mk [([0,0], 0), ([0,1], 1), ([1,0], 2), ([1,1], 3)]
 #guard (((zipAt dropT3 [] []).joinKPathInto ops 1 true).2).valCount == 2
 
 /-- `write_zipper_drop_head_test6`: dropping 4 bytes from paths that are at most
-4 long annihilates everything, because values at depth exactly `k` are lost. -/
+4 long leaves a focus value joined from the values at depth exactly `k`. -/
 def dropT6 : T := mk [([193,191,193,193,191], 0), ([193,191,193,194,12,28], 1),
                       ([193,191,193,194,18,9], 2), ([193,191,194,193,191], 3),
                       ([193,191,194,194,12,28], 4), ([193,191,194,194,15,47], 5),
                       ([193,191,194,194,18,9], 6)]
 
-#guard !((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).1
-#guard (((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).2).valCount == 0
+#guard ((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).1
+#guard (((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).2).valCount == 1
 
 /-- `write_zipper_drop_head_test1`: under the root `123:`, dropping 4 bytes
 rewrites `abc:Bob` to `Bob` and `dog:Bob:Fido` to `Bob:Fido`. -/
