@@ -230,13 +230,14 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// will undo `insert_prefix`.
     fn insert_prefix<K: AsRef<[u8]>>(&mut self, prefix: K) -> bool;
 
-    /// Deleted the `n` bytes from the path above the zipper's focus, including any subtries that descend
-    /// from the deleted branches
+    /// Move the subtrie at the focus upward by n path bytes, deleting all path bytes and associated values,
+    /// along with other branches that descend from the deleted path segment.
     ///
-    /// Returns `true` if n upstream bytes were removed from the path, otherwise returns `false`.
-    //
-    // GOAT: TODO, make a diagram illustrating the behavior
-    fn remove_prefix(&mut self, n: usize) -> bool;
+    /// Returns the number of bytes ascended, at most `n`. If `n > self.depth()`, the subtrie
+    /// is lifted to the zipper's root and the original depth is returned.
+    ///
+    #[doc = concat!("<div>\n", include_str!("docs/remove_prefix.svg"), "\n</div>")]
+    fn remove_prefix(&mut self, n: usize) -> usize;
 
     /// Meets (retains the intersection of) the subtrie below the zipper's focus with the subtrie downstream
     /// from the focus of `read_zipper`
@@ -383,7 +384,7 @@ impl<V: Clone + Send + Sync, Z, A: Allocator> ZipperWriting<V, A> for &mut Z whe
     fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { (**self).join_k_path_into(byte_cnt, prune) }
     fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { (**self).meet_k_path_into(byte_cnt, prune) }
     fn insert_prefix<K: AsRef<[u8]>>(&mut self, prefix: K) -> bool { (**self).insert_prefix(prefix) }
-    fn remove_prefix(&mut self, n: usize) -> bool { (**self).remove_prefix(n) }
+    fn remove_prefix(&mut self, n: usize) -> usize { (**self).remove_prefix(n) }
     fn meet_into<RZ: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &RZ, prune: bool) -> AlgebraicStatus where V: Lattice { (**self).meet_into(read_zipper, prune) }
     fn meet_2<RZA: ZipperInfallibleSubtries<V, A>, RZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &RZA, rz_b: &RZB) -> AlgebraicStatus where V: Lattice { (**self).meet_2(rz_a, rz_b) }
     fn subtract_into<RZ: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &RZ, prune: bool) -> AlgebraicStatus where V: DistributiveLattice { (**self).subtract_into(read_zipper, prune) }
@@ -554,7 +555,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { self.z.join_k_path_into(byte_cnt, prune) }
     fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { self.z.meet_k_path_into(byte_cnt, prune) }
     fn insert_prefix<K: AsRef<[u8]>>(&mut self, prefix: K) -> bool { self.z.insert_prefix(prefix) }
-    fn remove_prefix(&mut self, n: usize) -> bool { self.z.remove_prefix(n) }
+    fn remove_prefix(&mut self, n: usize) -> usize { self.z.remove_prefix(n) }
     fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice { self.z.meet_into(read_zipper, prune) }
     fn meet_2<ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice { self.z.meet_2(rz_a, rz_b) }
     fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice { self.z.subtract_into(read_zipper, prune) }
@@ -726,7 +727,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting
     fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { self.z.join_k_path_into(byte_cnt, prune) }
     fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { self.z.meet_k_path_into(byte_cnt, prune) }
     fn insert_prefix<K: AsRef<[u8]>>(&mut self, prefix: K) -> bool { self.z.insert_prefix(prefix) }
-    fn remove_prefix(&mut self, n: usize) -> bool { self.z.remove_prefix(n) }
+    fn remove_prefix(&mut self, n: usize) -> usize { self.z.remove_prefix(n) }
     fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice { self.z.meet_into(read_zipper, prune) }
     fn meet_2<ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice { self.z.meet_2(rz_a, rz_b) }
     fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice { self.z.subtract_into(read_zipper, prune) }
@@ -868,7 +869,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperWriting<V, A> for Write
     fn join_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { self.z.join_k_path_into(byte_cnt, prune) }
     fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice { self.z.meet_k_path_into(byte_cnt, prune) }
     fn insert_prefix<K: AsRef<[u8]>>(&mut self, prefix: K) -> bool { self.z.insert_prefix(prefix) }
-    fn remove_prefix(&mut self, n: usize) -> bool { self.z.remove_prefix(n) }
+    fn remove_prefix(&mut self, n: usize) -> usize { self.z.remove_prefix(n) }
     fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice { self.z.meet_into(read_zipper, prune) }
     fn meet_2<ZA: ZipperInfallibleSubtries<V, A>, ZB: ZipperInfallibleSubtries<V, A>>(&mut self, rz_a: &ZA, rz_b: &ZB) -> AlgebraicStatus where V: Lattice { self.z.meet_2(rz_a, rz_b) }
     fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice { self.z.subtract_into(read_zipper, prune) }
@@ -2027,14 +2028,19 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         true
     }
     /// See [ZipperWriting::remove_prefix]
-    pub fn remove_prefix(&mut self, n: usize) -> bool {
-
+    pub fn remove_prefix(&mut self, n: usize) -> usize {
+        if n == 0 || self.at_root() {
+            return 0;
+        }
         let downstream_node = self.get_focus().into_option();
-
-        let fully_ascended = self.ascend(n) == n;
-
+        let focus_val = self.remove_val(false);
+        let ascended = self.ascend(n);
         self.graft_internal(downstream_node);
-        fully_ascended
+        match focus_val {
+            Some(val) => { self.set_val(val); },
+            None => { self.remove_val(false); },
+        }
+        ascended
     }
     /// See [ZipperWriting::meet_into]
     pub fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice {
@@ -5445,7 +5451,10 @@ mod tests {
         let mut wz = map.write_zipper_at_path(b"123");
 
         wz.descend_to(b":Pam");
-        assert_eq!(wz.remove_prefix(4), true);
+        assert_eq!(wz.remove_prefix(0), 0);
+        assert_eq!(wz.path(), b":Pam");
+        assert_eq!(wz.remove_prefix(4), 4);
+        assert_eq!(wz.path(), b"");
         drop(wz);
 
         assert_eq!(map.val_count(), 1);
@@ -5456,7 +5465,7 @@ mod tests {
         let mut wz = map.write_zipper_at_path(b"123:");
 
         wz.descend_to(b"Pam.");
-        assert_eq!(wz.remove_prefix(4), true);
+        assert_eq!(wz.remove_prefix(4), 4);
         drop(wz);
 
         assert_eq!(map.val_count(), 1);
@@ -5467,11 +5476,80 @@ mod tests {
         let mut wz = map.write_zipper_at_path(b"123:");
 
         wz.descend_to(b"Pam.");
-        assert_eq!(wz.remove_prefix(9), false);
+        assert_eq!(wz.remove_prefix(9), 4);
+        assert_eq!(wz.path(), b"");
+        assert_eq!(wz.remove_prefix(9), 0);
         drop(wz);
 
         assert_eq!(map.val_count(), 1);
         assert_eq!(map.val_at(b"123:Bandit"), Some(&2));
+    }
+
+    #[test]
+    fn write_zipper_remove_prefix_focus_values() {
+        for (origin, n, target, ascended) in [
+            (b"".as_slice(), 0, b"abc".as_slice(), 0),
+            (b"".as_slice(), 2, b"a".as_slice(), 2),
+            (b"".as_slice(), 3, b"".as_slice(), 3),
+            (b"".as_slice(), 9, b"".as_slice(), 3),
+            (b"a".as_slice(), 9, b"a".as_slice(), 2),
+        ] {
+            for focus_val in [None, Some(77u64)] {
+                for destination_val in [None, Some(11u64)] {
+                    for branches in [false, true] {
+                        let mut map = PathMap::<u64>::new();
+                        map.create_path(b"abc");
+                        map.set_val_at(b"outside", 99);
+                        map.set_val_at(b"a/other", 22);
+                        map.set_val_at(b"ab/sibling", 33);
+                        if let Some(val) = destination_val { map.set_val_at(target, val); }
+                        if let Some(val) = focus_val { map.set_val_at(b"abc", val); }
+                        if branches { map.set_val_at(b"abc/child", 88); }
+
+                        let mut expected = if n == 0 { map.clone() } else { PathMap::new() };
+                        if n != 0 {
+                            expected.create_path(target);
+                            if let Some(val) = focus_val { expected.set_val_at(target, val); }
+                            if branches { expected.set_val_at([target, b"/child"].concat(), 88); }
+                            if !target.is_empty() { expected.set_val_at(b"outside", 99); }
+                        }
+                        let mut wz = map.write_zipper_at_path(origin);
+                        wz.descend_to(&b"abc"[origin.len()..]);
+                        let before_val = wz.val().copied();
+                        assert_eq!(wz.remove_prefix(n), ascended);
+                        assert_eq!(wz.path(), &target[origin.len()..]);
+                        assert_eq!(wz.val().copied(), if n == 0 { before_val } else { focus_val },
+                            "origin={origin:?}, n={n}, focus_val={focus_val:?}, destination_val={destination_val:?}, branches={branches}");
+                        drop(wz);
+                        assert_eq!(all_locations(&map), all_locations(&expected));
+                        assert_valid_trie(map.root());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_zipper_remove_prefix_focus_value_replaces_map_root() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(b"", 11);
+        map.set_val_at(b"abc", 77);
+        map.set_val_at(b"abc/child", 88);
+        map.set_val_at(b"other", 99);
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"abc");
+        assert_eq!(wz.remove_prefix(3), 3);
+        assert_eq!(wz.path(), b"");
+        assert_eq!(wz.val(), Some(&77));
+        assert_eq!(wz.remove_prefix(5), 0);
+        assert_eq!(wz.val(), Some(&77));
+        drop(wz);
+        assert_eq!(map.val_at(b""), Some(&77));
+        assert_eq!(map.val_at(b"/child"), Some(&88));
+        assert_eq!(map.val_count(), 2);
+        assert!(!map.path_exists_at(b"abc"));
+        assert!(!map.path_exists_at(b"other"));
+        assert_valid_trie(map.root());
     }
 
     #[test]

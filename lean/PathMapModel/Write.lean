@@ -211,18 +211,15 @@ def insertPrefix (pre : Path) : Bool × Zip V :=
       (t.paths.map fun q => pre ++ q)
     (true, z.graftMap shifted)
 
-/-- `ZipperWriting::remove_prefix`: lift the subtrie below the focus up by `n`
-bytes, replacing whatever was below the new (ascended) focus.  Returns whether
-the full `n` bytes could be ascended.
-
-Note the value at the old focus is *not* carried up — it belonged to the parent
-cell, not to the node that gets moved. -/
-def removePrefix (n : Nat) : Bool × Zip V :=
-  let below := z.focusNode
-  -- `ascend` now reports how far it got, so "were all `n` bytes removed" is a
-  -- comparison rather than the flag it used to return directly.
+/-- `ZipperWriting::remove_prefix`: move the focused subtrie upward by `n`
+path bytes, deleting the intervening path segment, its associated values,
+and other branches descending from that segment. The original focus value
+replaces the value at the new focus, clearing it when absent. Returns the
+number of bytes ascended. -/
+def removePrefix (n : Nat) : Nat × Zip V :=
+  let subtrie := z.makeMap
   let (ascended, z1) := z.ascend n
-  (ascended == n, z1.withTrie (z1.trie.graftBelow z1.focus below))
+  (ascended, z1.graftMap subtrie)
 
 /-! ## Algebraic operations
 

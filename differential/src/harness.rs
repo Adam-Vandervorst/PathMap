@@ -800,7 +800,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 44 => {
                     let n = get!(d.modn(6));
-                    ("remove_prefix", show_bool(wz.remove_prefix(n)).to_string())
+                    ("remove_prefix", wz.remove_prefix(n).to_string())
                 }
                 45 => {
                     let pr = get!(d.boolean());
