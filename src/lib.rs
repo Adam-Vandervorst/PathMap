@@ -82,6 +82,9 @@ pub mod morphisms;
 /// Functionality to optimize a trie by finding structural sharing using a temporary [Merkle tree](https://en.wikipedia.org/wiki/Merkle_tree)
 pub mod merkleization;
 
+/// Fused evaluation of set-operation DAGs over trie nodes
+pub mod fuse;
+
 /// Handy conveniences and utilities to use with a [PathMap]
 pub mod utils;
 
