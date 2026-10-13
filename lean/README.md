@@ -216,14 +216,17 @@ inputs start with the eight bytes `PMFUZZ\x01\x00`, then a little-endian u16
 selector count (1 through 256), followed by the same map/zipper header. Operation
 bytes are reduced modulo the recorded count, independently of the running
 software's operation table. Truncated headers and invalid counts are rejected.
+Readers auto-detect this format by the magic string; inputs without it use the
+legacy selector count of 56.
 Operation 56 is `remove_subtrie`, with one boolean prune operand.
 
-The random-input generator obtains the header from the selected Rust trace
-producer's `--input-header` option. `NOPS` in `differential/src/harness.rs` is
-the only definition of the current generation count; Lean and replay never
-consult it. Keep existing operation IDs and argument-decoding rules stable.
+Generators always write the current header, using `NOPS` in
+`lean/input_format.py`, which must match `differential/src/harness.rs`.
+Saved failures and shrunken inputs also carry a header, preserving the original
+selector count (56 for legacy inputs). The shrinker keeps this header intact.
+Keep existing operation IDs and argument-decoding rules stable.
 Adding an operation requires its Lean/Rust handlers and reproducer entry, plus
-updating `NOPS`; the input format and old repros need no changes.
+updating both `NOPS` constants; the input format and old repros need no changes.
 
 Every path byte is masked to `b % 4`, so generated tries share prefixes heavily
 and actually branch — that is where the interesting shapes are (branch points,

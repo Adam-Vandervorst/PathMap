@@ -33,8 +33,11 @@ import random
 import shutil
 import subprocess
 import sys
+
 import tempfile
 import tomllib
+
+from input_format import input_header
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC = os.path.join(ROOT, "lean", "mutants.toml")
@@ -124,7 +127,7 @@ def main():
     for i in range(args.corpus):
         p = os.path.join(tmp, "c%04d.bin" % i)
         with open(p, "wb") as f:
-            f.write(bytes(rng.randrange(256) for _ in range(rng.randrange(20, 300))))
+            f.write(input_header() + bytes(rng.randrange(256) for _ in range(rng.randrange(20, 300))))
         corpus.append(p)
 
     def restore():
