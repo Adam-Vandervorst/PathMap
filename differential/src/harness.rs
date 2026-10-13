@@ -24,7 +24,8 @@ use pathmap::zipper::*;
 // `str::lines()` recovers them then.
 use core::fmt::Write as _;
 
-/// Selector count for newly generated inputs. Keep operation IDs permanently assigned.
+/// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
+/// Keep operation IDs permanently assigned.
 pub const NOPS: usize = 57;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;

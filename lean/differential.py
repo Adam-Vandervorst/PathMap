@@ -29,6 +29,8 @@ import subprocess
 import sys
 import tempfile
 
+from input_format import input_header, versioned_input
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORACLE = os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
 # PATHMAP_TRACE / PATHMAP_ACT_TRACE override the search, for builds that live
@@ -481,9 +483,8 @@ class RandomInputs(InputSource):
     `randbytes` alone is ~39x faster than that loop.
     """
 
-    def __init__(self, seed, count, maxlen, input_header):
+    def __init__(self, seed, count, maxlen):
         self.seed, self.count, self.maxlen = seed, count, maxlen
-        self.input_header = input_header
 
     def __len__(self):
         return self.count
@@ -493,7 +494,7 @@ class RandomInputs(InputSource):
 
     def get(self, idx):
         rng = random.Random((self.seed << 32) ^ idx)
-        return self.input_header + rng.randbytes(rng.randrange(8, self.maxlen))
+        return input_header() + rng.randbytes(rng.randrange(8, self.maxlen))
 
 
 class FileInputs(InputSource):
@@ -607,9 +608,7 @@ def main():
     if args.files:
         sources.append(FileInputs(args.files))
     if args.random:
-        # The Rust producer owns the count for new inputs; never duplicate it here or in Lean.
-        header_hex = subprocess.check_output([trace_bin, "--input-header"], text=True).strip()
-        sources.append(RandomInputs(args.seed, args.random, args.maxlen, bytes.fromhex(header_hex)))
+        sources.append(RandomInputs(args.seed, args.random, args.maxlen))
     source = ChainInputs(sources)
     n_inputs = len(source)
 
@@ -623,7 +622,7 @@ def main():
         safe = re.sub(r"[^A-Za-z0-9_.#-]", "_", os.path.basename(source.name(idx)))
         path = os.path.join(faildir[0], safe + ".bin")
         with open(path, "wb") as f:
-            f.write(source.get(idx))
+            f.write(versioned_input(source.get(idx)))
         return path
 
     fails = 0
