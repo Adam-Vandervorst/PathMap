@@ -132,7 +132,7 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for EmptyNode {
             (AlgebraicStatus::Element, Err(other.clone()))
         }
     }
-    fn drop_head_dyn(&mut self, _byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
+    fn drop_head_dyn(&mut self, _byte_cnt: usize, _root_val: &mut Option<V>) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
         None
     }
     fn pmeet_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Lattice {
