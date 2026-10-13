@@ -1,4 +1,5 @@
 import PathMapModel.Spec
+import PathMapModel.Fuzz
 
 /-!
 # Build-time checks
@@ -50,6 +51,20 @@ def probes : List Path := [[], [0], [1], [0,0], [0,1], [1,1], [0,1,2], [3]]
 
 def allZips : List (Zip UInt64) :=
   fixtures.flatMap (fun t => probes.map (fun p => zipAt t [] p))
+
+/-! The selector count belongs to each input, independent of the current operation table. -/
+
+def inputWithCount (lo hi : UInt8) : ByteArray :=
+  ByteArray.mk (Fuzz.wireMagic ++ [lo, hi]).toArray
+
+#guard ((Fuzz.Dec.init (ByteArray.mk #[])).map (·.opCount)) == some 56
+#guard ((Fuzz.Dec.init (inputWithCount 56 0)).map (·.opCount)) == some 56
+#guard ((Fuzz.Dec.init (inputWithCount 58 0)).map (·.opCount)) == some 58
+#guard ((Fuzz.Dec.init (inputWithCount 0 1)).map (·.opCount)) == some 256
+#guard (Fuzz.Dec.init (inputWithCount 0 0)).isNone
+#guard (Fuzz.Dec.init (inputWithCount 1 1)).isNone
+#guard (Fuzz.Dec.init (ByteArray.mk Fuzz.wireMagic.toArray)).isNone
+#guard (Fuzz.Dec.init (ByteArray.mk (Fuzz.wireMagic ++ [57]).toArray)).isNone
 
 /-! ## Regression fixtures from `src/write_zipper.rs` -/
 
@@ -126,6 +141,39 @@ def dropT1Result : T := ((zipAt dropT1 [0x31,0x32,0x33,0x3a] []).joinKPathInto o
 #guard dropT1Result.valAt [0x31,0x32,0x33,0x3a,0x42,0x6f,0x62] == some 0
 #guard dropT1Result.valAt [0x31,0x32,0x33,0x3a,0x42,0x6f,0x62,0x3a,0x46,0x69,0x64,0x6f] == some 1
 #guard dropT1Result.valCount [] == 2
+
+/-! ## Subtrie removal -/
+
+/-! `remove_subtrie` clears the focus and descendants, preserves other content,
+and prunes only up to the zipper root. Dangling descendants count as branches;
+pruning an already dangling focus does not count as removing content. -/
+
+#guard ((zipAt fBranch [] [0]).removeSubtrie false).1
+#guard ((zipAt fBranch [] [0]).removeSubtrie false).2.pathExists
+#guard !((zipAt fBranch [] [0]).removeSubtrie false).2.isVal
+#guard ((zipAt fBranch [] [0]).removeSubtrie false).2.childCount == 0
+#guard ((zipAt fBranch [] [0]).removeSubtrie true).2.trie.valAt [] == some 0
+#guard ((zipAt fBranch [] [0]).removeSubtrie true).2.trie.valAt [1] == some 4
+#guard !((zipAt fBranch [] [0]).removeSubtrie true).2.pathExists
+#guard ((zipAt fBranch [] []).removeSubtrie true).2.trie.isEmptyMap
+#guard !(((zipAt fBranch [] []).removeSubtrie true).2.removeSubtrie true).1
+#guard ((zipAt fDangle [] [0,1]).removeSubtrie false).1
+#guard !((zipAt fDangle [] [0,1,2]).removeSubtrie true).1
+#guard !((zipAt fDangle [] [0,1,2]).removeSubtrie true).2.pathExists
+#guard !((zipAt fEmpty [] [3]).removeSubtrie true).1
+#guard !((zipAt fEmpty [] [3]).removeSubtrie true).2.pathExists
+#guard ((zipAt fRun [0,0] [0]).removeSubtrie true).2.trie.pathExists [0,0]
+#guard !((zipAt fRun [0,0] [0]).removeSubtrie true).2.trie.pathExists [0,0,0]
+#guard ((zipAt fRun [0,0] []).removeSubtrie true).2.pathExists
+
+#guard allZips.all (fun z => [false, true].all (fun pr =>
+  let (removed, after) := z.removeSubtrie pr
+  let (branches, z1) := z.removeBranches pr
+  let (value, composed) := z1.removeVal pr
+  removed == (branches || value.isSome) &&
+    after.trie.vals == composed.trie.vals && after.trie.paths == composed.trie.paths &&
+    after.path == z.path && after.root == z.root &&
+    !after.isVal && after.childCount == 0))
 
 /-! ## Structural invariants over every fixture -/
 

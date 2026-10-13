@@ -115,6 +115,7 @@
 [`remove_branches_at`]: https://docs.rs/pathmap/latest/pathmap/struct.PathMap.html#method.remove_branches_at
 [`remove_branches`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_branches
 [`remove_prefix`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_prefix
+[`remove_subtrie`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#method.remove_subtrie
 [`remove_unmasked_branches`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_unmasked_branches
 [`remove_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_val
 [`reserve_buffers`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPathBuffer.html#tymethod.reserve_buffers

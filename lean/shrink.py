@@ -8,6 +8,8 @@ crate panic) while deleting bytes, so the result is a minimal reproducer.
 """
 import argparse, os, re, subprocess, sys
 
+from input_format import HEADER_SIZE, versioned_input
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # PATHMAP_ORACLE / PATHMAP_TRACE / PATHMAP_ACT_TRACE override the defaults, for
 # builds that live in another target dir (CI builds two commits side by side).
@@ -67,6 +69,7 @@ def signature(blob):
 
 
 def shrink(blob):
+    blob = versioned_input(blob)
     sig = signature(blob)
     if sig is None:
         sys.exit("input does not diverge")
@@ -75,7 +78,7 @@ def shrink(blob):
     while changed:
         changed = False
         for chunk in (32, 16, 8, 4, 2, 1):
-            i = 0
+            i = HEADER_SIZE
             while i + chunk <= len(blob):
                 cand = blob[:i] + blob[i + chunk:]
                 if signature(cand) == sig:
@@ -84,7 +87,7 @@ def shrink(blob):
                 else:
                     i += 1
         # also try lowering byte values, which simplifies op choices and paths
-        for i in range(len(blob)):
+        for i in range(HEADER_SIZE, len(blob)):
             for v in (0, 1, blob[i] // 2):
                 if v >= blob[i]:
                     continue

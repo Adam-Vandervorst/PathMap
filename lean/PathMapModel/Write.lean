@@ -114,6 +114,14 @@ def removeBranches (prune : Bool) : Bool × Zip V :=
   let z' := z.withTrie (z.trie.removeBelow z.focus)
   (removed, if prune then (z'.prunePath).2 else z')
 
+/-- `ZipperWriting::remove_subtrie`: remove the focus value and all descendants,
+then optionally prune. Returns whether a value or branch was removed; pruning
+alone does not count as removal. The cursor and zipper root do not move. -/
+def removeSubtrie (prune : Bool) : Bool × Zip V :=
+  let (branches, z1) := z.removeBranches false
+  let (value, z2) := z1.removeVal false
+  (branches || value.isSome, if prune then (z2.prunePath).2 else z2)
+
 /-- `ZipperWriting::remove_unmasked_branches`: keep only the child bytes set in
 `mask`; delete the rest along with their subtries. -/
 def removeUnmaskedBranches (mask : ByteMask) (prune : Bool) : Zip V :=

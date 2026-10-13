@@ -37,7 +37,7 @@ impl<'t, S: AsRef<[u8]>> ReadSource for ACTZipper<'t, S, u64> {
 /// Decode and execute a fuzzer input with an ACT built from map1 as the read
 /// source.  See `bin/act_trace.rs` for what this does and does not exercise.
 pub fn run_act(bytes: &[u8], check: bool) -> String {
-    let mut d = Dec { bytes, pos: 0 };
+    let Some(mut d) = Dec::new(bytes) else { return "EMPTY\n".to_string(); };
     let (mut map0, map1, root0, root1) = match decode_header(&mut d) {
         Some(x) => x,
         None => return "EMPTY\n".to_string(),
