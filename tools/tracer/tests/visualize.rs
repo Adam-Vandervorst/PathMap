@@ -10,7 +10,7 @@ use pathmap::arena_compact::ArenaCompactTree;
 use pathmap::utils::debug::TraceZipper;
 use pathmap::utils::debug::zipper_tracing::{self, decode_trace};
 use pathmap::zipper::*;
-use tracer::{render_html, replay, Replay, ReplayConfig};
+use tracer::{render_html, replay, Annotations, Replay, ReplayConfig};
 
 /// The trace is global, so tests that use it must not overlap
 static TRACE_LOCK: Mutex<()> = Mutex::new(());
@@ -38,7 +38,8 @@ fn out_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tracer")
 }
 
-/// Replays the trace, and writes it as `name.trace` and its animation as `name.html`
+/// Replays the trace, and writes it as `name.trace` and its animation as `name.html`, with the annotations
+/// in `tests/name.ann.json` if there are any
 fn replay_and_render(name: &str, trace: &[u8], seeds: Vec<(String, PathMap<u64>)>) -> Replay<u64> {
     let events = decode_trace::<u64>(trace).unwrap();
     let replay = replay(&events, seeds, &ReplayConfig::default());
@@ -46,7 +47,9 @@ fn replay_and_render(name: &str, trace: &[u8], seeds: Vec<(String, PathMap<u64>)
     std::fs::create_dir_all(out_dir()).unwrap();
     std::fs::write(out_dir().join(format!("{name}.trace")), trace).unwrap();
     let path = out_dir().join(format!("{name}.html"));
-    std::fs::write(&path, render_html(&replay, name)).unwrap();
+    let ann_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join(format!("{name}.ann.json"));
+    let ann = ann_path.exists().then(|| Annotations::from_json(&std::fs::read_to_string(&ann_path).unwrap()).unwrap());
+    std::fs::write(&path, render_html(&replay, name, ann.as_ref()).unwrap()).unwrap();
     println!("{name}: {}", path.display());
     replay
 }
@@ -192,4 +195,137 @@ fn wide_trie() {
     let last = replay.frames.iter().rev().find(|frame| frame.caption == "z1.descend_to(\"q\")").unwrap();
     assert_eq!(last.maps[0].nodes[&b""[..]].hidden, 26 - 13);
     assert!(!last.maps[0].zippers[0].writer);
+}
+
+/// A small version of the aunt query from MORK's aunt-kg benchmark.  Names are 3 bytes plus a separator,
+/// so dropping the leading symbol of every path below a zipper is `join_k_path_into(4)`
+#[test]
+fn aunt_kg() {
+    const PARENTS: [(&str, &str); 12] = [
+        ("ann", "bob"), ("ann", "cat"), ("ann", "dee"), ("gus", "eve"), ("gus", "hal"), ("gus", "ivy"),
+        ("bob", "jon"), ("bob", "kim"), ("eve", "jon"), ("eve", "kim"), ("dee", "lou"), ("hal", "max"),
+    ];
+    //lou's gender isn't recorded, so lou isn't a person
+    const FEMALE: [&str; 6] = ["ann", "cat", "dee", "eve", "ivy", "kim"];
+    const MALE: [&str; 5] = ["bob", "gus", "hal", "jon", "max"];
+    const SYMBOL_LEN: usize = 4;
+
+    let mut family = PathMap::<u64>::new();
+    for (parent, child) in PARENTS {
+        family.insert(format!("kg/parent/{parent}/{child}"), 1);
+    }
+    for person in FEMALE {
+        family.insert(format!("kg/female/{person}"), 1);
+    }
+    for person in MALE {
+        family.insert(format!("kg/male/{person}"), 1);
+    }
+    std::fs::create_dir_all(out_dir()).unwrap();
+    let act_path = out_dir().join("family.act");
+    ArenaCompactTree::dump_from_zipper(family.read_zipper(), |val: &u64| *val, &act_path).unwrap();
+
+    let mut output = PathMap::<u64>::new();
+    let trace = traced(|| {
+        let family_head = family.zipper_head();
+        let output_head = output.zipper_head();
+
+        //family |= (child $y $x) for each (parent $x $y)
+        let mut parent = TraceZipper::new(1, family_head.read_zipper_at_path(b"kg/parent/").unwrap());
+        let mut child_index = TraceZipper::new(2, family_head.write_zipper_at_exclusive_path(b"kg/child/").unwrap());
+        while parent.to_next_val() {
+            let fact = parent.path().to_vec();
+            let (p, c) = fact.split_at(SYMBOL_LEN);
+            child_index.descend_to(c);
+            child_index.descend_to(b"/");
+            child_index.descend_to(&p[..SYMBOL_LEN - 1]);
+            child_index.set_val(1);
+            child_index.reset();
+        }
+        drop(child_index);
+        parent.reset();
+
+        //person = female ∪ male
+        let female = TraceZipper::new(3, family_head.read_zipper_at_path(b"kg/female/").unwrap());
+        let male = TraceZipper::new(4, family_head.read_zipper_at_path(b"kg/male/").unwrap());
+        let mut person_index = TraceZipper::new(5, family_head.write_zipper_at_exclusive_path(b"kg/person/").unwrap());
+        person_index.graft(&female);
+        let _ = person_index.join_into(&male);
+        drop(person_index);
+        drop(male);
+
+        //Every person's parents
+        let child = TraceZipper::new(6, family_head.read_zipper_at_path(b"kg/child/").unwrap());
+        let mut person = TraceZipper::new(7, family_head.read_zipper_at_path(b"kg/person/").unwrap());
+        let mut parents_out = TraceZipper::new(8, output_head.write_zipper_at_exclusive_path(b"out/parents/").unwrap());
+        parents_out.graft(&child);
+        let _ = parents_out.restrict(&person);
+        drop(parents_out);
+
+        //my_parents is positioned at the parents of each person in turn.  People without recorded parents are skipped
+        let mut my_parents = TraceZipper::new(9, family_head.read_zipper_at_path(b"kg/child/").unwrap());
+        let next_person = |person: &mut TraceZipper<_>, my_parents: &mut TraceZipper<_>| -> Option<Vec<u8>> {
+            while person.to_next_val() {
+                let mut dir = person.path().to_vec();
+                dir.push(b'/');
+                my_parents.move_to_path(&dir);
+                if my_parents.path_exists() {
+                    return Some(dir)
+                }
+            }
+            None
+        };
+
+        //mother(p) = parents(p) ∩ female
+        let mut mother_out = TraceZipper::new(10, output_head.write_zipper_at_exclusive_path(b"out/mother/").unwrap());
+        while let Some(dir) = next_person(&mut person, &mut my_parents) {
+            mother_out.move_to_path(&dir);
+            let _ = mother_out.meet_2(&my_parents, &female);
+        }
+        drop(mother_out);
+        person.reset();
+
+        //sister(p) = (children of p's parents ∩ female) - p
+        let mut sister_out = TraceZipper::new(11, output_head.write_zipper_at_exclusive_path(b"out/sister/").unwrap());
+        while let Some(dir) = next_person(&mut person, &mut my_parents) {
+            sister_out.move_to_path(&dir);
+            sister_out.graft(&my_parents);
+            sister_out.restricting(&parent);
+            sister_out.join_k_path_into(SYMBOL_LEN, true);
+            let _ = sister_out.meet_into(&female, true);
+            if sister_out.descend_to_check(&dir[..SYMBOL_LEN - 1]) {
+                sister_out.remove_val(true);
+            }
+        }
+        drop(sister_out);
+        person.reset();
+
+        //aunt(p) = (children of p's grandparents - p's parents) ∩ female
+        let mut aunt_out = TraceZipper::new(12, output_head.write_zipper_at_exclusive_path(b"out/aunt/").unwrap());
+        while let Some(dir) = next_person(&mut person, &mut my_parents) {
+            aunt_out.move_to_path(&dir);
+            aunt_out.graft(&my_parents);
+            aunt_out.restricting(&child);
+            aunt_out.join_k_path_into(SYMBOL_LEN, true);
+            if !aunt_out.restricting(&parent) {
+                continue
+            }
+            aunt_out.join_k_path_into(SYMBOL_LEN, true);
+            let _ = aunt_out.subtract_into(&my_parents, true);
+            let _ = aunt_out.meet_into(&female, true);
+        }
+    });
+    let seed = tracer::load_act::<u64>(&act_path).unwrap();
+    let replay = replay_and_render("aunt_kg", &trace, vec![("family.act".to_string(), seed)]);
+    //The family map is seeded, and the output map shares no prefix with it
+    assert_eq!(replay.maps.len(), 2);
+    assert_eq!(entries(&replay.maps[0]), entries(&family));
+    assert_eq!(entries(&replay.maps[1]), entries(&output));
+    let relation = |name: &str| -> Vec<String> {
+        let prefix = format!("out/{name}/");
+        output.iter().filter_map(|(path, _)| path.strip_prefix(prefix.as_bytes()).map(|rest| String::from_utf8(rest.to_vec()).unwrap())).collect()
+    };
+    assert_eq!(relation("parents"), ["bob/ann", "cat/ann", "dee/ann", "eve/gus", "hal/gus", "ivy/gus", "jon/bob", "jon/eve", "kim/bob", "kim/eve", "max/hal"]);
+    assert_eq!(relation("mother"), ["bob/ann", "cat/ann", "dee/ann", "jon/eve", "kim/eve"]);
+    assert_eq!(relation("sister"), ["bob/cat", "bob/dee", "cat/dee", "dee/cat", "eve/ivy", "hal/eve", "hal/ivy", "ivy/eve", "jon/kim"]);
+    assert_eq!(relation("aunt"), ["jon/cat", "jon/dee", "jon/ivy", "kim/cat", "kim/dee", "kim/ivy", "max/eve", "max/ivy"]);
 }

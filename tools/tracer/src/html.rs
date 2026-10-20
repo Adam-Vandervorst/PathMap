@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::{Replay, ReplayValue};
+use crate::{Annotations, Replay, ReplayValue};
 
 const TEMPLATE: &str = include_str!("player.html");
 
@@ -40,16 +40,19 @@ fn push_list<T>(out: &mut String, items: impl IntoIterator<Item = T>, mut push_i
     out.push(']');
 }
 
-/// The frames as JSON.  Paths are hex strings.  Each node is `[path, exists, accessible, val, hidden]`, and
-/// each zipper is `[id, root, focus, writer]`
-fn frames_json<V: ReplayValue>(replay: &Replay<V>, title: &str) -> String {
+/// The frames as JSON.  Paths are hex strings.  Each frame has its event's seq as `e`, each node is
+/// `[path, exists, accessible, val, hidden]`, and each zipper is `[id, root, focus, writer]`
+fn frames_json<V: ReplayValue>(replay: &Replay<V>, title: &str, ann: &str) -> String {
     let mut out = String::from("{\"title\":");
     push_json_str(&mut out, title);
     out.push_str(",\"maps\":");
     push_list(&mut out, &replay.map_labels, |out, label| push_json_str(out, label));
     out.push_str(",\"frames\":");
     push_list(&mut out, &replay.frames, |out, frame| {
-        out.push_str("{\"c\":");
+        match frame.event {
+            Some(seq) => { let _ = write!(out, "{{\"e\":{seq},\"c\":"); },
+            None => out.push_str("{\"e\":null,\"c\":"),
+        }
         push_json_str(out, &frame.caption);
         match frame.actor {
             Some(id) => { let _ = write!(out, ",\"a\":{id}"); },
@@ -82,12 +85,20 @@ fn frames_json<V: ReplayValue>(replay: &Replay<V>, title: &str) -> String {
         });
         out.push('}');
     });
+    out.push_str(",\"ann\":");
+    out.push_str(ann);
     out.push('}');
     out
 }
 
-/// Renders the replay as a page that plays it back
-pub fn render_html<V: ReplayValue>(replay: &Replay<V>, title: &str) -> String {
+/// Renders the replay as a page that plays it back, steered by `ann` if given.  Fails if the annotations
+/// don't fit the replay
+pub fn render_html<V: ReplayValue>(replay: &Replay<V>, title: &str, ann: Option<&Annotations>) -> Result<String, String> {
+    let ann = match ann {
+        //`<` only appears inside strings, where escaping it keeps the JSON from ending the enclosing `<script>`
+        Some(ann) => crate::annotations::resolve(ann, replay)?.to_string().replace('<', "\\u003c"),
+        None => "null".to_string(),
+    };
     let mut escaped_title = String::new();
     for c in title.chars() {
         match c {
@@ -97,7 +108,7 @@ pub fn render_html<V: ReplayValue>(replay: &Replay<V>, title: &str) -> String {
             c => escaped_title.push(c),
         }
     }
-    TEMPLATE
+    Ok(TEMPLATE
         .replace("__TITLE__", &escaped_title)
-        .replace("/*__TRACE_DATA__*/null", &frames_json(replay, title))
+        .replace("/*__TRACE_DATA__*/null", &frames_json(replay, title, &ann)))
 }

@@ -7,8 +7,9 @@
 //! 2. Wrap each zipper of interest in a [TraceZipper], giving it an id.  Every zipper writes to the same trace
 //! 3. Call [close] to flush the trace
 //!
-//! The trace is a header followed by a stream of `(zipper_id, TraceOp)` events, which [decode_trace]
-//! turns back into [TraceOp]s.
+//! The trace is a header followed by a stream of `(seq, zipper_id, TraceOp)` events, which [decode_trace]
+//! turns back into [TraceOp]s.  `seq` numbers the events of a trace in the order they were recorded, starting
+//! from 0, so an event can be referred to even if the stream is later filtered.
 //!
 //! An event is written as a call begins, so the trace records which operations were called and with
 //! what arguments, but not their results.  A player needs its own copy of the trie to follow along.
@@ -48,7 +49,7 @@ use crate::zipper::zipper_priv::ZipperReadOnlyPriv;
 use crate::PathMap;
 
 const TRACE_MAGIC: &[u8; 8] = b"PMTRACE\0";
-const TRACE_VERSION: u64 = 1;
+const TRACE_VERSION: u64 = 2;
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // Encoding
@@ -380,6 +381,8 @@ struct TraceSink {
     out: Box<dyn Write + Send>,
     val_type: TypeId,
     val_type_name: &'static str,
+    /// The `seq` of the next event
+    next_seq: u64,
 }
 
 static SINK: Mutex<Option<TraceSink>> = Mutex::new(None);
@@ -406,7 +409,7 @@ pub fn open<V: TraceValue>(mut out: impl Write + Send + 'static) -> io::Result<(
     TRACE_VERSION.encode(&mut header);
     type_name::<V>().to_string().encode(&mut header);
     out.write_all(&header)?;
-    *sink = Some(TraceSink { out: Box::new(out), val_type: TypeId::of::<V>(), val_type_name: type_name::<V>() });
+    *sink = Some(TraceSink { out: Box::new(out), val_type: TypeId::of::<V>(), val_type_name: type_name::<V>(), next_seq: 0 });
     Ok(())
 }
 
@@ -430,14 +433,19 @@ fn is_open() -> bool {
 /// Writes one event to the trace, if a trace is open.  `typed` events may contain `W` values, so
 /// `W` must match the trace's value type
 fn write_event<W: TraceValue>(id: u64, op: &TraceOp<W>, typed: bool) {
-    let mut buf = Vec::new();
-    id.encode(&mut buf);
-    op.encode(&mut buf);
+    let mut body = Vec::new();
+    id.encode(&mut body);
+    op.encode(&mut body);
     let mut sink = lock_sink();
     if let Some(sink) = sink.as_mut() {
         if typed {
             assert!(sink.val_type == TypeId::of::<W>(), "zipper_tracing: trace was opened for values of type {}, but a TraceZipper has values of type {}", sink.val_type_name, type_name::<W>());
         }
+        //The seq is assigned under the lock, so it orders events from all threads
+        let mut buf = Vec::with_capacity(body.len() + 2);
+        sink.next_seq.encode(&mut buf);
+        sink.next_seq += 1;
+        buf.extend_from_slice(&body);
         if let Err(err) = sink.out.write_all(&buf) {
             //Avoid a double-panic (and abort) when this is a drop during unwinding
             if !std::thread::panicking() {
@@ -453,8 +461,8 @@ fn flush_sink() {
     }
 }
 
-/// Decodes a complete trace into `(zipper_id, op)` events
-pub fn decode_trace<V: TraceValue>(mut bytes: &[u8]) -> io::Result<Vec<(u64, TraceOp<V>)>> {
+/// Decodes a complete trace into `(seq, zipper_id, op)` events
+pub fn decode_trace<V: TraceValue>(mut bytes: &[u8]) -> io::Result<Vec<(u64, u64, TraceOp<V>)>> {
     let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, format!("zipper_tracing: {msg}"));
     let input = &mut bytes;
     let (magic, rest) = input.split_first_chunk::<8>().ok_or_else(|| invalid("truncated header"))?;
@@ -471,9 +479,10 @@ pub fn decode_trace<V: TraceValue>(mut bytes: &[u8]) -> io::Result<Vec<(u64, Tra
     }
     let mut events = Vec::new();
     while !input.is_empty() {
+        let seq = u64::decode(input).ok_or_else(|| invalid("truncated event"))?;
         let id = u64::decode(input).ok_or_else(|| invalid("truncated event"))?;
         let op = TraceOp::decode(input).ok_or_else(|| invalid("invalid or truncated op"))?;
-        events.push((id, op));
+        events.push((seq, id, op));
     }
     Ok(events)
 }
@@ -939,7 +948,8 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> { Ok(()) }
     }
 
-    /// Runs `f` with a trace open, and returns the decoded trace
+    /// Runs `f` with a trace open, and returns the decoded trace's `(zipper_id, op)` events, after
+    /// checking they're numbered in order
     fn traced(f: impl FnOnce()) -> Vec<(u64, TraceOp<u64>)> {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let buf = SharedBuf::default();
@@ -947,7 +957,11 @@ mod tests {
         f();
         close().unwrap();
         let bytes = buf.0.lock().unwrap().clone();
-        decode_trace(&bytes).unwrap()
+        let events = decode_trace(&bytes).unwrap();
+        for (idx, (seq, _, _)) in events.iter().enumerate() {
+            assert_eq!(*seq, idx as u64);
+        }
+        events.into_iter().map(|(_, id, op)| (id, op)).collect()
     }
 
     #[test]

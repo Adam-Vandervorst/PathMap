@@ -10,6 +10,7 @@
     --edge: #b9bdc5; --node: #ffffff; --node-stroke: #4a5160; --ghost: #a3a8b1;
     --val-fill: #fbe7b6; --val-text: #8a5a00; --button: #efede7; --button-hover: #e3e0d7;
     --off-fill: #ecebe7; --off-stroke: #b3b6bc; --off-text: #8d929b; --off-edge: #d5d7db; --pill: #f1efe9;
+    --note-bg: #f3f1ec;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -17,6 +18,7 @@
       --edge: #4a505b; --node: #20232a; --node-stroke: #c3c8d1; --ghost: #6b717c;
       --val-fill: #4d3b12; --val-text: #f2c66d; --button: #23262d; --button-hover: #2e323a;
       --off-fill: #1c1e23; --off-stroke: #4b505a; --off-text: #6f7580; --off-edge: #30343c; --pill: #20232a;
+      --note-bg: #1b1d22;
     }
   }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -26,11 +28,20 @@
   .controls { display: flex; align-items: center; gap: 4px; }
   button, select { font: inherit; color: var(--fg); background: var(--button); border: 1px solid var(--rule); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
   button:hover { background: var(--button-hover); }
-  #scrub { flex: 1; min-width: 160px; }
+  .scrub-wrap { position: relative; flex: 1; min-width: 160px; display: flex; }
+  #scrub { width: 100%; }
+  #ticks { position: absolute; left: 8px; right: 8px; top: -5px; height: 8px; pointer-events: none; }
+  .tick { position: absolute; width: 3px; height: 8px; border-radius: 2px; background: var(--node-stroke); transform: translateX(-50%); }
   #counter { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 70px; text-align: right; }
   #caption { display: flex; align-items: center; gap: 12px; padding: 10px 16px; font: 600 20px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; border-bottom: 1px solid var(--rule); min-height: 28px; overflow-wrap: anywhere; }
   #swatch { width: 16px; height: 16px; border-radius: 50%; flex: none; }
   #stage { flex: 1; min-height: 0; }
+  /* The annotation caption has a band of its own, so it never covers the graph */
+  #note { display: flex; align-items: center; justify-content: center; min-height: 34px; padding: 8px 16px; background: var(--note-bg); border-bottom: 1px solid var(--rule); font: 600 22px/1.35 system-ui, sans-serif; text-align: center; }
+  #note span { opacity: 0; transition: opacity 0.35s; }
+  #note span.on { opacity: 1; }
+  .region { stroke-width: 1.5; stroke-dasharray: 6 4; }
+  .region-tab { font: 700 15px system-ui, sans-serif; dominant-baseline: central; fill: #fff; }
   #view { width: 100%; height: 100%; display: block; }
   footer { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 8px 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
   footer svg { vertical-align: middle; margin-right: 4px; }
@@ -66,13 +77,15 @@
       <button id="next" title="Next (→)">▶︎|</button>
       <button id="last" title="Last (End)">⏭</button>
     </div>
-    <input id="scrub" type="range" min="0" value="0">
+    <div class="scrub-wrap"><input id="scrub" type="range" min="0" value="0"><div id="ticks"></div></div>
     <span id="counter"></span>
+    <select id="chapters" title="Jump to a marked point" hidden></select>
     <select id="speed" title="Speed">
       <option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
     </select>
   </header>
   <div id="caption"><span id="swatch"></span><span id="caption-text"></span></div>
+  <div id="note" hidden><span></span></div>
   <div id="stage"><svg id="view" preserveAspectRatio="xMidYMin meet"></svg></div>
   <footer>
     <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" class="node"/></svg>path exists</span>
@@ -92,10 +105,14 @@ const DATA = /*__TRACE_DATA__*/null;
 const DX = 40, DY = 60, R = 12, GAP = 80, TOP = 56;
 // The most the drawing is scaled up, so a small trie doesn't fill the window with giant nodes
 const MAX_SCALE = 1.4;
+// Zooming on a subtrie is allowed to scale further, so it can be read, unless its annotation sets a max_scale
+const MAX_ZOOM_SCALE = 4;
 // Hidden children are summarized by a pseudo node, keyed by its parent's path with this suffix
 const MORE = "+";
 const PALETTE = ["#e4572e", "#2e86de", "#17a589", "#9b59b6", "#e1a100", "#d6336c", "#16a3b8", "#7d8a2e"];
 const zcolor = id => PALETTE[id % PALETTE.length];
+// Labeled regions get muted colors, so they don't compete with the zippers
+const REGION_PALETTE = ["#5b6fb5", "#3f8f7d", "#a8577e", "#8a7a3e", "#6a5d9e", "#3d8aa8", "#9a6545", "#5e7f3f"];
 const lerp = (a, b, t) => a + (b - a) * t;
 const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -189,12 +206,60 @@ function layout(frame) {
 let cur = { nodes: new Map(), panels: new Map(), rings: new Map(), box: [-DX, 0, DX * 8, 300] };
 let idx = 0, anim = null, playing = false, timer = null;
 
-const speed = () => parseFloat(speedSelect.value);
+// The settings each frame gets from the annotations' ranges.  A later range wins for each setting it has
+const ANN = (DATA && DATA.ann) || { start: 0, ranges: [], marks: [] };
+const notes = DATA ? DATA.frames.map(() => ({})) : [];
+for (const r of ANN.ranges) {
+  for (let i = r.from; i <= r.to; i++) {
+    const n = notes[i];
+    if (r.caption != null) n.caption = r.caption;
+    if (r.speed != null) n.speed = r.speed;
+    if (r.hold != null) n.hold = r.hold;
+    if (r.zoom) n.zoom = r.zoom;
+    if (r.collapse) n.collapse = r;
+  }
+}
+
+// The playback speed for a frame: the chosen speed, times the frame's annotated speed
+const speed = i => parseFloat(speedSelect.value) * (notes[i].speed || 1);
+const clampFrame = i => Math.max(0, Math.min(DATA.frames.length - 1, i));
+
+// The frame one step from `i`.  A collapsed range is a single step, from the frame before it to its last frame
+function stepFrom(i, dir) {
+  let j = clampFrame(i + dir);
+  const c = notes[j].collapse;
+  if (c && j !== c.to) j = clampFrame(dir > 0 ? c.to : c.from - 1);
+  return j;
+}
+
+// Grows a view rectangle so it isn't scaled up by more than `cap`
+function fitBox([bx, by, bw, bh], cap, center) {
+  const minW = svg.clientWidth / cap, minH = svg.clientHeight / cap;
+  if (bw < minW) { bx -= (minW - bw) / 2; bw = minW; }
+  if (bh < minH) { if (center) by -= (minH - bh) / 2; bh = minH; }
+  return [bx, by, bw, bh];
+}
+
+// The camera for a frame: the whole layout, or the subtrie its annotations zoom on
+function cameraFor(i, to) {
+  const z = notes[i].zoom;
+  if (z) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of to.nodes.values()) {
+      if (n.map !== z.map || !n.path.startsWith(z.path)) continue;
+      minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
+      minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
+    }
+    if (minX !== Infinity) return fitBox([minX - DX * 1.2, minY - DY * 0.8, maxX - minX + DX * 3, maxY - minY + DY * 1.6], z.max_scale || MAX_ZOOM_SCALE, true);
+  }
+  return fitBox(to.box, MAX_SCALE, false);
+}
 
 function goTo(i, instant) {
   clearTimeout(timer);
-  idx = Math.max(0, Math.min(DATA.frames.length - 1, i));
-  anim = { t0: performance.now(), dur: instant ? 0 : 450 / speed(), from: cur, to: layoutOf(idx) };
+  idx = clampFrame(i);
+  const to = layoutOf(idx);
+  anim = { t0: performance.now(), dur: instant ? 0 : 450 / speed(idx), from: cur, to, box: cameraFor(idx, to) };
   updateHud();
   requestAnimationFrame(tick);
 }
@@ -241,14 +306,14 @@ function tick(now) {
     const fp = from.panels.get(i);
     panels.set(i, fp ? { ...tp, x: lerp(fp.x, tp.x, e), o: lerp(fp.o, 1, e) } : { ...tp, o: e });
   }
-  const box = to.box.map((v, j) => lerp(from.box[j], v, e));
+  const box = anim.box.map((v, j) => lerp(from.box[j], v, e));
   cur = { nodes, panels, rings, box };
   draw(cur, to);
   if (t < 1) {
     requestAnimationFrame(tick);
   } else {
     anim = null;
-    if (playing) timer = setTimeout(() => idx < DATA.frames.length - 1 ? goTo(idx + 1) : setPlaying(false), 350 / speed());
+    if (playing) timer = setTimeout(() => idx < DATA.frames.length - 1 ? goTo(stepFrom(idx, 1)) : setPlaying(false), 350 / speed(idx) + (notes[idx].hold || 0) * 1000);
   }
 }
 
@@ -258,6 +323,32 @@ function draw(state, target) {
   out.push(`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>`);
   for (const p of state.panels.values()) {
     out.push(`<text class="panel" x="${p.x}" y="${TOP - 34}" opacity="${p.o}">${esc(p.label)}</text>`);
+  }
+  // Labeled subtries: a tinted region around everything below the labeled node, with its name on a tab.  Shorter
+  // paths are drawn first, so a region nested in another is drawn over it
+  // Tabs keep at least their normal size on screen when the view is scaled down to fit a large trie
+  const k = Math.min(3, Math.max(1, 1 / Math.min(svg.clientWidth / state.box[2], svg.clientHeight / state.box[3])));
+  const tabs = [];
+  const labels = (ANN.labels || []).map((l, li) => ({ ...l, color: REGION_PALETTE[li % REGION_PALETTE.length] }))
+    .filter(l => l.from <= idx && idx <= l.to).sort((a, b) => a.path.length - b.path.length);
+  for (const l of labels) {
+    const root = state.nodes.get(l.map + ":" + l.path);
+    if (!root) continue;
+    let minX = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of state.nodes.values()) {
+      if (n.map !== l.map || !n.path.startsWith(l.path)) continue;
+      minX = Math.min(minX, n.x - (n.more ? 36 : R)); maxX = Math.max(maxX, n.x + (n.more ? 36 : R));
+      maxY = Math.max(maxY, n.y + R + (n.val != null ? 20 : 6));
+    }
+    const tabW = (l.text.length * 8.5 + 20) * k, tabH = 26 * k, pad = 6;
+    // The tab is placed left of the edge that leads into the region where there's room for it
+    const x = minX - pad, y = root.y - R - pad - tabH;
+    const tabX = root.x - R - 6 - tabW >= x ? root.x - R - 6 - tabW : x;
+    //The region's size comes from the subtrie alone; a tab that's wider than the region extends past it
+    const w = maxX + pad - x, h = maxY + pad - y;
+    out.push(`<rect class="region" x="${x}" y="${y}" width="${w}" height="${h}" rx="14" fill="${l.color}" fill-opacity="0.08" stroke="${l.color}" stroke-opacity="0.55" opacity="${root.o}"/>`);
+    //The tabs are drawn over the nodes, so they're never hidden
+    tabs.push(`<g opacity="${root.o}"><rect x="${tabX}" y="${y}" width="${tabW}" height="${tabH}" rx="${tabH / 2}" fill="${l.color}"/><text class="region-tab" x="${tabX + 10 * k}" y="${y + tabH / 2}" style="font-size: ${15 * k}px">${esc(l.text)}</text></g>`);
   }
   for (const n of state.nodes.values()) {
     if (n.path === "") continue;
@@ -311,6 +402,7 @@ function draw(state, target) {
     if (n.val != null) g += `<text class="value${state_ === "off" ? " off" : ""}" x="${n.x}" y="${n.y + R + 15}">${esc(n.val)}</text>`;
     out.push(g + tip + "</g>");
   }
+  out.push(...tabs);
   for (const sid of frame.s) {
     const a = state.rings.get(sid), b = state.rings.get(frame.a);
     if (!a || !b) continue;
@@ -335,19 +427,20 @@ function draw(state, target) {
     out.push(g + "</g>");
   }
   svg.innerHTML = out.join("");
-  let [bx, by, bw, bh] = state.box;
-  const minW = svg.clientWidth / MAX_SCALE, minH = svg.clientHeight / MAX_SCALE;
-  if (bw < minW) { bx -= (minW - bw) / 2; bw = minW; }
-  if (bh < minH) bh = minH;
-  svg.setAttribute("viewBox", `${bx} ${by} ${bw} ${bh}`);
+  svg.setAttribute("viewBox", state.box.join(" "));
 }
 
 function updateHud() {
   const frame = DATA.frames[idx];
   document.getElementById("caption-text").textContent = frame.c;
   document.getElementById("swatch").style.background = frame.a != null ? zcolor(frame.a) : "transparent";
-  document.getElementById("counter").textContent = `${idx} / ${DATA.frames.length - 1}`;
+  const last = DATA.frames[DATA.frames.length - 1].e;
+  document.getElementById("counter").textContent = frame.e == null ? "start" : `event ${frame.e} / ${last}`;
   scrub.value = idx;
+  const note = document.querySelector("#note span");
+  if (notes[idx].caption) note.textContent = notes[idx].caption;
+  note.classList.toggle("on", !!notes[idx].caption);
+  if (frame.e != null) history.replaceState(null, "", `#event=${frame.e}`);
 }
 
 function setPlaying(on) {
@@ -355,7 +448,7 @@ function setPlaying(on) {
   playButton.textContent = on ? "⏸" : "▶";
   clearTimeout(timer);
   if (on) {
-    if (idx >= DATA.frames.length - 1) goTo(0); else if (!anim) goTo(idx + 1);
+    if (idx >= DATA.frames.length - 1) goTo(0); else if (!anim) goTo(stepFrom(idx, 1));
   }
 }
 
@@ -365,21 +458,35 @@ if (!DATA) {
   document.getElementById("title").textContent = DATA.title;
   scrub.max = DATA.frames.length - 1;
   document.getElementById("first").onclick = () => { setPlaying(false); goTo(0); };
-  document.getElementById("prev").onclick = () => { setPlaying(false); goTo(idx - 1); };
-  document.getElementById("next").onclick = () => { setPlaying(false); goTo(idx + 1); };
+  document.getElementById("prev").onclick = () => { setPlaying(false); goTo(stepFrom(idx, -1)); };
+  document.getElementById("next").onclick = () => { setPlaying(false); goTo(stepFrom(idx, 1)); };
   document.getElementById("last").onclick = () => { setPlaying(false); goTo(DATA.frames.length - 1); };
   playButton.onclick = () => setPlaying(!playing);
   scrub.oninput = () => { setPlaying(false); goTo(parseInt(scrub.value, 10)); };
   document.addEventListener("keydown", ev => {
     if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT") return;
-    if (ev.key === "ArrowRight") { setPlaying(false); goTo(idx + 1); }
-    else if (ev.key === "ArrowLeft") { setPlaying(false); goTo(idx - 1); }
+    if (ev.key === "ArrowRight") { setPlaying(false); goTo(stepFrom(idx, 1)); }
+    else if (ev.key === "ArrowLeft") { setPlaying(false); goTo(stepFrom(idx, -1)); }
     else if (ev.key === " ") { ev.preventDefault(); setPlaying(!playing); }
     else if (ev.key === "Home") { setPlaying(false); goTo(0); }
     else if (ev.key === "End") { setPlaying(false); goTo(DATA.frames.length - 1); }
     else return;
   });
-  goTo(0, true);
+  document.getElementById("note").hidden = !ANN.ranges.some(r => r.caption != null);
+  // Chapter marks, in a menu and as ticks on the scrubber
+  if (ANN.marks.length) {
+    const chapters = document.getElementById("chapters");
+    chapters.hidden = false;
+    chapters.innerHTML = `<option value="">Jump to…</option>` + ANN.marks.map(m => `<option value="${m.frame}">${esc(m.label)}</option>`).join("");
+    chapters.onchange = () => { if (chapters.value !== "") { setPlaying(false); goTo(parseInt(chapters.value, 10)); } chapters.value = ""; };
+    document.getElementById("ticks").innerHTML = ANN.marks.map(m =>
+      `<div class="tick" style="left: ${m.frame / Math.max(1, DATA.frames.length - 1) * 100}%" title="${esc(m.label)}"></div>`).join("");
+  }
+  window.addEventListener("resize", () => { if (!anim) goTo(idx, true); });
+  // A link may name the event to open at, as #event=N
+  const linked = /^#event=(\d+)$/.exec(location.hash);
+  const linkedFrame = linked ? DATA.frames.findIndex(f => f.e === parseInt(linked[1], 10)) : -1;
+  goTo(linkedFrame >= 0 ? linkedFrame : ANN.start, true);
 }
 </script>
 </body>

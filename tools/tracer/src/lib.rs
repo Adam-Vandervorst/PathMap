@@ -9,9 +9,11 @@ use pathmap::arena_compact::ArenaCompactTree;
 use pathmap::ring::{DistributiveLattice, Lattice};
 use pathmap::utils::debug::zipper_tracing::{decode_trace, TraceValue};
 
+mod annotations;
 mod html;
 mod replay;
 
+pub use annotations::{Annotations, EventRange, Label, Mark, RangeNote, Zoom};
 pub use html::render_html;
 pub use replay::{replay, quote_path, Frame, MapView, NodeView, Replay, ReplayConfig, ZipperView};
 
@@ -39,21 +41,23 @@ pub fn load_act<V: ReplayValue>(path: &Path) -> io::Result<PathMap<V>> {
     Ok(act.iter().map(|(path, val)| (path, V::from_act(val))).collect())
 }
 
-fn render<V: ReplayValue>(trace: &[u8], acts: &[PathBuf], cfg: &ReplayConfig, title: &str) -> io::Result<(String, Vec<String>)> {
+fn render<V: ReplayValue>(trace: &[u8], acts: &[PathBuf], ann: Option<&Annotations>, cfg: &ReplayConfig, title: &str) -> io::Result<(String, Vec<String>)> {
     let events = decode_trace::<V>(trace)?;
     let seeds = acts.iter()
         .map(|path| Ok((format!("{}", path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()), load_act::<V>(path)?)))
         .collect::<io::Result<Vec<_>>>()?;
     let replay = replay(&events, seeds, cfg);
-    Ok((render_html(&replay, title), replay.warnings))
+    let html = render_html(&replay, title, ann).map_err(io::Error::other)?;
+    Ok((html, replay.warnings))
 }
 
-/// Replays a trace, seeding maps from `acts`, and returns the HTML page and any warnings
+/// Replays a trace, seeding maps from `acts`, and returns the HTML page, steered by `ann` if given, and any warnings
 ///
 /// Traces with `u64` and `()` values are supported
-pub fn render_trace(trace: &[u8], acts: &[PathBuf], cfg: &ReplayConfig, title: &str) -> io::Result<(String, Vec<String>)> {
-    match render::<u64>(trace, acts, cfg, title) {
-        Err(err) if err.kind() == io::ErrorKind::InvalidData => render::<()>(trace, acts, cfg, title).map_err(|_| err),
+pub fn render_trace(trace: &[u8], acts: &[PathBuf], ann: Option<&Annotations>, cfg: &ReplayConfig, title: &str) -> io::Result<(String, Vec<String>)> {
+    match render::<u64>(trace, acts, ann, cfg, title) {
+        //The trace's value type is only known from its header, so a mismatch means it should be tried as ()
+        Err(err) if err.kind() == io::ErrorKind::InvalidData => render::<()>(trace, acts, ann, cfg, title).map_err(|_| err),
         result => result,
     }
 }

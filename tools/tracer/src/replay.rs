@@ -44,6 +44,8 @@ pub struct Replay<V: ReplayValue> {
 /// The visible state after one event
 #[derive(Clone, Debug)]
 pub struct Frame {
+    /// The `seq` of the event, or `None` for the state before the first event
+    pub event: Option<u64>,
     pub caption: String,
     /// The zipper that performed the event
     pub actor: Option<u64>,
@@ -125,10 +127,10 @@ struct MapSlot {
 
 /// Decides which map each zipper is on.  Returns the map index of each zipper id, and the labels of maps
 /// added beyond the seeded ones
-fn assign_maps<V: ReplayValue>(events: &[(u64, TraceOp<V>)], seeds: &[(String, PathMap<V>)], writers: &HashSet<usize>, cfg: &ReplayConfig, warnings: &mut Vec<String>) -> (HashMap<u64, usize>, Vec<String>) {
+fn assign_maps<V: ReplayValue>(events: &[(u64, u64, TraceOp<V>)], seeds: &[(String, PathMap<V>)], writers: &HashSet<usize>, cfg: &ReplayConfig, warnings: &mut Vec<String>) -> (HashMap<u64, usize>, Vec<String>) {
     let mut slots: Vec<MapSlot> = seeds.iter().enumerate().map(|(idx, (label, _))| MapSlot { key: None, seed: Some(idx), label: label.clone(), live: vec![] }).collect();
     let mut map_of: HashMap<u64, usize> = HashMap::new();
-    for (idx, (id, op)) in events.iter().enumerate() {
+    for (idx, (_, id, op)) in events.iter().enumerate() {
         match op {
             TraceOp::Created { root_prefix_path: rpp, .. } => {
                 let is_writer = writers.contains(&idx);
@@ -352,10 +354,10 @@ fn apply_write<'h, V: ReplayValue>(w: &mut WriteZipperTracked<'h, 'static, V>, o
 
 /// Returns the index of the `Created` event of each zipper lifetime that performs a write.  Write and read zippers
 /// are replayed differently, and an id may be reused, so this is decided per lifetime rather than per id
-fn writer_lifetimes<V>(events: &[(u64, TraceOp<V>)]) -> HashSet<usize> {
+fn writer_lifetimes<V>(events: &[(u64, u64, TraceOp<V>)]) -> HashSet<usize> {
     let mut current: HashMap<u64, usize> = HashMap::new();
     let mut writers = HashSet::new();
-    for (idx, (id, op)) in events.iter().enumerate() {
+    for (idx, (_, id, op)) in events.iter().enumerate() {
         if let TraceOp::Created { .. } = op {
             current.insert(*id, idx);
         }
@@ -370,11 +372,12 @@ fn writer_lifetimes<V>(events: &[(u64, TraceOp<V>)]) -> HashSet<usize> {
     writers
 }
 
-/// Replays `events` and records a frame after each one
+/// Replays `events`, which are `(seq, zipper_id, op)` as returned by [decode_trace](pathmap::utils::debug::zipper_tracing::decode_trace),
+/// and records a frame after each one
 ///
 /// `seeds` are the initial contents of maps loaded from files, in priority order.  When a zipper's
 /// `root_prefix_path` is compatible with more than one seed, the first one wins
-pub fn replay<V: ReplayValue>(events: &[(u64, TraceOp<V>)], seeds: Vec<(String, PathMap<V>)>, cfg: &ReplayConfig) -> Replay<V> {
+pub fn replay<V: ReplayValue>(events: &[(u64, u64, TraceOp<V>)], seeds: Vec<(String, PathMap<V>)>, cfg: &ReplayConfig) -> Replay<V> {
     let mut warnings = Vec::new();
     let writers = writer_lifetimes(events);
     let (map_of, map_labels) = assign_maps(events, &seeds, &writers, cfg, &mut warnings);
@@ -390,18 +393,18 @@ pub fn replay<V: ReplayValue>(events: &[(u64, TraceOp<V>)], seeds: Vec<(String, 
     {
         let heads: Vec<_> = maps.iter_mut().map(|map| map.zipper_head()).collect();
         let mut live: HashMap<u64, LiveZipper<'_, V>> = HashMap::new();
-        frames.push(Frame { caption: "start".to_string(), actor: None, sources: vec![], maps: capture(&mut live, &mut mirrors, &shown) });
-        for (idx, (id, op)) in events.iter().enumerate() {
+        frames.push(Frame { event: None, caption: "start".to_string(), actor: None, sources: vec![], maps: capture(&mut live, &mut mirrors, &shown) });
+        for (idx, (seq, id, op)) in events.iter().enumerate() {
             let mut caption = format!("z{id}.{}", call_text(op));
             let result = step(*id, op, &heads, &map_of, writers.contains(&idx), &mut live);
             if let Err(err) = result {
                 caption.push_str(&format!("  ⚠ {err}"));
-                warnings.push(format!("event {idx} (z{id}): {err}"));
+                warnings.push(format!("event {seq} (z{id}): {err}"));
             }
             if let Some(&m) = map_of.get(id) {
                 shown[m] = true;
             }
-            frames.push(Frame { caption, actor: Some(*id), sources: traced_sources(op), maps: capture(&mut live, &mut mirrors, &shown) });
+            frames.push(Frame { event: Some(*seq), caption, actor: Some(*id), sources: traced_sources(op), maps: capture(&mut live, &mut mirrors, &shown) });
         }
         //The zippers borrow the heads, so they must go first
         drop(live);
@@ -739,6 +742,7 @@ mod tests {
             created(6, b""),
             (1, TraceOp::SetVal { val: 1 }),
         ];
+        let events: Vec<_> = events.into_iter().enumerate().map(|(seq, (id, op))| (seq as u64, id, op)).collect();
         //Zipper 1's lifetime begins at event 0
         let writers = HashSet::from([0]);
         let mut warnings = vec![];
