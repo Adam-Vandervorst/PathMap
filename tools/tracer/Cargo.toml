@@ -1,0 +1,9 @@
+[package]
+name = "tracer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Inspects and replays trace files written by pathmap's TraceZipper, rendering them as an animated HTML page"
+
+[dependencies]
+pathmap = { path = "../..", features = ["arena_compact"] }

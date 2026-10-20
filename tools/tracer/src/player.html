@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root {
+    --bg: #faf9f6; --fg: #1d2127; --muted: #6a717c; --rule: #dedbd3;
+    --edge: #b9bdc5; --node: #ffffff; --node-stroke: #4a5160; --ghost: #a3a8b1;
+    --val-fill: #fbe7b6; --val-text: #8a5a00; --button: #efede7; --button-hover: #e3e0d7;
+    --off-fill: #ecebe7; --off-stroke: #b3b6bc; --off-text: #8d929b; --off-edge: #d5d7db; --pill: #f1efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171c; --fg: #e4e6ea; --muted: #9aa1ac; --rule: #2c3038;
+      --edge: #4a505b; --node: #20232a; --node-stroke: #c3c8d1; --ghost: #6b717c;
+      --val-fill: #4d3b12; --val-text: #f2c66d; --button: #23262d; --button-hover: #2e323a;
+      --off-fill: #1c1e23; --off-stroke: #4b505a; --off-text: #6f7580; --off-edge: #30343c; --pill: #20232a;
+    }
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 16px; border-bottom: 1px solid var(--rule); }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0 8px 0 0; }
+  .controls { display: flex; align-items: center; gap: 4px; }
+  button, select { font: inherit; color: var(--fg); background: var(--button); border: 1px solid var(--rule); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+  button:hover { background: var(--button-hover); }
+  #scrub { flex: 1; min-width: 160px; }
+  #counter { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 70px; text-align: right; }
+  #caption { display: flex; align-items: center; gap: 12px; padding: 10px 16px; font: 600 20px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; border-bottom: 1px solid var(--rule); min-height: 28px; overflow-wrap: anywhere; }
+  #swatch { width: 16px; height: 16px; border-radius: 50%; flex: none; }
+  #stage { flex: 1; min-height: 0; }
+  #view { width: 100%; height: 100%; display: block; }
+  footer { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 8px 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+  footer svg { vertical-align: middle; margin-right: 4px; }
+  .edge { stroke: var(--edge); stroke-width: 1.5; }
+  .edge.ghost { stroke: var(--ghost); stroke-dasharray: 4 4; }
+  .edge.off { stroke: var(--off-edge); }
+  .node { fill: var(--node); stroke: var(--node-stroke); stroke-width: 1.5; }
+  .node.val { fill: var(--val-fill); }
+  .node.ghost { fill: var(--bg); stroke: var(--ghost); stroke-dasharray: 3 3; }
+  .node.off { fill: var(--off-fill); stroke: var(--off-stroke); stroke-width: 1; }
+  .root { fill: var(--node-stroke); }
+  .label { fill: var(--fg); font: 600 13px ui-monospace, Menlo, monospace; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+  .label.ghost { fill: var(--ghost); }
+  .label.off { fill: var(--off-text); font-weight: 500; }
+  .label.hex { font-size: 9px; }
+  .value { fill: var(--val-text); font: 11px ui-monospace, Menlo, monospace; text-anchor: middle; }
+  .value.off { fill: var(--off-text); }
+  .fan { stroke: var(--ghost); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .pill { fill: var(--pill); stroke: var(--ghost); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .pill-text { fill: var(--muted); font: 700 12px system-ui, sans-serif; text-anchor: middle; dominant-baseline: central; }
+  .panel { fill: var(--muted); font: 600 12px system-ui, sans-serif; }
+  .tag { font: 700 12px system-ui, sans-serif; dominant-baseline: central; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1 id="title"></h1>
+    <div class="controls">
+      <button id="first" title="First (Home)">⏮</button>
+      <button id="prev" title="Previous (←)">◀</button>
+      <button id="play" title="Play / pause (space)">▶</button>
+      <button id="next" title="Next (→)">▶︎|</button>
+      <button id="last" title="Last (End)">⏭</button>
+    </div>
+    <input id="scrub" type="range" min="0" value="0">
+    <span id="counter"></span>
+    <select id="speed" title="Speed">
+      <option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
+    </select>
+  </header>
+  <div id="caption"><span id="swatch"></span><span id="caption-text"></span></div>
+  <div id="stage"><svg id="view" preserveAspectRatio="xMidYMin meet"></svg></div>
+  <footer>
+    <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" class="node"/></svg>path exists</span>
+    <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" class="node val"/></svg>has a value</span>
+    <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" class="node ghost"/></svg>path doesn't exist</span>
+    <span><svg width="16" height="16"><circle cx="8" cy="8" r="6" class="node off"/></svg>no live zipper can reach it</span>
+    <span><svg width="26" height="16"><circle cx="13" cy="8" r="6" fill="none" stroke="#2e86de" stroke-width="2.5"/></svg><svg width="26" height="16"><line x1="2" y1="8" x2="24" y2="8" stroke="#2e86de" stroke-width="6" stroke-linecap="round" opacity="0.35"/></svg>write zipper focus &amp; path</span>
+    <span><svg width="26" height="16"><circle cx="13" cy="8" r="6" fill="none" stroke="#2e86de" stroke-width="2.5" stroke-dasharray="4 3"/></svg><svg width="26" height="16"><line x1="3" y1="8" x2="24" y2="8" stroke="#2e86de" stroke-width="5" stroke-linecap="round" stroke-dasharray="0.1 7" opacity="0.6"/></svg>read zipper focus &amp; path</span>
+    <span><svg width="26" height="16"><line x1="2" y1="8" x2="24" y2="8" stroke="#2e86de" stroke-width="2" stroke-dasharray="3 3"/></svg>above the zipper's root</span>
+    <span><svg width="44" height="16"><rect x="1" y="2" width="42" height="12" rx="6" class="pill"/></svg>children not shown</span>
+  </footer>
+</div>
+<script>
+"use strict";
+const DATA = /*__TRACE_DATA__*/null;
+
+const DX = 40, DY = 60, R = 12, GAP = 80, TOP = 56;
+// The most the drawing is scaled up, so a small trie doesn't fill the window with giant nodes
+const MAX_SCALE = 1.4;
+// Hidden children are summarized by a pseudo node, keyed by its parent's path with this suffix
+const MORE = "+";
+const PALETTE = ["#e4572e", "#2e86de", "#17a589", "#9b59b6", "#e1a100", "#d6336c", "#16a3b8", "#7d8a2e"];
+const zcolor = id => PALETTE[id % PALETTE.length];
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const svg = document.getElementById("view");
+const scrub = document.getElementById("scrub");
+const playButton = document.getElementById("play");
+const speedSelect = document.getElementById("speed");
+
+function byteLabel(hex) {
+  const b = parseInt(hex.slice(-2), 16);
+  if (b === 0x20) return { text: "␣", hex: false };
+  if (b > 0x20 && b < 0x7f) return { text: String.fromCharCode(b), hex: false };
+  return { text: hex.slice(-2), hex: true };
+}
+
+function pathText(hex) {
+  let s = "";
+  for (let i = 0; i < hex.length; i += 2) {
+    const b = parseInt(hex.slice(i, i + 2), 16);
+    s += (b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c) ? String.fromCharCode(b) : "\\x" + hex.slice(i, i + 2);
+  }
+  return '"' + s + '"';
+}
+
+const parentPath = path => path.endsWith(MORE) ? path.slice(0, -1) : path.slice(0, -2);
+const parentKey = key => {
+  const colon = key.indexOf(":");
+  const path = key.slice(colon + 1);
+  return path === "" ? null : key.slice(0, colon + 1) + parentPath(path);
+};
+
+// Positions every visible node of a frame.  Maps are laid out side by side, and each map is a tree
+// with the leaves spaced evenly and each parent centered over its children
+const layouts = [];
+function layoutOf(i) {
+  if (!layouts[i]) layouts[i] = layout(DATA.frames[i]);
+  return layouts[i];
+}
+
+function layout(frame) {
+  const nodes = new Map(), panels = new Map(), zippers = [];
+  let xOff = 0, maxY = TOP;
+  for (const mv of frame.m) {
+    const info = new Map(mv.n.map(n => [n[0], n]));
+    const kids = new Map();
+    for (const p of info.keys()) {
+      if (p === "") continue;
+      const parent = p.slice(0, -2);
+      if (!kids.has(parent)) kids.set(parent, []);
+      kids.get(parent).push(p);
+    }
+    for (const list of kids.values()) list.sort();
+    // The pseudo node for hidden children goes after the shown ones
+    for (const [p, n] of info) {
+      if (n[4] > 0) {
+        if (!kids.has(p)) kids.set(p, []);
+        kids.get(p).push(p + MORE);
+      }
+    }
+    const slot = new Map();
+    let leaf = 0;
+    const visit = p => {
+      if (p.endsWith(MORE)) { slot.set(p, leaf + 0.5); leaf += 2; return; }
+      const ks = kids.get(p);
+      if (!ks) { slot.set(p, leaf++); return; }
+      ks.forEach(visit);
+      slot.set(p, (slot.get(ks[0]) + slot.get(ks[ks.length - 1])) / 2);
+    };
+    if (info.has("")) visit("");
+    for (const [p, n] of info) {
+      if (!slot.has(p)) continue;
+      const y = TOP + p.length / 2 * DY;
+      maxY = Math.max(maxY, y);
+      nodes.set(mv.i + ":" + p, { x: xOff + slot.get(p) * DX, y, exists: !!n[1], accessible: !!n[2], val: n[3], path: p, map: mv.i, o: 1 });
+      if (n[4] > 0) {
+        const mp = p + MORE;
+        nodes.set(mv.i + ":" + mp, { x: xOff + slot.get(mp) * DX, y: y + DY, more: n[4], accessible: !!n[2], path: mp, map: mv.i, o: 1 });
+        maxY = Math.max(maxY, y + DY);
+      }
+    }
+    panels.set(mv.i, { x: xOff - R, label: DATA.maps[mv.i] || "map " + mv.i, o: 1 });
+    for (const z of mv.z) zippers.push({ id: z[0], map: mv.i, root: z[1], focus: z[2], writer: !!z[3] });
+    xOff += Math.max(leaf, 1) * DX + GAP;
+  }
+  const width = Math.max(xOff - GAP, DX * 4);
+  return { nodes, panels, zippers, box: [-DX, 0, width + DX * 3, maxY + 80] };
+}
+
+// The state as last drawn.  Transitions start from here, so an interrupted transition continues smoothly
+let cur = { nodes: new Map(), panels: new Map(), rings: new Map(), box: [-DX, 0, DX * 8, 300] };
+let idx = 0, anim = null, playing = false, timer = null;
+
+const speed = () => parseFloat(speedSelect.value);
+
+function goTo(i, instant) {
+  clearTimeout(timer);
+  idx = Math.max(0, Math.min(DATA.frames.length - 1, i));
+  anim = { t0: performance.now(), dur: instant ? 0 : 450 / speed(), from: cur, to: layoutOf(idx) };
+  updateHud();
+  requestAnimationFrame(tick);
+}
+
+function nearestFrom(from, key) {
+  for (let k = key; k !== null; k = parentKey(k)) {
+    const n = from.nodes.get(k);
+    if (n) return n;
+  }
+  return null;
+}
+
+function tick(now) {
+  if (!anim) return;
+  const { from, to } = anim;
+  const t = anim.dur ? Math.min(1, (now - anim.t0) / anim.dur) : 1;
+  const e = ease(t);
+  const nodes = new Map();
+  for (const [k, tn] of to.nodes) {
+    const fn = from.nodes.get(k);
+    if (fn) {
+      nodes.set(k, { ...tn, x: lerp(fn.x, tn.x, e), y: lerp(fn.y, tn.y, e), o: lerp(fn.o, 1, e) });
+    } else {
+      // New nodes grow out of their nearest visible ancestor
+      const start = nearestFrom(from, parentKey(k)) || tn;
+      nodes.set(k, { ...tn, x: lerp(start.x, tn.x, e), y: lerp(start.y, tn.y, e), o: e });
+    }
+  }
+  for (const [k, fn] of from.nodes) {
+    if (!to.nodes.has(k) && fn.o * (1 - e) > 0.02) nodes.set(k, { ...fn, o: fn.o * (1 - e) });
+  }
+  const rings = new Map();
+  for (const z of to.zippers) {
+    const target = nodes.get(z.map + ":" + z.focus);
+    if (!target) continue;
+    const fr = from.rings.get(z.id);
+    rings.set(z.id, fr ? { x: lerp(fr.x, target.x, e), y: lerp(fr.y, target.y, e), o: lerp(fr.o, 1, e) } : { x: target.x, y: target.y, o: e });
+  }
+  for (const [id, fr] of from.rings) {
+    if (!rings.has(id) && fr.o * (1 - e) > 0.02) rings.set(id, { ...fr, o: fr.o * (1 - e) });
+  }
+  const panels = new Map();
+  for (const [i, tp] of to.panels) {
+    const fp = from.panels.get(i);
+    panels.set(i, fp ? { ...tp, x: lerp(fp.x, tp.x, e), o: lerp(fp.o, 1, e) } : { ...tp, o: e });
+  }
+  const box = to.box.map((v, j) => lerp(from.box[j], v, e));
+  cur = { nodes, panels, rings, box };
+  draw(cur, to);
+  if (t < 1) {
+    requestAnimationFrame(tick);
+  } else {
+    anim = null;
+    if (playing) timer = setTimeout(() => idx < DATA.frames.length - 1 ? goTo(idx + 1) : setPlaying(false), 350 / speed());
+  }
+}
+
+function draw(state, target) {
+  const frame = DATA.frames[idx];
+  const out = [];
+  out.push(`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>`);
+  for (const p of state.panels.values()) {
+    out.push(`<text class="panel" x="${p.x}" y="${TOP - 34}" opacity="${p.o}">${esc(p.label)}</text>`);
+  }
+  for (const n of state.nodes.values()) {
+    if (n.path === "") continue;
+    const parent = state.nodes.get(n.map + ":" + parentPath(n.path));
+    if (!parent) continue;
+    const o = Math.min(n.o, parent.o);
+    if (n.more) {
+      // A fan of edges into the pill, so it reads as many children rather than one
+      for (const dx of [-14, 0, 14]) out.push(`<line class="fan" x1="${parent.x}" y1="${parent.y + R}" x2="${n.x + dx}" y2="${n.y - 11}" opacity="${o}"/>`);
+      continue;
+    }
+    const cls = !n.exists ? " ghost" : n.accessible ? "" : " off";
+    out.push(`<line class="edge${cls}" x1="${parent.x}" y1="${parent.y}" x2="${n.x}" y2="${n.y}" opacity="${o}"/>`);
+  }
+  // Each zipper's path from the map root to its focus.  Zippers that share a path are offset so both show
+  target.zippers.forEach((z, zi) => {
+    const shift = (zi - (target.zippers.length - 1) / 2) * 5;
+    const above = [], below = [];
+    for (let k = 0; k <= z.focus.length; k += 2) {
+      const n = state.nodes.get(z.map + ":" + z.focus.slice(0, k));
+      if (!n) continue;
+      const pt = `${n.x + shift},${n.y}`;
+      if (k <= z.root.length) above.push(pt);
+      if (k >= z.root.length) below.push(pt);
+    }
+    const color = zcolor(z.id);
+    if (above.length > 1) out.push(`<polyline points="${above.join(" ")}" fill="none" stroke="${color}" stroke-width="2" stroke-dasharray="3 4" opacity="0.8"/>`);
+    if (below.length > 1) {
+      // Writers get a solid band, readers a dotted one
+      const style = z.writer ? `stroke-width="7" opacity="0.32"` : `stroke-width="6" stroke-dasharray="0.1 9" opacity="0.7"`;
+      out.push(`<polyline points="${below.join(" ")}" fill="none" stroke="${color}" ${style} stroke-linecap="round" stroke-linejoin="round"/>`);
+    }
+  });
+  for (const n of state.nodes.values()) {
+    const tip = n.more ? "" : `<title>${esc(pathText(n.path))}${n.val != null ? " = " + esc(n.val) : ""}${!n.exists ? " (doesn't exist)" : n.accessible ? "" : " (no live zipper can reach it)"}</title>`;
+    if (n.path === "") {
+      out.push(`<g opacity="${n.o}"><circle class="root" cx="${n.x}" cy="${n.y}" r="6"/>${tip}</g>`);
+      continue;
+    }
+    if (n.more) {
+      const text = `+${n.more} more`;
+      const w = text.length * 7 + 16;
+      out.push(`<g opacity="${n.o}"><rect class="pill" x="${n.x - w / 2}" y="${n.y - 11}" width="${w}" height="22" rx="11"/><text class="pill-text" x="${n.x}" y="${n.y}">${text}</text><title>${n.more} more children not shown</title></g>`);
+      continue;
+    }
+    const label = byteLabel(n.path);
+    const state_ = !n.exists ? "ghost" : n.accessible ? "" : "off";
+    const cls = state_ ? "node " + state_ : (n.val != null ? "node val" : "node");
+    let g = `<g opacity="${n.o}"><circle class="${cls}" cx="${n.x}" cy="${n.y}" r="${R}"/>`;
+    g += `<text class="label${state_ ? " " + state_ : ""}${label.hex ? " hex" : ""}" x="${n.x}" y="${n.y}">${esc(label.text)}</text>`;
+    if (n.val != null) g += `<text class="value${state_ === "off" ? " off" : ""}" x="${n.x}" y="${n.y + R + 15}">${esc(n.val)}</text>`;
+    out.push(g + tip + "</g>");
+  }
+  for (const sid of frame.s) {
+    const a = state.rings.get(sid), b = state.rings.get(frame.a);
+    if (!a || !b) continue;
+    const mx = (a.x + b.x) / 2, my = Math.min(a.y, b.y) - 50;
+    out.push(`<path d="M${a.x},${a.y - R - 6} Q${mx},${my} ${b.x},${b.y - R - 6}" fill="none" stroke="${zcolor(sid)}" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow)" opacity="${Math.min(a.o, b.o)}"/>`);
+  }
+  const writers = new Map(target.zippers.map(z => [z.id, z.writer]));
+  for (const [id, r] of state.rings) {
+    const color = zcolor(id);
+    const actor = id === frame.a;
+    const writer = writers.has(id) ? writers.get(id) : r.writer;
+    r.writer = writer;
+    let g = `<g opacity="${r.o}">`;
+    if (actor) g += `<circle cx="${r.x}" cy="${r.y}" r="${R + 9}" fill="none" stroke="${color}" stroke-width="7" opacity="0.22"/>`;
+    g += `<circle cx="${r.x}" cy="${r.y}" r="${R + 5}" fill="none" stroke="${color}" stroke-width="${actor ? 3.5 : 2.5}"${writer ? "" : ` stroke-dasharray="5 3"`}/>`;
+    // Writers get a filled tag, readers an outlined one
+    const text = `z${id} ${writer ? "write" : "read"}`;
+    const w = text.length * 7 + 12, tx = r.x + R + 6, ty = r.y - R - 10;
+    g += writer
+      ? `<rect x="${tx}" y="${ty - 9}" width="${w}" height="18" rx="9" fill="${color}"/><text class="tag" x="${tx + 6}" y="${ty}" fill="#fff">${text}</text>`
+      : `<rect x="${tx}" y="${ty - 9}" width="${w}" height="18" rx="9" fill="var(--bg)" stroke="${color}" stroke-width="1.5"/><text class="tag" x="${tx + 6}" y="${ty}" fill="${color}">${text}</text>`;
+    out.push(g + "</g>");
+  }
+  svg.innerHTML = out.join("");
+  let [bx, by, bw, bh] = state.box;
+  const minW = svg.clientWidth / MAX_SCALE, minH = svg.clientHeight / MAX_SCALE;
+  if (bw < minW) { bx -= (minW - bw) / 2; bw = minW; }
+  if (bh < minH) bh = minH;
+  svg.setAttribute("viewBox", `${bx} ${by} ${bw} ${bh}`);
+}
+
+function updateHud() {
+  const frame = DATA.frames[idx];
+  document.getElementById("caption-text").textContent = frame.c;
+  document.getElementById("swatch").style.background = frame.a != null ? zcolor(frame.a) : "transparent";
+  document.getElementById("counter").textContent = `${idx} / ${DATA.frames.length - 1}`;
+  scrub.value = idx;
+}
+
+function setPlaying(on) {
+  playing = on;
+  playButton.textContent = on ? "⏸" : "▶";
+  clearTimeout(timer);
+  if (on) {
+    if (idx >= DATA.frames.length - 1) goTo(0); else if (!anim) goTo(idx + 1);
+  }
+}
+
+if (!DATA) {
+  document.getElementById("caption-text").textContent = "No trace data.  This page is generated by `tracer replay`.";
+} else {
+  document.getElementById("title").textContent = DATA.title;
+  scrub.max = DATA.frames.length - 1;
+  document.getElementById("first").onclick = () => { setPlaying(false); goTo(0); };
+  document.getElementById("prev").onclick = () => { setPlaying(false); goTo(idx - 1); };
+  document.getElementById("next").onclick = () => { setPlaying(false); goTo(idx + 1); };
+  document.getElementById("last").onclick = () => { setPlaying(false); goTo(DATA.frames.length - 1); };
+  playButton.onclick = () => setPlaying(!playing);
+  scrub.oninput = () => { setPlaying(false); goTo(parseInt(scrub.value, 10)); };
+  document.addEventListener("keydown", ev => {
+    if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT") return;
+    if (ev.key === "ArrowRight") { setPlaying(false); goTo(idx + 1); }
+    else if (ev.key === "ArrowLeft") { setPlaying(false); goTo(idx - 1); }
+    else if (ev.key === " ") { ev.preventDefault(); setPlaying(!playing); }
+    else if (ev.key === "Home") { setPlaying(false); goTo(0); }
+    else if (ev.key === "End") { setPlaying(false); goTo(DATA.frames.length - 1); }
+    else return;
+  });
+  goTo(0, true);
+}
+</script>
+</body>
+</html>
