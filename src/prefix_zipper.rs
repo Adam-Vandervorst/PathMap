@@ -1033,6 +1033,7 @@ mod tests {
     fn prefix_zipper_fork_at_focus() {
         use crate::zipper::ZipperForking;
         let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[], 0);
         map.set_val_at(&[5u8], 1);
         map.set_val_at(&[5u8, 6], 2);
         fn steps<Z: ZipperMoving + ZipperPath>(z: &mut Z) -> Vec<Vec<u8>> {
@@ -1040,30 +1041,76 @@ mod tests {
             while z.to_next_step() { v.push(z.path().to_vec()); assert!(v.len() < 16); }
             v
         }
-        let mut z = PrefixZipper::new(&[2u8, 3][..], map.read_zipper());
-        for (at, want) in [
-            (&[][..], vec![vec![2], vec![2, 3], vec![2, 3, 5], vec![2, 3, 5, 6]]),
-            (&[2u8][..], vec![vec![3], vec![3, 5], vec![3, 5, 6]]),
-            (&[2u8, 3, 5][..], vec![vec![6]]),
-            (&[9u8][..], vec![]),
-        ] {
-            z.reset();
-            z.descend_to(at);
-            let fork = z.fork_read_zipper();
-            assert_eq!(fork.is_some(), z.path_exists(), "{at:?}");
-            let Some(mut f) = fork else { continue };
-            assert!(f.at_root(), "{at:?}");
-            assert_eq!(f.path_exists(), z.path_exists(), "{at:?}");
-            assert_eq!(steps(&mut f), want, "{at:?}");
-            f.reset();
-            f.descend_to(&[1u8, 1]);
-            assert_eq!(f.ascend(5), 2, "{at:?}");
-            assert!(f.at_root(), "{at:?}");
+        for owned_prefix in [false, true] {
+            for origin in [&[][..], &[2u8][..], &[2u8, 3][..]] {
+                for (at, want) in [
+                    (&[][..], vec![vec![2], vec![2, 3], vec![2, 3, 5], vec![2, 3, 5, 6]]),
+                    (&[2u8][..], vec![vec![3], vec![3, 5], vec![3, 5, 6]]),
+                    (&[2u8, 3][..], vec![vec![5], vec![5, 6]]),
+                    (&[2u8, 3, 5][..], vec![vec![6]]),
+                    (&[2u8, 3, 5, 6][..], vec![]),
+                    (&[9u8][..], vec![]),
+                ] {
+                    if !at.starts_with(origin) { continue; }
+                    let prefix = if owned_prefix {
+                        std::borrow::Cow::Owned(vec![2u8, 3])
+                    } else {
+                        std::borrow::Cow::Borrowed(&[2u8, 3][..])
+                    };
+                    let mut z = PrefixZipper::new(prefix, map.read_zipper());
+                    z.set_root_prefix_path(origin).unwrap();
+                    z.descend_to(&at[origin.len()..]);
+                    let fork = z.fork_read_zipper();
+                    assert_eq!(fork.is_some(), z.path_exists(), "{at:?}");
+                    let Some(mut f) = fork else { continue };
+                    assert!(f.at_root(), "{at:?}");
+                    assert_eq!(f.path_exists(), z.path_exists(), "{at:?}");
+                    assert_eq!(f.path(), b"");
+                    assert_eq!(f.origin_path(), at);
+                    assert_eq!(f.root_prefix_path(), at);
+                    assert_eq!(f.get_val(), z.get_val());
+                    assert_eq!(f.prefix_path_below_focus(), z.prefix_path_below_focus());
+                    assert_eq!(steps(&mut f), want, "{at:?}");
+                    f.reset();
+                    f.descend_to(&[1u8, 1]);
+                    assert_eq!(f.ascend(5), 2, "{at:?}");
+                    assert!(f.at_root(), "{at:?}");
+                    f.descend_to(&[1u8, 1]);
+                    f.reset();
+                    assert_eq!(f.origin_path(), at);
+                    assert_eq!(f.get_val(), z.get_val());
+
+                    f.descend_to(&[2u8, 3, 5, 6][at.len()..]);
+                    let mut nested = f.fork_read_zipper().unwrap();
+                    assert!(nested.at_root());
+                    assert_eq!(nested.path(), b"");
+                    assert_eq!(nested.root_prefix_path(), &[2u8, 3, 5, 6]);
+                    assert_eq!(nested.get_val(), Some(&2));
+                    assert_eq!(nested.ascend(1), 0);
+                    nested.descend_to(&[9u8]);
+                    assert!(nested.fork_read_zipper().is_none());
+                    nested.reset();
+                    assert_eq!(nested.get_val(), Some(&2));
+                }
+            }
         }
-        //An empty prefix
+        //An empty prefix, including a fork after descending into the source
         let mut z = PrefixZipper::new(&[][..], map.read_zipper());
         z.set_root_prefix_path(&[]).unwrap();
         let mut f = z.fork_read_zipper().expect("focus path exists");
         assert_eq!(steps(&mut f), vec![vec![5], vec![5, 6]]);
+        f.reset();
+        f.descend_to(&[5u8]);
+        let mut nested = f.fork_read_zipper().unwrap();
+        assert!(nested.at_root());
+        assert_eq!(nested.path(), b"");
+        assert_eq!(nested.root_prefix_path(), &[5u8]);
+        assert!(nested.to_next_val());
+        assert_eq!(nested.path(), &[6u8]);
+        assert_eq!(nested.get_val(), Some(&2));
+        assert!(!nested.to_next_val());
+        nested.reset();
+        assert_eq!(nested.origin_path(), &[5u8]);
+        assert_eq!(nested.get_val(), Some(&1));
     }
 }

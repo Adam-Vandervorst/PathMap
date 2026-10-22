@@ -7831,4 +7831,14 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn write_zipper_forks_handle_missing_paths_and_empty_roots() {
+        let mut map = PathMap::<u64>::new();
+        assert!(map.write_zipper().fork_read_zipper().is_some());
+        assert!(map.clone().into_write_zipper(b"").fork_read_zipper().is_some());
+        map.insert(b"ab", 7);
+        assert!(map.write_zipper_at_path(b"missing").fork_read_zipper().is_none());
+        assert!(map.into_write_zipper(b"missing").fork_read_zipper().is_none());
+    }
 }

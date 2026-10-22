@@ -6899,4 +6899,22 @@ mod tests {
         let mut z = m.read_zipper(); z.descend_to(&[100]);
         assert_eq!(z.to_prev_sibling_byte(), Some(10));     // fad58f4 and master: None
     }
+
+    #[test]
+    fn read_zipper_forks_handle_missing_paths_and_empty_roots() {
+        let mut map = PathMap::<u64>::new();
+        assert!(map.read_zipper().fork_read_zipper().is_some());
+        assert!(map.clone().into_read_zipper(b"").fork_read_zipper().is_some());
+        map.insert(b"ab", 7);
+        assert!(map.read_zipper_at_path(b"missing").fork_read_zipper().is_none());
+        assert!(map.clone().into_read_zipper(b"missing").fork_read_zipper().is_none());
+
+        // The associated type must expose val_at through the trait bound alone.
+        fn check_val_at<Z: ZipperForking<u64>>(zipper: Z) {
+            let fork = zipper.fork_read_zipper().unwrap();
+            assert_eq!(fork.val_at(b"b"), Some(&7));
+        }
+        check_val_at(map.read_zipper_at_path(b"a"));
+        check_val_at(map.into_read_zipper(b"a"));
+    }
 }

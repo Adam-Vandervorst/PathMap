@@ -4264,11 +4264,14 @@ mod tests {
         m.insert(&[1u8, 1], 72);
         let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
 
+        assert!(t.read_zipper_at_path(&[1u8]).fork_read_zipper().is_some());
+
         for root in [&[1u8, 1, 3][..], &[9u8], &[1u8, 0, 2, 5, 5]] {
             let mut az = t.read_zipper_u64();
             az.descend_to(root);
             assert!(!az.path_exists(), "{root:?}");
             assert!(az.fork_read_zipper().is_none(), "{root:?}");
+            assert!(t.read_zipper_at_path(root).fork_read_zipper().is_none(), "{root:?}");
             let mut fork = t.read_zipper_at_path_u64(root);
             assert!(!fork.path_exists(), "{root:?}");
             assert_eq!(fork.val(), None, "{root:?}");
