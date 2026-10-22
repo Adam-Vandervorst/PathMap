@@ -142,6 +142,9 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
     fn to_next_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.zipper.to_next_step_observed(&mut (&mut self.path, &mut *obs))
     }
+    fn to_prev_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.to_prev_step_observed(&mut (&mut self.path, &mut *obs))
+    }
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let byte = self.zipper.to_next_sibling_byte()?;
         *self.path.last_mut().expect("path must not be empty") = byte;
@@ -160,6 +163,9 @@ impl<Z: ZipperIteration> ZipperIteration for PathTracker<Z> {
     //fans the reported movements out to this tracker's path buffer as well as the caller's observer
     fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.zipper.to_next_val_observed(&mut (&mut self.path, &mut *obs))
+    }
+    fn to_prev_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.to_prev_val_observed(&mut (&mut self.path, &mut *obs))
     }
     fn descend_last_path_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.zipper.descend_last_path_observed(&mut (&mut self.path, &mut *obs))

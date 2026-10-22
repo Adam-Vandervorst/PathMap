@@ -134,6 +134,8 @@
 [`to_next_step`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.to_next_step
 [`to_next_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.to_next_val
 [`to_prev_sibling_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.to_prev_sibling_byte
+[`to_prev_step`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#method.to_prev_step
+[`to_prev_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#method.to_prev_val
 [`trie_ref_at_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlySubtries.html#tymethod.trie_ref_at_path
 [`val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html#tymethod.val
 [`val_at`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValuesAt.html#tymethod.val_at
