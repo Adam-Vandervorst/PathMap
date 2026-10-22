@@ -102,7 +102,7 @@ impl<V> ZipperValuesAt<V> for EmptyZipper {
 
 impl<V> ZipperForking<V> for EmptyZipper {
     type ReadZipperT<'a> = EmptyZipper;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> { Self::new_at_path(self.origin_path()) }
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> { None }
 }
 
 impl<'a, V: Clone + Send + Sync> ZipperReadOnlyValues<'a, V> for EmptyZipper {

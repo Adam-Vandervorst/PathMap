@@ -2930,8 +2930,9 @@ impl<'tree, Storage> ZipperForking<()> for ACTZipper<'tree, Storage, ()>
 where Storage: AsRef<[u8]>
 {
     type ReadZipperT<'t> = ACTZipper<'t, Storage, ()> where Self: 't;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        self.clone().with_root_here()
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
+        Some(self.clone().with_root_here())
     }
 }
 
@@ -2939,8 +2940,9 @@ impl<'tree, Storage> ZipperForking<u64> for ACTZipper<'tree, Storage, u64>
 where Storage: AsRef<[u8]>
 {
     type ReadZipperT<'t> = ACTZipper<'t, Storage, u64> where Self: 't;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        self.clone().with_root_here()
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
+        Some(self.clone().with_root_here())
     }
 }
 
@@ -4249,8 +4251,8 @@ mod tests {
         }
     }
 
-    /// A zipper can be rooted at a path that does not exist -- `fork_read_zipper` at an
-    /// off-trie focus makes one.  `reset` put the path back but cleared `invalid`
+    /// A zipper can be constructed at a path that does not exist.
+    /// `reset` put the path back but cleared `invalid`
     /// unconditionally, so the zipper came back believing it was rooted at its deepest
     /// real ancestor and answered `val()` with that ancestor's value.
     #[test]
@@ -4266,7 +4268,8 @@ mod tests {
             let mut az = t.read_zipper_u64();
             az.descend_to(root);
             assert!(!az.path_exists(), "{root:?}");
-            let mut fork = az.fork_read_zipper();
+            assert!(az.fork_read_zipper().is_none(), "{root:?}");
+            let mut fork = t.read_zipper_at_path_u64(root);
             assert!(!fork.path_exists(), "{root:?}");
             assert_eq!(fork.val(), None, "{root:?}");
             fork.reset();

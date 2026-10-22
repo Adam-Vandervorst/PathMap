@@ -395,8 +395,9 @@ def toNextKPath (k : Nat) : Bool × Zip V :=
 /-! ## `trait ZipperForking` -/
 
 /-- `ZipperForking::fork_read_zipper`: a new zipper rooted at the current focus,
-over a snapshot of the same trie. -/
-def forkReadZipper : Zip V := { z with root := z.focus, path := [] }
+over a snapshot of the same trie, or `none` when the focus path does not exist. -/
+def forkReadZipper : Option (Zip V) :=
+  if z.pathExists then some { z with root := z.focus, path := [] } else none
 
 end Zip
 end PathMapModel

@@ -345,7 +345,10 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit s "make_map_val_count" (toString (z.makeMap.valCount [])), d)
   | 26 => do let (t, d) ← d.mod 2
              let z := getTarget s t
-             some (emit s "dump" (dumpAt z.trie z.focus), d)
+             let result := match z.forkReadZipper with
+               | some fork => dumpAt fork.trie fork.root
+               | none => "_:-"
+             some (emit s "dump" result, d)
   | 27 => do let (v, d) ← d.u8
              let (old, z) := s.wz.setVal (UInt64.ofNat v.toNat)
              some (emit { s with wz := z } "set_val" (showVal old), d)

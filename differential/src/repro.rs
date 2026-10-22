@@ -170,7 +170,7 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             25 => { let t = g!(d.modn(2));
                     if t == 0 { "wz.make_map().val_count();".to_string() }
                     else { "rz.make_map().val_count();".to_string() } }
-            26 => { let t = g!(d.modn(2)); format!("{}.fork_read_zipper();", z!(t)) }
+            26 => { let t = g!(d.modn(2)); format!("let _ = {}.fork_read_zipper();", z!(t)) }
             27 => { let v = g!(d.u8()) as u64; format!("wz.set_val({v});") }
             28 => { let pr = g!(d.boolean()); format!("wz.remove_val({pr});") }
             29 => "wz.create_path();".to_string(),

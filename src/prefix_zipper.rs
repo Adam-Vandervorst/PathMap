@@ -642,14 +642,22 @@ impl<'prefix, Z, V> ZipperForking<V> for PrefixZipper<'prefix, Z>
         Z: ZipperIteration + ZipperForking<V>
 {
     type ReadZipperT<'a> = PrefixZipper<'prefix, Z::ReadZipperT<'a>> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> <Self as ZipperForking<V>>::ReadZipperT<'a> {
-        PrefixZipper {
-            path: Vec::new(),
-            position: PrefixPos::Prefix { valid: 0 },
-            source: self.source.fork_read_zipper(),
-            prefix: self.prefix.clone(),
-            origin_depth: 0,
-        }
+    fn fork_read_zipper<'a>(&'a self) -> Option<<Self as ZipperForking<V>>::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
+        // Keep the path to the new root for absolute paths and reset. Only the
+        // prefix after that root remains part of the child's traversal space.
+        let (prefix, position) = match self.position {
+            PrefixPos::Prefix {..} => (self.prefix.clone(), PrefixPos::Prefix { valid: 0 }),
+            PrefixPos::Source => (Cow::Owned(self.path.clone()), PrefixPos::Source),
+            PrefixPos::PrefixOff {..} => return None,
+        };
+        Some(PrefixZipper {
+            path: self.path.clone(),
+            position,
+            source: self.source.fork_read_zipper()?,
+            prefix,
+            origin_depth: self.path.len(),
+        })
     }
 }
 
@@ -1021,8 +1029,6 @@ mod tests {
     }
 
     /// A fork is rooted at the focus, wherever the focus is
-    //GOAT,  re-enable this test when https://github.com/Adam-Vandervorst/PathMap/issues/96 is addressed
-    #[ignore]
     #[test]
     fn prefix_zipper_fork_at_focus() {
         use crate::zipper::ZipperForking;
@@ -1043,10 +1049,13 @@ mod tests {
         ] {
             z.reset();
             z.descend_to(at);
-            let mut f = z.fork_read_zipper();
+            let fork = z.fork_read_zipper();
+            assert_eq!(fork.is_some(), z.path_exists(), "{at:?}");
+            let Some(mut f) = fork else { continue };
             assert!(f.at_root(), "{at:?}");
             assert_eq!(f.path_exists(), z.path_exists(), "{at:?}");
             assert_eq!(steps(&mut f), want, "{at:?}");
+            f.reset();
             f.descend_to(&[1u8, 1]);
             assert_eq!(f.ascend(5), 2, "{at:?}");
             assert!(f.at_root(), "{at:?}");
@@ -1054,7 +1063,7 @@ mod tests {
         //An empty prefix
         let mut z = PrefixZipper::new(&[][..], map.read_zipper());
         z.set_root_prefix_path(&[]).unwrap();
-        let mut f = z.fork_read_zipper();
+        let mut f = z.fork_read_zipper().expect("focus path exists");
         assert_eq!(steps(&mut f), vec![vec![5], vec![5, 6]]);
     }
 }

@@ -217,6 +217,15 @@ pub fn dump<Z: ZipperMoving + ZipperPath + ZipperValues<u64>>(z: &mut Z) -> Stri
     lines.join(",")
 }
 
+/// Dump a fork at the current focus. A missing path retains the trace's empty
+/// root marker, matching `Fuzz.dumpAt` on an absent subtree.
+pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
+    match z.fork_read_zipper() {
+        Some(mut fork) => dump(&mut fork),
+        None => "_:-".to_string(),
+    }
+}
+
 /// The read side of the harness: whatever the write zipper is reading *from*.
 ///
 /// Two implementations exist.  A `PathMap` read zipper supports everything.  An
@@ -266,7 +275,7 @@ pub trait ReadSource:
 
 impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     fn dump_fork(&self) -> String {
-        dump(&mut self.fork_read_zipper())
+        dump_fork(self)
     }
     fn make_map_val_count(&self) -> Option<usize> {
         Some(self.make_map().val_count())
@@ -684,7 +693,7 @@ pub fn run_ops<R: ReadSource>(
                 26 => {
                     let t = get!(d.modn(2));
                     let s = if t == 0 {
-                        dump(&mut wz.fork_read_zipper())
+                        dump_fork(&wz)
                     } else {
                         (*rz).dump_fork()
                     };

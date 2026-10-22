@@ -456,9 +456,9 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValuesAt<V> fo
 
 impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<V> for WriteZipperTracked<'trie, '_, V, A>{
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let rz_core = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(rz_core)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let rz_core = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(rz_core))
     }
 }
 
@@ -626,9 +626,9 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValuesAt<V> fo
 
 impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<V> for WriteZipperUntracked<'trie, '_, V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let rz_core = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(rz_core)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let rz_core = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(rz_core))
     }
 }
 
@@ -805,9 +805,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for WriteZ
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for WriteZipperOwned<V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let rz_core = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(rz_core)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let rz_core = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(rz_core))
     }
 }
 
@@ -1050,11 +1050,12 @@ impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zipper for Wri
 
 impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<V> for WriteZipperCore<'trie, '_, V, A> {
     type ReadZipperT<'a> = crate::zipper::read_zipper_core::ReadZipperCore<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
         let new_root_val = self.val();
         let path = self.origin_path();
 
-        read_zipper_core::ReadZipperCore::new_with_node_and_path_in(self.focus_parent(), false, path, path.len(), self.key.node_key_start(), new_root_val, self.alloc.clone())
+        Some(read_zipper_core::ReadZipperCore::new_with_node_and_path_in(self.focus_parent(), false, path, path.len(), self.key.node_key_start(), new_root_val, self.alloc.clone()))
     }
 }
 
@@ -5469,7 +5470,7 @@ mod tests {
         // Test forking a zipper from a WriteZipper and make sure it inherits the origin_path
         wz.ascend(6);
         assert_eq!(wz.is_val(), false);
-        let mut rz = wz.fork_read_zipper();
+        let mut rz = wz.fork_read_zipper().expect("focus path exists");
         assert_eq!(rz.path(), b"");
         assert_eq!(rz.origin_path(), b"This path can take you anywhere.  Just close your eyes... and open your ");
         assert_eq!(rz.is_val(), false);
@@ -7583,7 +7584,7 @@ mod tests {
         let rb = srcs.read_zipper_at_path(&[1u8, 0]);
         assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None);
         wz.reset();
-        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[2u8]); probe.path_exists() }, true, "the meet should leave [2] dangling");
+        assert_eq!({ let mut probe = wz.fork_read_zipper().expect("focus path exists"); probe.descend_to(&[2u8]); probe.path_exists() }, true, "the meet should leave [2] dangling");
         assert_eq!(wz.subtract_into(&ra, false), AlgebraicStatus::Element);
         drop(wz);
         assert_eq!(all_locations(&dst), vec![

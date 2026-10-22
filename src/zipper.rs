@@ -107,15 +107,19 @@ pub trait ZipperValuesAt<V>: ZipperValues<V> {
 /// Method to fork a read zipper from the parent zipper
 pub trait ZipperForking<V> {
     /// The read-zipper type returned from [fork_read_zipper](ZipperForking::fork_read_zipper)
-    type ReadZipperT<'a>: ZipperAbsolutePath + ZipperIteration + ZipperValues<V> where Self: 'a;
+    type ReadZipperT<'a>: ZipperAbsolutePath + ZipperIteration + ZipperValues<V> + ZipperValuesAt<V> where Self: 'a;
 
     /// Returns a new read-only Zipper, with the new zipper's root being at the zipper's current focus
+    ///
+    /// Returns `None` if the focus path does not exist.
+    ///
+    /// The child zipper's [`root_prefix_path`] is based on the parent zipper's [`origin_path`].
     ///
     /// Discussion: The main uses of this method is to construct a child zipper with a different root
     /// from the parent, to construct a read zipper when you have another zipper type, or to cheaply
     /// create a zipper you can pass to a function that takes ownership.  Often however, you want to
     /// clone the parent zipper instead.
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a>;
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>>;
 }
 
 /// Methods for zippers that can access concrete subtries
@@ -1306,7 +1310,7 @@ macro_rules! zipper_impl_lens {
         fn val_at<K: AsRef<[u8]>>(&$s, path: K) -> Option<&V> { $e.val_at(path) }
     };
     (ZipperForking $s: ident => $e:expr) => {
-        fn fork_read_zipper<'a>(&'a $s) -> Self::ReadZipperT<'a> { $e.fork_read_zipper() }
+        fn fork_read_zipper<'a>(&'a $s) -> Option<Self::ReadZipperT<'a>> { $e.fork_read_zipper() }
     };
     (ZipperSubtries $s: ident => $e:expr) => {
         fn native_subtries(&$s) -> bool { $e.native_subtries() }
@@ -1472,9 +1476,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperTracked<'_, '_, V, A>{
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let forked_zipper = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let forked_zipper = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper))
     }
 }
 
@@ -1563,9 +1567,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ReadZipper
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperUntracked<'_, '_, V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let forked_zipper = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let forked_zipper = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper))
     }
 }
 
@@ -1618,7 +1622,7 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
         let core = ReadZipperCore::new_with_node_and_cloned_path_in(root_node, false, path, root_prefix_len, root_key_start, root_val, alloc);
         Self { z: core }
     }
-    /// Makes a new `ReadZipperUntracked` for use in the implementation of [Zipper::fork_read_zipper].
+    /// Makes a new `ReadZipperUntracked` for use in the implementation of [ZipperForking::fork_read_zipper].
     /// Forked zippers never need to be tracked because they are always fully covered by their parent's permissions
     pub(crate) fn new_forked_with_inner_zipper(core: ReadZipperCore<'a, 'path, V, A>) -> Self {
         ReadZipperUntracked{ z: core }
@@ -1735,9 +1739,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for ReadZip
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperOwned<V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let forked_zipper = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let forked_zipper = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper))
     }
 }
 
@@ -1950,12 +1954,13 @@ pub(crate) mod read_zipper_core {
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperCore<'_, '_, V, A> {
         type ReadZipperT<'a> = ReadZipperCore<'a, 'a, V, A> where Self: 'a;
-        fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+        fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
             timed_span!(ForkReadZipper, COUNTERS);
+            if !self.path_exists() { return None; }
             let new_root_val = self.val();
             let new_root_path = self.origin_path();
             let new_root_key_start = new_root_path.len() - self.node_key().len();
-            Self::ReadZipperT::new_with_node_and_path_internal_in(OwnedOrBorrowed::Borrowed(self.focus_parent()), new_root_path, new_root_key_start, new_root_val, self.alloc.clone())
+            Some(Self::ReadZipperT::new_with_node_and_path_internal_in(OwnedOrBorrowed::Borrowed(self.focus_parent()), new_root_path, new_root_key_start, new_root_val, self.alloc.clone()))
         }
     }
 
@@ -5657,7 +5662,7 @@ mod tests {
 
         //Fork a sub-zipper, and test iteration of that subtree
         zipper.descend_to(b"rub");
-        let mut sub_zipper = zipper.fork_read_zipper();
+        let mut sub_zipper = zipper.fork_read_zipper().expect("focus path exists");
         while let Some(&val) = sub_zipper.to_next_get_val() {
             // println!("{val}  {} = {}", std::str::from_utf8(sub_zipper.path()).unwrap(), std::str::from_utf8(&rs[val].as_bytes()[3..]).unwrap());
             assert_eq!(&rs[val].as_bytes()[3..], sub_zipper.path());
@@ -5743,7 +5748,7 @@ mod tests {
         // Test val_count & iteration on a ReadZipper forked off of a WriteZipper
         let wz = map.write_zipper_at_path(b"r");
         assert_eq!(wz.val_count(), R_KEY_CNT);
-        let rz = wz.fork_read_zipper();
+        let rz = wz.fork_read_zipper().expect("focus path exists");
         assert_eq!(rz.val_count(), R_KEY_CNT);
         let mut count = 0;
         for (_path, _) in rz {
@@ -5793,7 +5798,7 @@ mod tests {
         let mut r0 = map.read_zipper();
         r0.descend_to_byte(0);
         assert_eq!(r0.path_exists(), true);
-        let mut r1 = r0.fork_read_zipper();
+        let mut r1 = r0.fork_read_zipper().expect("focus path exists");
         assert_eq!(r1.to_next_sibling_byte(), None);
         assert_eq!(r1.child_mask().0[0], (1<<3) | (1<<4) | (1<<5));
         r1.descend_to_byte(3);
@@ -6813,9 +6818,9 @@ mod tests {
     fn read_zipper_fork_root_to_next_step_terminates() {
         let mut m = PathMap::<u64>::new(); m.set_val_at(&[0u8,0,2,3,0], 1); m.create_path(&[0u8,3]);
         let rz = m.read_zipper_at_path(&[0u8,3]);
-        let mut f = rz.fork_read_zipper();
+        let mut f = rz.fork_read_zipper().expect("focus path exists");
         assert!(!f.ascend_byte());        // fad58f4: true (release) / subtract-with-overflow (debug)
-        let mut f = rz.fork_read_zipper();
+        let mut f = rz.fork_read_zipper().expect("focus path exists");
         assert!(!f.to_next_step());       // fad58f4: never returns
     }
 
