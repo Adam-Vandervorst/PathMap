@@ -79,6 +79,9 @@
 [`descend_first_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_first_byte
 [`descend_first_k_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.descend_first_k_path
 [`descend_indexed_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_indexed_byte
+[`PathObserver`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.PathObserver.html
+[`descend_last_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#method.descend_last_byte
+[`descend_last_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#method.descend_last_path
 [`descend_to_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to_byte
 [`descend_to_existing`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to_existing
 [`descend_to_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to_val
@@ -133,6 +136,7 @@
 [`to_next_sibling_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.to_next_sibling_byte
 [`to_next_step`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.to_next_step
 [`to_next_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.to_next_val
+[`descend_last_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#method.descend_last_val
 [`to_prev_sibling_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.to_prev_sibling_byte
 [`trie_ref_at_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlySubtries.html#tymethod.trie_ref_at_path
 [`val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html#tymethod.val

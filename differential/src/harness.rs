@@ -26,7 +26,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 57;
+pub const NOPS: usize = 58;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -944,6 +944,10 @@ pub fn run_ops<R: ReadSource>(
                     let pr = get!(d.boolean());
                     ("remove_subtrie", show_bool(wz.remove_subtrie(pr)).to_string())
                 }
+                57 => {
+                    let _t = get!(d.modn(2));
+                    ("descend_last_val", show_bool(rz.descend_last_val()).to_string())
+                }
                 47 => {
                     let t = get!(d.modn(2));
                     // The blind-zipper addition: `descend_until` reporting the
@@ -1029,6 +1033,25 @@ mod input_format_tests {
             assert_eq!(run_act(&bytes, false), run_act(legacy, false));
             assert_eq!(emit_repro(&bytes, 256), emit_repro(legacy, 256));
         }
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_last_value_descent() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            0, // map0 empty.
+            3, 0, 9, 1, 0, 10, 2, 0, 1, 11, // map1: [], [0], [0,1].
+            0, 0, // Zipper roots.
+            57, 1, 57, 1, // Find the last value; succeed again without movement.
+            0, 1, 1, 3, // Descend to missing [0,1,3].
+            57, 1, // Fail without leaving that subtree.
+        ]);
+        let trace = run(&bytes, true);
+        assert!(trace.contains("0 descend_last_val ret=1"), "{trace}");
+        assert!(trace.contains("1 descend_last_val ret=1"), "{trace}");
+        assert!(trace.contains("3 descend_last_val ret=0"), "{trace}");
+        assert!(trace.contains("R=000103 o000103 e0"), "{trace}");
+        assert!(emit_repro(&bytes, 256).contains("rz.descend_last_val();"));
     }
 
     #[test]

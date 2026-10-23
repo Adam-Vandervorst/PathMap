@@ -299,6 +299,15 @@ def toNextValMonotone (z : Zip V) : Bool :=
   let (moved, z') := z.toNextVal
   if moved then Path.lt z.path z'.path && z'.isVal else z'.atRoot
 
+/-- Last-value descent stays within the starting subtree, includes the focus,
+and leaves it unchanged when no value is found. Repeating success is stable. -/
+def descendLastValLands (z : Zip V) : Bool :=
+  let (found, z') := z.descendLastVal
+  if found then
+    z'.isVal && z'.pathExists && (z.path ≼ z'.path) &&
+      z'.descendLastVal.1 && z'.descendLastVal.2.path == z'.path
+  else z'.path == z.path
+
 /-- `join` is commutative **on locations**, but not on values.
 
 `pathmap`'s `u64` (and `usize`, `u32`, `u16`, `u8`) `Lattice` instances define

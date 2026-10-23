@@ -219,6 +219,11 @@ software's operation table. Truncated headers and invalid counts are rejected.
 Readers auto-detect this format by the magic string; inputs without it use the
 legacy selector count of 56.
 Operation 56 is `remove_subtrie`, with one boolean prune operand.
+Operation 57 is `descend_last_val`. It consumes a target byte and always uses
+the read zipper, like `to_next_val`.
+The model selects the greatest valued path in the starting subtree, including
+the focus itself. Success means a value was found, even without movement;
+failure leaves the focus unchanged.
 
 Generators always write the current header, using `NOPS` in
 `lean/input_format.py`, which must match `differential/src/harness.rs`.

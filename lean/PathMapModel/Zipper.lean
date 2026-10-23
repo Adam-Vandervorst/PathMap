@@ -364,6 +364,15 @@ def descendLastPath : Bool × Zip V :=
   | some q => if q == z.path then (false, z) else (true, { z with path := q })
   | none => (false, z)
 
+/-- `ZipperIteration::descend_last_val`: the greatest valued path in the
+starting subtree, including the starting focus itself. Success reports that
+a value exists, even without movement. Failure leaves the focus unchanged. -/
+def descendLastVal : Bool × Zip V :=
+  match (z.subPaths.filter (fun q => z.path ≼ q &&
+      (z.trie.valAt (z.root ++ q)).isSome)).getLast? with
+  | some q => (true, { z with path := q })
+  | none => (false, z)
+
 /-- The shared core of `descend_first_k_path` and `to_next_k_path`
 (`k_path_internal`): the depth-first-least existing location that is exactly
 `k` bytes below the common ancestor at depth `base`, and that comes strictly
