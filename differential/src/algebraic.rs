@@ -568,6 +568,11 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "u64:shape:nary", cause: DANGLING },
     Known { signature: "u64:shape:nary_poly", cause: DANGLING },
     Known { signature: "u64:shape:dnf", cause: DANGLING },
+    // The subtract_zipper route's own subtraction agrees with PathMap::subtract
+    // on every path and value; it builds a different node layout, and the
+    // baseline join or meet that consumes it is what then goes wrong.
+    Known { signature: "u64:values:subtract_zipper", cause: BIAS_OR_LOSS },
+    Known { signature: "u64:shape:subtract_zipper", cause: DANGLING },
     Known { signature: "u64:law:join-associative", cause: BIAS_OR_LOSS },
     Known { signature: "u64:law:join-distributes-over-meet", cause: BIAS_OR_LOSS },
     Known { signature: "u64:law:majority-is-pairwise-meets", cause: BIAS_OR_LOSS },
@@ -579,9 +584,9 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "u64:law:absorb-join-meet", cause: BIAS },
     Known { signature: "u64:law:sym-diff-is-join-minus-meet", cause: BIAS },
     Known { signature: "u64:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
-    Known { signature: "u64:panic:eval:line_list_node.rs:2669", cause: LOSS },
-    Known { signature: "u64:panic:eval:line_list_node.rs:2720", cause: LOSS },
-    Known { signature: "u64:panic:eval:dense_byte_node.rs:2080", cause: LOSS },
+    Known { signature: "u64:panic:eval:line_list_node.rs:2732", cause: LOSS },
+    Known { signature: "u64:panic:eval:line_list_node.rs:2783", cause: LOSS },
+    Known { signature: "u64:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
 
     // ---------------------------------------------------------------- bits
     // The lawful type.  Everything here is a real defect: there is no value
@@ -610,15 +615,20 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "bits:shape:nary", cause: DANGLING },
     Known { signature: "bits:shape:nary_poly", cause: DANGLING },
     Known { signature: "bits:shape:dnf", cause: DANGLING },
+    // About once per million: SubtractZipper's result is dangling-only and
+    // equal in shape to the baseline's, and the join after it loses the other
+    // operand's value (the debug assert behind cause 2 fires).
+    Known { signature: "bits:values:subtract_zipper", cause: LOSS },
+    Known { signature: "bits:shape:subtract_zipper", cause: DANGLING },
     Known { signature: "bits:law:join-associative", cause: LOSS },
     Known { signature: "bits:law:join-commutative", cause: LOSS },
     Known { signature: "bits:law:join-distributes-over-meet", cause: LOSS },
     Known { signature: "bits:law:sym-diff-is-join-minus-meet", cause: LOSS },
     Known { signature: "bits:law:majority-is-pairwise-meets", cause: LOSS },
     Known { signature: "bits:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
-    Known { signature: "bits:panic:eval:line_list_node.rs:2669", cause: LOSS },
-    Known { signature: "bits:panic:eval:line_list_node.rs:2720", cause: LOSS },
-    Known { signature: "bits:panic:eval:dense_byte_node.rs:2080", cause: LOSS },
+    Known { signature: "bits:panic:eval:line_list_node.rs:2732", cause: LOSS },
+    Known { signature: "bits:panic:eval:line_list_node.rs:2783", cause: LOSS },
+    Known { signature: "bits:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
     // ---------------------------------------------------------------- unit
     // `PathMap<()>`: the set case, and lawful.  Nothing here can be a value
     // bias, because there is no value to misplace -- so every entry is either a
@@ -642,17 +652,19 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "unit:shape:nary", cause: DANGLING },
     Known { signature: "unit:shape:nary_poly", cause: DANGLING },
     Known { signature: "unit:shape:dnf", cause: DANGLING },
+    Known { signature: "unit:values:subtract_zipper", cause: LOSS },
+    Known { signature: "unit:shape:subtract_zipper", cause: DANGLING },
     Known { signature: "unit:law:join-associative", cause: LOSS },
     Known { signature: "unit:law:join-commutative", cause: LOSS },
     Known { signature: "unit:law:join-distributes-over-meet", cause: LOSS },
     Known { signature: "unit:law:sym-diff-is-join-minus-meet", cause: LOSS },
     Known { signature: "unit:law:majority-is-pairwise-meets", cause: LOSS },
     Known { signature: "unit:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
-    Known { signature: "unit:panic:eval:line_list_node.rs:2669", cause: LOSS },
-    Known { signature: "unit:panic:eval:dense_byte_node.rs:2080", cause: LOSS },
+    Known { signature: "unit:panic:eval:line_list_node.rs:2732", cause: LOSS },
+    Known { signature: "unit:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
     // Fires roughly once per million random cases, and the corpus reproduces it
     // for all three types.
-    Known { signature: "unit:panic:eval:line_list_node.rs:2720", cause: LOSS },
+    Known { signature: "unit:panic:eval:line_list_node.rs:2783", cause: LOSS },
     // Two laws that fire only under `unit`, both once per couple of million
     // cases, and both cause 2.  `unit` reaches it where the other types do not
     // because every value is identical, so `merkleize` and `clone` share far

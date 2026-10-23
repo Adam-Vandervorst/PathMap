@@ -31,7 +31,8 @@ use pathmap::experimental::zipper_algebra::{
     zipper_subtract3, zipper_sym_diff, zipper_sym_diff3, ZipperMergeF,
 };
 use pathmap::zipper::{
-    OverlayZipper, ReadZipperUntracked, ZipperMoving, ZipperPath, ZipperValues, ZipperWriting,
+    OverlayZipper, ReadZipperUntracked, SubtractZipper, ZipperMoving, ZipperPath, ZipperValues,
+    ZipperWriting,
 };
 
 use super::expr::{Expr, Op};
@@ -87,6 +88,20 @@ pub enum Route {
     NaryPoly,
     /// `zipper_merge_dnf` on a join of meets.
     Dnf,
+    /// Every subtraction through the lazy `SubtractZipper`, materialised, and
+    /// every other operator through the baseline's whole-map call.
+    ///
+    /// A route of its own rather than a fourth subtract strategy: adding a
+    /// strategy would renumber which mix each `pw#k` route uses, and a new
+    /// finding would land under a `pw` signature `KNOWN` already attributes to
+    /// another cause.  Holding the other operators at the baseline also means a
+    /// divergence here can only come from `SubtractZipper`.
+    SubtractZipper,
+    /// Nested `SubtractZipper`s, materialised once at the end: a left spine of
+    /// subtractions `x - y - z ...` with each zipper the left input of the
+    /// next, or `x - (y - z)` with one as the right input.  This is the route
+    /// that tests a `SubtractZipper` reading from another one.
+    SubtractZipperNested,
     /// Flat `BTreeMap` semantics, no trie.  Values only; abstains on structure.
     Model,
 }
@@ -100,6 +115,8 @@ impl Route {
             Route::NaryPoly,
             Route::Dnf,
             Route::Model,
+            Route::SubtractZipper,
+            Route::SubtractZipperNested,
         ]);
         v
     }
@@ -127,6 +144,8 @@ impl Route {
             Route::NaryPoly => "nary_poly".into(),
             Route::Dnf => "dnf".into(),
             Route::Model => "model".into(),
+            Route::SubtractZipper => "subtract_zipper".into(),
+            Route::SubtractZipperNested => "subtract_zipper_nested".into(),
         }
     }
 }
@@ -169,6 +188,8 @@ pub fn eval<V: FuzzValue>(route: Route, e: &Expr, operands: &[PathMap<V>]) -> Op
                 operands.iter().map(|m| values_of_shape(&shape_of_map(m))).collect();
             Some(Outcome { values: model::eval(e, &vals), shape: None })
         }
+        Route::SubtractZipper => subtract_zipper(e, operands).map(|m| Outcome::from_map(&m)),
+        Route::SubtractZipperNested => subtract_zipper_nested(e, operands).map(|m| Outcome::from_map(&m)),
     }
 }
 
@@ -368,7 +389,72 @@ where
     out
 }
 
+/// [`Route::SubtractZipper`].  `None` when `e` has no subtraction, because the
+/// route would then be the baseline over again.
+fn subtract_zipper<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>> {
+    fn go<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> PathMap<V> {
+        match e {
+            Expr::Var(i) => operands[*i].clone(),
+            Expr::Bin(op, l, r) => {
+                let a = go(l, operands);
+                let b = go(r, operands);
+                if *op == Op::Subtract {
+                    materialize(SubtractZipper::new(a.read_zipper(), b.read_zipper()))
+                } else {
+                    apply(*op, 0, &a, &b).expect("strategy 0 applies to every value type")
+                }
+            }
+        }
+    }
+    let mut ops = Vec::new();
+    collect_ops(e, &mut ops);
+    ops.contains(&Op::Subtract).then(|| go(e, operands))
+}
+
 // -------------------------------------------------------- whole-expression
+
+/// [`Route::SubtractZipperNested`].
+///
+/// The expression's left spine of subtractions, `x0 - x1 - ... - xk`, becomes
+/// `k` nested zippers when `k >= 2`.  With a single subtraction whose right
+/// operand is itself one, `x - (y - z)`, the inner zipper is the right input
+/// instead.  The `x`s may be any subexpression; they go through the baseline.
+fn subtract_zipper_nested<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>> {
+    let mut spine: Vec<&Expr> = Vec::new();
+    let mut cur = e;
+    while let Expr::Bin(Op::Subtract, l, r) = cur {
+        spine.push(r);
+        cur = l;
+    }
+    spine.push(cur);
+    spine.reverse();
+    let base = |x: &Expr| pointwise(0, x, operands).expect("strategy 0 applies to every value type");
+
+    if spine.len() == 2 {
+        let Expr::Bin(Op::Subtract, y, z) = spine[1] else { return None };
+        let (x, y, z) = (base(spine[0]), base(y), base(z));
+        let rhs = SubtractZipper::new(y.read_zipper(), z.read_zipper());
+        return Some(materialize(SubtractZipper::new(x.read_zipper(), rhs)));
+    }
+
+    let maps: Vec<PathMap<V>> = spine.iter().map(|x| base(x)).collect();
+    let rz = |i: usize| maps[i].read_zipper();
+    // Each level of nesting is a different type, so the chain is spelled out
+    // per length.
+    macro_rules! nest {
+        ($z:expr) => { $z };
+        ($z:expr, $next:expr $(, $rest:expr)*) => {
+            nest!(SubtractZipper::new($z, $next) $(, $rest)*)
+        };
+    }
+    Some(match maps.len() {
+        3 => materialize(nest!(rz(0), rz(1), rz(2))),
+        4 => materialize(nest!(rz(0), rz(1), rz(2), rz(3))),
+        5 => materialize(nest!(rz(0), rz(1), rz(2), rz(3), rz(4))),
+        6 => materialize(nest!(rz(0), rz(1), rz(2), rz(3), rz(4), rz(5))),
+        _ => return None,
+    })
+}
 
 /// Chain of exactly three operands through the `*3` entry points.
 fn ternary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>> {

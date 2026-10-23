@@ -422,3 +422,38 @@ fn every_strategy_index_is_reachable_from_some_pointwise_route() {
         }
     }
 }
+
+#[test]
+fn every_whole_expression_route_applies_to_some_random_case() {
+    // A route whose shape the generator never produces would pass every sweep
+    // without testing anything, so check that each one actually runs.
+    use algebraic::routes::{eval, Route};
+    const CASES: usize = 2_000;
+    let mut rng = algebraic::Rng::for_job(20261023, 0);
+    let routes: Vec<Route> =
+        Route::all().into_iter().filter(|r| !matches!(r, Route::Pointwise(_))).collect();
+    let mut applied = vec![0usize; routes.len()];
+    let _ = with_quiet_panics(|| {
+        for _ in 0..CASES {
+            let bytes = rng.input();
+            // Building the operands can panic (the known merkleize defect).
+            let Ok(case) = std::panic::catch_unwind(|| algebraic::decode::<u64>(&bytes)) else {
+                continue;
+            };
+            for (n, r) in applied.iter_mut().zip(&routes) {
+                let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    eval(*r, &case.expr, &case.operands).is_some()
+                }));
+                if got.unwrap_or(true) {
+                    *n += 1;
+                }
+            }
+        }
+    });
+    for (r, n) in routes.iter().zip(&applied) {
+        eprintln!("{:>24}: applies to {n} of {CASES}", r.name(&Expr::Var(0)));
+    }
+    for (r, n) in routes.iter().zip(&applied) {
+        assert!(*n > 0, "route {} never applies in {CASES} random cases", r.name(&Expr::Var(0)));
+    }
+}

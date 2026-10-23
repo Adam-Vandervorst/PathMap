@@ -87,6 +87,16 @@ is ever built:
 | `nary_poly` | the same chain | `ZipperMergeF::join_n` and friends, via the `PolyZipper` enum |
 | `dnf` | a join of meets | `zipper_merge_dnf` |
 | `model` | anything | a flat `BTreeMap`, no trie at all |
+| `subtract_zipper` | anything with a subtraction | every `-` through the lazy `SubtractZipper`, other operators through the baseline |
+| `subtract_zipper_nested` | a left spine `x - y - z ...` of two or more subtractions, or `x - (y - z)` | nested `SubtractZipper`s, one reading from another; the `x`s go through the baseline |
+
+The two `SubtractZipper` routes are routes of their own, not a fourth subtract
+strategy for the pointwise routes: a new strategy would renumber which mix each
+`pw#k` uses, and a new finding would land under a `pw` signature `KNOWN` already
+attributes to something else. Holding the other operators at the baseline means a
+divergence on them points at `SubtractZipper` or at what consumes its output.
+Both walk the zipper with `to_next_step` and materialise the result; the walk
+records dangling paths, so nothing is lost in the comparison.
 
 The `model` route is the fourth opinion. Every other route goes through
 `pathmap`, so a defect common to the whole algebra layer would make them agree
