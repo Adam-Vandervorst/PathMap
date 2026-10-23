@@ -161,6 +161,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        if self.depth() == 0 { return None }
         let byte = self.focus_byte()?;
         let ascended = self.ascend(1);
         debug_assert_eq!(ascended, 1, "must ascend");

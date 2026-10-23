@@ -1032,8 +1032,12 @@ mod test {
 
   #[test]
   fn serialization_trivial_test() {
+    #[cfg(miri)]
+    const LEN : usize = 0x_02;
+    #[cfg(not(miri))]
     const LEN : usize = 0x_80;
-    // const LEN : usize = 0x_02;
+    const SHORT_VALUE_LEN: usize = if LEN < 15 { LEN } else { 15 };
+    const LONG_VALUE_LEN: usize = if LEN < 25 { LEN } else { 25 };
     #[allow(long_running_const_eval)]
     const ARR : [u8; LEN]= {
       let mut arr = [0_u8 ; LEN];
@@ -1094,6 +1098,8 @@ mod test {
     trie.set_val_at(b"b", as_arc(b""));
 
 
+    #[cfg(not(miri))]
+    {
     trie.set_val_at(b"desf", as_arc(b"lmnopqrstuv"));
     trie.set_val_at(b"desF", as_arc(b"lmnopqrstuv"));
     trie.set_val_at(b"desG", as_arc(b"lmnopqrstuv"));
@@ -1504,15 +1510,16 @@ mod test {
     trie.set_val_at(b"fgsfdfdsafssfdsfsdgsfdgfds57123azxgbce", as_arc(b"xyz"));
     trie.set_val_at(b"fgsfdfdsafssfdsfsdgsfdgfds57123azxgbcf", as_arc(b"xyz"));
     trie.set_val_at(b"fgsfdfdsafssfdsfsdgsfdgfds57123azxgbcg", as_arc(b"xyz"));
+    }
 
 
     for l in 0..LEN {
       trie.set_val_at(&ARR[..l], as_arc(&ARR[..l]));
-      if l >= 1 {trie.set_val_at(&ARR[1..l], as_arc(&ARR[..15]));};
+      if l >= 1 {trie.set_val_at(&ARR[1..l], as_arc(&ARR[..SHORT_VALUE_LEN]));};
     }
     for l in 0..LEN {
       trie.set_val_at(&ARR[l..], as_arc(&ARR[..l]));
-      if l <= LEN {trie.set_val_at(&ARR[l..LEN], as_arc(&ARR[..25]));};
+      if l <= LEN {trie.set_val_at(&ARR[l..LEN], as_arc(&ARR[..LONG_VALUE_LEN]));};
     }
     for l in 0..LEN {
       trie.set_val_at(&ARR[l..], as_arc(&ARR[..LEN]));

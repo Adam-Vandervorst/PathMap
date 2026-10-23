@@ -416,7 +416,7 @@ impl<V: Clone + Send + Sync> TrieNode<V> for BridgeNode<V> {
         (NODE_ITER_FINISHED, &[])
     }
     #[inline(always)]
-    fn next_items(&self, token: IterToken) -> (IterToken, &[u8], Option<&TrieNodeODRc<V>>, Option<&V>) {
+    fn next_items(&self, token: IterToken, _after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V>>, Option<&V>) {
         if token == 0 {
             let node_key = self.key();
             if self.is_used_child() {

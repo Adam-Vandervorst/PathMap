@@ -515,11 +515,11 @@ where
         Out: ZipperWriting<V, A>,
     {
         if *lhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(lhs, std::mem::take(lhs_grafts), false);
+            out.graft_masked_branches(lhs, std::mem::take(lhs_grafts) & lhs.child_mask(), false);
         }
 
         if *rhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(rhs, std::mem::take(rhs_grafts), false);
+            out.graft_masked_branches(rhs, std::mem::take(rhs_grafts) & rhs.child_mask(), false);
         }
     }
 
@@ -729,15 +729,15 @@ where
         Out: ZipperWriting<V, A>,
     {
         if *lhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(lhs, std::mem::take(lhs_grafts), false);
+            out.graft_masked_branches(lhs, std::mem::take(lhs_grafts) & lhs.child_mask(), false);
         }
 
         if *mid_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(mid, std::mem::take(mid_grafts), false);
+            out.graft_masked_branches(mid, std::mem::take(mid_grafts) & mid.child_mask(), false);
         }
 
         if *rhs_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(rhs, std::mem::take(rhs_grafts), false);
+            out.graft_masked_branches(rhs, std::mem::take(rhs_grafts) & rhs.child_mask(), false);
         }
     }
 
@@ -1011,19 +1011,19 @@ fn zipper_merge4<P, V, Z0, Z1, Z2, Z3, Out, A>(
         Out: ZipperWriting<V, A>,
     {
         if *z0_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z0, std::mem::take(z0_grafts), false);
+            out.graft_masked_branches(z0, std::mem::take(z0_grafts) & z0.child_mask(), false);
         }
 
         if *z1_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z1, std::mem::take(z1_grafts), false);
+            out.graft_masked_branches(z1, std::mem::take(z1_grafts) & z1.child_mask(), false);
         }
 
         if *z2_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z2, std::mem::take(z2_grafts), false);
+            out.graft_masked_branches(z2, std::mem::take(z2_grafts) & z2.child_mask(), false);
         }
 
         if *z3_grafts != ByteMask::EMPTY {
-            out.graft_masked_branches(z3, std::mem::take(z3_grafts), false);
+            out.graft_masked_branches(z3, std::mem::take(z3_grafts) & z3.child_mask(), false);
         }
     }
 
@@ -1665,7 +1665,12 @@ where
     {
         for_each_bit(active, |i| {
             if grafts[i] != ByteMask::EMPTY {
-                out.graft_masked_branches(&zs[i], std::mem::take(&mut grafts[i]), false);
+                let z = &zs[i];
+                out.graft_masked_branches(
+                    z,
+                    std::mem::take(&mut grafts[i]) & z.child_mask(),
+                    false,
+                );
             }
         });
     }

@@ -164,6 +164,9 @@ impl<Z: ZipperIteration> ZipperIteration for PathTracker<Z> {
     fn descend_last_path_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.zipper.descend_last_path_observed(&mut (&mut self.path, &mut *obs))
     }
+    fn descend_last_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.descend_last_val_observed(&mut (&mut self.path, &mut *obs))
+    }
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         self.zipper.descend_first_k_path_observed(k, &mut (&mut self.path, &mut *obs))
     }

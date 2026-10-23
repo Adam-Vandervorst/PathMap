@@ -11,8 +11,6 @@ use crate::write_zipper::write_zipper_priv::WriteZipperPriv;
 
 #[cfg(feature = "serialization")]
 pub mod serialization;
-#[cfg(feature = "serialization")]
-pub mod tree_serialization;
 
 #[cfg(feature = "zipper_alg")]
 pub mod zipper_algebra;
@@ -159,6 +157,7 @@ impl <V: TrieValue + 'static, A: Allocator> ZipperWriting<V, A> for NullZipper {
     fn get_val_or_set_mut(&mut self, default: V) -> &mut V { Box::leak(Box::new(default)) }
     fn get_val_or_set_mut_with<F>(&mut self, func: F) -> &mut V where F: FnOnce() -> V { Box::leak(Box::new(func())) }
     fn set_val(&mut self, _val: V) -> Option<V> { None }
+    fn set_val_at<K: AsRef<[u8]>>(&mut self, path: K, val: V) -> Option<V> { None }
     fn remove_val(&mut self, _prune: bool) -> Option<V> { None }
     fn zipper_head<'z>(&'z mut self) -> Self::ZipperHead<'z> { todo!() }
     fn graft<Z: ZipperInfallibleSubtries<V, A>>(&mut self, _read_zipper: &Z) {}

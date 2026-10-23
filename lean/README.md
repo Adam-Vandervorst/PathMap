@@ -168,15 +168,30 @@ Honest accounting, because it matters for how much the model is worth:
   separate the focus from its stop depth.
 * **Machine-checked on fixtures** (`Check.lean`): the metamorphic laws in
   `Spec.lean` §2, evaluated at build time over six trie shapes crossed with
-  eight focus positions — plus regression fixtures whose expected values are
+  eight focus positions — plus pruning contract checks, regression fixtures
   transcribed from `pathmap`'s own unit tests (`write_zipper_prune_path_test2`,
-  `write_zipper_drop_head_test1/3/6`) and the `restrict` oracle from
+  `write_zipper_drop_head_test1/3/6`), and the `restrict` oracle from
   `tests/pathmap_algebra_differential.rs`.
 * **Checked against the crate** (`differential.py`): everything else, on every
   generated program.
 
 The definitions themselves are the specification.  They are total and executable,
 so "the spec" and "the oracle" cannot drift apart.
+
+### Pruning contract
+
+`Zip.prunePath` removes a dangling suffix only when the focus exists and has
+neither a value nor children.  It stops at the closest valued or branching
+ancestor, or at the write zipper's root, whichever comes first.  It leaves the
+cursor at the focus and returns the number of removed path bytes;
+`Zip.pruneAscend` then ascends by that count.  The root itself survives.
+
+A `prune` flag means running the operation with `false`, then calling
+`prune_path` at the resulting focus.  This applies even when the operation
+returns `None` or otherwise changes nothing.  These rules are encoded in
+`PathMap.lean` and `Write.lean` and checked with fixtures in `Check.lean`.
+The harness runs pruning at every zipper root and reports disagreements with
+the Rust implementation.
 
 ## The differential harness
 
@@ -196,6 +211,28 @@ body:
   repeated: op := u8 % 56 ; operands per op
 ```
 
+This is the headerless format, whose selector count is permanently 56. New
+inputs start with the eight bytes `PMFUZZ\x01\x00`, then a little-endian u16
+selector count (1 through 256), followed by the same map/zipper header. Operation
+bytes are reduced modulo the recorded count, independently of the running
+software's operation table. Truncated headers and invalid counts are rejected.
+Readers auto-detect this format by the magic string; inputs without it use the
+legacy selector count of 56.
+Operation 56 is `remove_subtrie`, with one boolean prune operand.
+Operation 57 is `descend_last_val`. It consumes a target byte and always uses
+the read zipper, like `to_next_val`.
+The model selects the greatest valued path in the starting subtree, including
+the focus itself. Success means a value was found, even without movement;
+failure leaves the focus unchanged.
+
+Generators always write the current header, using `NOPS` in
+`lean/input_format.py`, which must match `differential/src/harness.rs`.
+Saved failures and shrunken inputs also carry a header, preserving the original
+selector count (56 for legacy inputs). The shrinker keeps this header intact.
+Keep existing operation IDs and argument-decoding rules stable.
+Adding an operation requires its Lean/Rust handlers and reproducer entry, plus
+updating both `NOPS` constants; the input format and old repros need no changes.
+
 Every path byte is masked to `b % 4`, so generated tries share prefixes heavily
 and actually branch — that is where the interesting shapes are (branch points,
 single-child runs, dangling chains).  Decoding stops when the input runs out.
@@ -207,6 +244,12 @@ is a textual diff.
 
 The op table lives in `Fuzz.lean` (`PathMapModel.Fuzz.step`) and
 `differential/src/harness.rs`; **the two must be changed together.**
+
+`Zip.removeSubtrie` clears the focus value and all descendants, then optionally
+prunes. Its boolean result counts removal of a value or branch, including a
+dangling descendant, but not pruning an already dangling focus. Build-time
+checks cover removal, unrelated content, cursor stability, and the zipper-root
+bound; differential operation 56 exercises the optimized Rust implementation.
 
 ### Front ends
 
@@ -319,19 +362,28 @@ not, the maps it ends with match the trace's `MAP0`/`MAP1`.
 A handful of argument combinations are skipped by both sides, each because the
 crate's behaviour there is a confirmed bug that would otherwise mask everything
 downstream.  Each is recorded in [FINDINGS.md](FINDINGS.md) and each skip is
-commented at its site:
+commented at its site.
 
-* `meet_k_path_into` when the focus has no children, or `k = 0` — it does not
-  terminate.
-* `insert_prefix("")` and `join_k_path_into(0)` — both should be the identity and
-  both destroy the subtrie.
-* `descend_first_k_path(0)` / `to_next_k_path(0)` — degenerate; report success
-  without moving, forever.
-* `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native
-  read zipper leaves its own root there.
-* `prune_path` / `prune_ascend`, and the `prune` flag on every other operation,
-  for a write zipper not rooted at the map root — the depth pruned is a function
-  of internal node layout, so there is nothing to specify.
+A skip is named in the trace — `ret=skip:<reason>`, never a bare `skip` — so a
+skipped op says which rule declined it.  The vocabulary is defined once on each
+side (`SKIP_*` in `differential/src/harness.rs`, `skip*` in
+`PathMapModel/Fuzz.lean`) and the two must agree exactly, or every input that
+skips diverges:
+
+| token | what it means |
+|---|---|
+| `skip:k0` | `meet_k_path_into(0)`, `join_k_path_into(0)` — degenerate; they should be the identity and destroy the subtrie. (`descend_first_k_path(0)` is specified as `false` without moving and is no longer skipped.) |
+| `skip:empty-focus` | `meet_k_path_into` with no children (it does not terminate), and `restricting` when either side has nothing below its focus (the two branches differ in *effect*, not just in the reported bool). |
+| `skip:empty-path` | `insert_prefix("")` — should be the identity, destroys the subtrie. |
+| `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native read zipper leaves its own root there. |
+| `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
+| `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
+
+Naming these turned up an ordering bug the bare token had hidden: for
+`restricting` the model tested ACT mode first and the harness tested the empty
+focus first, so in ACT mode with an empty focus the two took different branches
+and agreed only because both printed `skip`.  The model now checks the guards in
+the harness's order.
 
 `to_next_k_path` is also only exercised as the continuation of a
 `descend_first_k_path` iteration (the `k_path_walk` op), because
@@ -390,7 +442,7 @@ observed behaviour rather than intent, and are the places to distrust:
 | --- | --- |
 | `AlgStatus.merge` | transcribed line-for-line from `src/ring.rs` |
 | `joinVal` / `meetVal` / `subVal` | follow `Option<V>`'s impls in `src/ring.rs` |
-| `Zip.prunePath` | stop depth determined empirically; the doc comment is wrong |
+| `Zip.prunePath` | specifies the documented zipper-root bound and the count of removed bytes |
 | `Zip.toNextKPath` | deliberately follows the native `ReadZipper` over the trait default |
 | `PathMap.dropHead` | "values at depth exactly `k` are lost" is observed, not documented |
 | `Zip.joinMapInto` | the short-circuit asymmetry with `join_into` is observed |
@@ -481,25 +533,32 @@ documentation rather than from the code.
 
 ## Current agreement
 
-500 random programs (`./lean/differential.py --random 500 --seed 99 --max-fails 0`),
-model versus crate, comparing every return value plus both maps in full:
+20000 random programs (`./lean/differential.py --random 20000 --seed 7
+--max-fails 0`), model versus crate, comparing every return value plus both maps
+in full:
 
 ```
-404/500 inputs agree exactly
- 87/500 hit one of the classified defects in FINDINGS.md
-  9/500 diverge for reasons not yet classified
+19735/20000 inputs agree exactly
+  265/20000 hit one of the classified defects
+    0/20000 diverge for reasons not yet classified
 ```
 
-The 87 break down as: `to_next_val` after `to_next_step` (19), `ascend_until`
-corrupting a write zipper (17), zippers escaping their root (16), a `set_val`
-unwrap on `None` (14), the `TrieRef` slice underflow (12), `make_unique` on an
-empty sentinel (7), `join_into` dropping the source (2).
+The 265 break down as `graft_masked_branches` creating the focus (177),
+`join_into` dropping the source (24), `AlgebraicStatus` imprecision (20 + 18),
+value bias by node layout (11), a dangling child kept by an algebraic op (11),
+`val_at` at a dangling path (3), `subtract_into` dropping a value (1).
 
-Every defect listed in FINDINGS.md reproduces here exactly as it does on
-`master`; the blind-zipper migration neither fixed nor introduced any of them.
+Five of those classes are keyed on the *shape* of the divergence rather than on
+an operation name, because the same defect surfaces under whichever operation
+happens to read the damaged location -- value bias, for instance, is reported by
+`meet_into` where it is introduced but by `dump`, `val_at` or the final map dump
+wherever it is later observed.  `divergence_shape` in `differential.py` decides
+those, and returning "no familiar shape" is its important case: it is what keeps
+a genuinely new defect out of the known buckets.  The remaining corpus inputs
+can be replayed with `./lean/differential.py lean/corpus/*.bin`.
 
-`differential.py` prints that breakdown itself, so new divergences stay visible
-as the known ones are fixed.
+`differential.py` prints the breakdown itself, so new divergences stay visible as
+the known ones are fixed.
 
 ## ArenaCompactTree as the read source
 

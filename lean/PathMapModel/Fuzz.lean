@@ -23,8 +23,13 @@ header:
   r0        := u8 % 4 ; r0 × pathbyte    -- write zipper root
   r1        := u8 % 4 ; r1 × pathbyte    -- read  zipper root
 body:
-  repeated: op := u8 % 56 ; operands per op (see `Op.decode`)
+  repeated: op := u8 % 56 ; operands per op (see `step`)
 ```
+
+Inputs prefixed with `PMFUZZ\x01\x00` followed by a little-endian u16 selector
+count (1..=256) use the same map/zipper header but decode operations modulo that
+recorded count. Headerless inputs use 56. Operation 56 is `remove_subtrie`,
+followed by a prune byte.
 
 Every **path byte** is masked to `b % 4`, so the generated tries share prefixes
 heavily — that is where the interesting trie shapes (branch points, dangling
@@ -49,6 +54,33 @@ namespace Fuzz
 abbrev V := UInt64
 /-- The `Lattice`/`DistributiveLattice` instance `pathmap` provides for `u64`. -/
 def ops : ValOps V := u64Ops
+
+/-! ## Skip reasons
+
+Why an operation was skipped.  Every `skip` in the trace carries one of these,
+so a skipped op says which rule declined it rather than just that something
+declined it.  `differential/src/harness.rs` emits the same tokens; the two must
+agree exactly or every input with a skip diverges.
+
+* `skip:act` — the ACT read source cannot be a merge source
+  (`ZipperInfallibleSubtries` is not implemented for it) or does not implement
+  the trait the op needs.
+* `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root, where
+  the native read zipper escapes its own root.
+* `skip:k0` — a degenerate `k = 0` on `join`/`meet_k_path_into`.
+* `skip:empty-focus` — the focus has nothing below it, where the op's behaviour
+  is a function of node materialisation rather than trie state.
+* `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
+* `skip:quarantined` — the op is disabled outright (op 54).
+
+Each is recorded in FINDINGS.md and commented at its site. -/
+
+def skipAct : String := "skip:act"
+def skipAtRoot : String := "skip:at-root"
+def skipK0 : String := "skip:k0"
+def skipEmptyFocus : String := "skip:empty-focus"
+def skipEmptyPath : String := "skip:empty-path"
+def skipQuarantined : String := "skip:quarantined"
 
 /-! ## Rendering -/
 
@@ -88,6 +120,7 @@ def dumpAt (t : PathMap V) (root : Path) : String :=
 structure Dec where
   bytes : ByteArray
   pos : Nat
+  opCount : Nat := 56
 
 /-- Read one byte; `none` once the input is exhausted, which ends the program. -/
 def Dec.u8 (d : Dec) : Option (UInt8 × Dec) :=
@@ -159,40 +192,24 @@ def emit (s : St) (name : String) (ret : String) : St :=
 def showBool (b : Bool) : String := if b then "1" else "0"
 
 
-/-- Is the *explicit* `prune_path` / `prune_ascend` well-defined for this state?
-
-Only for a write zipper rooted at the map root.  Pruning happens in two places:
-`node_remove_*` prunes within the internal node holding the focus, and
-`prune_path_internal` prunes the trie above it but stops at the zipper's origin.
-With a non-empty zipper root the two disagree and the depth pruned becomes a
-function of node layout rather than of the logical trie — a 40-byte dangling
-chain under a zipper rooted at depth 5 prunes to the map root, a 100-byte one
-stops at the zipper root.
-
-The `prune` *flag* on the other operations is worse: it is passed straight to
-`node_remove_val` / `node_remove_all_branches`, which prune within the node even
-when they find nothing to remove and report `None`.  So `remove_val(true)` can
-delete a dangling location while returning `None`, and whether it does depends on
-where the node boundary falls.  The harness therefore always passes
-`prune = false` to those operations (see `noPrune`) and gates the explicit prune
-operations on this predicate. -/
-def pruneable (s : St) : Bool := s.wz.root.isEmpty
-
-/-- The `prune` flag the harness passes to operations that take one.
-
-Always `false`: the flag's effect is a function of internal node layout rather
-than of the logical trie, so there is nothing for a model to agree with.  See
-`pruneable` and lean/FINDINGS.md finding 7. -/
-def noPrune : Bool := false
-
 /-! ## The operation table
 
-`op % 47` selects the operation.  Ops `0`–`26` act on a target zipper chosen by
-a following `u8 % 2` byte (`0` = write zipper, `1` = read zipper); ops `27`–`46`
-are write-zipper operations. -/
+`op % selector_count` selects the operation (56 for headerless inputs). Ops `0`–`26`
+act on a target zipper chosen by a following `u8 % 2` byte (`0` = write zipper,
+`1` = read zipper); ops `27`–`46` and `56` are write-zipper operations. -/
 
-/-- Number of distinct operations.  Must match `NOPS` in `differential/src/harness.rs`. -/
-def nops : Nat := 56
+/-- Input header marker. Must match `WIRE_MAGIC` in the Rust harness. -/
+def wireMagic : List UInt8 := [80, 77, 70, 85, 90, 90, 1, 0]
+
+def Dec.init (bytes : ByteArray) : Option Dec := do
+  if bytes.data.toList.take wireMagic.length == wireMagic then
+    let d : Dec := { bytes, pos := wireMagic.length }
+    let (lo, d) ← d.u8
+    let (hi, d) ← d.u8
+    let count := lo.toNat + 256 * hi.toNat
+    if count == 0 || count > 256 then none
+    else some { d with opCount := count }
+  else some { bytes, pos := 0 }
 
 /-- A full `k`-path iteration: `descend_first_k_path` followed by
 `to_next_k_path` until it runs out (capped at 32 stops).  Returns the locations
@@ -224,7 +241,7 @@ def getTarget (s : St) (t : Nat) : Zip V := if t == 0 then s.wz else s.rz
 which ends the program. -/
 def step (s : St) (d : Dec) : Option (St × Dec) := do
   let (opRaw, d) ← d.u8
-  let op := opRaw.toNat % nops
+  let op := opRaw.toNat % d.opCount
   match op with
   | 0 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
             let (_, s) := onTarget s t (fun z => ((), z.descendTo p))
@@ -262,12 +279,12 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 11 => do let (t, d) ← d.mod 2
              -- Skipped at the zipper root: `ReadZipper::to_next_sibling_byte`
              -- escapes its own root there (see the notes in `Zip.toNextSiblingByte`).
-             if (getTarget s t).atRoot then some (emit s "to_next_sibling_byte" "skip", d)
+             if (getTarget s t).atRoot then some (emit s "to_next_sibling_byte" skipAtRoot, d)
              else
                let (r, s) := onTarget s t (fun z => z.toNextSiblingByte)
                some (emit s "to_next_sibling_byte" (showByteOpt r), d)
   | 12 => do let (t, d) ← d.mod 2
-             if (getTarget s t).atRoot then some (emit s "to_prev_sibling_byte" "skip", d)
+             if (getTarget s t).atRoot then some (emit s "to_prev_sibling_byte" skipAtRoot, d)
              else
                let (r, s) := onTarget s t (fun z => z.toPrevSiblingByte)
                some (emit s "to_prev_sibling_byte" (showByteOpt r), d)
@@ -280,23 +297,21 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              let (r, z) := s.rz.toNextVal
              some (emit { s with rz := z } "to_next_val" (showBool r), d)
   | 15 => do let (_t, d) ← d.mod 2; let (k, d) ← d.mod 4
-             -- `k = 0` is degenerate: `k_path_internal` treats "already at depth
-             -- base+0" as a hit and reports success without moving, then
-             -- `to_next_k_path(0)` reports success forever.  Skipped.
-             if k == 0 then some (emit s "descend_first_k_path" "skip", d)
-             else
-               let (r, z) := s.rz.descendFirstKPath k
-               some (emit { s with rz := z } "descend_first_k_path" (showBool r), d)
+             -- `k = 0` is specified: `false`, focus untouched.  `kPathFrom` gives
+             -- that with no special case, since it wants a location strictly after
+             -- the focus and the only one at depth base+0 is the focus itself.
+             let (r, z) := s.rz.descendFirstKPath k
+             some (emit { s with rz := z } "descend_first_k_path" (showBool r), d)
   | 16 => do let (_t, d) ← d.mod 2; let (k, d) ← d.mod 4
              -- `to_next_k_path` is only meaningful as the continuation of a
              -- `descend_first_k_path` iteration -- `k_path_internal` carries
              -- iteration state, and calling it cold is flagged by pathmap's own
              -- debug assertions.  So the op is the whole walk, not one step.
-             if k == 0 then some (emit s "k_path_walk" "skip", d)
-             else
-               let (ps, z) := kWalk s.rz k
-               some (emit { s with rz := z } "k_path_walk"
-                 (String.intercalate "," (ps.map hexPath)), d)
+             -- With `k = 0` the descent fails, so the walk is empty and the
+             -- never-ending `to_next_k_path(0)` is not reached.
+             let (ps, z) := kWalk s.rz k
+             some (emit { s with rz := z } "k_path_walk"
+               (String.intercalate "," (ps.map hexPath)), d)
   | 17 => do let (_t, d) ← d.mod 2
              -- `ZipperIteration` is read-only: the target byte is still consumed,
              -- but the operation always applies to the read zipper.
@@ -324,110 +339,112 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              let z := getTarget s t
              some (emit s "val_at" (showVal (z.valAt p)), d)
   | 25 => do let (t, d) ← d.mod 2
-             if s.act && t == 1 then some (emit s "make_map_val_count" "skip", d)
+             if s.act && t == 1 then some (emit s "make_map_val_count" skipAct, d)
              else
                let z := getTarget s t
                some (emit s "make_map_val_count" (toString (z.makeMap.valCount [])), d)
   | 26 => do let (t, d) ← d.mod 2
              let z := getTarget s t
-             some (emit s "dump" (dumpAt z.trie z.focus), d)
+             let result := match z.forkReadZipper with
+               | some fork => dumpAt fork.trie fork.root
+               | none => "_:-"
+             some (emit s "dump" result, d)
   | 27 => do let (v, d) ← d.u8
              let (old, z) := s.wz.setVal (UInt64.ofNat v.toNat)
              some (emit { s with wz := z } "set_val" (showVal old), d)
-  | 28 => do let (_pr, d) ← d.bool
-             let (old, z) := s.wz.removeVal noPrune
+  | 28 => do let (pr, d) ← d.bool
+             let (old, z) := s.wz.removeVal pr
              some (emit { s with wz := z } "remove_val" (showVal old), d)
   | 29 => do let (r, z) := s.wz.createPath
              some (emit { s with wz := z } "create_path" (showBool r), d)
-  | 30 => do if pruneable s then
-               let (n, z) := s.wz.prunePath
-               some (emit { s with wz := z } "prune_path" (toString n), d)
-             else some (emit s "prune_path" "skip", d)
-  | 31 => do if pruneable s then
-               let (n, z) := s.wz.pruneAscend
-               some (emit { s with wz := z } "prune_ascend" (toString n), d)
-             else some (emit s "prune_ascend" "skip", d)
-  | 32 => do let (_pr, d) ← d.bool
+  | 30 => do let (n, z) := s.wz.prunePath
+             some (emit { s with wz := z } "prune_path" (toString n), d)
+  | 31 => do let (n, z) := s.wz.pruneAscend
+             some (emit { s with wz := z } "prune_ascend" (toString n), d)
+  | 32 => do let (pr, d) ← d.bool
              let leaky := s.wz.focusNodeIsEmpty
-             let (r, z) := s.wz.removeBranches noPrune
+             let (r, z) := s.wz.removeBranches pr
              some (emit { s with wz := z } "remove_branches"
                (if leaky then "?" else showBool r), d)
-  | 33 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (_pr, d) ← d.bool
-             let z := s.wz.removeUnmaskedBranches (ByteMask.ofList m) noPrune
+  | 33 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (pr, d) ← d.bool
+             let z := s.wz.removeUnmaskedBranches (ByteMask.ofList m) pr
              some (emit { s with wz := z } "remove_unmasked_branches" (hexPath (ByteMask.ofList m)), d)
-  | 34 => do if s.act then some (emit s "graft" "skip", d) else
+  | 34 => do if s.act then some (emit s "graft" skipAct, d) else
              do
                let z := s.wz.graft s.rz
                some (emit { s with wz := z } "graft" "-", d)
   | 35 => do let (p, d) ← d.path
-             if s.act then some (emit s "graft_src_at" "skip", d)
+             if s.act then some (emit s "graft_src_at" skipAct, d)
              else
                let z := s.wz.graftSrcAt s.rz p
                some (emit { s with wz := z } "graft_src_at" (hexPath p), d)
-  | 36 => do if s.act then some (emit s "join_into" "skip", d) else
+  | 36 => do if s.act then some (emit s "join_into" skipAct, d) else
              do
                let (st, z) := s.wz.joinInto ops s.rz
                some (emit { s with wz := z } "join_into" (toString st), d)
-  | 37 => do if s.act then some (emit s "join_map_into" "skip", d) else
+  | 37 => do if s.act then some (emit s "join_map_into" skipAct, d) else
              do
                let leaky := s.wz.focusNodeIsEmpty
                let (st, z) := s.wz.joinMapInto ops s.rz.makeMap
                some (emit { s with wz := z } "join_map_into"
                  (if leaky then "?" else toString st), d)
-  | 38 => do let (_pr, d) ← d.bool
-             if s.act then some (emit s "meet_into" "skip", d)
+  | 38 => do let (pr, d) ← d.bool
+             if s.act then some (emit s "meet_into" skipAct, d)
              else
-               let (st, z) := s.wz.meetInto ops s.rz noPrune
+               let (st, z) := s.wz.meetInto ops s.rz pr
                some (emit { s with wz := z } "meet_into" (toString st), d)
-  | 39 => do let (_pr, d) ← d.bool
-             if s.act then some (emit s "subtract_into" "skip", d)
+  | 39 => do let (pr, d) ← d.bool
+             if s.act then some (emit s "subtract_into" skipAct, d)
              else
-               let (st, z) := s.wz.subtractInto ops s.rz noPrune
+               let (st, z) := s.wz.subtractInto ops s.rz pr
                some (emit { s with wz := z } "subtract_into" (toString st), d)
-  | 40 => do if s.act then some (emit s "restrict" "skip", d) else
+  | 40 => do if s.act then some (emit s "restrict" skipAct, d) else
              do
                let leaky := s.wz.focusNodeIsEmpty
                let (st, z) := s.wz.restrict ops s.rz
                some (emit { s with wz := z } "restrict"
                  (if leaky then "?" else toString st), d)
-  | 41 => do if s.act then some (emit s "restricting" "skip", d) else
-             do
-               -- Skipped, not merely masked, when either side has nothing below
-               -- its focus: there `restricting` branches on whether an empty node
-               -- happens to be materialised, and the two branches differ in
-               -- *effect*, not just in the reported bool.  See FINDINGS.md #8.
-               if s.wz.focusNodeIsEmpty || s.rz.focusNodeIsEmpty then
-                 some (emit s "restricting" "skip", d)
-               else
-                 let (r, z) := s.wz.restricting s.rz
-                 some (emit { s with wz := z } "restricting" (showBool r), d)
-  | 42 => do let (k, d) ← d.mod 4; let (_pr, d) ← d.bool
+             -- Skipped, not merely masked, when either side has nothing below
+             -- its focus: there `restricting` branches on whether an empty node
+             -- happens to be materialised, and the two branches differ in
+             -- *effect*, not just in the reported bool.  See FINDINGS.md #8.
+             -- This guard is checked *before* the ACT one because the harness
+             -- reaches the ACT skip only by calling `do_restricting`, which it
+             -- does not do once this guard has fired; the two orders were
+             -- indistinguishable while both reasons rendered as a bare `skip`.
+  | 41 => do if s.wz.focusNodeIsEmpty || s.rz.focusNodeIsEmpty then
+               some (emit s "restricting" skipEmptyFocus, d)
+             else if s.act then some (emit s "restricting" skipAct, d)
+             else
+               let (r, z) := s.wz.restricting s.rz
+               some (emit { s with wz := z } "restricting" (showBool r), d)
+  | 42 => do let (k, d) ← d.mod 4; let (pr, d) ← d.bool
              -- `join_k_path_into(0)` should be the identity but destroys the
              -- subtrie in pathmap 0.3.1; see `Zip.joinKPathInto`.
-             if k == 0 then some (emit s "join_k_path_into" "skip", d)
+             if k == 0 then some (emit s "join_k_path_into" skipK0, d)
              else
                -- The bool is another `AbstractNodeRef` leak: an empty node still
                -- comes back as `Some(...)` from `into_option()` for some
                -- representations, so `true` gets reported for a collapse that
                -- produced nothing.  Compared only when something survived.
                -- See FINDINGS.md #8.
-               let (r, z) := s.wz.joinKPathInto ops k noPrune
+               let (r, z) := s.wz.joinKPathInto ops k pr
                some (emit { s with wz := z } "join_k_path_into"
                  (if z.focusNodeIsEmpty then "?" else showBool r), d)
   | 43 => do let (p, d) ← d.path
              -- `insert_prefix("")` destroys the subtrie in pathmap 0.3.1; see
              -- `Zip.insertPrefix`.  Skipped so the known bug does not mask others.
              if p.isEmpty then
-               some (emit s "insert_prefix" "skip", d)
+               some (emit s "insert_prefix" skipEmptyPath, d)
              else
                let (r, z) := s.wz.insertPrefix p
                some (emit { s with wz := z } "insert_prefix" (showBool r), d)
   | 44 => do let (n, d) ← d.mod 6
              let (r, z) := s.wz.removePrefix n
              some (emit { s with wz := z } "remove_prefix" (showBool r), d)
-  | 45 => do let (_pr, d) ← d.bool
+  | 45 => do let (pr, d) ← d.bool
              let leaky := s.wz.focusNodeIsEmpty && s.wz.val.isNone
-             let (m, z) := s.wz.takeMap noPrune
+             let (m, z) := s.wz.takeMap pr
              if leaky then
                some (emit { s with wz := (z.graftMap (m.getD PathMap.empty)) }
                  "take_map_restore" "?", d)
@@ -435,13 +452,15 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              match m with
              | some mm => some (emit { s with wz := z.graftMap mm } "take_map_restore" "1", d)
              | none => some (emit { s with wz := z } "take_map_restore" "0", d)
-  | 46 => do let (k, d) ← d.mod 4; let (_pr, d) ← d.bool
+  | 46 => do let (k, d) ← d.mod 4; let (pr, d) ← d.bool
              -- `meet_k_path_into` is not implementable for these arguments; see
-             -- `Zip.meetKPathUnspecified`.  The Rust side applies the same guard.
-             if s.wz.meetKPathUnspecified k then
-               some (emit s "meet_k_path_into" "skip", d)
+             -- `Zip.meetKPathUnspecified`, whose two disjuncts are split out here
+             -- so the skip names which one fired.  The Rust side matches.
+             if k == 0 then some (emit s "meet_k_path_into" skipK0, d)
+             else if s.wz.focusNodeIsEmpty then
+               some (emit s "meet_k_path_into" skipEmptyFocus, d)
              else
-               let (r, z) := s.wz.meetKPathInto ops k noPrune
+               let (r, z) := s.wz.meetKPathInto ops k pr
                some (emit { s with wz := z } "meet_k_path_into" (showBool r), d)
   | 47 => do let (t, d) ← d.mod 2
              -- The blind-zipper addition: `descend_until` reporting the bytes it
@@ -477,14 +496,14 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 52 => do -- `ZipperReadOnlyIteration::to_next_get_val` must advance exactly as
              -- `to_next_val` does and hand back the value at the new focus.
              -- ACT does not implement the trait, so the op is unavailable there.
-             if s.act then some (emit s "to_next_get_val" "skip", d) else
+             if s.act then some (emit s "to_next_get_val" skipAct, d) else
              do
              let (moved, z) := s.rz.toNextVal
              let v := if moved then z.val else none
              some (emit { s with rz := z } "to_next_get_val"
                (showBool moved ++ ":" ++ showVal v ++ ":1"), d)
   | 53 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (ru, d) ← d.bool
-             if s.act then some (emit s "graft_masked_branches" "skip", d) else
+             if s.act then some (emit s "graft_masked_branches" skipAct, d) else
              do
                let z := s.wz.graftMaskedBranches s.rz (ByteMask.ofList m) ru
                some (emit { s with wz := z } "graft_masked_branches"
@@ -496,7 +515,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              -- broken three ways (FINDINGS.md #15) and the node representations
              -- it leaves behind degrade the `AlgebraicStatus` that *later*
              -- operations report, which would contaminate the whole run.
-             if true then some (emit s "graft_child_maps" "skip", d) else
+             if true then some (emit s "graft_child_maps" skipQuarantined, d) else
              do
                let mask := ByteMask.ofList m
                let maps := mask.map (fun b => ([b], s.rz.trie.subtrie (s.rz.focus ++ [b])))
@@ -505,11 +524,17 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                  (hexPath mask ++ ":" ++ showBool ru), d)
   | 55 => do let (p, d) ← d.path
              -- `meet_2` takes two sources; the second is the first moved to `p`.
-             if s.act then some (emit s "meet_2" "skip", d) else
+             if s.act then some (emit s "meet_2" skipAct, d) else
              do
                let b := { s.rz with path := s.rz.path ++ p }
                let (st, z) := s.wz.meet2 ops s.rz b
                some (emit { s with wz := z } "meet_2" (toString st), d)
+  | 56 => do let (pr, d) ← d.bool
+             let (removed, z) := s.wz.removeSubtrie pr
+             some (emit { s with wz := z } "remove_subtrie" (showBool removed), d)
+  | 57 => do let (_, d) ← d.mod 2
+             let (r, z) := s.rz.descendLastVal
+             some (emit { s with rz := z } "descend_last_val" (showBool r), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/
@@ -553,7 +578,7 @@ def header (d : Dec) (act : Bool) : Option (St × Dec) := do
 
 /-- Decode and run a fuzzer input, returning the trace lines. -/
 def run (bytes : ByteArray) (maxSteps : Nat := 256) (act : Bool := false) : List String :=
-  match header { bytes, pos := 0 } act with
+  match Dec.init bytes >>= (fun d => header d act) with
   | none => ["EMPTY"]
   | some (s0, d) =>
       let s := loop maxSteps s0 d

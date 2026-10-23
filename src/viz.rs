@@ -522,7 +522,7 @@ fn pre_init_node_hashes<V : TrieValue + Debug + Hash, A : Allocator>(node: &Trie
         let node_ref = node.as_tagged();
         let mut token = node_ref.new_iter_token();
         while token != NODE_ITER_FINISHED {
-            let (new_token, _key_bytes, rec, _value) = node_ref.next_items(token);
+            let (new_token, _key_bytes, rec, _value) = node_ref.next_items(token, false);
             if let Some(child) = rec {
                 pre_init_node_hashes(child, ds);
             }
@@ -663,7 +663,7 @@ fn viz_node_physical<V : TrieValue + Debug + Hash, A : Allocator>(n: &TrieNodeOD
 
     let mut token = bn.new_iter_token();
     while token != NODE_ITER_FINISHED {
-        let (new_token, key_bytes, rec, value) = bn.next_items(token);
+        let (new_token, key_bytes, rec, value) = bn.next_items(token, false);
         // println!("iterating over {:?}: {:?} ({:?} {:?})", address, key_bytes, rec.is_some(), value.is_some());
 
         if let Some(r) = rec {

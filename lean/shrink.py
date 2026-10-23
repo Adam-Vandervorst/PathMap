@@ -8,14 +8,18 @@ crate panic) while deleting bytes, so the result is a minimal reproducer.
 """
 import argparse, os, re, subprocess, sys
 
+from input_format import HEADER_SIZE, versioned_input
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ORACLE = os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
+# PATHMAP_ORACLE / PATHMAP_TRACE / PATHMAP_ACT_TRACE override the defaults, for
+# builds that live in another target dir (CI builds two commits side by side).
+ORACLE = os.environ.get("PATHMAP_ORACLE") or os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
 # Release by default, matching differential.py: a debug build turns several
 # known bugs into panics, and the shrinker would then collapse every input onto
 # whichever panic it hits first.  `--debug` shrinks toward a panic on purpose.
-TRACE_RELEASE = os.path.join(ROOT, "target", "release", "pathmap_trace")
+TRACE_RELEASE = os.environ.get("PATHMAP_TRACE") or os.path.join(ROOT, "target", "release", "pathmap_trace")
 TRACE_DEBUG = os.path.join(ROOT, "target", "debug", "pathmap_trace")
-ACT_RELEASE = os.path.join(ROOT, "target", "release", "act_trace")
+ACT_RELEASE = os.environ.get("PATHMAP_ACT_TRACE") or os.path.join(ROOT, "target", "release", "act_trace")
 ACT_DEBUG = os.path.join(ROOT, "target", "debug", "act_trace")
 TRACE = TRACE_RELEASE
 ORACLE_ARGS = []
@@ -54,13 +58,18 @@ def signature(blob):
             strip = lambda t: re.sub(r" n\d+", " n?", t)
             vc = (len(pa) == 2 and len(pb) == 2 and pa[0] == pb[0]
                   and strip(pa[1]) == strip(pb[1]))
-            return "DIFF %s%s" % ("valcount-only " if vc else "", a.split()[1])
+            fields = a.split()
+            op = fields[1] if len(fields) > 1 and fields[0].isdigit() else (fields[0] if fields else "blank")
+            if op == "remove_val" and any(t.startswith("ret=") and t != "ret=-" for t in fields):
+                op += " valued"
+            return "DIFF %s%s" % ("valcount-only " if vc else "", op)
     if len(ml) != len(cl):
         return "DIFF length"
     return None
 
 
 def shrink(blob):
+    blob = versioned_input(blob)
     sig = signature(blob)
     if sig is None:
         sys.exit("input does not diverge")
@@ -69,7 +78,7 @@ def shrink(blob):
     while changed:
         changed = False
         for chunk in (32, 16, 8, 4, 2, 1):
-            i = 0
+            i = HEADER_SIZE
             while i + chunk <= len(blob):
                 cand = blob[:i] + blob[i + chunk:]
                 if signature(cand) == sig:
@@ -78,7 +87,7 @@ def shrink(blob):
                 else:
                     i += 1
         # also try lowering byte values, which simplifies op choices and paths
-        for i in range(len(blob)):
+        for i in range(HEADER_SIZE, len(blob)):
             for v in (0, 1, blob[i] // 2):
                 if v >= blob[i]:
                     continue

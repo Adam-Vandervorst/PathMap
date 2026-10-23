@@ -1,7 +1,6 @@
 
 use divan::{Divan, Bencher, black_box};
-use pathmap::PathMap;
-use pathmap::zipper::*;
+use pathmap::{PathMap, zipper::*};
 
 fn main() {
     // Run registered benchmarks.
@@ -20,8 +19,8 @@ fn superdense_join(bencher: Bencher, n: u64) {
     let mut vnr = PathMap::new();
     for i in 0..n { vnl.set_val_at(prefix_key(&i), i); }
     // println!("{:?}", vnl.root);
-    for i in 0..n { assert_eq!(vnl.get_val_at(prefix_key(&i)), Some(i).as_ref()); }
-    for i in n..2*n { assert_eq!(vnl.get_val_at(prefix_key(&i)), None); }
+    for i in 0..n { assert_eq!(vnl.val_at(prefix_key(&i)), Some(i).as_ref()); }
+    for i in n..2*n { assert_eq!(vnl.val_at(prefix_key(&i)), None); }
     let mut c: Vec<u64> = Vec::with_capacity(n as usize);
     vnl.iter().for_each(|(k, v)| {
         assert!(*v < n);
@@ -74,7 +73,7 @@ fn superdense_get(bencher: Bencher, n: u64) {
     //Benchmark the get operation
     bencher.bench_local(|| {
         for i in 0..n {
-            assert_eq!(map.get_val_at(prefix_key(&i)), Some(&i));
+            assert_eq!(map.val_at(prefix_key(&i)), Some(&i));
         }
     });
 }
@@ -295,6 +294,21 @@ fn superdense_zipper_cursor(bencher: Bencher, n: u64) {
             count += 1;
         }
         assert_eq!(count, n);
+    });
+}
+
+#[divan::bench(args = [100, 200, 400, 800, 1600, 3200])]
+fn superdense_zipper_step_iter(bencher: Bencher, n: u64) {
+    let mut map: PathMap<u64> = PathMap::new();
+    for i in 0..n { map.set_val_at(prefix_key(&i), i); }
+
+    bencher.bench_local(|| {
+        let mut steps = 0usize;
+        let mut zipper = map.read_zipper();
+        while zipper.to_next_step() {
+            steps += 1;
+        }
+        black_box(steps);
     });
 }
 

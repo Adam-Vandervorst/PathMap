@@ -33,6 +33,7 @@
 [`ZipperReadOnlyValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html
 [`ZipperSubtries`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperSubtries.html
 [`ZipperValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html
+[`ZipperValuesAt`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValuesAt.html
 [`ZipperWriting`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html
 [`ZipperWriting::graft`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.graft
 [`OverlayZipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/struct.OverlayZipper.html
@@ -63,6 +64,7 @@
 [`ZipperReadOnlyValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html
 [`ZipperSubtries`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperSubtries.html
 [`ZipperValues`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html
+[`ZipperValuesAt`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValuesAt.html
 [`ZipperWriting`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html
 [`Zipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.Zipper.html
 [`ascend_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.ascend_byte
@@ -77,12 +79,17 @@
 [`descend_first_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_first_byte
 [`descend_first_k_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.descend_first_k_path
 [`descend_indexed_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_indexed_byte
+[`PathObserver`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.PathObserver.html
+[`descend_last_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#method.descend_last_byte
+[`descend_last_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#method.descend_last_path
 [`descend_to_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to_byte
 [`descend_to_existing`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to_existing
 [`descend_to_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to_val
 [`descend_to`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_to
 [`descend_until`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.descend_until
 [`fork_read_zipper`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperForking.html#tymethod.fork_read_zipper
+[`get_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html#tymethod.get_val
+[`get_val_at`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyValues.html#tymethod.get_val_at
 [`get_val_mut`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.get_val_mut
 [`get_val_or_set_mut_with`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.get_val_or_set_mut_with
 [`get_val_or_set_mut`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.get_val_or_set_mut
@@ -111,6 +118,7 @@
 [`remove_branches_at`]: https://docs.rs/pathmap/latest/pathmap/struct.PathMap.html#method.remove_branches_at
 [`remove_branches`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_branches
 [`remove_prefix`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_prefix
+[`remove_subtrie`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#method.remove_subtrie
 [`remove_unmasked_branches`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_unmasked_branches
 [`remove_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.remove_val
 [`reserve_buffers`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperPathBuffer.html#tymethod.reserve_buffers
@@ -128,9 +136,11 @@
 [`to_next_sibling_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.to_next_sibling_byte
 [`to_next_step`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.to_next_step
 [`to_next_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#tymethod.to_next_val
+[`descend_last_val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperIteration.html#method.descend_last_val
 [`to_prev_sibling_byte`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperMoving.html#tymethod.to_prev_sibling_byte
 [`trie_ref_at_path`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlySubtries.html#tymethod.trie_ref_at_path
 [`val`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValues.html#tymethod.val
+[`val_at`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperValuesAt.html#tymethod.val_at
 [`witness`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperReadOnlyConditionalValues.html#tymethod.witness
 [`restrict`]: https://docs.rs/pathmap/latest/pathmap/zipper/trait.ZipperWriting.html#tymethod.restrict
 [`Send`]: https://doc.rust-lang.org/std/marker/trait.Send.html

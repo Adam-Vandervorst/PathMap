@@ -209,7 +209,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             // logic makes sure conflicting paths aren't permitted, so we should not get aliased &mut borrows
             let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
             let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
-            let new_zipper = ReadZipperTracked::new_with_node_and_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker);
+            let new_zipper = ReadZipperTracked::new_isolated_in(root_node, path, root_val, z.alloc.clone(), zipper_tracker);
             Ok(new_zipper)
         })
     }
@@ -229,7 +229,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             #[cfg(not(debug_assertions))]
             let zipper_tracker = None;
 
-            ReadZipperTracked::new_with_node_and_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker)
+            ReadZipperTracked::new_isolated_in(root_node, path, root_val, z.alloc.clone(), zipper_tracker)
         })
     }
     fn read_zipper_at_path<'a, K: AsRef<[u8]>>(&'a self, path: K) -> Result<ReadZipperTracked<'a, 'static, V, A>, Conflict> where 'trie: 'a {
@@ -242,7 +242,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             let root_node: &'trie TrieNodeODRc<V, A> = unsafe{ core::mem::transmute(root_node) };
             let root_val: Option<&'trie V> = root_val.map(|v| unsafe{ &*v.as_ptr() } );
 
-            let new_zipper = ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), Some(zipper_tracker));
+            let new_zipper = ReadZipperTracked::new_isolated_cloned_path_in(root_node, path, root_val, z.alloc.clone(), Some(zipper_tracker));
             Ok(new_zipper)
         })
     }
@@ -263,7 +263,7 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             #[cfg(not(debug_assertions))]
             let zipper_tracker = None;
 
-            ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, true, path.as_ref(), path.len(), 0, root_val, z.alloc.clone(), zipper_tracker)
+            ReadZipperTracked::new_isolated_cloned_path_in(root_node, path, root_val, z.alloc.clone(), zipper_tracker)
         })
     }
     fn write_zipper_at_exclusive_path<'a, K: AsRef<[u8]>>(&'a self, path: K) -> Result<WriteZipperTracked<'a, 'static, V, A>, Conflict> where 'trie: 'a {
@@ -343,7 +343,7 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
         debug_assert_eq!(z.focus_stack.depth(), 1);
         z.focus_stack.to_root();
         let stack_root = z.focus_stack.root_mut().unwrap();
-        make_cell_node(stack_root);
+        make_cell_node(stack_root, z.alloc.clone());
         let root_val = z.root_val.as_mut().unwrap();
         return (stack_root, unsafe{ &mut **root_val })
     }
@@ -368,7 +368,11 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                 let cell_node = end_node.make_mut().into_cell_node().unwrap();
                 let (exclusive_node, val) = cell_node.prepare_cf(last_path_byte);
 
+                //With an empty `path`, the popped byte was the zipper's own; put it back
                 z.key.prefix_buf.truncate(original_path_len);
+                if z.key.prefix_buf.len() < original_path_len {
+                    z.key.prefix_buf.push(last_path_byte);
+                }
 
                 return (exclusive_node, val)
             },
@@ -381,8 +385,8 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
                 z.in_zipper_mut_static_result(
                     |node, key| {
                         let new_node = if key.len() > 0 {
-                            if let Some(mut remaining) = node.take_node_at_key(key, false) {
-                                make_cell_node(&mut remaining);
+                            if let Some(mut remaining) = node.take_node_at_key(key, usize::MAX) {
+                                make_cell_node(&mut remaining, alloc.clone());
                                 remaining
                             } else {
                                 TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc)
@@ -409,11 +413,15 @@ pub(crate) fn prepare_exclusive_write_path<'a, 'trie: 'a, 'path: 'a, V: Clone + 
     } else {
         //CASE 4
         z.key.prefix_buf.truncate(original_path_len);
+        if z.key.prefix_buf.len() < original_path_len {
+            z.key.prefix_buf.push(last_path_byte);
+        }
 
         //If the node on top of the stack is not a cell node, we need to upgrade it
         if !z.focus_stack.top().unwrap().is_cell_node() {
+            let alloc = z.alloc.clone();
             swap_top_node(&mut z.focus_stack, &z.key, |mut existing_node| {
-                make_cell_node(&mut existing_node);
+                make_cell_node(&mut existing_node, alloc);
                 existing_node
             });
         }
@@ -430,11 +438,11 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
     //If remaining_key is non-zero length, split and upgrade the intervening node
     if remaining_key.len() > 0 {
         let mut node_ref = node.make_mut();
-        let mut new_parent = match node_ref.take_node_at_key(remaining_key, false) {
+        let mut new_parent = match node_ref.take_node_at_key(remaining_key, usize::MAX) {
             Some(downward_node) => downward_node,
-            None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc)
+            None => TrieNodeODRc::new_in(CellByteNode::new_in(alloc.clone()), alloc.clone())
         };
-        make_cell_node(&mut new_parent);
+        make_cell_node(&mut new_parent, alloc.clone());
         let result = node_ref.node_set_branch(remaining_key, new_parent);
         match result {
             Ok(_) => { },
@@ -445,7 +453,7 @@ fn prepare_node_at_path_end<'a, V: Clone + Send + Sync, A: Allocator>(start_node
         node = child_node;
     } else {
         //Otherwise just upgrade node
-        make_cell_node(node);
+        make_cell_node(node, alloc);
     }
     node
 }
@@ -509,7 +517,7 @@ mod tests {
             for i in (n * elements_per_thread)..((n + 1) * elements_per_thread) {
                 let mut path = vec![n as u8];
                 path.extend(prefix_key(&(i as u64)));
-                assert_eq!(map.get_val_at(path), Some(&i));
+                assert_eq!(map.val_at(path), Some(&i));
             }
         }
     }
@@ -613,7 +621,7 @@ mod tests {
         zipper.set_val(0);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at(&[0]), Some(&0));
+        assert_eq!(map.val_at(&[0]), Some(&0));
     }
 
     #[test]
@@ -628,7 +636,7 @@ mod tests {
         zipper.set_val(0);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at("test"), Some(&0));
+        assert_eq!(map.val_at("test"), Some(&0));
     }
 
     #[test]
@@ -642,7 +650,7 @@ mod tests {
         zipper.set_val(2);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:2"), Some(&2));
     }
 
     #[test]
@@ -662,8 +670,8 @@ mod tests {
         drop(zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
-        assert_eq!(map.get_val_at("test:3"), Some(&3));
+        assert_eq!(map.val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:3"), Some(&3));
     }
 
     #[test]
@@ -679,7 +687,7 @@ mod tests {
         zipper.set_val(42);
         drop(zipper);
         drop(map_head);
-        assert_eq!(map.get_val_at([3, 193, 49, 42]), Some(&42));
+        assert_eq!(map.val_at([3, 193, 49, 42]), Some(&42));
     }
 
     #[test]
@@ -702,11 +710,11 @@ mod tests {
         drop(zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("test:1"), Some(&1));
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
-        assert_eq!(map.get_val_at("test:3"), Some(&3));
-        assert_eq!(map.get_val_at("test:4"), Some(&4));
-        assert_eq!(map.get_val_at("test:5"), Some(&5));
+        assert_eq!(map.val_at("test:1"), Some(&1));
+        assert_eq!(map.val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:3"), Some(&3));
+        assert_eq!(map.val_at("test:4"), Some(&4));
+        assert_eq!(map.val_at("test:5"), Some(&5));
     }
 
     #[test]
@@ -729,11 +737,11 @@ mod tests {
         drop(zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("test:1"), Some(&1));
-        assert_eq!(map.get_val_at("test:2"), Some(&2));
-        assert_eq!(map.get_val_at("test:3"), Some(&3));
-        assert_eq!(map.get_val_at("test:4"), Some(&4));
-        assert_eq!(map.get_val_at("test:5"), Some(&5));
+        assert_eq!(map.val_at("test:1"), Some(&1));
+        assert_eq!(map.val_at("test:2"), Some(&2));
+        assert_eq!(map.val_at("test:3"), Some(&3));
+        assert_eq!(map.val_at("test:4"), Some(&4));
+        assert_eq!(map.val_at("test:5"), Some(&5));
     }
     /// Tests a zipper head that starts from a path other than the map root 
     #[test]
@@ -753,8 +761,8 @@ mod tests {
         drop(zh);
         drop(wz);
         assert_eq!(map.val_count(), 2);
-        assert_eq!(map.get_val_at(b"start:0000:hello"), Some(&0));
-        assert_eq!(map.get_val_at(b"start:0000:goodbye"), Some(&0));
+        assert_eq!(map.val_at(b"start:0000:hello"), Some(&0));
+        assert_eq!(map.val_at(b"start:0000:goodbye"), Some(&0));
     }
     /// A test for the tracker logic, testing many parallel [WriteZipper]s at once
     #[test]
@@ -791,10 +799,10 @@ mod tests {
         drop(wz);
 
         assert_eq!(map.val_count(), 8);
-        assert_eq!(map.get_val_at("start:0000:hello"), Some(&0));
-        assert_eq!(map.get_val_at("start:0000:goodbye"), Some(&0));
-        assert_eq!(map.get_val_at("start:0003:hello"), Some(&3));
-        assert_eq!(map.get_val_at("start:0003:goodbye"), Some(&3));
+        assert_eq!(map.val_at("start:0000:hello"), Some(&0));
+        assert_eq!(map.val_at("start:0000:goodbye"), Some(&0));
+        assert_eq!(map.val_at("start:0003:hello"), Some(&3));
+        assert_eq!(map.val_at("start:0003:goodbye"), Some(&3));
     }
 
     /// Test more cases in the logic to upgrade nodes before creating zippers
@@ -843,7 +851,7 @@ mod tests {
         drop(wz);
         drop(rz);
         drop(zh);
-        assert_eq!(map.get_val_at([3, 194, 22]), Some(&()));
+        assert_eq!(map.val_at([3, 194, 22]), Some(&()));
 
         //Similar to above case, but for the ReadZipper that uses a cloned path
         let mut map = PathMap::<usize>::new();
@@ -873,7 +881,7 @@ mod tests {
         drop(rz);
         drop(rz2);
         drop(zh);
-        assert_eq!(map.get_val_at([3, 194, 22]), Some(&1005));
+        assert_eq!(map.val_at([3, 194, 22]), Some(&1005));
     }
 
     /// Dance a bunch of readers and writers inside the same zipper head
@@ -1005,7 +1013,7 @@ mod tests {
         wz.remove_val(true);
         drop(wz);
         drop(zh);
-        assert_eq!(map.get_val_at(b"path"), None);
+        assert_eq!(map.val_at(b"path"), None);
     }
 
     /// Test that a ReadZipper pointing at empty root behaves as it should
@@ -1230,13 +1238,13 @@ mod tests {
         //     println!("{} {v}", String::from_utf8_lossy(&k));
         // }
         assert_eq!(map.val_count(), 7);
-        assert_eq!(map.get_val_at(b"a+value").unwrap(), &0);
-        assert_eq!(map.get_val_at(b"a-children-0+value").unwrap(), &7);
-        assert_eq!(map.get_val_at(b"b+value").unwrap(), &1);
-        assert_eq!(map.get_val_at(b"b-children-0+metabolic").unwrap(), &6);
-        assert_eq!(map.get_val_at(b"b-children-0+metadata").unwrap(), &3);
-        assert_eq!(map.get_val_at(b"b-children-0+value").unwrap(), &4);
-        assert_eq!(map.get_val_at(b"b-children-1+value").unwrap(), &5);
+        assert_eq!(map.val_at(b"a+value").unwrap(), &0);
+        assert_eq!(map.val_at(b"a-children-0+value").unwrap(), &7);
+        assert_eq!(map.val_at(b"b+value").unwrap(), &1);
+        assert_eq!(map.val_at(b"b-children-0+metabolic").unwrap(), &6);
+        assert_eq!(map.val_at(b"b-children-0+metadata").unwrap(), &3);
+        assert_eq!(map.val_at(b"b-children-0+value").unwrap(), &4);
+        assert_eq!(map.val_at(b"b-children-1+value").unwrap(), &5);
     }
 
     #[test]
@@ -1283,10 +1291,10 @@ mod tests {
         //     println!("{} {v}", String::from_utf8_lossy(&k));
         // }
         assert_eq!(map.val_count(), 4);
-        assert_eq!(map.get_val_at(b"a0+value").unwrap(), &0);
-        assert_eq!(map.get_val_at(b"a1+value").unwrap(), &1);
-        assert_eq!(map.get_val_at(b"b0+value").unwrap(), &2);
-        assert_eq!(map.get_val_at(b"b1+value").unwrap(), &3);
+        assert_eq!(map.val_at(b"a0+value").unwrap(), &0);
+        assert_eq!(map.val_at(b"a1+value").unwrap(), &1);
+        assert_eq!(map.val_at(b"b0+value").unwrap(), &2);
+        assert_eq!(map.val_at(b"b1+value").unwrap(), &3);
     }
 
     #[test]
@@ -1314,8 +1322,8 @@ mod tests {
         drop(top_zipper);
         drop(map_head);
 
-        assert_eq!(map.get_val_at("0:test:5"), Some(&5));
-        assert_eq!(map.get_val_at("0:test:5:next:1"), Some(&1));
+        assert_eq!(map.val_at("0:test:5"), Some(&5));
+        assert_eq!(map.val_at("0:test:5:next:1"), Some(&1));
     }
     /// Use a [ZipperHeadOwned] to write a bunch of paths into the map, single-threaded
     #[test]
@@ -1349,10 +1357,10 @@ mod tests {
 
         let map = zh.into_map();
         assert_eq!(map.val_count(), 8);
-        assert_eq!(map.get_val_at("start:0000:hello"), Some(&0));
-        assert_eq!(map.get_val_at("start:0000:goodbye"), Some(&0));
-        assert_eq!(map.get_val_at("start:0002:hello"), Some(&2));
-        assert_eq!(map.get_val_at("start:0002:goodbye"), Some(&2));
+        assert_eq!(map.val_at("start:0000:hello"), Some(&0));
+        assert_eq!(map.val_at("start:0000:goodbye"), Some(&0));
+        assert_eq!(map.val_at("start:0002:hello"), Some(&2));
+        assert_eq!(map.val_at("start:0002:goodbye"), Some(&2));
     }
     /// Parallel version of `owned_zipper_head_test1`, but with a lot more elements, pounding on the
     /// ZipperHead from each thread
@@ -1408,8 +1416,8 @@ mod tests {
             hello_path.extend(b":hello");
             let mut goodbye_path = path_base.clone();
             goodbye_path.extend(b":goodbye");
-            assert_eq!(map.get_val_at(hello_path), Some(&i));
-            assert_eq!(map.get_val_at(goodbye_path), Some(&i));
+            assert_eq!(map.val_at(hello_path), Some(&i));
+            assert_eq!(map.val_at(goodbye_path), Some(&i));
         }
     }
     /// Tests the [ZipperHead::cleanup_write_zipper] method
@@ -1493,5 +1501,275 @@ mod tests {
         assert_eq!(rz.path_exists(), false);
         assert_eq!(rz.is_val(), false);
         drop(rz);
+    }
+
+    #[test]
+    fn cleanup_write_zipper_at_emptied_link() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8], 1);
+        map.set_val_at(&[0u8, 0, 1], 2);
+        map.write_zipper_at_path(&[0u8, 0]).remove_branches(false);
+        assert!(map.read_zipper_at_path(&[0u8, 0]).path_exists());
+
+        let zh = map.zipper_head();
+        let wz = zh.write_zipper_at_exclusive_path(&[0u8, 0]).unwrap();
+        zh.cleanup_write_zipper(wz);
+
+        assert!(!zh.read_zipper_at_path(&[0u8, 0]).unwrap().path_exists());
+        assert_eq!(zh.read_zipper_at_path(&[0u8]).unwrap().val(), Some(&1));
+    }
+
+    /// A ZipperHead turns the parent node into a CellByteNode; joining a list node with it must not
+    /// treat the cell node as a DenseByteNode
+    #[test]
+    fn zipper_head_cell_node_pjoin_test() {
+        let mut b = PathMap::<()>::new();
+        b.set_val_at(b"ax", ());
+        b.set_val_at(b"bx", ());
+        {
+            let zh = b.zipper_head();
+            let mut wz = zh.write_zipper_at_exclusive_path(b"c").unwrap();
+            wz.set_val(());
+        }
+        let mut a = PathMap::<()>::new();
+        a.set_val_at(b"dx", ());
+
+        let joined = a.join(&b);
+        let mut paths: Vec<Vec<u8>> = joined.iter().map(|(p, _)| p).collect();
+        paths.sort();
+        assert_eq!(paths, vec![b"ax".to_vec(), b"bx".to_vec(), b"c".to_vec(), b"dx".to_vec()]);
+    }
+
+    /// A reader must not hold a node that live writers point into
+    #[test]
+    fn head_reader_beside_live_writers() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8, 0], 1);
+        let zh = map.into_zipper_head(&[]);
+        {
+            let mut w1 = zh.write_zipper_at_exclusive_path(&[0x11u8]).unwrap();
+            //Not in the trie, so it used to hold the root node, which the next writer then copied
+            let r0 = zh.read_zipper_at_path(&[0x22u8, 0, 0]).unwrap();
+            let w0 = zh.write_zipper_at_exclusive_path(&[0u8]).unwrap();
+            assert!(!r0.path_exists());
+            drop(r0);
+            w1.set_val(5);
+            drop(w0);
+            drop(w1);
+        }
+        let map = zh.into_map();
+        assert_eq!(map.val_at(&[0x11u8]), Some(&5));
+        assert_eq!(map.val_at(&[0u8, 0]), Some(&1));
+    }
+
+    #[test]
+    fn head_reader_private_root_value_and_witness() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([0x22], 22);
+        map.set_val_at([0x22, 0x01], 1);
+        map.set_val_at([0x44, 0x55], 55);
+        let zh = map.into_zipper_head([]);
+        let mut other_writer = zh.write_zipper_at_exclusive_path([0x11]).unwrap();
+
+        let reader = zh.read_zipper_at_borrowed_path(&[0x22]).unwrap();
+        assert!(reader.path_exists());
+        assert!(reader.is_val());
+        assert_eq!(reader.val(), Some(&22));
+        assert_eq!(reader.val_at([0x01]), Some(&1));
+        let cloned_reader = reader.clone();
+        let witness = reader.witness();
+        let held_value = reader.get_val_with_witness(&witness).unwrap();
+        drop(reader);
+        assert_eq!(cloned_reader.val(), Some(&22));
+        drop(cloned_reader);
+
+        let mut writer = zh.write_zipper_at_exclusive_path([0x22]).unwrap();
+        writer.set_val(99);
+        drop(writer);
+        assert_eq!(*held_value, 22);
+
+        let prefix = zh.read_zipper_at_borrowed_path(&[0x44]).unwrap();
+        assert!(prefix.path_exists());
+        assert!(!prefix.is_val());
+        assert_eq!(prefix.val_at([0x55]), Some(&55));
+        drop(prefix);
+
+        let missing = zh.read_zipper_at_borrowed_path(&[0xee, 0x00]).unwrap();
+        assert!(!missing.path_exists());
+        assert!(!missing.is_val());
+        assert_eq!(missing.child_count(), 0);
+        drop(missing);
+
+        other_writer.set_val(11);
+    }
+
+    /// A witness must keep the head's root value alive after its reader releases the path lock.
+    #[test]
+    fn head_root_value_witness_survives_reader_and_writer() {
+        use std::sync::Arc;
+
+        let original = Arc::new(String::from("old"));
+        let mut map = PathMap::<Arc<String>>::new();
+        map.set_val_at([], original.clone());
+        let head = map.zipper_head();
+
+        let reader = head.read_zipper_at_path([]).unwrap();
+        let witness = reader.witness();
+        assert_eq!(reader.get_val_with_witness(&witness).map(|v| v.as_str()), Some("old"));
+        drop(reader);
+
+        let mut writer = head.write_zipper_at_exclusive_path([]).unwrap();
+        drop(writer.remove_val(false));
+        drop(writer);
+
+        // The map no longer owns the old value. A valid witness must still own it.
+        assert!(Arc::strong_count(&original) > 1);
+        drop(witness);
+    }
+
+    /// `get_trie_ref`, `get_focus` and forks from a head's read zipper, which owns its root node
+    #[test]
+    fn head_read_zipper_trie_refs() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 3], &[0]] { map.set_val_at(p, 7); }
+        let zh = map.zipper_head();
+        for path in [&[][..], &[1u8], &[1u8, 2], &[9u8]] {
+            let mut rz = zh.read_zipper_at_path(path).unwrap();
+            for step in [&[][..], &[2u8], &[2u8, 1]] {
+                rz.reset();
+                rz.descend_to(step);
+                let tr = rz.get_trie_ref();
+                assert_eq!(tr.val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(tr.child_mask(), rz.child_mask(), "{path:?} {step:?}");
+                let _ = rz.get_focus();
+                let fork = rz.fork_read_zipper();
+                assert_eq!(fork.is_some(), rz.path_exists(), "{path:?} {step:?}");
+                let Some(fork) = fork else { continue };
+                assert_eq!(fork.get_trie_ref().val(), rz.val(), "{path:?} {step:?}");
+                assert_eq!(fork.trie_ref_at_path(&[0u8]).val(), rz.val_at(&[0u8]), "{path:?} {step:?}");
+            }
+        }
+    }
+
+    /// A `ZipperHead` from a write zipper made with a borrowed path, and the zipper used afterwards
+    #[test]
+    fn zipper_head_from_write_zipper_at_borrowed_path() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[1u8, 2, 3], 7);
+        {
+            let path = [1u8, 2];
+            let mut wz = map.write_zipper_at_path(&path);
+            {
+                let zh = wz.zipper_head();
+                let mut child = zh.write_zipper_at_exclusive_path(&[4u8]).unwrap();
+                child.set_val(1);
+            }
+            assert_eq!(wz.origin_path(), &[1u8, 2]);
+            wz.descend_to(&[5u8]);
+            wz.set_val(2);
+            assert_eq!(wz.origin_path(), &[1u8, 2, 5]);
+        }
+        assert_eq!(map.val_at(&[1u8, 2, 4]), Some(&1));
+        assert_eq!(map.val_at(&[1u8, 2, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 3]), Some(&7));
+    }
+
+    /// An exclusive zipper at the head's own root, requested more than once, from a head whose
+    /// root sits partway into a node
+    #[test]
+    fn exclusive_path_at_head_root_twice() {
+        let sample = || {
+            let mut m = PathMap::<u64>::new();
+            for p in [&[1u8, 2, 1][..], &[1, 2, 1, 0], &[1, 2, 1, 3, 3], &[0], &[2, 2]] { m.set_val_at(p, 7); }
+            m
+        };
+
+        let zh = sample().into_zipper_head(&[1u8]);
+        for (path, v) in [(&[][..], 1), (&[9u8][..], 2), (&[][..], 3)] {
+            let mut wz = zh.write_zipper_at_exclusive_path(path).unwrap();
+            wz.descend_to(&[5u8]);
+            wz.set_val(v);
+        }
+        let map = zh.into_map();
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&3));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 2, 1, 0]), Some(&7));
+        assert_eq!(map.val_count(), 7);
+
+        let mut map = sample();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(&[1u8]);
+            let zh = wz.zipper_head();
+            for (path, v) in [(&[][..], 1), (&[][..], 2), (&[9u8][..], 3)] {
+                let mut child = zh.write_zipper_at_exclusive_path(path).unwrap();
+                child.descend_to(&[5u8]);
+                child.set_val(v);
+            }
+        }
+        assert_eq!(map.val_at(&[1u8, 5]), Some(&2));
+        assert_eq!(map.val_at(&[1u8, 9, 5]), Some(&3));
+        assert_eq!(map.val_count(), 7);
+    }
+
+    /// Exclusive paths from a head whose focus node is the empty sentinel
+    #[test]
+    fn exclusive_path_over_empty_node() {
+        let setups: [fn(&mut PathMap<u64>); 3] = [
+            |m| { m.write_zipper_at_path(&[0u8, 0]).remove_branches(false); },
+            |m| { let e = PathMap::<u64>::new(); m.write_zipper_at_path(&[0u8, 0]).graft(&e.read_zipper()); },
+            |m| { m.write_zipper_at_path(&[0u8, 0]).take_map(false); },
+        ];
+        for (i, setup) in setups.iter().enumerate() {
+            for paths in [[&[][..], &[5u8][..]], [&[5u8, 6][..], &[][..]], [&[0u8, 0][..], &[1u8][..]]] {
+                let mut map = PathMap::<u64>::new();
+                map.set_val_at(&[0u8, 0, 1, 2], 9);
+                map.set_val_at(&[7u8], 9);
+                setup(&mut map);
+                {
+                    let mut wz = map.write_zipper_at_path(&[0u8, 0]);
+                    let zh = wz.zipper_head();
+                    for (n, p) in paths.iter().enumerate() {
+                        let mut w = zh.write_zipper_at_exclusive_path(p).unwrap();
+                        w.set_val(n as u64);
+                    }
+                }
+                assert_eq!(map.val_at(&[7u8]), Some(&9), "setup {i} {paths:?}");
+                for (n, p) in paths.iter().enumerate() {
+                    let full: Vec<u8> = [&[0u8, 0][..], p].concat();
+                    assert_eq!(map.val_at(&full), Some(&(n as u64)), "setup {i} {paths:?}");
+                }
+            }
+        }
+    }
+
+    /// An exclusive zipper rooted at a link emptied by `remove_branches`, `take_map` or a graft of nothing
+    #[test]
+    fn exclusive_zipper_at_emptied_link() {
+        let preps: [fn(&mut WriteZipperUntracked<u64>); 4] = [
+            |z| { z.remove_branches(false); },
+            |z| { z.take_map(false); },
+            |z| { let e = PathMap::<u64>::new(); z.graft(&e.read_zipper()); },
+            |z| { let e = PathMap::<u64>::new(); z.restrict(&e.read_zipper()); },
+        ];
+        for (i, prep) in preps.iter().enumerate() {
+            let mut map = PathMap::<u64>::new();
+            for p in [&[0u8, 0, 1][..], &[0, 0, 1, 2], &[0]] { map.set_val_at(p, 1); }
+            {
+                let mut wz = map.write_zipper_at_path(&[0u8, 0]);
+                prep(&mut wz);
+                let zh = wz.zipper_head();
+                let mut w = zh.write_zipper_at_exclusive_path(&[]).unwrap();
+                assert!(!w.descend_to_existing_byte(1), "prep {i}");
+                w.descend_to(&[7u8, 7]);
+                assert!(!w.path_exists(), "prep {i}");
+                assert_eq!(w.ascend_until(), 2, "prep {i}");
+                w.descend_to(&[7u8, 7]);
+                w.set_val(5);
+            }
+            assert_eq!(map.get(&[0u8, 0, 7, 7]), Some(&5), "prep {i}");
+            assert_eq!(map.get(&[0u8]), Some(&1), "prep {i}");
+            assert_eq!(map.val_count(), 2, "prep {i}");
+        }
     }
 }

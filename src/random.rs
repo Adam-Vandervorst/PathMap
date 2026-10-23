@@ -211,7 +211,7 @@ mod tests {
   use rand_distr::{Triangular, Uniform};
   use crate::random::*;
   use crate::ring::Lattice;
-  use crate::zipper::{ZipperWriting, ZipperSubtries};
+  use crate::zipper::{ZipperWriting, ZipperSubtries, ZipperValuesAt};
 
   #[test]
   fn fixed_length() {
@@ -478,18 +478,18 @@ mod tests {
       let mut rz = trie.read_zipper();
       path_gen.clone().sample_iter(rng.clone()).take(N_DESCENDS).for_each(|path| {
         rz.descend_to(&path[..]);
-        assert_eq!(rz.get_val(), trie.get_val_at(&path[..]));
+        assert_eq!(rz.get_val(), trie.val_at(&path[..]));
         path_gen.clone().sample_iter(rng_.clone()).take(N_DESCENDS).for_each(|path| {
           rz.descend_to(&path[..]);
           rz.ascend(path.len());
         });
         assert_eq!(rz.path(), &path[..]);
-        assert_eq!(rz.get_val(), trie.get_val_at(&path[..]));
+        assert_eq!(rz.get_val(), trie.val_at(&path[..]));
         path_gen.clone().sample_iter(rng_.clone()).take(N_DESCENDS).for_each(|path| {
           // println!("prev {:?}", rz.path());
           rz.move_to_path(&path[..]);
           assert_eq!(rz.path(), &path[..]);
-          assert_eq!(rz.get_val(), trie.get_val_at(&path[..]));
+          assert_eq!(rz.get_val(), trie.val_at(&path[..]));
         });
         rz.reset();
 

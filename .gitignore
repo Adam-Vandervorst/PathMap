@@ -10,3 +10,4 @@ whisper_benches/logs
 # Lean build output and shrink.py scratch file
 /lean/.lake
 /lean/.shrink.bin
+__pycache__/

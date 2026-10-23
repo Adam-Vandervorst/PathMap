@@ -1,4 +1,5 @@
 import PathMapModel.Spec
+import PathMapModel.Fuzz
 
 /-!
 # Build-time checks
@@ -51,6 +52,20 @@ def probes : List Path := [[], [0], [1], [0,0], [0,1], [1,1], [0,1,2], [3]]
 def allZips : List (Zip UInt64) :=
   fixtures.flatMap (fun t => probes.map (fun p => zipAt t [] p))
 
+/-! The selector count belongs to each input, independent of the current operation table. -/
+
+def inputWithCount (lo hi : UInt8) : ByteArray :=
+  ByteArray.mk (Fuzz.wireMagic ++ [lo, hi]).toArray
+
+#guard ((Fuzz.Dec.init (ByteArray.mk #[])).map (·.opCount)) == some 56
+#guard ((Fuzz.Dec.init (inputWithCount 56 0)).map (·.opCount)) == some 56
+#guard ((Fuzz.Dec.init (inputWithCount 58 0)).map (·.opCount)) == some 58
+#guard ((Fuzz.Dec.init (inputWithCount 0 1)).map (·.opCount)) == some 256
+#guard (Fuzz.Dec.init (inputWithCount 0 0)).isNone
+#guard (Fuzz.Dec.init (inputWithCount 1 1)).isNone
+#guard (Fuzz.Dec.init (ByteArray.mk Fuzz.wireMagic.toArray)).isNone
+#guard (Fuzz.Dec.init (ByteArray.mk (Fuzz.wireMagic ++ [57]).toArray)).isNone
+
 /-! ## Regression fixtures from `src/write_zipper.rs` -/
 
 /-- `write_zipper_prune_path_test2`, first phase: removing the value at
@@ -75,14 +90,29 @@ and below it (the location does not exist). -/
 #guard ((zipAt pruneT2b [] [0,0,0,1,2,3]).prunePath).1 == 0
 #guard ((zipAt pruneT2b [] [0,0,0,1,2,3,4,5]).prunePath).1 == 0
 
-/-! Pruning *does* rise above the zipper's root, contradicting the doc comment
-on `ZipperWriting::prune_path`.  A zipper rooted at `[0,0]` looking at the
-dangling tip of the same chain prunes all 7 bytes, back to the map root — not
-the 5 that lie below its own root.  Verified against pathmap 0.3.1; see
-`Zip.prunePath`. -/
+/-! The zipper root bounds pruning, even for a dangling chain continuing above it. -/
 
-#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).1 == 7
-#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).2.trie.isEmptyMap
+#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).1 == 5
+#guard ((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).2.trie.pathExists [0,0]
+#guard !((zipAt pruneT2b [0,0] [0,1,2,3,4]).prunePath).2.trie.pathExists [0,0,0]
+
+/-! The flag is an explicit prune after the operation, including a no-op.
+`false` preserves a dangling path. -/
+
+#guard (((zipAt pruneT2 [] [0,0,1,0,0]).removeVal true).2.trie.pathExists [0,0,1]) == false
+#guard (((zipAt pruneT2 [] [0,0,1,0,0]).removeVal false).2.trie.pathExists [0,0,1,0,0])
+#guard !(((zipAt pruneT2b [] [0,0,0,1,2,3,4]).removeVal true).2.trie.pathExists [0,0,0,1,2,3,4])
+#guard !(((zipAt pruneT2b [] []).removeBranches true).2.trie.pathExists [0])
+#guard (((zipAt pruneT2b [] []).removeBranches false).2.trie.pathExists [])
+#guard (((zipAt pruneT2b [] [0,0,0,1,2,3,4]).removeUnmaskedBranches
+  (ByteMask.ofList []) true).trie.pathExists [0,0,0,1,2,3,4]) == false
+#guard !(((zipAt pruneT2b [] [0,0,0,1,2,3,4]).takeMap true).2.trie.pathExists
+  [0,0,0,1,2,3,4])
+#guard !(((zipAt pruneT2b [] [0,0,0,1,2,3,4]).joinKPathInto ops 1 true).2.trie.pathExists
+  [0,0,0,1,2,3,4])
+#guard (((zipAt pruneT2b [0,0] [0,1,2,3,4]).removeVal true).2.trie.pathExists [0,0])
+#guard !(((zipAt pruneT2b [0,0] [0,1,2,3,4]).removeVal true).2.trie.pathExists
+  [0,0,0])
 
 /-! `write_zipper_drop_head_test3`: `[[0,0],[0,1],[1,0],[1,1]]` with
 `join_k_path_into(1)` collapses to 2 values. -/
@@ -112,6 +142,39 @@ def dropT1Result : T := ((zipAt dropT1 [0x31,0x32,0x33,0x3a] []).joinKPathInto o
 #guard dropT1Result.valAt [0x31,0x32,0x33,0x3a,0x42,0x6f,0x62,0x3a,0x46,0x69,0x64,0x6f] == some 1
 #guard dropT1Result.valCount [] == 2
 
+/-! ## Subtrie removal -/
+
+/-! `remove_subtrie` clears the focus and descendants, preserves other content,
+and prunes only up to the zipper root. Dangling descendants count as branches;
+pruning an already dangling focus does not count as removing content. -/
+
+#guard ((zipAt fBranch [] [0]).removeSubtrie false).1
+#guard ((zipAt fBranch [] [0]).removeSubtrie false).2.pathExists
+#guard !((zipAt fBranch [] [0]).removeSubtrie false).2.isVal
+#guard ((zipAt fBranch [] [0]).removeSubtrie false).2.childCount == 0
+#guard ((zipAt fBranch [] [0]).removeSubtrie true).2.trie.valAt [] == some 0
+#guard ((zipAt fBranch [] [0]).removeSubtrie true).2.trie.valAt [1] == some 4
+#guard !((zipAt fBranch [] [0]).removeSubtrie true).2.pathExists
+#guard ((zipAt fBranch [] []).removeSubtrie true).2.trie.isEmptyMap
+#guard !(((zipAt fBranch [] []).removeSubtrie true).2.removeSubtrie true).1
+#guard ((zipAt fDangle [] [0,1]).removeSubtrie false).1
+#guard !((zipAt fDangle [] [0,1,2]).removeSubtrie true).1
+#guard !((zipAt fDangle [] [0,1,2]).removeSubtrie true).2.pathExists
+#guard !((zipAt fEmpty [] [3]).removeSubtrie true).1
+#guard !((zipAt fEmpty [] [3]).removeSubtrie true).2.pathExists
+#guard ((zipAt fRun [0,0] [0]).removeSubtrie true).2.trie.pathExists [0,0]
+#guard !((zipAt fRun [0,0] [0]).removeSubtrie true).2.trie.pathExists [0,0,0]
+#guard ((zipAt fRun [0,0] []).removeSubtrie true).2.pathExists
+
+#guard allZips.all (fun z => [false, true].all (fun pr =>
+  let (removed, after) := z.removeSubtrie pr
+  let (branches, z1) := z.removeBranches pr
+  let (value, composed) := z1.removeVal pr
+  removed == (branches || value.isSome) &&
+    after.trie.vals == composed.trie.vals && after.trie.paths == composed.trie.paths &&
+    after.path == z.path && after.root == z.root &&
+    !after.isVal && after.childCount == 0))
+
 /-! ## Structural invariants over every fixture -/
 
 #guard fixtures.all valsExist
@@ -127,6 +190,20 @@ def dropT1Result : T := ((zipAt dropT1 [0x31,0x32,0x33,0x3a] []).joinKPathInto o
 #guard allZips.all descendIndexedLands
 #guard allZips.all siblingRoundTrip
 #guard allZips.all toNextValMonotone
+#guard allZips.all descendLastValLands
+
+/-! Last-value descent includes the focus and skips dangling suffixes. -/
+#guard ((zipAt fDangle [] []).descendLastVal).2.path == [0]
+#guard ((zipAt fDangle [] [0]).descendLastVal).1
+#guard ((zipAt fDangle [] [0]).descendLastVal).2.path == [0]
+#guard !((zipAt fDangle [] [0,1]).descendLastVal).1
+#guard ((zipAt fDangle [] [0,1]).descendLastVal).2.path == [0,1]
+#guard !((zipAt fEmpty [] []).descendLastVal).1
+#guard ((zipAt (mk [([], 9)]) [] []).descendLastVal).1
+#guard ((zipAt (mk [([], 9)]) [] []).descendLastVal).2.path == []
+#guard ((zipAt fBranch [0] []).descendLastVal).2.path == [1]
+#guard !((zipAt fSide [] [3,3]).descendLastVal).1
+#guard ((zipAt fSide [] [3,3]).descendLastVal).2.path == [3,3]
 #guard allZips.all (fun z => probes.all (descendToExistingLands z))
 #guard allZips.all (fun z => setValThenVal ops z 42)
 #guard allZips.all (takeThenGraft ops)

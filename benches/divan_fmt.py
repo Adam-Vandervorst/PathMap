@@ -119,6 +119,8 @@ def render_divan_table(data):
     for group in grouped:
         grouped[group].sort(key=lambda item: case_sort_key(item[0]))
 
+    if not grouped:
+        return "(no cases)"
     (_, first_record) = next(iter(grouped.values()))[0]
     lines = []
 

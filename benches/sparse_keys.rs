@@ -67,7 +67,7 @@ fn sparse_get(bencher: Bencher, n: u64) {
     //Benchmark the get operation
     bencher.bench_local(|| {
         for i in 0..n {
-            assert_eq!(map.get_val_at(&keys[i as usize]), Some(&i));
+            assert_eq!(map.val_at(&keys[i as usize]), Some(&i));
         }
     });
 }
@@ -322,6 +322,25 @@ fn sparse_zipper_cursor(bencher: Bencher, n: u64) {
             count += 1;
         }
         assert_eq!(count, n);
+    });
+}
+
+#[divan::bench(args = [50, 100, 200, 400, 800, 1600])]
+fn sparse_zipper_step_iter(bencher: Bencher, n: u64) {
+    let mut r = StdRng::seed_from_u64(1);
+    let keys: Vec<Vec<u8>> = (0..n).map(|_| {
+        let len = (r.random::<u8>() % 15) + 5;
+        (0..len).map(|_| r.random::<u8>()).collect()
+    }).collect();
+    let map: PathMap<usize> = keys.iter().enumerate().map(|(i, key)| (key, i)).collect();
+
+    bencher.bench_local(|| {
+        let mut steps = 0usize;
+        let mut zipper = map.read_zipper();
+        while zipper.to_next_step() {
+            steps += 1;
+        }
+        black_box(steps);
     });
 }
 

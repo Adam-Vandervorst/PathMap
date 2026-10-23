@@ -88,7 +88,7 @@ use crate::{
     morphisms::Catamorphism,
     utils::{BitMask, ByteMask, find_prefix_overlap},
     zipper::{
-        Zipper, ZipperValues, ZipperForking, ZipperAbsolutePath, ZipperIteration,
+        Zipper, ZipperValues, ZipperValuesAt, ZipperForking, ZipperAbsolutePath, ZipperIteration,
         ZipperMoving, ZipperPath, ZipperPathBuffer, ZipperReadOnlyValues, ZipperSubtries,
         PathObserver,
         ZipperConcrete, ZipperReadOnlyConditionalValues, TrieRef
@@ -1491,8 +1491,57 @@ use std::fs::{File, OpenOptions};
 
 pub struct FileDumper {
     buf_writer: BufWriter<File>,
-    line_buf: Vec<u8>,
-    line_map: HashMap::<u64, (usize, usize, LineId)>,
+    line_cache_entries: usize,
+}
+
+impl FileDumper {
+    fn line_matches(&mut self, offset: u64, end: u64, path: &[u8]) -> std::io::Result<bool> {
+        let mut header = [0; MAX_VARINT_SIZE];
+        let header_len = push_varint_u64(&mut &mut header[..], path.len() as u64)?;
+        let total = header_len + path.len();
+        if total as u64 > end - offset { return Ok(false); }
+        let buffered_start = end - self.buf_writer.buffer().len() as u64;
+        if offset >= buffered_start {
+            let start = (offset - buffered_start) as usize;
+            let stored = &self.buf_writer.buffer()[start..start + total];
+            return Ok(stored[..header_len] == header[..header_len] && stored[header_len..] == *path);
+        }
+        let mut bytes = [0; 8192];
+        for start in (0..total).step_by(bytes.len()) {
+            let len = (total - start).min(bytes.len());
+            let position = offset + start as u64;
+            let on_disk = buffered_start.saturating_sub(position).min(len as u64) as usize;
+            if on_disk != 0 {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileExt;
+                    self.buf_writer.get_ref().read_exact_at(&mut bytes[..on_disk], position)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    // Preserve the append position without flushing the buffered suffix.
+                    let file = self.buf_writer.get_mut();
+                    file.seek(SeekFrom::Start(position))?;
+                    let read = std::io::Read::read_exact(file, &mut bytes[..on_disk]);
+                    let restored = file.seek(SeekFrom::Start(buffered_start));
+                    read?;
+                    restored?;
+                }
+            }
+            if on_disk < len {
+                let buffered_offset = (position + on_disk as u64 - buffered_start) as usize;
+                bytes[on_disk..len].copy_from_slice(
+                    &self.buf_writer.buffer()[buffered_offset..buffered_offset + len - on_disk]);
+            }
+            let prefix = header_len.saturating_sub(start).min(len);
+            if prefix != 0 && bytes[..prefix] != header[start..start + prefix] { return Ok(false); }
+            if prefix < len {
+                let path_start = start + prefix - header_len;
+                if bytes[prefix..len] != path[path_start..path_start + len - prefix] { return Ok(false); }
+            }
+        }
+        Ok(true)
+    }
 }
 
 impl Write for FileDumper {
@@ -1520,8 +1569,7 @@ impl ArenaCompactTree<FileDumper> {
         let buf_writer = BufWriter::with_capacity(DUMPER_BUFFER_SIZE, file);
         let storage = FileDumper {
             buf_writer,
-            line_buf: Default::default(),
-            line_map: Default::default(),
+            line_cache_entries: usize::MAX,
         };
         let act = ArenaCompactTree {
             storage,
@@ -1550,16 +1598,17 @@ impl ArenaCompactTree<FileDumper> {
         let mut hasher = self.hasher.clone();
         hasher.write(path);
         let hash = hasher.finish();
-        if let Some(&(start, len, prev)) = self.storage.line_map.get(&hash) {
-            let buf = &self.storage.line_buf[start..start+len];
-            if buf == path {
+        if let Some(&prev) = self.line_map.get(&hash) {
+            if self.storage.line_matches(prev.0, self.position, path)? {
                 self.counters.add_line_data_reuse(path.len());
                 return Ok(prev);
             }
         }
+        // Only fingerprints and offsets are cached; stored bytes verify collisions.
+        if self.line_map.len() >= self.storage.line_cache_entries {
+            self.line_map.clear();
+        }
         let line_id = LineId(self.position);
-        let line_start = self.storage.line_buf.len();
-        self.storage.line_buf.extend_from_slice(path);
         let lenlen = push_varint_u64(
             &mut self.storage, path.len() as u64
         )? as u64;
@@ -1567,7 +1616,9 @@ impl ArenaCompactTree<FileDumper> {
         self.storage.write_all(path)?;
         self.position += path.len() as u64;
         self.counters.add_line_data(lenlen as usize + path.len());
-        self.storage.line_map.insert(hash, (line_start, path.len(), line_id));
+        if self.storage.line_cache_entries != 0 {
+            self.line_map.insert(hash, line_id);
+        }
         Ok(line_id)
     }
 }
@@ -1792,10 +1843,21 @@ pub struct ACTOutputStream {
 }
 
 impl ACTOutputStream {
-    /// Create (or truncate) the file at `path` and start streaming a trie into it
+    /// Create (or truncate) the file at `path` and start streaming a trie into it.
+    /// The reuse cache holds at most 262144 fingerprint-to-offset entries.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        Self::with_cache_limit(path, 262144)
+    }
+
+    /// Create a stream with at most `entries` cached fingerprints and ACT offsets.
+    /// Line bytes stay in the output file or its write buffer. Hash-table capacity
+    /// and metadata are additional. A zero entry limit disables caching.
+    /// Eviction may increase file size but never changes the tree's contents.
+    pub fn with_cache_limit(path: impl AsRef<Path>, entries: usize) -> Result<Self, std::io::Error> {
+        let mut act = ArenaCompactTree::<FileDumper>::open(path)?;
+        act.storage.line_cache_entries = entries;
         Ok(ACTOutputStream {
-            act: ArenaCompactTree::<FileDumper>::open(path)?,
+            act,
             stack: Vec::from([StreamFrame::empty()]),
             prev_path: Vec::new(),
             count: 0,
@@ -2307,9 +2369,11 @@ where Storage: AsRef<[u8]>
     cur_node: Node,
     stack: Vec<StackFrame>,
     path: Vec<u8>,
+    pub(crate) invalid: usize,
+    // origin_* fields are used to remember the position of zipper's root
     origin_depth: usize,
     origin_node_depth: usize,
-    pub invalid: usize,
+    origin_invalid: usize,
     _marker: PhantomData<Value>,
 }
 
@@ -2319,7 +2383,7 @@ where Storage: AsRef<[u8]>
     fn clone(&self) -> Self {
         let Self {
             tree, cur_node, stack, path,
-            origin_depth, origin_node_depth, invalid, ..
+            origin_depth, origin_node_depth, invalid, origin_invalid, ..
         } = self;
         Self {
             tree,
@@ -2329,6 +2393,7 @@ where Storage: AsRef<[u8]>
             origin_depth: *origin_depth,
             origin_node_depth: *origin_node_depth,
             invalid: *invalid,
+            origin_invalid: *origin_invalid,
             _marker: PhantomData,
         }
     }
@@ -2382,6 +2447,7 @@ where Storage: AsRef<[u8]>
             tree, cur_node,
             path: Vec::new(),
             invalid: 0,
+            origin_invalid: 0,
             origin_depth: 0,
             origin_node_depth: 0,
             stack: Vec::from([stack_frame]),
@@ -2391,6 +2457,7 @@ where Storage: AsRef<[u8]>
 
     fn with_root_here(mut self) -> Self {
         self.origin_depth = self.path.len();
+        self.origin_invalid = self.invalid;
         if self.stack.len() > 1 {
             let last = self.stack.len() - 1;
             self.stack.swap(0, last);
@@ -2663,30 +2730,23 @@ where Storage: AsRef<[u8]>
                 return start_len - self.path.len();
             }
 
-            match &self.cur_node {
-                Node::Line(line) => {
-                    if need_value && line.value.is_some() {
-                        return start_len - self.path.len();
-                    }
-                }
-                Node::Branch(node) => {
-                    if need_value && node.value.is_some() {
-                        return start_len - self.path.len();
-                    }
-                }
+            //The deepest real ancestor stops the ascent if the *focus* has a value (when needed) or branches
+            if (need_value && self.is_val()) || self.child_count() > 1 {
+                return start_len - self.path.len();
             }
         }
         while let Some(top_frame) = self.stack.last_mut() {
             let mut nchildren = top_frame.child_count;
-            let mut this_steps = top_frame.node_depth
-                .min(self.path.len() - self.origin_depth);
-            top_frame.node_depth = 0;
-            if self.stack.len() > 1 {
+            // case: partway into the node
+            let remaining = self.path.len() - self.origin_depth;
+            let mut this_steps = top_frame.node_depth.min(remaining);
+            top_frame.node_depth -= this_steps;
+            if self.stack.len() > 1 && remaining > this_steps {
                 self.stack.pop();
                 let prev = self.stack.last().unwrap();
                 self.cur_node = self.tree.get_node(prev.node_id).0;
                 nchildren = prev.child_count;
-                    this_steps += 1;
+                this_steps += 1;
             }
             self.path.truncate(self.path.len() - this_steps);
             // eprintln!("path={:?}", self.path);
@@ -2765,7 +2825,48 @@ where Storage: AsRef<[u8]>
         descended
     }
 
+    #[cold]
+    #[inline(never)]
+    fn to_sibling_from_nonexistent_path(&mut self, next: bool) -> Option<u8> {
+        // A sibling can only exist when the final byte alone is nonexistent and
+        // its parent is therefore an existing trie position.
+        if self.invalid != 1 || self.at_root() {
+            return None;
+        }
+
+        let cur_byte = *self.path.last().unwrap();
+        let (sibling_byte, sibling_idx) = match &self.cur_node {
+            Node::Line(line) => {
+                let frame = self.stack.last().unwrap();
+                let byte = *self.tree.get_line(line.path).get(frame.node_depth)?;
+                if (next && byte > cur_byte) || (!next && byte < cur_byte) {
+                    (byte, 0)
+                } else {
+                    return None;
+                }
+            }
+            Node::Branch(node) => {
+                let byte = if next {
+                    node.bytemask.next_bit(cur_byte)
+                } else {
+                    node.bytemask.prev_bit(cur_byte)
+                }?;
+                (byte, node.bytemask.index_of(byte) as usize)
+            }
+        };
+
+        self.path.pop();
+        self.invalid = 0;
+        let result = self.descend_indexed_byte(sibling_idx);
+        debug_assert_eq!(result, Some(sibling_byte));
+        result
+    }
+
     fn to_sibling(&mut self, next: bool) -> Option<u8> {
+        if self.invalid > 0 {
+            return self.to_sibling_from_nonexistent_path(next);
+        }
+
         let top_frame = self.stack.last().unwrap();
         if self.stack.len() <= 1 || top_frame.node_depth > 0 {
             // can't move to sibling at root, or along the path
@@ -2829,8 +2930,9 @@ impl<'tree, Storage> ZipperForking<()> for ACTZipper<'tree, Storage, ()>
 where Storage: AsRef<[u8]>
 {
     type ReadZipperT<'t> = ACTZipper<'t, Storage, ()> where Self: 't;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        self.clone().with_root_here()
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
+        Some(self.clone().with_root_here())
     }
 }
 
@@ -2838,8 +2940,9 @@ impl<'tree, Storage> ZipperForking<u64> for ACTZipper<'tree, Storage, u64>
 where Storage: AsRef<[u8]>
 {
     type ReadZipperT<'t> = ACTZipper<'t, Storage, u64> where Self: 't;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        self.clone().with_root_here()
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
+        Some(self.clone().with_root_here())
     }
 }
 
@@ -2921,9 +3024,10 @@ where Storage: AsRef<[u8]>
         let (cur_node, _) = self.tree.get_node(self.stack[0].node_id);
         self.cur_node = cur_node;
         self.stack.truncate(1);
+        // restore origin_* state
         self.stack[0].node_depth = self.origin_node_depth;
         self.path.truncate(self.origin_depth);
-        self.invalid = 0;
+        self.invalid = self.origin_invalid;
     }
 
     /// Returns the total number of values contained at and below the zipper's focus, including the focus itself
@@ -3206,72 +3310,47 @@ where Storage: AsRef<[u8]>
     /// See: [to_next_k_path](ZipperIteration::to_next_k_path)
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         timed_span!(DescendFirstKPath, COUNTERS);
-        for ii in 0..k {
-            match self.descend_first_byte() {
-                Some(byte) => obs.descend_to_byte(byte),
-                None => {
-                    self.ascend(ii);
-                    obs.ascend(ii);
+        if k == 0 {
+            return false;
+        }
+        //This used to follow the first byte `k` times and give up if it ran out, which finds a
+        //path of length `k` only when the leftmost chain happens to be that long -- so a trie
+        //whose first branch is short reported "no such path" with plenty of them to the right.
+        //The doc above promises depth-first exploration, and that is what the caller needs: the
+        //depth-first-*first* location exactly `k` bytes below the focus.  So on a dead end, back
+        //up to the nearest ancestor with an unvisited sibling and carry on from there.
+        let mut depth = 0usize;
+        loop {
+            while depth < k {
+                match self.descend_first_byte() {
+                    Some(byte) => {
+                        obs.descend_to_byte(byte);
+                        depth += 1;
+                    },
+                    None => break,
+                }
+            }
+            if depth == k {
+                return true;
+            }
+            //Dead end above depth `k`.  Ascend to the nearest branch that has another way
+            //down; running out of those means there is no such path, and the focus is back
+            //where it started, which is what the doc promises on `false`.
+            loop {
+                if depth == 0 {
                     return false;
                 }
-            }
-        }
-        return true;
-    }
-
-    /// Moves the zipper's focus to the next location with the same path length as the current focus,
-    /// following a depth-first exploration from a common root `k` steps above the current focus
-    ///
-    /// Returns `true` if the zipper has sucessfully moved to a new location at the same level, or `false`
-    /// if no further locations exist.  If this method returns `false` then the zipper will be ascended `k`
-    /// steps to the common root.  (The focus position when [descend_first_k_path](ZipperIteration::descend_first_k_path) was called)
-    ///
-    /// WARNING: This is not a constant-time operation, and may be as bad as `order n` with respect to the paths
-    /// below the zipper's focus.  Although a typical cost is `order log n` or better.
-    ///
-    /// See: [descend_first_k_path](ZipperIteration::descend_first_k_path)
-    fn to_next_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
-        timed_span!(ToNextKPath, COUNTERS);
-        let mut depth = k;
-        'outer: loop {
-            while depth > 0 && self.child_count() <= 1 {
-                if self.ascend(1) == 0 {
-                    break 'outer;
+                if let Some(byte) = self.to_next_sibling_byte() {
+                    //A sibling step is one byte up and one byte down, as the observer sees it
+                    obs.ascend(1);
+                    obs.descend_to_byte(byte);
+                    break;
                 }
+                self.ascend_byte();
                 obs.ascend(1);
                 depth -= 1;
             }
-            let stack = self.stack.last_mut().unwrap();
-            let idx = stack.child_index + 1;
-            if idx >= stack.child_count {
-                if depth == 0 {
-                    break 'outer;
-                }
-                if self.ascend(1) == 0 {
-                    break 'outer;
-                }
-                obs.ascend(1);
-                depth -= 1;
-                continue 'outer;
-            }
-            //The loops above already ascended, so this is a plain descent of one byte
-            match self.descend_indexed_byte(idx) {
-                Some(byte) => obs.descend_to_byte(byte),
-                None => unreachable!("idx was bounds-checked against child_count above"),
-            }
-            depth += 1;
-            for _ii in 0..k - depth {
-                match self.descend_first_byte() {
-                    Some(byte) => obs.descend_to_byte(byte),
-                    None => continue 'outer,
-                }
-                depth += 1;
-            }
-            return true;
         }
-        self.ascend(depth);
-        obs.ascend(depth);
-        false
     }
 }
 
@@ -3289,7 +3368,7 @@ impl <'a, Storage, Value>
 Iterator for ActIter<'a, Storage, Value>
 where
     Storage: AsRef<[u8]>,
-    ACTZipper<'a, Storage, Value>: ZipperValues<Value>,
+    ACTZipper<'a, Storage, Value>: ZipperValuesAt<Value>,
     Value: Clone,
 {
     type Item = (Vec<u8>, Value);
@@ -3326,7 +3405,7 @@ where
 mod tests {
     use super::{ArenaCompactTree, ACTZipper};
     use crate::{
-        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues}
+        morphisms::Catamorphism, PathMap, zipper::{zipper_iteration_tests, zipper_moving_tests, ZipperIteration, ZipperMoving, ZipperPath, ZipperValues, ZipperValuesAt}
     };
 
     zipper_moving_tests::zipper_moving_tests!(arena_compact_zipper,
@@ -3586,7 +3665,7 @@ mod tests {
                 for c in sample {
                     let path = [a, b, c, b, a];
                     assert_eq!(cached.get_val_at(&path), Some(1), "{path:?}");
-                    assert_eq!(map.get_val_at(&path), Some(&1), "source {path:?}");
+                    assert_eq!(map.val_at(&path), Some(&1), "source {path:?}");
                     // ...and nothing above or below a full-depth path
                     for len in 0..DEPTH {
                         assert_eq!(cached.get_val_at(&path[..len]), None, "{path:?}[..{len}]");
@@ -4095,4 +4174,169 @@ mod tests {
         assert_act_matches_map(&map, &tree);
         Ok(())
     }
+
+    /// `ACTZipper::descend_first_k_path` followed the first byte `k` times and gave up
+    /// when that chain ran out, so it found a path of length `k` only when the leftmost
+    /// chain happened to be that long.  The trait promises a depth-first search for the
+    /// first location exactly `k` bytes below the focus, with the focus unmoved on
+    /// `false`.
+    #[test]
+    fn act_zipper_descend_first_k_path_backtracks() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(b"a", 1);       //the leftmost branch is one byte deep
+        m.insert(b"bxy", 2);     //this one reaches depth 3
+        m.insert(b"bxz", 3);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+        for k in 1..=4 {
+            let mut az = t.read_zipper_u64();
+            let mut pz = m.read_zipper();
+            let a = az.descend_first_k_path(k);
+            let p = pz.descend_first_k_path(k);
+            assert_eq!(a, p, "k={k}");
+            assert_eq!(az.path(), pz.path(), "k={k}");
+            if a {
+                //The walk continues from what descend_first_k_path found
+                let mut az_paths = vec![az.path().to_vec()];
+                while az.to_next_k_path(k) { az_paths.push(az.path().to_vec()); }
+                let mut pz_paths = vec![pz.path().to_vec()];
+                while pz.to_next_k_path(k) { pz_paths.push(pz.path().to_vec()); }
+                assert_eq!(az_paths, pz_paths, "k={k}");
+            }
+        }
+        //From a focus below the root, and with no path of that length at all
+        let mut az = t.read_zipper_u64();
+        az.descend_to(b"b");
+        assert!(!az.descend_first_k_path(3));
+        assert_eq!(az.path(), b"b");
+        assert!(az.descend_first_k_path(2));
+        assert_eq!(az.path(), b"bxy");
+    }
+
+    /// `ascend_until` / `ascend_until_branch` zeroed the top frame's `node_depth` even when the
+    /// ascent stopped short at a zipper root that sits partway into a line node, so the frame
+    /// pointed at the start of the line while the path stayed at the root.  Every descent after
+    /// that read the line from its start and produced bytes that do not exist below the root.
+    #[test]
+    fn act_zipper_ascend_until_at_a_mid_line_root() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        m.insert(b"", 100);
+        m.insert(b"\x00\x00", 235);
+        m.insert(b"\x01\x03\x02\x02", 71);
+        m.insert(b"\x03\x03", 135);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+        //Rooted two bytes into the line under branch byte 01, so the root is mid-line
+        for root in [&b"\x01\x03\x02"[..], b"\x01\x03"] {
+            let mut az = t.read_zipper_at_path_u64(root);
+            let mut pz = m.read_zipper_at_path(root);
+            //At the root both are no-ops
+            assert_eq!(az.ascend_until_branch(), pz.ascend_until_branch());
+            assert_eq!(az.ascend_until(), pz.ascend_until());
+            assert_eq!(az.descend_first_byte(), pz.descend_first_byte(), "root {root:?}");
+            assert_eq!(az.path(), pz.path());
+            //From below the root, ascending stops at the root and the frame stays consistent
+            assert_eq!(az.descend_until(), pz.descend_until());
+            assert_eq!(az.path(), pz.path());
+            assert!(!az.at_root());
+            assert_eq!(az.ascend_until_branch(), pz.ascend_until_branch());
+            assert_eq!(az.path(), pz.path());
+            assert!(az.at_root());
+            assert_eq!(az.descend_first_byte(), pz.descend_first_byte());
+            assert_eq!(az.path(), pz.path());
+            assert_eq!(az.val(), pz.val());
+            az.reset(); pz.reset();
+            assert!(az.descend_first_k_path(1) == pz.descend_first_k_path(1));
+            assert_eq!(az.path(), pz.path());
+        }
+    }
+
+    /// A zipper can be constructed at a path that does not exist.
+    /// `reset` put the path back but cleared `invalid`
+    /// unconditionally, so the zipper came back believing it was rooted at its deepest
+    /// real ancestor and answered `val()` with that ancestor's value.
+    #[test]
+    fn act_zipper_reset_returns_to_an_off_trie_root() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        { let mut w = m.write_zipper(); w.set_val(38); }
+        m.insert(&[1u8, 0, 2], 22);
+        m.insert(&[1u8, 1], 72);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+
+        assert!(t.read_zipper_at_path(&[1u8]).fork_read_zipper().is_some());
+
+        for root in [&[1u8, 1, 3][..], &[9u8], &[1u8, 0, 2, 5, 5]] {
+            let mut az = t.read_zipper_u64();
+            az.descend_to(root);
+            assert!(!az.path_exists(), "{root:?}");
+            assert!(az.fork_read_zipper().is_none(), "{root:?}");
+            assert!(t.read_zipper_at_path(root).fork_read_zipper().is_none(), "{root:?}");
+            let mut fork = t.read_zipper_at_path_u64(root);
+            assert!(!fork.path_exists(), "{root:?}");
+            assert_eq!(fork.val(), None, "{root:?}");
+            fork.reset();
+            assert!(fork.at_root(), "{root:?}");
+            assert!(!fork.path_exists(), "{root:?} after reset");
+            assert_eq!(fork.val(), None, "{root:?} after reset");
+            assert_eq!(fork.val_count(), 0, "{root:?} after reset");
+            assert_eq!(fork.child_count(), 0, "{root:?} after reset");
+            assert!(!fork.to_next_val(), "{root:?} after reset");
+        }
+
+        //The same through a zipper created at an off-trie path
+        let mut az = t.read_zipper_at_path_u64(&[1u8, 1, 3]);
+        assert_eq!(az.val(), None);
+        az.descend_to(&[0u8]);
+        az.reset();
+        assert_eq!(az.val(), None);
+        assert!(!az.path_exists());
+    }
+
+    /// `ACTZipper` sibling steps from a focus off the trie
+    #[test]
+    fn act_zipper_sibling_step_from_an_off_trie_focus() {
+        use crate::zipper::*;
+        let mut m = PathMap::<u64>::new();
+        { let mut w = m.write_zipper(); w.set_val(38); }
+        m.insert(&[1u8], 5);
+        m.insert(&[1u8, 0, 2], 22);
+        m.insert(&[3u8], 7);
+        let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
+
+        //One byte off the trie, with a sibling on either side
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[2u8]);
+        assert!(!az.path_exists());
+        assert_eq!(az.to_next_sibling_byte(), Some(3));
+        assert_eq!(az.path(), &[3u8]);
+        assert_eq!(az.val(), Some(&7));
+        az.ascend(1);
+        az.descend_to(&[2u8]);
+        assert_eq!(az.to_prev_sibling_byte(), Some(1));
+        assert_eq!(az.path(), &[1u8]);
+        assert_eq!(az.val(), Some(&5));
+
+        //No sibling on that side: the zipper stays where it was
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[0u8]);
+        assert_eq!(az.to_prev_sibling_byte(), None);
+        assert_eq!(az.path(), &[0u8]);
+        assert!(!az.path_exists());
+        assert_eq!(az.to_next_sibling_byte(), Some(1));
+
+        //Two bytes off the trie: the parent is not real, so there is no sibling
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[2u8, 0]);
+        assert_eq!(az.to_next_sibling_byte(), None);
+        assert_eq!(az.path(), &[2u8, 0]);
+
+        //`to_next_step` from an off-trie focus visits what follows it
+        let mut az = t.read_zipper_u64();
+        az.descend_to(&[0u8]);
+        let mut seen = Vec::new();
+        while az.to_next_step() { seen.push(az.path().to_vec()); }
+        assert_eq!(seen, vec![vec![1u8], vec![1, 0], vec![1, 0, 2], vec![3]]);
+    }
+
 }

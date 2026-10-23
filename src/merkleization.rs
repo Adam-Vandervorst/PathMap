@@ -60,7 +60,7 @@ pub(crate) fn merkleize_impl<V, A>(
     let node_ref = node.as_tagged();
     let mut it = node_ref.new_iter_token();
     while it != NODE_ITER_FINISHED {
-        let (next, path, child, val) = node_ref.next_items(it);
+        let (next, path, child, val) = node_ref.next_items(it, false);
         it = next;
         path.hash(&mut hasher);
         let (child_hash, replace);
