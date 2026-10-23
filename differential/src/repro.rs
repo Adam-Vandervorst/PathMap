@@ -217,6 +217,8 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                             rs_bytes(&r1), rs_bytes(&p)) }
             56 => { let pr = g!(d.boolean()); format!("wz.remove_subtrie({pr});") }
             57 => { let _t = g!(d.modn(2)); "rz.descend_last_val();".to_string() }
+            58 => { let t = g!(d.modn(2)); format!("{}.to_prev_step();", z!(t)) }
+            59 => { let _t = g!(d.modn(2)); "rz.to_prev_val();".to_string() }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

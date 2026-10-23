@@ -471,8 +471,10 @@ pub trait ZipperMoving: Zipper {
     /// Advances the zipper to visit every existing path within the trie in a depth-first order,
     /// reporting movement to `obs`.
     ///
-    /// Returns `true` if the position of the zipper has moved, or `false` if the zipper has returned
-    /// to the root
+    /// Returns `false` when zipper has returned to the zipper’s root, otherwise `true`. If the zipper's
+    /// focus is on a non-existent path, this method moves to the next existing path in the sequence of
+    /// existing paths.
+    ///
     /// `obs` is notified of every movement made, so a caller can track the zipper's location without
     /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
     fn to_next_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
@@ -517,33 +519,43 @@ pub trait ZipperMoving: Zipper {
     /// Moves the zipper to the previous existing path within the trie, visiting every path in the exact
     /// reverse of the order used by [`to_next_step`](ZipperMoving::to_next_step), and reporting movement to `obs`.
     ///
-    /// Returns `true` if the position of the zipper has moved, or `false` if the zipper has returned
-    /// to the root.  Called at the root, this method moves to the last path in the trie (the end of
-    /// the path found by [`descend_last_byte`](ZipperMoving::descend_last_byte) repeatedly), so calling
-    /// it repeatedly cycles through all existing positions, like `to_next_step`.
+    /// Returns `false` when traversal ends at the zipper's root, otherwise `true`.
+    /// Called at the root, this method moves to the last existing path by sort order.
     ///
-    /// If the focus has a previous sibling, this method moves to that sibling and then descends its last
-    /// child at each level until it reaches a leaf.  Otherwise it ascends one byte.
+    /// If the zipper's focus is on a non-existent path, this method moves to the existing path immediately
+    /// before the focus path in the sequence of existing paths.
     ///
     /// `obs` is notified of every movement made, so a caller can track the zipper's location without
     /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
     fn to_prev_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
-        if !self.at_root() {
-            match self.to_prev_sibling_byte() {
-                Some(byte) => {
-                    //A sibling step replaces the last byte rather than adding one, so the
-                    //observer sees the old byte retracted before the new one arrives.
-                    obs.ascend(1);
-                    obs.descend_to_byte(byte);
-                },
-                None => {
-                    self.ascend_byte();
-                    obs.ascend(1);
-                    return !self.at_root()
+        if self.at_root() {
+            if self.child_count() == 0 {
+                return false
+            }
+        } else {
+            loop {
+                match self.to_prev_sibling_byte() {
+                    Some(byte) => {
+                        //A sibling step replaces the last byte rather than adding one, so the
+                        //observer sees the old byte retracted before the new one arrives.
+                        obs.ascend(1);
+                        obs.descend_to_byte(byte);
+                        break
+                    },
+                    None => {
+                        if !self.ascend_byte() {
+                            return false
+                        }
+                        obs.ascend(1);
+                        if self.at_root() {
+                            return false
+                        }
+                        if self.path_exists() {
+                            return true
+                        }
+                    }
                 }
             }
-        } else if self.child_count() == 0 {
-            return false
         }
         //Descend to the last leaf below the focus, which is the predecessor in depth-first order
         while let Some(byte) = self.descend_last_byte() {
@@ -3981,6 +3993,14 @@ pub(crate) mod zipper_moving_tests {
                 }
 
                 #[test]
+                fn [<$z_name _to_prev_step_from_missing_path>]() {
+                    for root in [b"".as_slice(), b"rom".as_slice()] {
+                        let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_TO_NEXT_STEP_TEST1_KEYS);
+                        crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, root, crate::zipper::zipper_moving_tests::to_prev_step_from_missing_path)
+                    }
+                }
+
+                #[test]
                 fn [<$z_name _zipper_byte_iter_test1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_BYTES_ITER_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::zipper_byte_iter_test1)
@@ -4835,6 +4855,30 @@ pub(crate) mod zipper_moving_tests {
         zipper.descend_to(b"a");
         assert!(!zipper.to_prev_step());
         assert!(zipper.at_root());
+    }
+
+    /// Missing suffixes must be skipped without skipping an existing parent or predecessor subtree.
+    pub fn to_prev_step_from_missing_path<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        let mut paths = vec![];
+        while zipper.to_next_step() {
+            paths.push(zipper.path().to_vec());
+        }
+        for start in [b"zzzz".as_slice(), b"0zzz", b"romanusZZ", b"romzzz", b"aaaa"] {
+            zipper.reset();
+            zipper.descend_to(start);
+            assert!(!zipper.path_exists(), "test focus must be missing: {start:?}");
+            let expected = paths.iter().rev().find(|path| path.as_slice() < start);
+            let mut observed = start.to_vec();
+            assert_eq!(zipper.to_prev_step_observed(&mut observed), expected.is_some(), "from {start:?}");
+            assert_eq!(zipper.path(), expected.map_or(b"".as_slice(), |path| path.as_slice()), "from {start:?}");
+            assert_eq!(observed, zipper.path(), "observer from {start:?}");
+            assert!(zipper.at_root() || zipper.path_exists());
+
+            zipper.reset();
+            zipper.descend_to(start);
+            assert_eq!(zipper.to_prev_step(), expected.is_some());
+            assert_eq!(zipper.path(), observed);
+        }
     }
 
     pub const ZIPPER_BYTES_ITER_TEST1_KEYS: &[&[u8]] = &[b"ABCDEFGHIJKLMNOPQRSTUVWXYZ", b"ab",];

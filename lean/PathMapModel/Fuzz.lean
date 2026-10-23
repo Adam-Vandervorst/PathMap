@@ -535,6 +535,12 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 57 => do let (_, d) ← d.mod 2
              let (r, z) := s.rz.descendLastVal
              some (emit { s with rz := z } "descend_last_val" (showBool r), d)
+  | 58 => do let (t, d) ← d.mod 2
+             let (r, s) := onTarget s t (fun z => z.toPrevStep)
+             some (emit s "to_prev_step" (showBool r), d)
+  | 59 => do let (_, d) ← d.mod 2
+             let (r, z) := s.rz.toPrevVal
+             some (emit { s with rz := z } "to_prev_val" (showBool r), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/

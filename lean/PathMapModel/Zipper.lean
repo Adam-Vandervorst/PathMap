@@ -341,6 +341,14 @@ def toNextStep : Bool × Zip V :=
   | some q => (true, { z with path := q })
   | none => (false, z.reset)
 
+/-- `ZipperMoving::to_prev_step`: the greatest non-root existing location
+strictly before the focus. At the root, wrap to the last non-root location.
+Missing focus paths are allowed; they are never returned as predecessors. -/
+def toPrevStep : Bool × Zip V :=
+  match (z.subPaths.filter (fun q => !q.isEmpty && (z.atRoot || Path.lt q z.path))).getLast? with
+  | some q => (true, { z with path := q })
+  | none => (false, z.reset)
+
 /-! ## `trait ZipperIteration` -/
 
 /-- `ZipperIteration::to_next_val`: the next existing location carrying a value,
@@ -348,6 +356,15 @@ in depth-first order.  Never reports the value at the starting focus.  On
 exhaustion the focus returns to the root and the result is `false`. -/
 def toNextVal : Bool × Zip V :=
   match z.subPaths.find? (fun q => Path.lt z.path q && (z.trie.valAt (z.root ++ q)).isSome) with
+  | some q => (true, { z with path := q })
+  | none => (false, z.reset)
+
+/-- `ZipperIteration::to_prev_val`: the greatest non-root valued location
+strictly before the focus, wrapping to the last such value from the root.
+The zipper-root value is excluded, as in `toNextVal`. -/
+def toPrevVal : Bool × Zip V :=
+  match (z.subPaths.filter (fun q => !q.isEmpty && (z.atRoot || Path.lt q z.path) &&
+      (z.trie.valAt (z.root ++ q)).isSome)).getLast? with
   | some q => (true, { z with path := q })
   | none => (false, z.reset)
 
