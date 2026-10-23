@@ -18,6 +18,12 @@ on:
       benches:
         description: space separated bench targets (empty = default set)
         default: ""
+      alg_fuzz_cases:
+        description: random cases per algebraic fuzz sweep (release and debug-assert)
+        default: "1000000"
+      alg_fuzz_seed:
+        description: seed for the algebraic fuzz sweeps
+        default: "1"
 
 permissions:
   contents: read
@@ -61,9 +67,9 @@ jobs:
 
   bench:
     name: bench A/B vs base
-    # Runs last, after the tests and the fuzz gate pass (skipped when either fails), on PRs
+    # Runs last, after the tests and both fuzz gates pass (skipped when any fails), on PRs
     # and manual runs only; a push to master has nothing to compare against.
-    needs: [test, fuzz]
+    needs: [test, fuzz, alg-fuzz]
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 300
@@ -250,4 +256,106 @@ jobs:
             ${{ runner.temp }}/fuzz-out/*.md
             ${{ runner.temp }}/fuzz-out/fails-*
             ${{ runner.temp }}/fuzz-out/repro
+          if-no-files-found: ignore
+
+  alg-fuzz:
+    name: algebraic equivalence fuzz
+    # No oracle: every route pathmap offers through its algebra (whole-map ops, write-zipper
+    # forms, experimental::zipper_algebra, OverlayZipper, SubtractZipper, ...) must give the
+    # same trie, and a set of lattice laws must hold.  See differential/ALGEBRAIC_FUZZING.md.
+    # Fails on any finding whose signature is missing from differential::algebraic::KNOWN,
+    # which lists what already reproduces on master.  The seed is fixed, so a red run
+    # reproduces locally with the command printed in the job summary.
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: toolchain
+        # rustup is installed per runner user on first use
+        run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "CARGO_TARGET_DIR=$HOME/cache/target" >> "$GITHUB_ENV"   # persists outside _work, so builds stay incremental
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version && cargo --version
+      - name: harness gate
+        # recogniser invariants, a short sweep, and route coverage; no corpus in CI
+        run: cargo test --release -p differential --test algebraic
+      - name: sweep (release)
+        if: ${{ !cancelled() }}
+        env:
+          CASES: ${{ inputs.alg_fuzz_cases || '1000000' }}
+          SEED: ${{ inputs.alg_fuzz_seed || '1' }}
+          OUT: ${{ runner.temp }}/alg-fuzz-out
+        run: |
+          cargo build --release -p differential --bin alg_fuzz
+          mkdir -p "$OUT/release"
+          # a hang is a finding too: the survival-search bug in SubtractZipper looped forever
+          rc=0
+          timeout 20m "$CARGO_TARGET_DIR/release/alg_fuzz" --random "$CASES" --seed "$SEED" --jobs "$(nproc)" \
+            --out "$OUT/release" > "$OUT/release.txt" 2>&1 || rc=$?
+          [ $rc -eq 124 ] && echo "::error::release sweep timed out (hang?)"
+          tail -n 40 "$OUT/release.txt"
+          exit $rc
+      - name: sweep (debug assertions)
+        # debug_assert!s inside the merge primitives catch defects no route comparison sees.
+        # RUSTFLAGS replaces .cargo/config.toml's flags, so target-cpu=native (needed by gxhash)
+        # is repeated; a separate target dir keeps the release build intact.
+        if: ${{ !cancelled() }}
+        env:
+          CASES: ${{ inputs.alg_fuzz_cases || '1000000' }}
+          SEED: ${{ inputs.alg_fuzz_seed || '1' }}
+          OUT: ${{ runner.temp }}/alg-fuzz-out
+          RUSTFLAGS: -C target-cpu=native -C debug-assertions=yes
+        run: |
+          export CARGO_TARGET_DIR="$CARGO_TARGET_DIR/dbgassert"
+          cargo build --release -p differential --bin alg_fuzz
+          mkdir -p "$OUT/dbgassert"
+          rc=0
+          timeout 30m "$CARGO_TARGET_DIR/release/alg_fuzz" --random "$CASES" --seed "$SEED" --jobs "$(nproc)" \
+            --out "$OUT/dbgassert" > "$OUT/dbgassert.txt" 2>&1 || rc=$?
+          [ $rc -eq 124 ] && echo "::error::debug-assert sweep timed out (hang?)"
+          tail -n 40 "$OUT/dbgassert.txt"
+          exit $rc
+      - name: summary
+        if: always()
+        env:
+          CASES: ${{ inputs.alg_fuzz_cases || '1000000' }}
+          SEED: ${{ inputs.alg_fuzz_seed || '1' }}
+          OUT: ${{ runner.temp }}/alg-fuzz-out
+        run: |
+          {
+            echo "### Algebraic equivalence fuzz"
+            for mode in release dbgassert; do
+              f="$OUT/$mode.txt"
+              [ -e "$f" ] || continue
+              if ! grep -q '^checked' "$f"; then
+                # alg_fuzz reports only at the end, so a killed run leaves no counts
+                echo; echo "**$mode**: no report (timed out or crashed; see the step log)"
+                continue
+              fi
+              echo
+              echo "**$mode** ($(grep -m 1 '^checked' "$f")): $(tail -n 1 "$f")"
+              echo
+              echo "<details><summary>findings by value type</summary>"
+              echo
+              echo '```text'
+              sed -n '/^by value type/,/^seen under/p' "$f" | grep -v '^seen under'
+              echo '```'
+              echo "</details>"
+            done
+            echo
+            echo "Reproduce: \`cargo run --release -p differential --bin alg_fuzz -- --random $CASES --seed $SEED --jobs $(nproc)\`"
+            echo "(debug assertions: add \`RUSTFLAGS='-C target-cpu=native -C debug-assertions=yes'\`)."
+            echo "Saved inputs are in the \`alg-fuzz-out\` artifact; shrink one with \`--shrink FILE --target SIG\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: alg-fuzz-out
+          path: ${{ runner.temp }}/alg-fuzz-out
           if-no-files-found: ignore
