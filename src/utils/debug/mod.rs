@@ -3,6 +3,9 @@
 mod diff_zipper;
 pub use diff_zipper::DiffZipper;
 
+pub mod zipper_tracing;
+pub use zipper_tracing::TraceZipper;
+
 mod morphism_debug;
 pub use morphism_debug::CatamorphismDebug;
 
