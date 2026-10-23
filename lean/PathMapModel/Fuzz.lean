@@ -532,6 +532,9 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 56 => do let (pr, d) ← d.bool
              let (removed, z) := s.wz.removeSubtrie pr
              some (emit { s with wz := z } "remove_subtrie" (showBool removed), d)
+  | 57 => do let (_, d) ← d.mod 2
+             let (r, z) := s.rz.descendLastVal
+             some (emit { s with rz := z } "descend_last_val" (showBool r), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/

@@ -216,6 +216,7 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                     format!("{{ let mut b = map1.read_zipper_at_path({}); b.descend_to({}); wz.meet_2(&rz, &b); }}",
                             rs_bytes(&r1), rs_bytes(&p)) }
             56 => { let pr = g!(d.boolean()); format!("wz.remove_subtrie({pr});") }
+            57 => { let _t = g!(d.modn(2)); "rz.descend_last_val();".to_string() }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));
