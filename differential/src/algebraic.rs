@@ -732,6 +732,10 @@ std::thread_local! {
     /// line called "panic".  A hook is the only way to see it.
     static PANIC_SITE: core::cell::RefCell<String> =
         const { core::cell::RefCell::new(String::new()) };
+    /// The input [`run_all`] is checking, so a panic that aborts the process
+    /// can still name its reproducer.
+    static CURRENT_INPUT: core::cell::RefCell<Vec<u8>> =
+        const { core::cell::RefCell::new(Vec::new()) };
 }
 
 /// Replace the panic hook with one that records the panic site and prints
@@ -752,6 +756,25 @@ pub fn install_panic_hook() {
                 format!("{f}:{}", l.line())
             })
             .unwrap_or_else(|| "?".to_string());
+        // A panic that cannot unwind aborts the whole process, so it can never
+        // become a finding; say what and where before the abort, or the run just
+        // dies with "thread caused non-unwinding panic".  Stable Rust cannot ask
+        // `info` whether it unwinds, so match std's messages for the three cases:
+        // a debug-mode unsafe-precondition check, a panic in a destructor during
+        // unwinding, and a panic in a function that cannot unwind.
+        let msg = info.payload_as_str().unwrap_or("");
+        if msg.starts_with("unsafe precondition")
+            || msg.starts_with("panic in a destructor")
+            || msg.starts_with("panic in a function that cannot unwind")
+        {
+            let input: String = CURRENT_INPUT
+                .with(|c| c.try_borrow().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()))
+                .unwrap_or_default();
+            eprintln!(
+                "non-unwinding panic at {site}: {msg}\ninput (hex, replay with xxd -r -p): {input}\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         PANIC_SITE.with(|s| *s.borrow_mut() = site);
     }));
 }
@@ -809,6 +832,11 @@ pub const VALUE_TYPES: &[&str] = &[
 /// both -- or under `bits` alone -- is a defect in the crate.  Checking only the
 /// lawful type would be cheaper and would lose the comparison.
 pub fn run_all(bytes: &[u8], f: &mut impl FnMut(&'static str, Outcome)) {
+    CURRENT_INPUT.with(|c| {
+        let mut c = c.borrow_mut();
+        c.clear();
+        c.extend_from_slice(bytes);
+    });
     f(<u64 as FuzzValue>::NAME, run::<u64>(bytes));
     f(<value::Bits as FuzzValue>::NAME, run::<value::Bits>(bytes));
     f(<() as FuzzValue>::NAME, run::<()>(bytes));
