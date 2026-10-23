@@ -60,7 +60,17 @@ zipper_alg = [] # Enables experimental implementations of Zipper-based algebraic
 fast-slice-utils = { version = "0.1.2", features = ["miri_safe"] }
 
 [target.'cfg(not(any(miri,target_arch="riscv64")))'.dependencies]
-gxhash = {version="3.5"} # for dag_serialization, merkleization, and caching catamorphism
+# gxhash: for dag_serialization, merkleization, and caching catamorphism.
+#
+# Pinned to a git commit instead of the 3.5.0 release.  3.5.0 hashes inputs shorter than 16 bytes with a
+# 16-byte `_mm_loadu_si128` that reads past their end.  Since Rust 1.99 `_mm_loadu_si128` is a checked
+# `copy_nonoverlapping`, so in a build with debug assertions that over-read can fail "unsafe precondition(s)
+# violated" and abort the process (seen in `merkleize`; it depends on stack layout, so it comes and goes by
+# binary and thread).  Upstream: https://github.com/ogxd/gxhash/issues/111.
+# Commit 390c3e5 (PR #118) does that load with inline assembly instead and is otherwise 3.5.0, so hash values
+# do not change.  Do not move to gxhash 4.0 (main) without checking serialized hashes: gxhash only keeps hashes
+# stable within a major version.  Go back to a crates.io version once a 3.x release has this commit.
+gxhash = { git = "https://github.com/ogxd/gxhash", rev = "390c3e5bc07a0b57026982686f69caa442473969" }
 
 [target.'cfg(any(miri,target_arch="riscv64"))'.dependencies]
 xxhash-rust = { version = "0.8.15", features = ["xxh64", "xxh3", "const_xxh3"] } # Replacement for gxhash running under miri
