@@ -792,11 +792,17 @@ impl<V: Clone + Send + Sync + Unpin + DistributiveLattice, A: Allocator> Distrib
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Quantale for PathMap<V, A> {
     fn prestrict(&self, other: &Self) -> AlgebraicResult<Self> {
         if other.root_val().is_some() {
-            return AlgebraicResult::Identity(SELF_IDENT)
+            return if self.is_empty() {
+                AlgebraicResult::None
+            } else {
+                AlgebraicResult::Identity(SELF_IDENT)
+            }
         }
-        match (self.root(), other.root()) {
+        match (self.root().filter(|n| !n.as_tagged().node_is_empty()),
+            other.root().filter(|n| !n.as_tagged().node_is_empty())) {
             (Some(self_root), Some(other_root)) => {
                 match self_root.prestrict(other_root) {
+                    AlgebraicResult::Element(new_root) if new_root.as_tagged().node_is_empty() => AlgebraicResult::None,
                     AlgebraicResult::Element(new_root) => AlgebraicResult::Element(Self::new_with_root_in(Some(new_root), None, self.alloc.clone())),
                     AlgebraicResult::Identity(mask) => {
                         debug_assert_eq!(mask, SELF_IDENT);
@@ -1313,10 +1319,7 @@ mod tests {
         wz.graft(&map1.read_zipper());
         drop(wz);
 
-        #[cfg(feature = "graft_root_vals")]
         assert_eq!(map0.val_at([]), Some(&0));
-        #[cfg(not(feature = "graft_root_vals"))]
-        assert_eq!(map0.get_val_at([]), None);
     }
 
     #[test]

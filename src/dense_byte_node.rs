@@ -1400,7 +1400,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
         (status, Ok(()))
     }
 
-    fn drop_head_dyn(&mut self, byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
+    fn drop_head_dyn(&mut self, byte_cnt: usize, root_val: &mut Option<V>) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
         debug_assert!(byte_cnt > 0);
         match self.values.len() {
             0 => { None },
@@ -1408,10 +1408,14 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 //WARNING: Don't be tempted to swap the node itself with its first child.  This feels like it
                 // might be an optimization, but it would be a memory leak because the other node will now
                 // hold an Rc to itself.
-                match self.values.pop().unwrap().into_rec().filter(|child| !child.is_empty()) {
+                let mut cf = self.values.pop().unwrap();
+                if byte_cnt == 1 {
+                    root_val.join_into(cf.take_val());
+                }
+                match cf.into_rec().filter(|child| !child.is_empty()) {
                     Some(mut child) => {
                         if byte_cnt > 1 {
-                            child.make_mut().drop_head_dyn(byte_cnt-1)
+                            child.make_mut().drop_head_dyn(byte_cnt-1, root_val)
                         } else {
                             Some(child)
                         }
@@ -1421,10 +1425,13 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             _ => {
                 let mut new_node = Self::new_in(self.alloc.clone());
-                while let Some(cf) = self.values.pop() {
+                while let Some(mut cf) = self.values.pop() {
+                    if byte_cnt == 1 {
+                        root_val.join_into(cf.take_val());
+                    }
                     let child = cf.into_rec().filter(|child| !child.is_empty());
                     let child = if byte_cnt > 1 {
-                        child.and_then(|mut child| child.make_mut().drop_head_dyn(byte_cnt-1))
+                        child.and_then(|mut child| child.make_mut().drop_head_dyn(byte_cnt-1, root_val))
                     } else {
                         child
                     };
