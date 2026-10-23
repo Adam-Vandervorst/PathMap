@@ -753,7 +753,9 @@ where
     B: ZipperMoving + ZipperValues<V>,
 {
     let mut depth = 0;
-    let mut branch_bytes = SmallVec::<[u8; 8]>::new();
+    // Branch points with unexplored children: the depth of the branch and the
+    // next child to visit there.
+    let mut branch_points = SmallVec::<[(usize, u8); 8]>::new();
 
     loop {
         let lhs_mask = lhs.child_mask();
@@ -778,10 +780,9 @@ where
         let next_common_byte = lhs_mask.indexed_bit::<true>(0);
         match next_common_byte {
             Some(byte) => {
-                // Remember only genuine branch points. The zipper itself knows
-                // how far it must ascend to get back here.
+                // Remember only genuine branch points.
                 if let Some(following_byte) = lhs_mask.next_bit(byte) {
-                    branch_bytes.push(following_byte);
+                    branch_points.push((depth, following_byte));
                 }
 
                 lhs.descend_to_byte(byte);
@@ -791,9 +792,11 @@ where
                 depth += 1;
             }
             None => {
-                // The current subtree is exhausted. Skip the entire unary suffix and
-                // return directly to the nearest branch with unexplored children.
-                let Some(next_byte) = branch_bytes.last_mut() else {
+                // The current subtree is exhausted. Return directly to the nearest
+                // branch with unexplored children. That is not necessarily the
+                // nearest branch: branches in between may be fully explored, so
+                // ascend by the recorded depth rather than to the next branch.
+                let Some((branch_depth, next_byte)) = branch_points.last_mut() else {
                     let lhs_ascended = lhs.ascend(depth);
                     let rhs_ascended = rhs.ascend(depth);
 
@@ -806,9 +809,11 @@ where
                     return false;
                 };
 
-                let ascended = lhs.ascend_until_branch();
+                let ascended = depth - *branch_depth;
+                let lhs_ascended = lhs.ascend(ascended);
                 let rhs_ascended = rhs.ascend(ascended);
 
+                debug_assert_eq!(lhs_ascended, ascended);
                 debug_assert_eq!(rhs_ascended, ascended);
 
                 witness.ascend(ascended);
@@ -820,7 +825,7 @@ where
                 if let Some(following_byte) = lhs.child_mask().next_bit(cur_byte) {
                     *next_byte = following_byte;
                 } else {
-                    branch_bytes.pop();
+                    branch_points.pop();
                 }
 
                 lhs.descend_to_byte(cur_byte);
@@ -2023,5 +2028,32 @@ mod tests {
                 assert_eq!(actual.child_count(), expected_z.child_count(), "focus {focus:?}");
             }
         }
+    }
+
+    /// The survival search must resume at the pending branch point, not at the
+    /// nearest branch: here `01/00` is a fully explored branch between the
+    /// exhausted `01/00/01/00` and the pending `01/01`, where the only
+    /// surviving value is.
+    #[test]
+    fn survival_search_skips_explored_branches() {
+        use crate::zipper::ZipperWriting;
+        let mut rhs = PathMap::<u16>::new();
+        for path in [&[0, 0, 0, 0, 0][..], &[1, 0, 0], &[1, 0, 1, 0], &[1, 1]] {
+            let mut wz = rhs.write_zipper_at_path(path);
+            wz.create_path();
+        }
+        let mut lhs = rhs.clone();
+        lhs.insert([1, 1], 1);
+        let expected = lhs.subtract(&rhs);
+        assert_eq!(expected.iter().collect::<Vec<_>>(), vec![(vec![1, 1], &1)]);
+
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        assert!(zipper.path_exists());
+        assert_eq!(zipper.val_count(), 1);
+        let mut got = Vec::new();
+        while zipper.to_next_val() {
+            got.push((zipper.path().to_vec(), *zipper.val().unwrap()));
+        }
+        assert_eq!(got, vec![(vec![1, 1], 1)]);
     }
 }
