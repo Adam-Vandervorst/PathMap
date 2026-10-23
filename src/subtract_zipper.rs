@@ -453,31 +453,63 @@ where
 
     /// Returns whether the current focus has a surviving child other than
     /// `cur_byte`.
-    ///
-    /// `cur_byte` is assumed to be a child of the materialized subtraction.
     fn has_surviving_sibling(&mut self, cur_byte: u8) -> bool {
+        self.count_surviving_siblings(cur_byte, 1) != 0
+    }
+
+    /// Counts the surviving children of the current focus other than `cur_byte`,
+    /// stopping once `limit` is reached.
+    fn count_surviving_siblings(&mut self, cur_byte: u8, limit: usize) -> usize {
         let mut candidates = self.lhs.child_mask();
         candidates.clear_bit(cur_byte);
 
-        if candidates.is_empty_mask() {
-            return false;
+        if limit == 0 || candidates.is_empty_mask() {
+            return 0;
         }
         if !self.rhs.path_exists() {
-            // The whole LHS subtree survives, so any other LHS child is enough.
-            return true;
+            // The whole LHS subtree survives, so every other LHS child counts.
+            return candidates.count_bits().min(limit);
         }
 
         let rhs_mask = self.rhs.child_mask();
 
         // Any LHS-only sibling survives wholesale.
         let lhs_only = (candidates ^ rhs_mask) & candidates;
-        if !lhs_only.is_empty_mask() {
-            return true;
+        let mut count = lhs_only.count_bits();
+        if count >= limit {
+            return limit;
         }
 
         // Shared siblings need to be inspected.
         let common = candidates & rhs_mask;
-        common.iter().any(|byte| self.subtree_survives(byte))
+        for byte in common.iter() {
+            if self.subtree_survives(byte) {
+                count += 1;
+                if count >= limit {
+                    break;
+                }
+            }
+        }
+        count
+    }
+
+    /// Decides whether the focus, just reached by ascending out of child
+    /// `cur_byte`, is a branch of the materialized subtraction.
+    ///
+    /// `child_survives` says whether that child is part of the subtraction. If
+    /// it is, one other surviving child makes a branch. If it is not (the old
+    /// focus was off the trie, or subtracted away), two are needed, and finding
+    /// one proves that this focus survives, so `child_survives` is updated for
+    /// the next ascent.
+    fn is_branch_after_ascent(&mut self, cur_byte: u8, child_survives: &mut bool) -> bool {
+        if *child_survives {
+            return self.has_surviving_sibling(cur_byte);
+        }
+        let others = self.count_surviving_siblings(cur_byte, 2);
+        if others != 0 {
+            *child_survives = true;
+        }
+        others >= 2
     }
 
     /// Classifies the current virtual focus for optimized downward traversal.
@@ -1001,14 +1033,10 @@ where
         }
 
         // Survival is monotone upward: once the current subtree survives, every
-        // ancestor reached while ascending survives as well.
-        //
-        // If the current subtree does not survive, that remains true for every
-        // parent through which this loop continues: continuing means that the parent
-        // has neither a surviving value nor another surviving child. The first parent
-        // at which the subtraction may become non-empty is therefore exactly where
-        // this traversal stops.
-        let survives = self.path_exists();
+        // ancestor reached while ascending survives as well. A non-surviving
+        // subtree becomes surviving at the first ancestor with another surviving
+        // child; is_branch_after_ascent() tracks that transition.
+        let mut survives = self.path_exists();
         let mut ascended = 0;
         loop {
             let cur_byte = self.focus_byte().expect("not at root");
@@ -1018,7 +1046,7 @@ where
 
             let stop = self.at_root()
                 || value_survives::<V, _, _>(&self.lhs, &self.rhs)
-                || self.has_surviving_sibling(cur_byte);
+                || self.is_branch_after_ascent(cur_byte, &mut survives);
 
             if stop {
                 self.refresh();
@@ -1044,7 +1072,7 @@ where
             self.ascend_raw_known(1, survives);
             ascended += 1;
 
-            if self.at_root() || self.has_surviving_sibling(cur_byte) {
+            if self.at_root() || self.is_branch_after_ascent(cur_byte, &mut survives) {
                 self.refresh();
                 return ascended;
             }
@@ -1970,5 +1998,34 @@ mod tests {
         zipper.descend_to([10, 20]);
         assert!(!zipper.path_exists(), "state invalid");
         assert!(!zipper.to_next_k_path(2));
+    }
+
+    /// Ascending out of a subtracted-away child must not count the parent's one
+    /// remaining child as a branch.
+    #[test]
+    fn ascend_until_from_subtracted_child_matches_materialized() {
+        let lhs = PathMap::from_iter([(&[1, 2, 3, 4][..], 1u16), (&[1, 2, 5], 2), (&[1, 2, 5, 6], 3), (&[7], 4)]);
+        let rhs = PathMap::from_iter([(&[1, 2, 5][..], 2u16), (&[1, 2, 5, 6], 3)]);
+        let expected = lhs.subtract(&rhs);
+
+        for focus in [&[1, 2, 5][..], &[1, 2, 5, 6]] {
+            for need_value in [false, true] {
+                let mut actual = subtract_at(&lhs, &rhs, &[]);
+                let mut expected_z = expected.read_zipper();
+                actual.descend_to(focus);
+                expected_z.descend_to(focus);
+                assert!(!actual.path_exists());
+                assert!(!expected_z.path_exists());
+
+                let (a, e) = if need_value {
+                    (actual.ascend_until(), expected_z.ascend_until())
+                } else {
+                    (actual.ascend_until_branch(), expected_z.ascend_until_branch())
+                };
+                assert_eq!(a, e, "steps, focus {focus:?}, need_value {need_value}");
+                assert_eq!(actual.path(), expected_z.path(), "path, focus {focus:?}, need_value {need_value}");
+                assert_eq!(actual.child_count(), expected_z.child_count(), "focus {focus:?}");
+            }
+        }
     }
 }
