@@ -344,6 +344,46 @@ fn sparse_zipper_step_iter(bencher: Bencher, n: u64) {
     });
 }
 
+#[divan::bench(args = [50, 100, 200, 400, 800, 1600])]
+fn sparse_zipper_prev_cursor(bencher: Bencher, n: u64) {
+
+    let mut r = StdRng::seed_from_u64(1);
+    let keys: Vec<Vec<u8>> = (0..n).into_iter().map(|_| {
+        let len = (r.random::<u8>() % 18) + 3; //length between 3 and 20 chars
+        (0..len).into_iter().map(|_| r.random::<u8>()).collect()
+    }).collect();
+    let map: PathMap<usize> = keys.iter().enumerate().map(|(n, s)| (s, n)).collect();
+
+    //Benchmark using the zipper as a cursor, moving backwards
+    bencher.bench_local(|| {
+        let mut count = 0;
+        let mut zipper = map.read_zipper();
+        while zipper.to_prev_val() {
+            count += 1;
+        }
+        assert_eq!(count, n);
+    });
+}
+
+#[divan::bench(args = [50, 100, 200, 400, 800, 1600])]
+fn sparse_zipper_prev_step_iter(bencher: Bencher, n: u64) {
+    let mut r = StdRng::seed_from_u64(1);
+    let keys: Vec<Vec<u8>> = (0..n).map(|_| {
+        let len = (r.random::<u8>() % 15) + 5;
+        (0..len).map(|_| r.random::<u8>()).collect()
+    }).collect();
+    let map: PathMap<usize> = keys.iter().enumerate().map(|(i, key)| (key, i)).collect();
+
+    bencher.bench_local(|| {
+        let mut steps = 0usize;
+        let mut zipper = map.read_zipper();
+        while zipper.to_prev_step() {
+            steps += 1;
+        }
+        black_box(steps);
+    });
+}
+
 #[divan::bench(args = [10, 20, 40, 80, 160, 320])]
 fn sparse_iter(bencher: Bencher, n: u64) {
 
