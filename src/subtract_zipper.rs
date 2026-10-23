@@ -31,7 +31,7 @@ impl PathObserver for PathWitness {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SurvivalWitness {
     path: SmallVec<[u8; 16]>,
     pos: usize,
@@ -132,6 +132,8 @@ impl SurvivalWitness {
     }
 }
 
+/// Cloning gives an independent zipper at the same focus, cached state included.
+#[derive(Clone)]
 pub struct SubtractZipper<V, A, B> {
     lhs: A,
     rhs: B,
@@ -158,6 +160,7 @@ pub struct SubtractZipper<V, A, B> {
     survival_witness: Option<SurvivalWitness>,
 }
 
+#[derive(Clone)]
 enum CachedVal<V> {
     None,
     Lhs,
@@ -753,7 +756,9 @@ where
     B: ZipperMoving + ZipperValues<V>,
 {
     let mut depth = 0;
-    let mut branch_bytes = SmallVec::<[u8; 8]>::new();
+    // Branch points with unexplored children: the depth of the branch and the
+    // next child to visit there.
+    let mut branch_points = SmallVec::<[(usize, u8); 8]>::new();
 
     loop {
         let lhs_mask = lhs.child_mask();
@@ -778,10 +783,9 @@ where
         let next_common_byte = lhs_mask.indexed_bit::<true>(0);
         match next_common_byte {
             Some(byte) => {
-                // Remember only genuine branch points. The zipper itself knows
-                // how far it must ascend to get back here.
+                // Remember only genuine branch points.
                 if let Some(following_byte) = lhs_mask.next_bit(byte) {
-                    branch_bytes.push(following_byte);
+                    branch_points.push((depth, following_byte));
                 }
 
                 lhs.descend_to_byte(byte);
@@ -791,9 +795,11 @@ where
                 depth += 1;
             }
             None => {
-                // The current subtree is exhausted. Skip the entire unary suffix and
-                // return directly to the nearest branch with unexplored children.
-                let Some(next_byte) = branch_bytes.last_mut() else {
+                // The current subtree is exhausted. Return directly to the nearest
+                // branch with unexplored children. That is not necessarily the
+                // nearest branch: branches in between may be fully explored, so
+                // ascend by the recorded depth rather than to the next branch.
+                let Some((branch_depth, next_byte)) = branch_points.last_mut() else {
                     let lhs_ascended = lhs.ascend(depth);
                     let rhs_ascended = rhs.ascend(depth);
 
@@ -806,9 +812,11 @@ where
                     return false;
                 };
 
-                let ascended = lhs.ascend_until_branch();
+                let ascended = depth - *branch_depth;
+                let lhs_ascended = lhs.ascend(ascended);
                 let rhs_ascended = rhs.ascend(ascended);
 
+                debug_assert_eq!(lhs_ascended, ascended);
                 debug_assert_eq!(rhs_ascended, ascended);
 
                 witness.ascend(ascended);
@@ -820,7 +828,7 @@ where
                 if let Some(following_byte) = lhs.child_mask().next_bit(cur_byte) {
                     *next_byte = following_byte;
                 } else {
-                    branch_bytes.pop();
+                    branch_points.pop();
                 }
 
                 lhs.descend_to_byte(cur_byte);
@@ -2027,5 +2035,80 @@ mod tests {
                 assert_eq!(actual.child_count(), expected_z.child_count(), "focus {focus:?}");
             }
         }
+    }
+
+    #[test]
+    fn clone_moves_independently() {
+        let lhs = PathMap::from_iter([(&[1, 2, 3][..], 1u16), (&[1, 4], 2), (&[5], 3)]);
+        let rhs = PathMap::from_iter([(&[1, 4][..], 2u16)]);
+        let expected = lhs.subtract(&rhs);
+
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        zipper.descend_to([1]);
+        let mut cloned = zipper.clone();
+        assert_eq!(cloned.path(), &[1]);
+        assert_eq!(cloned.child_mask(), zipper.child_mask());
+
+        cloned.descend_to([2, 3]);
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(zipper.path(), &[1]);
+
+        zipper.reset();
+        zipper.descend_to([1, 4]);
+        assert!(!zipper.path_exists());
+        assert_eq!(cloned.path(), &[1, 2, 3]);
+        let mut expected_z = expected.read_zipper();
+        expected_z.descend_to([1, 2, 3]);
+        assert_eq!(cloned.val(), expected_z.val());
+    }
+
+    /// A `SubtractZipper` can be the input of another one, computing `(a - b) - c`.
+    #[test]
+    fn nested_subtract_matches_materialized() {
+        let a = PathMap::from_iter([(&[1, 2][..], 1u16), (&[1, 3], 2), (&[4], 3), (&[4, 5], 4), (&[6], 5)]);
+        let b = PathMap::from_iter([(&[1, 2][..], 1u16), (&[4], 3)]);
+        let c = PathMap::from_iter([(&[1, 3][..], 2u16), (&[4, 5], 9), (&[7], 1)]);
+        let expected = a.subtract(&b).subtract(&c);
+
+        let inner = SubtractZipper::new(a.read_zipper(), b.read_zipper());
+        let mut nested = SubtractZipper::new(inner, c.read_zipper());
+        let mut expected_z = expected.read_zipper();
+
+        let mut got = vec![(nested.path().to_vec(), nested.val().cloned())];
+        while nested.to_next_step() {
+            got.push((nested.path().to_vec(), nested.val().cloned()));
+        }
+        let mut want = vec![(expected_z.path().to_vec(), expected_z.val().cloned())];
+        while expected_z.to_next_step() {
+            want.push((expected_z.path().to_vec(), expected_z.val().cloned()));
+        }
+        assert_eq!(got, want);
+    }
+
+    /// The survival search must resume at the pending branch point, not at the
+    /// nearest branch: here `01/00` is a fully explored branch between the
+    /// exhausted `01/00/01/00` and the pending `01/01`, where the only
+    /// surviving value is.
+    #[test]
+    fn survival_search_skips_explored_branches() {
+        use crate::zipper::ZipperWriting;
+        let mut rhs = PathMap::<u16>::new();
+        for path in [&[0, 0, 0, 0, 0][..], &[1, 0, 0], &[1, 0, 1, 0], &[1, 1]] {
+            let mut wz = rhs.write_zipper_at_path(path);
+            wz.create_path();
+        }
+        let mut lhs = rhs.clone();
+        lhs.insert([1, 1], 1);
+        let expected = lhs.subtract(&rhs);
+        assert_eq!(expected.iter().collect::<Vec<_>>(), vec![(vec![1, 1], &1)]);
+
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        assert!(zipper.path_exists());
+        assert_eq!(zipper.val_count(), 1);
+        let mut got = Vec::new();
+        while zipper.to_next_val() {
+            got.push((zipper.path().to_vec(), *zipper.val().unwrap()));
+        }
+        assert_eq!(got, vec![(vec![1, 1], 1)]);
     }
 }
