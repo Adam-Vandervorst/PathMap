@@ -264,8 +264,10 @@ jobs:
     # forms, experimental::zipper_algebra, OverlayZipper, SubtractZipper, ...) must give the
     # same trie, and a set of lattice laws must hold.  See differential/ALGEBRAIC_FUZZING.md.
     # Fails on any finding whose signature is missing from differential::algebraic::KNOWN,
-    # which lists what already reproduces on master.  The seed is fixed, so a red run
-    # reproduces locally with the command printed in the job summary.
+    # which lists what already reproduces on master.  The seed and the job count are fixed, so
+    # a red run reproduces locally with the command printed in the job summary: each job draws
+    # its own input stream, so --jobs decides which inputs run, not only how fast.  64 is the
+    # cap; a smaller machine runs the same inputs, oversubscribed.
     needs: test
     if: ${{ !cancelled() }}
     runs-on: [self-hosted, linux, x64]
@@ -290,13 +292,14 @@ jobs:
         env:
           CASES: ${{ inputs.alg_fuzz_cases || '1000000' }}
           SEED: ${{ inputs.alg_fuzz_seed || '1' }}
+          JOBS: 64
           OUT: ${{ runner.temp }}/alg-fuzz-out
         run: |
           cargo build --release -p differential --bin alg_fuzz
           mkdir -p "$OUT/release"
           # a hang is a finding too: the survival-search bug in SubtractZipper looped forever
           rc=0
-          timeout 20m "$CARGO_TARGET_DIR/release/alg_fuzz" --random "$CASES" --seed "$SEED" --jobs "$(nproc)" \
+          timeout 20m "$CARGO_TARGET_DIR/release/alg_fuzz" --random "$CASES" --seed "$SEED" --jobs "$JOBS" \
             --out "$OUT/release" > "$OUT/release.txt" 2>&1 || rc=$?
           [ $rc -eq 124 ] && echo "::error::release sweep timed out (hang?)"
           tail -n 40 "$OUT/release.txt"
@@ -309,6 +312,7 @@ jobs:
         env:
           CASES: ${{ inputs.alg_fuzz_cases || '1000000' }}
           SEED: ${{ inputs.alg_fuzz_seed || '1' }}
+          JOBS: 64
           OUT: ${{ runner.temp }}/alg-fuzz-out
           RUSTFLAGS: -C target-cpu=native -C debug-assertions=yes
         run: |
@@ -316,7 +320,7 @@ jobs:
           cargo build --release -p differential --bin alg_fuzz
           mkdir -p "$OUT/dbgassert"
           rc=0
-          timeout 30m "$CARGO_TARGET_DIR/release/alg_fuzz" --random "$CASES" --seed "$SEED" --jobs "$(nproc)" \
+          timeout 30m "$CARGO_TARGET_DIR/release/alg_fuzz" --random "$CASES" --seed "$SEED" --jobs "$JOBS" \
             --out "$OUT/dbgassert" > "$OUT/dbgassert.txt" 2>&1 || rc=$?
           [ $rc -eq 124 ] && echo "::error::debug-assert sweep timed out (hang?)"
           tail -n 40 "$OUT/dbgassert.txt"
@@ -326,6 +330,7 @@ jobs:
         env:
           CASES: ${{ inputs.alg_fuzz_cases || '1000000' }}
           SEED: ${{ inputs.alg_fuzz_seed || '1' }}
+          JOBS: 64
           OUT: ${{ runner.temp }}/alg-fuzz-out
         run: |
           {
@@ -349,7 +354,7 @@ jobs:
               echo "</details>"
             done
             echo
-            echo "Reproduce: \`cargo run --release -p differential --bin alg_fuzz -- --random $CASES --seed $SEED --jobs $(nproc)\`"
+            echo "Reproduce: \`cargo run --release -p differential --bin alg_fuzz -- --random $CASES --seed $SEED --jobs $JOBS\`"
             echo "(debug assertions: add \`RUSTFLAGS='-C target-cpu=native -C debug-assertions=yes'\`)."
             echo "Saved inputs are in the \`alg-fuzz-out\` artifact; shrink one with \`--shrink FILE --target SIG\`."
           } >> "$GITHUB_STEP_SUMMARY"
