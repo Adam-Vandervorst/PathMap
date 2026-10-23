@@ -545,13 +545,30 @@ impl<'prefix, Z> ZipperIteration for PrefixZipper<'prefix, Z>
     where Z: ZipperIteration
 {
     fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
-        if self.position.is_invalid() {
-            return false;
+        let found = 'search: {
+            //Inside the source, delegate directly without checking the prefix or path existence.
+            if !self.position.is_source() {
+                if let PrefixPos::PrefixOff { valid, invalid } = self.position {
+                    let mismatch = self.origin_depth + valid;
+                    if self.path[mismatch] >= self.prefix[mismatch] {
+                        break 'search false;
+                    }
+                    //The source sorts after the focus; retract the invalid suffix before entering it.
+                    self.ascend(invalid);
+                    obs.ascend(invalid);
+                }
+                if self.consume_prefix(obs) && self.source.is_val() {
+                    break 'search true;
+                }
+            }
+            self.source.to_next_val_observed(&mut (&mut self.path, &mut *obs))
+        };
+        if !found {
+            let depth = self.depth();
+            self.reset();
+            obs.ascend(depth);
         }
-        //Values only exist within the source, and the source's own root may hold one, so the prefix
-        //is consumed without descending any further before handing off
-        self.consume_prefix(obs);
-        self.source.to_next_val_observed(&mut (&mut self.path, &mut *obs))
+        found
     }
 
     fn descend_last_path_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
@@ -893,6 +910,58 @@ mod tests {
         assert!(!z.descend_first_k_path_observed(99, &mut obs));
         assert_eq!(z.path(), b"", "a failed descent must leave the focus unmoved");
         assert_eq!(&obs[..], z.path());
+    }
+
+    #[test]
+    fn prefix_zipper_to_next_val_from_missing_path() {
+        fn check<Z: ZipperIteration + ZipperPath + ZipperAbsolutePath>(
+            mut z: Z, materialized: &PathMap<u64>, origin: &[u8], start: &[u8],
+        ) {
+            let mut expected = materialized.read_zipper_at_path(origin);
+            z.descend_to(start);
+            expected.descend_to(start);
+            let mut observed = start.to_vec();
+            //Continue after exhaustion as well, checking that iteration restarts at the root.
+            for _ in 0..5 {
+                assert_eq!(z.to_next_val_observed(&mut observed), expected.to_next_val(), "from {start:?}");
+                assert_eq!(z.path(), expected.path(), "from {start:?}");
+                assert_eq!(observed, z.path(), "observer from {start:?}");
+                assert_eq!(z.root_prefix_path(), origin);
+            }
+            z.reset();
+            z.descend_to(start);
+            expected.reset();
+            expected.descend_to(start);
+            assert_eq!(z.to_next_val(), expected.to_next_val());
+            assert_eq!(z.path(), expected.path());
+        }
+
+        for keys in [
+            &[b"ab".as_slice(), b"cd"][..],
+            &[b"".as_slice(), b"ab", b"cd"][..],
+            &[b"".as_slice()][..],
+            &[][..],
+        ] {
+            let source: PathMap<u64> = keys.iter().map(|key| (key, 1)).collect();
+            for (prefix, origin) in [
+                (b"p".as_slice(), b"".as_slice()),
+                (b"pre.p", b""), (b"pre.p", b"pre."), (b"", b""),
+            ] {
+                let materialized: PathMap<u64> = keys.iter()
+                    .map(|key| ([prefix, key].concat(), 1)).collect();
+                for start in [
+                    b"ozz".as_slice(), b"qzz", b"pbb", b"pzz", b"p",
+                    b"pre.ozz", b"pre.qzz", b"pre.pbb", b"pre.pzz",
+                    b"pre.p", b"pre.pab", b"pre.pcd", b"pr", b"",
+                ] {
+                    let z = PrefixZipper::new(prefix, source.read_zipper()).with_origin(origin).unwrap();
+                    check(z, &materialized, origin, start);
+                    let z = PrefixZipper::new(prefix, source.clone().into_write_zipper(b""))
+                        .with_origin(origin).unwrap();
+                    check(z, &materialized, origin, start);
+                }
+            }
+        }
     }
 
     const PATHS1: &[(&[u8], u64)] = &[
