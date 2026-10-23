@@ -31,7 +31,7 @@ impl PathObserver for PathWitness {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SurvivalWitness {
     path: SmallVec<[u8; 16]>,
     pos: usize,
@@ -132,6 +132,8 @@ impl SurvivalWitness {
     }
 }
 
+/// Cloning gives an independent zipper at the same focus, cached state included.
+#[derive(Clone)]
 pub struct SubtractZipper<V, A, B> {
     lhs: A,
     rhs: B,
@@ -158,6 +160,7 @@ pub struct SubtractZipper<V, A, B> {
     survival_witness: Option<SurvivalWitness>,
 }
 
+#[derive(Clone)]
 enum CachedVal<V> {
     None,
     Lhs,
@@ -2028,6 +2031,54 @@ mod tests {
                 assert_eq!(actual.child_count(), expected_z.child_count(), "focus {focus:?}");
             }
         }
+    }
+
+    #[test]
+    fn clone_moves_independently() {
+        let lhs = PathMap::from_iter([(&[1, 2, 3][..], 1u16), (&[1, 4], 2), (&[5], 3)]);
+        let rhs = PathMap::from_iter([(&[1, 4][..], 2u16)]);
+        let expected = lhs.subtract(&rhs);
+
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        zipper.descend_to([1]);
+        let mut cloned = zipper.clone();
+        assert_eq!(cloned.path(), &[1]);
+        assert_eq!(cloned.child_mask(), zipper.child_mask());
+
+        cloned.descend_to([2, 3]);
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(zipper.path(), &[1]);
+
+        zipper.reset();
+        zipper.descend_to([1, 4]);
+        assert!(!zipper.path_exists());
+        assert_eq!(cloned.path(), &[1, 2, 3]);
+        let mut expected_z = expected.read_zipper();
+        expected_z.descend_to([1, 2, 3]);
+        assert_eq!(cloned.val(), expected_z.val());
+    }
+
+    /// A `SubtractZipper` can be the input of another one, computing `(a - b) - c`.
+    #[test]
+    fn nested_subtract_matches_materialized() {
+        let a = PathMap::from_iter([(&[1, 2][..], 1u16), (&[1, 3], 2), (&[4], 3), (&[4, 5], 4), (&[6], 5)]);
+        let b = PathMap::from_iter([(&[1, 2][..], 1u16), (&[4], 3)]);
+        let c = PathMap::from_iter([(&[1, 3][..], 2u16), (&[4, 5], 9), (&[7], 1)]);
+        let expected = a.subtract(&b).subtract(&c);
+
+        let inner = SubtractZipper::new(a.read_zipper(), b.read_zipper());
+        let mut nested = SubtractZipper::new(inner, c.read_zipper());
+        let mut expected_z = expected.read_zipper();
+
+        let mut got = vec![(nested.path().to_vec(), nested.val().cloned())];
+        while nested.to_next_step() {
+            got.push((nested.path().to_vec(), nested.val().cloned()));
+        }
+        let mut want = vec![(expected_z.path().to_vec(), expected_z.val().cloned())];
+        while expected_z.to_next_step() {
+            want.push((expected_z.path().to_vec(), expected_z.val().cloned()));
+        }
+        assert_eq!(got, want);
     }
 
     /// The survival search must resume at the pending branch point, not at the
