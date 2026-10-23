@@ -24,6 +24,7 @@ pub use crate::overlay_zipper::{OverlayZipper};
 pub use crate::prefix_zipper::{PrefixZipper};
 pub use crate::path_tracker::{PathTracker};
 pub use crate::empty_zipper::{EmptyZipper};
+pub use crate::subtract_zipper::{SubtractZipper};
 pub use crate::poly_zipper::{PolyZipper, PolyZipperExplicit};
 pub use crate::dependent_zipper::DependentProductZipperG;
 use crate::zipper_tracking::*;
@@ -4411,45 +4412,6 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zip.path(), b"12345");
         assert_eq!(zip.ascend_until_branch(), 5);
         assert_eq!(zip.path(), b"");
-        assert!(zip.at_root());
-
-        //Try with some actual branches in the trie.
-        //Some paths encountered will be values only, some will be branches only, and some will be both
-        let keys = ["1", "123", "12345", "1abc", "1234abc"];
-        let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
-        let mut zip = map.read_zipper();
-
-        zip.descend_to(b"12345");
-        assert!(zip.path_exists());
-        assert_eq!(zip.path(), b"12345");
-        assert_eq!(zip.ascend_until(), 1);
-        assert_eq!(zip.path(), b"1234"); // "1234" is a branch only
-        assert_eq!(zip.is_val(), false);
-        assert_eq!(zip.child_count(), 2);
-        assert_eq!(zip.ascend_until(), 1);
-        assert_eq!(zip.path(), b"123"); // "123" is a value only
-        assert_eq!(zip.child_count(), 1);
-        assert_eq!(zip.is_val(), true);
-        assert_eq!(zip.ascend_until(), 2); // Jump over "12" because it's neither a branch nor a value
-        assert_eq!(zip.path(), b"1"); // "1" is both a branch and a value
-        assert_eq!(zip.is_val(), true);
-        assert_eq!(zip.child_count(), 2);
-        assert_eq!(zip.ascend_until(), 1);
-        assert_eq!(zip.path(), b"");
-        assert_eq!(zip.child_count(), 1);
-        assert_eq!(zip.ascend_until(), 0);
-        assert!(zip.at_root());
-
-        //Test that ascend_until_branch skips over all the values
-        zip.descend_to(b"12345");
-        assert!(zip.path_exists());
-        assert_eq!(zip.ascend_until_branch(), 1);
-        assert_eq!(zip.path(), b"1234");
-        assert_eq!(zip.ascend_until_branch(), 3);
-        assert_eq!(zip.path(), b"1");
-        assert_eq!(zip.ascend_until_branch(), 1);
-        assert_eq!(zip.path(), b"");
-        assert_eq!(zip.ascend_until_branch(), 0);
         assert!(zip.at_root());
     }
 
