@@ -266,6 +266,15 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         WriteZipperUntracked::new_with_node_and_path_internal_in(root_node, Some(root_val), &[], 0, self.alloc.clone())
     }
 
+    /// Creates a new [write zipper](ZipperWriting) starting at the root of the `PathMap`, that reuses the
+    /// allocations held by `buffer`.  See [WriteZipperBuffer]
+    pub fn write_zipper_with_buffer(&mut self, buffer: WriteZipperBuffer<V, A>) -> WriteZipperUntracked<'_, 'static, V, A> {
+        self.ensure_root();
+        let root_node = self.root.get_mut().as_mut().unwrap();
+        let root_val = self.root_val.get_mut();
+        WriteZipperUntracked::new_with_node_and_buffer_internal_in(root_node, Some(root_val), &[], 0, self.alloc.clone(), buffer)
+    }
+
     /// Creates a new [write zipper](ZipperWriting) with the specified path from the root of the map
     pub fn write_zipper_at_path<'a, 'path>(&'a mut self, path: &'path[u8]) -> WriteZipperUntracked<'a, 'path, V, A> {
         self.ensure_root();
