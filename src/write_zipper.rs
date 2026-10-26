@@ -3069,7 +3069,7 @@ mod mut_node_stack {
         }
         /// Same as [Self::new], but uses `stack`, which must be empty, as the storage
         #[inline]
-        pub fn new_with_stack(root: &'a mut TrieNodeODRc<V, A>, stack: NodeStackVec<V, A>) -> Self {
+        pub(crate) fn new_with_stack(root: &'a mut TrieNodeODRc<V, A>, stack: NodeStackVec<V, A>) -> Self {
             debug_assert!(stack.is_empty());
             Self { root: Some(NonNull::from(root)), stack, phantom: PhantomData }
         }
