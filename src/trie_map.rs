@@ -1592,6 +1592,33 @@ mod tests {
         assert_eq!(map.val_at(b"foo/bar"), Some(&300));
         assert_eq!(map.val_at(b"missing"), None);
     }
+
+    /// Joining a byte node with a list node whose only contents are dangling paths the byte node
+    /// also has.  Each list slot joins to nothing, which must not make the whole join empty
+    #[test]
+    fn map_join_with_dangling_only_list_node() {
+        let mut a = PathMap::<u64>::new();
+        a.set_val_at([0u8, 1, 2, 2, 2], 1);
+        a.set_val_at([1u8, 0], 1);
+        a.create_path([2u8, 0]);
+        a.create_path([2u8, 1]);
+        let mut b = a.clone();
+        a.set_val_at([2u8, 2], 2);
+        //Rebuilt rather than cloned, so the two share no nodes
+        let mut b_fresh = PathMap::<u64>::new();
+        b_fresh.set_val_at([0u8, 1, 2, 2, 2], 1);
+        b_fresh.set_val_at([1u8, 0], 1);
+        b_fresh.create_path([2u8, 0]);
+        b_fresh.create_path([2u8, 1]);
+        b.remove_val_at([2u8, 2], false);
+
+        for b in [&b, &b_fresh] {
+            for joined in [a.join(b), b.join(&a)] {
+                assert_eq!(joined.val_at([2u8, 2]), Some(&2));
+                assert_eq!(joined.val_count(), 3);
+            }
+        }
+    }
 }
 
 //GOAT, Consider refactor of zipper traits.  `WriteZipper` -> `PathWriter`.  Zipper is split into the zipper
