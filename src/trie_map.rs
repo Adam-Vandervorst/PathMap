@@ -1607,6 +1607,26 @@ mod tests {
         assert_eq!(b.join(&a).val_at([1u8, 0, 0, 0]), Some(&1));
     }
 
+    /// A meet where a list node holds a value and a child under one key, and the child meets an
+    /// empty node: the result must not keep an empty child beside the value
+    #[test]
+    fn map_meet_value_beside_emptied_child() {
+        let mut x = PathMap::<u64>::new();
+        x.create_path([2u8]);
+        let mut big = PathMap::<u64>::new();
+        big.set_val_at([1u8], 2);
+        big.create_path([1u8, 2, 1, 2, 1]);
+        big.set_val_at([2u8], 1);
+        let mut c = PathMap::<u64>::new();
+        c.set_val_at([2u8], 1);
+        c.set_val_at([2u8, 0], 2);
+        c.set_val_at([2u8, 2], 2);
+
+        let met = x.join(&big).meet(&x.join(&c));
+        assert_eq!(met.val_at([2u8]), Some(&1));
+        assert_eq!(met.val_count(), 1);
+    }
+
 }
 
 //GOAT, Consider refactor of zipper traits.  `WriteZipper` -> `PathWriter`.  Zipper is split into the zipper

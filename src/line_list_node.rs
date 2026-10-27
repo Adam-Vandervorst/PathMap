@@ -3011,9 +3011,21 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
 
         pmeet_generic::<2, V, A, _>(self_payloads, other, swapped, |payloads| {
             debug_assert_eq!(payloads.len(), self_payloads.len());
-            let slot0_payload = payloads.get_mut(0).and_then(|p| core::mem::take(p)).map(|p| p.into());
-            let slot1_payload = payloads.get_mut(1).and_then(|p| core::mem::take(p)).map(|p| p.into());
-            let new_node = self.clone_with_updated_payloads(slot0_payload, slot1_payload).unwrap();
+            let mut slot0_payload = payloads.get_mut(0).and_then(|p| core::mem::take(p));
+            let mut slot1_payload = payloads.get_mut(1).and_then(|p| core::mem::take(p));
+            //A child that met down to an empty node is a dangling sentinel.  Beside a value under the
+            // same key it is redundant, since the value keeps the path, and a valid node may not hold it
+            if self_slot_count == 2 && self_payloads[0].0 == self_payloads[1].0 {
+                let is_empty_child = |p: &Option<ValOrChild<V, A>>| matches!(p, Some(ValOrChild::Child(child)) if child.as_tagged().node_is_empty());
+                let is_val = |p: &Option<ValOrChild<V, A>>| matches!(p, Some(ValOrChild::Val(_)));
+                if is_empty_child(&slot0_payload) && is_val(&slot1_payload) {
+                    slot0_payload = None;
+                }
+                if is_empty_child(&slot1_payload) && is_val(&slot0_payload) {
+                    slot1_payload = None;
+                }
+            }
+            let new_node = self.clone_with_updated_payloads(slot0_payload.map(|p| p.into()), slot1_payload.map(|p| p.into())).unwrap();
             TrieNodeODRc::new_in(new_node, self.alloc.clone())
         })
     }
