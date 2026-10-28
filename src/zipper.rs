@@ -1554,6 +1554,24 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTra
         let core = ReadZipperCore::new_with_node_and_cloned_path_in(root_node, owned_root, path, root_prefix_len, root_key_start, root_val, alloc);
         Self { z: core, tracker }
     }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(mut self) -> ZipperBuffer<V, A> {
+        let placeholder = ReadZipperCore::new_with_node_and_path_internal_in(
+            OwnedOrBorrowed::None,
+            &[],
+            0,
+            None,
+            self.z.alloc.clone(),
+        );
+        core::mem::replace(&mut self.z, placeholder).into_zipper_buffer()
+    }
+
+    /// Same as [Clone::clone], but the new zipper stores its path and ancestor
+    /// stack in the allocations held by `buffer`.
+    pub fn clone_with_buffer(&self, buffer: ZipperBuffer<V, A>) -> Self {
+        Self { z: self.z.clone_with_buffer(buffer), tracker: self.tracker.clone() }
+    }
 }
 
 //GOAT, the standard prototype of IntoIterator isn't compatible with ReadZipperTracked anymore because 
@@ -1667,6 +1685,25 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
     pub(crate) fn new_forked_with_inner_zipper(core: ReadZipperCore<'a, 'path, V, A>) -> Self {
         ReadZipperUntracked{ z: core }
     }
+
+    /// Creates a new zipper at the root of `map`, reusing the allocations held by `buffer`.
+    /// See [PathMap::read_zipper_with_buffer]
+    pub(crate) fn new_with_buffer(map: &'a PathMap<V, A>, buffer: ZipperBuffer<V, A>) -> ReadZipperUntracked<'a, 'static, V, A> {
+        let mut zipper = map.read_zipper();
+        zipper.z.install_buffer(buffer);
+        zipper
+    }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(self) -> ZipperBuffer<V, A> {
+        self.z.into_zipper_buffer()
+    }
+
+    /// Same as [Clone::clone], but the new zipper stores its path and ancestor
+    /// stack in the allocations held by `buffer`.
+    pub fn clone_with_buffer(&self, buffer: ZipperBuffer<V, A>) -> Self {
+        Self { z: self.z.clone_with_buffer(buffer) }
+    }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipperUntracked<'a, 'path, V, A> {
@@ -1754,6 +1791,11 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator> ReadZipperOwned<V, 
         let map = MaybeDangling::into_inner(self.map);
         *map
     }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(self) -> ZipperBuffer<V, A> {
+        self.z.into_zipper_buffer()
+    }
 }
 
 
@@ -1823,6 +1865,65 @@ pub(crate) const EXPECTED_DEPTH: usize = 16;
 
 /// Size in bytes to preallocate path storage in the zipper
 pub(crate) const EXPECTED_PATH_LEN: usize = 64;
+
+/// Buffers taken from a read zipper for reuse by another read zipper.
+///
+/// A zipper's path buffer and ancestor stack can grow substantially while it
+/// is being used.  A [`ZipperBuffer`] keeps those allocations alive after the
+/// zipper is dropped, so they can be handed to
+/// [PathMap::read_zipper_with_buffer] or [ReadZipperUntracked::clone_with_buffer].
+///
+/// A `ZipperBuffer` holds no cursor state: both buffers are always empty, and
+/// only their capacity is carried over to the next zipper.
+pub struct ZipperBuffer<V: Clone + Send + Sync, A: Allocator = GlobalAlloc> {
+    prefix_buf: Vec<u8>,
+    // The ancestor stack's element type borrows from the map, so its
+    // allocation is stored with the element type erased.
+    ancestors: ErasedVecAlloc,
+    phantom: core::marker::PhantomData<fn() -> (V, A)>,
+}
+
+/// The allocation of an empty `Vec`, with the element type erased so it is no
+/// longer bound by any lifetime in that type
+struct ErasedVecAlloc {
+    ptr: core::ptr::NonNull<u8>,
+    cap: usize,
+    elem: core::alloc::Layout,
+}
+
+// SAFETY: An `ErasedVecAlloc` owns an allocation with no live elements in it
+unsafe impl Send for ErasedVecAlloc {}
+unsafe impl Sync for ErasedVecAlloc {}
+
+impl ErasedVecAlloc {
+    fn from_vec<T>(mut vec: Vec<T>) -> Self {
+        vec.clear();
+        let mut vec = core::mem::ManuallyDrop::new(vec);
+        let ptr = core::ptr::NonNull::new(vec.as_mut_ptr()).unwrap().cast();
+        Self { ptr, cap: vec.capacity(), elem: core::alloc::Layout::new::<T>() }
+    }
+
+    /// Returns an empty `Vec` that owns the allocation.  `T` must have the same layout
+    /// as the element type of the `Vec` the allocation came from.  The zipper only
+    /// converts between ancestor stacks that differ in lifetime, so this always holds
+    fn into_vec<T>(self) -> Vec<T> {
+        assert_eq!(self.elem, core::alloc::Layout::new::<T>());
+        let this = core::mem::ManuallyDrop::new(self);
+        // SAFETY: The allocation came from a `Vec` with capacity `cap` whose element
+        // has the same size and alignment as `T`, and it holds no elements
+        unsafe { Vec::from_raw_parts(this.ptr.as_ptr().cast::<T>(), 0, this.cap) }
+    }
+}
+
+impl Drop for ErasedVecAlloc {
+    fn drop(&mut self) {
+        let size = self.elem.size() * self.cap;
+        if size > 0 {
+            // SAFETY: This is the layout `Vec` allocated with: `cap` elements of `elem`
+            unsafe { std::alloc::dealloc(self.ptr.as_ptr(), core::alloc::Layout::from_size_align_unchecked(size, self.elem.align())) }
+        }
+    }
+}
 
 pub(crate) mod read_zipper_core {
     use crate::PathMap;
@@ -1939,8 +2040,27 @@ pub(crate) mod read_zipper_core {
 
     impl<V: Clone + Send + Sync, A: Allocator> Clone for ReadZipperCore<'_, '_, V, A> where V: Clone {
         fn clone(&self) -> Self {
+            self.clone_into_buffers(Vec::new(), Vec::new())
+        }
+    }
+
+    impl<'a, V: Clone + Send + Sync, A: Allocator> ReadZipperCore<'a, '_, V, A> {
+        /// Copies the zipper, storing the copy's path and ancestor stack in `prefix_buf`
+        /// and `ancestors`, which must be empty.  Shared by `clone` and `clone_with_buffer`
+        fn clone_into_buffers(&self, mut prefix_buf: Vec<u8>, mut ancestors: Vec<(TaggedNodeRef<'a, V, A>, IterToken, usize)>) -> Self {
+            debug_assert!(prefix_buf.is_empty() && ancestors.is_empty());
+            if self.prefix_buf.capacity() > 0 {
+                prefix_buf.extend_from_slice(&self.prefix_buf);
+                ancestors.extend_from_slice(&self.ancestors);
+            } else if prefix_buf.capacity() > 0 {
+                // A non-zero capacity marks `prefix_buf` as initialized, so it must begin with
+                // the origin path.  `self` hasn't moved yet, so its path is just the origin path
+                debug_assert!(self.ancestors.is_empty());
+                prefix_buf.extend_from_slice(self.origin_path.as_slice());
+            }
             let root_node = self.root_node.clone();
-            // The cloned private root has a new address. Its reference is valid while the clone lives.
+            // A private root value lives in `root_node`'s box, so the copy must point at its own
+            // box rather than at `self`'s.  The box keeps its address while the copy lives.
             let root_val = match &root_node {
                 OwnedOrBorrowed::Private(private) => Some(unsafe { &*(&private.1 as *const V) }),
                 _ => self.root_val,
@@ -1953,8 +2073,8 @@ pub(crate) mod read_zipper_core {
                 root_node,
                 focus_node: self.focus_node.clone(),
                 focus_iter_token: NODE_ITER_INVALID,
-                prefix_buf: self.prefix_buf.clone(),
-                ancestors: self.ancestors.clone(),
+                prefix_buf,
+                ancestors,
                 alloc: self.alloc.clone(),
             }
         }
@@ -2889,6 +3009,41 @@ pub(crate) mod read_zipper_core {
             }
         }
 
+        /// Consumes the zipper and keeps its buffer allocations for reuse.
+        pub(crate) fn into_zipper_buffer(mut self) -> ZipperBuffer<V, A> {
+            // Ancestor entries contain references into this zipper's map, so
+            // no entry may survive.  Only the allocations are kept.
+            self.prefix_buf.clear();
+            self.ancestors.clear();
+            ZipperBuffer {
+                prefix_buf: self.prefix_buf,
+                ancestors: ErasedVecAlloc::from_vec(self.ancestors),
+                phantom: core::marker::PhantomData,
+            }
+        }
+
+        /// Moves the allocations in `buffer` into a freshly created zipper, which must
+        /// not have moved yet (its buffers are still uninitialized)
+        pub(crate) fn install_buffer(&mut self, buffer: ZipperBuffer<V, A>) {
+            debug_assert_eq!(self.prefix_buf.capacity(), 0);
+            debug_assert!(self.ancestors.is_empty());
+            let ZipperBuffer { mut prefix_buf, ancestors, phantom: _ } = buffer;
+            // A non-zero capacity marks `prefix_buf` as initialized, in which case
+            // it must begin with the origin path.  See `reserve_buffers`
+            if prefix_buf.capacity() > 0 {
+                prefix_buf.extend_from_slice(self.origin_path.as_slice());
+            }
+            self.prefix_buf = prefix_buf;
+            self.ancestors = ancestors.into_vec();
+        }
+
+        /// Same as [Clone::clone], but writes the path and ancestor stack into the
+        /// allocations held by `buffer`
+        pub(crate) fn clone_with_buffer(&self, buffer: ZipperBuffer<V, A>) -> Self {
+            let ZipperBuffer { prefix_buf, ancestors, phantom: _ } = buffer;
+            self.clone_into_buffers(prefix_buf, ancestors.into_vec())
+        }
+
         /// Returns the length of the `self.path()`, saving a couple instructions, but is internal because it may panic
         #[inline(always)]
         fn path_len(&self) -> usize {
@@ -3513,6 +3668,131 @@ pub(crate) mod read_zipper_core {
         assert_eq!(&rz.z.prefix_buf, b"hi-howdy");
         assert_eq!(&rz.path(), b"-howdy");
         assert_eq!(rz.origin_path(), b"hi-howdy");
+    }
+
+    #[test]
+    fn read_zipper_with_buffer_reuses_allocations() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alpha", 1);
+        map.set_val_at(b"alphabet", 2);
+
+        let mut zipper = map.read_zipper();
+        zipper.reserve_buffers(4096, 512);
+        zipper.descend_to(b"alphabet");
+        let prefix_ptr = zipper.z.prefix_buf.as_ptr();
+        let ancestors_ptr = zipper.z.ancestors.as_ptr();
+        let prefix_capacity = zipper.z.prefix_buf.capacity();
+        let ancestors_capacity = zipper.z.ancestors.capacity();
+
+        let buffer = zipper.into_zipper_buffer();
+
+        let mut other_map = PathMap::<usize>::new();
+        other_map.set_val_at(b"alphabet", 3);
+        let mut zipper = other_map.read_zipper_with_buffer(buffer);
+
+        assert_eq!(zipper.path(), b"");
+        assert_eq!(zipper.origin_path(), b"");
+        assert_eq!(zipper.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(zipper.z.prefix_buf.capacity(), prefix_capacity);
+        assert_eq!(zipper.z.ancestors.as_ptr(), ancestors_ptr);
+        assert_eq!(zipper.z.ancestors.capacity(), ancestors_capacity);
+
+        assert!(zipper.descend_to_check(b"alphabet"));
+        assert_eq!(zipper.val(), Some(&3));
+        assert_eq!(zipper.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(zipper.z.ancestors.as_ptr(), ancestors_ptr);
+    }
+
+    #[test]
+    fn read_zipper_with_unallocated_buffer() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alphabet", 1);
+
+        let buffer = map.read_zipper().into_zipper_buffer();
+        let mut zipper = map.read_zipper_with_buffer(buffer);
+        assert!(zipper.descend_to_check(b"alphabet"));
+        assert_eq!(zipper.val(), Some(&1));
+    }
+
+    #[test]
+    fn zipper_buffer_drop_and_send() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alphabet", 1);
+
+        let mut zipper = map.read_zipper();
+        zipper.reserve_buffers(256, 32);
+        zipper.descend_to(b"alphabet");
+        let buffer = zipper.into_zipper_buffer();
+        assert_send_sync(&buffer);
+        drop(buffer);
+    }
+
+    #[test]
+    fn read_zipper_clone_with_buffer() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alphabet", 1);
+        map.set_val_at(b"alpine", 2);
+
+        let mut donor = map.read_zipper();
+        donor.reserve_buffers(4096, 512);
+        let prefix_ptr = donor.z.prefix_buf.as_ptr();
+        let ancestors_ptr = donor.z.ancestors.as_ptr();
+
+        // Clone a zipper that has moved below a non-root origin
+        let mut zipper = map.read_zipper_at_borrowed_path(b"al");
+        zipper.descend_to(b"pha");
+        let mut cloned = zipper.clone_with_buffer(donor.into_zipper_buffer());
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(cloned.z.ancestors.as_ptr(), ancestors_ptr);
+        assert_eq!(cloned.path(), b"pha");
+        assert_eq!(cloned.origin_path(), b"alpha");
+        assert!(cloned.descend_to_check(b"bet"));
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(cloned.ascend(6), 6);
+        assert!(cloned.descend_to_check(b"pine"));
+        assert_eq!(cloned.val(), Some(&2));
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+
+        // Clone a zipper that has not moved yet, so its buffers are uninitialized
+        let mut donor = map.read_zipper();
+        donor.reserve_buffers(4096, 512);
+        let prefix_ptr = donor.z.prefix_buf.as_ptr();
+        let fresh = map.read_zipper_at_borrowed_path(b"alp");
+        let mut cloned = fresh.clone_with_buffer(donor.into_zipper_buffer());
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(cloned.origin_path(), b"alp");
+        assert!(cloned.descend_to_check(b"habet"));
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(cloned.origin_path(), b"alphabet");
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+    }
+
+    /// A zipper from a [ZipperHead] keeps a private copy of its root value.  A buffered
+    /// clone must point at its own copy, so it stays valid after the original is dropped
+    #[test]
+    fn read_zipper_clone_with_buffer_private_root() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"ab", 1);
+        map.set_val_at(b"abcd", 2);
+        let zh = map.zipper_head();
+
+        let (mut cloned, mut buffered) = {
+            let rz = zh.read_zipper_at_path(b"ab").unwrap();
+            let buffer = PathMap::<usize>::new().read_zipper().into_zipper_buffer();
+            (rz.clone(), rz.clone_with_buffer(buffer))
+        };
+        // Reuse the freed memory, so a dangling reference reads garbage outside miri too
+        let junk = Box::new([0xdead_usize; 2]);
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(buffered.val(), Some(&1));
+        assert!(buffered.descend_to_check(b"cd"));
+        assert_eq!(buffered.val(), Some(&2));
+        assert_eq!(buffered.ascend(2), 2);
+        assert_eq!(buffered.val(), Some(&1));
+        assert!(cloned.descend_to_check(b"cd"));
+        assert_eq!(cloned.val(), Some(&2));
+        drop(junk);
     }
 }
 use read_zipper_core::*;
