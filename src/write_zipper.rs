@@ -201,7 +201,7 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     ///
     /// ## Behavior
     ///
-    /// GOAT, The below behavior is not what we want.  See https://github.com/Adam-Vandervorst/PathMap/issues/104
+    /// GOAT, The below behavior is not what we want.  See <https://github.com/Adam-Vandervorst/PathMap/issues/104>
     /// Replaces the downstream branches with the join of the subtries `byte_cnt` bytes below
     /// the focus.  Paths that end in fewer than `byte_cnt` bytes are removed entirely.
     /// Values at exactly `byte_cnt` bytes are also removed; only the
@@ -3240,14 +3240,14 @@ mod tests {
 
         // Move the buffer to a zipper on another map
         let buffer = wz.into_zipper_buffer();
-        assert_eq!(map.get_val_at(b"abcdab"), Some(&7));
+        assert_eq!(map.val_at(b"abcdab"), Some(&7));
         let mut other = PathMap::<usize>::new();
         let mut wz = other.write_zipper_with_buffer(buffer);
         wz.descend_to(b"xyz");
         wz.set_val(1);
         assert_eq!(wz.z.key.prefix_buf.as_ptr(), ptrs.0);
         drop(wz);
-        assert_eq!(other.get_val_at(b"xyz"), Some(&1));
+        assert_eq!(other.val_at(b"xyz"), Some(&1));
         assert_eq!(other.val_count(), 1);
     }
 
@@ -3264,14 +3264,14 @@ mod tests {
         wz.descend_to(b"alphabet");
         wz.set_val(1);
         drop(wz);
-        assert_eq!(map.get_val_at(b"alphabet"), Some(&1));
+        assert_eq!(map.val_at(b"alphabet"), Some(&1));
 
         let buffer = WriteZipperOwned::<usize>::new().into_zipper_buffer();
         let mut wz = map.write_zipper_with_buffer(buffer);
         wz.descend_to(b"alpine");
         wz.set_val(2);
         drop(wz);
-        assert_eq!(map.get_val_at(b"alpine"), Some(&2));
+        assert_eq!(map.val_at(b"alpine"), Some(&2));
     }
 
     #[test]
@@ -3319,9 +3319,9 @@ mod tests {
         zh.cleanup_write_zipper(wz);
         drop(zh);
 
-        assert_eq!(map.get_val_at(b"bacdab"), Some(&100));
-        assert_eq!(map.get_val_at(b"zztop"), Some(&200));
-        assert_eq!(map.get_val_at(b"abcdab"), Some(&branchy_val(b"abcdab")));
+        assert_eq!(map.val_at(b"bacdab"), Some(&100));
+        assert_eq!(map.val_at(b"zztop"), Some(&200));
+        assert_eq!(map.val_at(b"abcdab"), Some(&branchy_val(b"abcdab")));
     }
 
     /// `PathMap::iter` exposes values but not dangling paths.  Check every value and, when a
@@ -3346,7 +3346,7 @@ mod tests {
     /// leave a path-preserving sentinel behind: the node would then hold two
     /// onward children under one key, and the accessors disagree about which
     /// one the byte leads to.  `node_get_child` picks the real subtrie (so
-    /// `get_val_at`, `descend_to` and `val_count` stay right) while
+    /// `val_at`, `descend_to` and `val_count` stay right) while
     /// `next_items` picks the empty sentinel, so every stepping traversal
     /// walks into nothing and reports the map as empty.
     ///

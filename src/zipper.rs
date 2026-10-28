@@ -114,7 +114,8 @@ pub trait ZipperForking<V> {
     ///
     /// Returns `None` if the focus path does not exist.
     ///
-    /// The child zipper's [`root_prefix_path`] is based on the parent zipper's [`origin_path`].
+    /// The child zipper's [`root_prefix_path`](ZipperAbsolutePath::root_prefix_path) is based on
+    /// the parent zipper's [`origin_path`](ZipperAbsolutePath::origin_path).
     ///
     /// Discussion: The main uses of this method is to construct a child zipper with a different root
     /// from the parent, to construct a read zipper when you have another zipper type, or to cheaply

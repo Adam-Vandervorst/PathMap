@@ -137,7 +137,7 @@ const U64_SIZE: usize = core::mem::size_of::<u64>();
 /// Size of the trailer that [`ArenaCompactTree::merge_zipper_into_file`]
 /// appends after each merge: two little-endian `u64`s,
 /// `[previous_suffix, previous_root]` (see [`ArenaCompactTree::root_history`]).
-const ROOT_TRAILER_SIZE: usize = 2 * U64_SIZE;
+pub const ROOT_TRAILER_SIZE: usize = 2 * U64_SIZE;
 
 /// File magic signature
 pub const MAGIC_LENGTH: usize = 8;
@@ -547,7 +547,7 @@ impl Counters {
 ///
 /// [ArenaCompactTree] can be constructed using [`ArenaCompactTree::<Vec<u8>>::from_zipper`]:
 ///
-/// ... Or opened from disk using [`ArenaCompactTree::<Mmap>::open`]:
+/// ... Or opened from disk using [`ArenaCompactTree::<Mmap>::open_mmap`]:
 pub struct ArenaCompactTree<Storage> {
     /// Backing storage for the trie
     storage: Storage,

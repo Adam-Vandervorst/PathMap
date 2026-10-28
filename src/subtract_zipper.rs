@@ -1562,7 +1562,6 @@ mod tests {
         UnaryNode(u8),
         NonExistentNode,
         Leaf(V),
-        Branch(ByteMask),
     }
 
     impl<V: DistributiveLattice + Clone + Send + Sync + Unpin + PartialEq + Debug> State<V> {
@@ -1619,9 +1618,6 @@ mod tests {
                 State::NonExistentNode => assert_state_impl(zipper, false, None, ByteMask::EMPTY),
                 State::Leaf(expected_value) => {
                     assert_state_impl(zipper, true, Some(expected_value), ByteMask::EMPTY)
-                }
-                State::Branch(expected_children) => {
-                    assert_state_impl(zipper, true, None, expected_children)
                 }
             }
         }
