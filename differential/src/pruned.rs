@@ -55,13 +55,9 @@ pub const NOPS: usize = 54;
 /// `to_next`/`to_prev_sibling_byte` at the zipper root, where the native read
 /// zipper escapes its own root.
 pub const SKIP_AT_ROOT: &str = "skip:at-root";
-/// A degenerate `k = 0` on `join_k_path_into` / `meet_k_path_into`.
-pub const SKIP_K0: &str = "skip:k0";
 /// The focus has nothing below it, where the op's behaviour is a function of
 /// node materialisation rather than of trie state.
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
-/// `insert_prefix("")`, which destroys the subtrie.
-pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
 
 /// The prune flag every operation in this subset is driven with.
 ///
@@ -503,24 +499,13 @@ pub fn run_ops(
             }
             44 => {
                 let k = get!(d.modn(4));
-                // `join_k_path_into(0)` collapses the subtrie instead of being
-                // the identity.
-                if k == 0 {
-                    ("join_k_path_into", SKIP_K0.to_string())
-                } else {
-                    let r = wz.join_k_path_into(k, PRUNE);
-                    let s = if focus_node_empty(&wz) { "?".to_string() } else { show_bool(r).to_string() };
-                    ("join_k_path_into", s)
-                }
+                let r = wz.join_k_path_into(k, PRUNE);
+                let s = if focus_node_empty(&wz) { "?".to_string() } else { show_bool(r).to_string() };
+                ("join_k_path_into", s)
             }
             45 => {
                 let p = get!(d.path(6));
-                // `insert_prefix("")` destroys the subtrie.
-                if p.is_empty() {
-                    ("insert_prefix", SKIP_EMPTY_PATH.to_string())
-                } else {
-                    ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
-                }
+                ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
             }
             46 => {
                 let n = get!(d.modn(6));
@@ -539,15 +524,7 @@ pub fn run_ops(
             }
             48 => {
                 let k = get!(d.modn(4));
-                // `meet_k_path_into` spins forever when the focus has no
-                // children, and escapes the focus subtree when k == 0.
-                if k == 0 {
-                    ("meet_k_path_into", SKIP_K0.to_string())
-                } else if wz.child_count() == 0 {
-                    ("meet_k_path_into", SKIP_EMPTY_FOCUS.to_string())
-                } else {
-                    ("meet_k_path_into", show_bool(wz.meet_k_path_into(k, PRUNE)).to_string())
-                }
+                ("meet_k_path_into", show_bool(wz.meet_k_path_into(k, PRUNE)).to_string())
             }
             49 => {
                 let v = get!(d.u8()) as u64;

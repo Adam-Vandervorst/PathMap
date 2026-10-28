@@ -394,12 +394,6 @@ def joinKPathInto (k : Nat) : Bool × PZip V :=
   let r := PrunedMap.dropHead ops z.makeMap k
   (!r.isEmptyMap, if k == 0 then z else z.graftMap r)
 
-/-- `meet_k_path_into` is **not implementable** for these arguments: its
-provisional implementation drives `descend_first_k_path` through the
-`ZipperIteration` *default* loop, which spins forever when the focus has no
-children, and which escapes the focus's subtree entirely when `k = 0`. -/
-def meetKPathUnspecified (k : Nat) : Bool := k == 0 || z.childCount == 0
-
 /-- One step of `meet_k_path_into`: meet in the subtrie at `f ++ q`. -/
 def meetStep (t : PrunedMap V) (f : Path) (acc : Option (PrunedMap V)) (q : Path) :
     Option (PrunedMap V) :=
@@ -412,8 +406,8 @@ path below the focus and meet the results.
 
 Values at depth exactly `k` become the focus value.  The meet replaces the whole
 subtrie, focus value included: an empty meet is `remove_subtrie`, which is
-grafting the empty map.  Only meaningful when `meetKPathUnspecified` is
-`false`. -/
+grafting the empty map.  With `k = 0` the only subtrie is the focus's own, so
+it is the identity; a focus with no children meets nothing and is emptied. -/
 def meetKPathInto (k : Nat) : Bool × PZip V :=
   let kps := (z.trie.subtrie z.focus).kPaths k
   let result : Option (PrunedMap V) := kps.foldl (meetStep ops z.trie z.focus) none

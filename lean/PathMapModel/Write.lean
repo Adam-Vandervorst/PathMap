@@ -446,20 +446,13 @@ def joinKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
   let res := !r.isEmptyMap
   (res, if prune && !res then (z1.prunePath).2 else z1)
 
-/-- `meet_k_path_into` is **not implementable** for these arguments: its
-provisional implementation drives `descend_first_k_path` through the
-`ZipperIteration` *default* loop, which spins forever when the focus has no
-children, and which escapes the focus's subtree entirely when `k = 0`.
-Verified against `pathmap` 0.3.1: `meet_k_path_into(1, false)` on a leaf hangs. -/
-def meetKPathUnspecified (k : Nat) : Bool := k == 0 || z.childCount == 0
-
 /-- `ZipperWriting::meet_k_path_into`: strip the leading `k` bytes from every
 path below the focus and meet the results.
 
 Values at depth exactly `k` become the focus value. The meet replaces the whole
 subtrie, focus value included, so an empty meet leaves no focus value and no
-branches (`remove_subtrie`). Only meaningful when `meetKPathUnspecified` is
-`false`. -/
+branches (`remove_subtrie`). With `k = 0` the only subtrie is the focus's own,
+so it is the identity; a focus with no children meets nothing and is emptied. -/
 def meetKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
   let kps := (z.trie.subtrie z.focus).kPaths k
   let result : Option (PathMap V) :=

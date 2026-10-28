@@ -196,7 +196,6 @@ harnesses should know they are gaps here rather than absences of defects:
 
 Operations the subset *does* cover are specified, not skipped, even where they
 are known to leak — which is why finding 1 is reported rather than suppressed.
-The four `skip:` reasons that remain (`at-root`, `k0`, `empty-focus`,
-`empty-path`) are the ones where the crate's behaviour is a function of node
+The two `skip:` reasons that remain (`at-root`, `empty-focus`) are the ones where the crate's behaviour is a function of node
 materialisation rather than of trie state, so there is nothing for a model to
 agree with; each is commented at its site in `PrunedModel/Fuzz.lean`.

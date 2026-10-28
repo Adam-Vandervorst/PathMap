@@ -102,13 +102,9 @@ map root, so the prune count is well-defined), and `skip:quarantined`
 /-- `to_next`/`to_prev_sibling_byte` at the zipper root, where the native read
 zipper escapes its own root. -/
 def skipAtRoot : String := "skip:at-root"
-/-- A degenerate `k = 0` on `join_k_path_into` / `meet_k_path_into`. -/
-def skipK0 : String := "skip:k0"
 /-- The focus has nothing below it, where the op's behaviour is a function of
 node materialisation rather than of trie state. -/
 def skipEmptyFocus : String := "skip:empty-focus"
-/-- `insert_prefix("")`, which destroys the subtrie. -/
-def skipEmptyPath : String := "skip:empty-path"
 
 /-! ## Rendering -/
 
@@ -425,19 +421,12 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                let (r, z) := s.wz.restricting s.rz
                some (emit { s with wz := z } "restricting" (showBool r), d)
   | 44 => do let (k, d) ← d.mod 4
-             -- `join_k_path_into(0)` should be the identity but collapses the
-             -- subtrie in `pathmap` 0.4.0.
-             if k == 0 then some (emit s "join_k_path_into" skipK0, d)
-             else
-               let (r, z) := s.wz.joinKPathInto ops k
-               some (emit { s with wz := z } "join_k_path_into"
-                 (if z.focusNodeIsEmpty then "?" else showBool r), d)
+             let (r, z) := s.wz.joinKPathInto ops k
+             some (emit { s with wz := z } "join_k_path_into"
+               (if z.focusNodeIsEmpty then "?" else showBool r), d)
   | 45 => do let (p, d) ← d.path
-             -- `insert_prefix("")` destroys the subtrie in `pathmap` 0.4.0.
-             if p.isEmpty then some (emit s "insert_prefix" skipEmptyPath, d)
-             else
-               let (r, z) := s.wz.insertPrefix p
-               some (emit { s with wz := z } "insert_prefix" (showBool r), d)
+             let (r, z) := s.wz.insertPrefix p
+             some (emit { s with wz := z } "insert_prefix" (showBool r), d)
   | 46 => do let (n, d) ← d.mod 6
              let (r, z) := s.wz.removePrefix n
              some (emit { s with wz := z } "remove_prefix" (toString r), d)
@@ -451,15 +440,8 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              | some mm => some (emit { s with wz := z.graftMap mm } "take_map_restore" "1", d)
              | none => some (emit { s with wz := z } "take_map_restore" "0", d)
   | 48 => do let (k, d) ← d.mod 4
-             -- `meet_k_path_into` is not implementable for these arguments; see
-             -- `PZip.meetKPathUnspecified`, whose two disjuncts are split out
-             -- here so the skip names which one fired.
-             if k == 0 then some (emit s "meet_k_path_into" skipK0, d)
-             else if s.wz.focusNodeIsEmpty then
-               some (emit s "meet_k_path_into" skipEmptyFocus, d)
-             else
-               let (r, z) := s.wz.meetKPathInto ops k
-               some (emit { s with wz := z } "meet_k_path_into" (showBool r), d)
+             let (r, z) := s.wz.meetKPathInto ops k
+             some (emit { s with wz := z } "meet_k_path_into" (showBool r), d)
   | 49 => do let (v, d) ← d.u8
              -- Writing through the reference `get_val_mut` hands back.  It must
              -- behave like `set_val` where a value exists and do nothing --

@@ -377,9 +377,7 @@ skips diverges:
 
 | token | what it means |
 |---|---|
-| `skip:k0` | `meet_k_path_into(0)`, `join_k_path_into(0)` — degenerate; they should be the identity and destroy the subtrie. (`descend_first_k_path(0)` is specified as `false` without moving and is no longer skipped.) |
-| `skip:empty-focus` | `meet_k_path_into` with no children (it does not terminate), and `restricting` when either side has nothing below its focus (the two branches differ in *effect*, not just in the reported bool). |
-| `skip:empty-path` | `insert_prefix("")` — should be the identity, destroys the subtrie. |
+| `skip:empty-focus` | `restricting` when either side has nothing below its focus (the two branches differ in *effect*, not just in the reported bool). |
 | `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native read zipper leaves its own root there. |
 | `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
 | `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
@@ -713,9 +711,8 @@ Three restrictions define the subset:
 Operations the subset covers are specified, not skipped, even where the crate is
 known to leak.  That is the point: `graft` with an empty source is accidentally
 `create_path`, and
-[PRUNED_FINDINGS.md](PRUNED_FINDINGS.md) is the result.  Only four `skip:`
-reasons survive (`at-root`, `k0`, `empty-focus`, `empty-path`), against the
-other harness's seven.
+[PRUNED_FINDINGS.md](PRUNED_FINDINGS.md) is the result.  Only two `skip:`
+reasons survive (`at-root`, `empty-focus`), against the other harness's four.
 
 `differential/src/pruned.rs` is the crate side — one read source, so no
 `ReadSource` trait and no ACT mode — and `lean/pruned_differential.py` is
