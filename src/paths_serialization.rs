@@ -53,6 +53,13 @@ pub struct DeserializationStats {
   pub path_count : usize
 }
 
+// zlib accepts null allocator callbacks, but the Rust bindings declare them as
+// non-null function pointers. Keep the zeroed storage uninitialized until C
+// replaces those callbacks, without ever constructing an invalid Rust value.
+fn zeroed_z_stream() -> std::mem::MaybeUninit<z_stream> {
+  std::mem::MaybeUninit::zeroed()
+}
+
 /// Serializes each value's path from the focus of `rz` into `.paths` data written to `target`
 pub fn serialize_paths<'a, V, W, RZ>(rz: RZ, target: &mut W) -> std::io::Result<SerializationStats>
   where
@@ -115,12 +122,12 @@ where
   const CHUNK: usize = 4096; // not tuned yet
   let mut buffer = [0u8; CHUNK];
 
-  #[allow(invalid_value)] //Squish the warning about a Null function ptr, because zlib uses a default allocator if the the ptr is NULL
-  //I filed https://github.com/rust-lang/libz-sys/issues/243 to track this issue, and I confirmed the easy fix works, but I didn't submit
-  // a PR because their build and validation process is very confusing.
-  let mut strm: z_stream = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-  let mut ret = unsafe { zng_deflateInit(&mut strm, 7) };
+  let mut storage = zeroed_z_stream();
+  let mut ret = unsafe { zng_deflateInit(storage.as_mut_ptr(), 7) };
   assert_eq!(ret, Z_OK);
+  // SAFETY: successful initialization installs valid callbacks. Borrow in place
+  // because zlib retains the stream's address for the duration of its use.
+  let strm = unsafe { storage.assume_init_mut() };
 
   let mut total_paths : usize = 0;
   while advance_f(src)? {
@@ -140,7 +147,7 @@ where
     loop {
       strm.avail_out = CHUNK as _;
       strm.next_out = buffer.as_mut_ptr();
-      ret = unsafe { deflate(&mut strm, Z_NO_FLUSH) };
+      ret = unsafe { deflate(strm, Z_NO_FLUSH) };
       assert_ne!(ret, Z_STREAM_ERROR);
       let have = CHUNK - strm.avail_out as usize;
       target.write_all(&mut buffer[..have])?;
@@ -153,7 +160,7 @@ where
     loop {
       strm.avail_out = CHUNK as _;
       strm.next_out = buffer.as_mut_ptr();
-      ret = unsafe { deflate(&mut strm, Z_NO_FLUSH) };
+      ret = unsafe { deflate(strm, Z_NO_FLUSH) };
       assert_ne!(ret, Z_STREAM_ERROR);
       let have = CHUNK - strm.avail_out as usize;
       target.write_all(&mut buffer[..have])?;
@@ -167,13 +174,13 @@ where
   loop {
     strm.avail_out = CHUNK as _;
     strm.next_out = buffer.as_mut_ptr();
-    ret = unsafe { deflate(&mut strm, Z_FINISH) };
+    ret = unsafe { deflate(strm, Z_FINISH) };
     let have = CHUNK - strm.avail_out as usize;
     target.write_all(&buffer[..have])?;
     if ret == Z_STREAM_END { break; }
     assert_eq!(ret, Z_OK);
   }
-  ret = unsafe { deflateEnd(&mut strm) };
+  ret = unsafe { deflateEnd(strm) };
   assert_eq!(ret, Z_OK);
 
   Ok(SerializationStats {
@@ -217,10 +224,12 @@ pub fn for_each_deserialized_path<R: std::io::Read, F: FnMut(usize, &[u8]) -> st
   let mut lbuf_offset = 0;
   let mut finished_path = true;
   let mut total_paths : usize = 0usize;
-  #[allow(invalid_value)] //Squish the warning about a Null function ptr, because zlib uses a default allocator if the the ptr is NULL
-  let mut strm: z_stream = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-  let mut ret = unsafe { zng_inflateInit(&mut strm) };
+  let mut storage = zeroed_z_stream();
+  let mut ret = unsafe { zng_inflateInit(storage.as_mut_ptr()) };
   if ret != Z_OK { return Err(std::io::Error::new(std::io::ErrorKind::Other, "failed to init zlib-ng inflate")) }
+  // SAFETY: successful initialization installs valid callbacks; keep the
+  // initialized stream in its original storage while zlib uses it.
+  let strm = unsafe { storage.assume_init_mut() };
   let mut wz_buf = vec![];
   // if statement in loop that emulates goto for the many to many ibuffer-obuffer relation
   'reading: loop {
@@ -233,7 +242,7 @@ pub fn for_each_deserialized_path<R: std::io::Read, F: FnMut(usize, &[u8]) -> st
       strm.next_out = obuffer.as_mut_ptr();
       let mut pos = 0usize;
 
-      ret = unsafe { inflate(&mut strm, Z_NO_FLUSH) };
+      ret = unsafe { inflate(strm, Z_NO_FLUSH) };
       if ret == Z_STREAM_ERROR { return Err(std::io::Error::new(std::io::ErrorKind::Other, "Z_STREAM_ERROR")) }
       if strm.avail_out as usize == OUT {
         if ret == Z_STREAM_END { break 'reading }
@@ -276,7 +285,7 @@ pub fn for_each_deserialized_path<R: std::io::Read, F: FnMut(usize, &[u8]) -> st
     }
   }
 
-  unsafe { inflateEnd(&mut strm) };
+  unsafe { inflateEnd(strm) };
 
   Ok(DeserializationStats {
     bytes_in   : strm.total_in,

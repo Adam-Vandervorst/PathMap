@@ -677,28 +677,30 @@ struct ZStream {
 unsafe impl Send for ZStream {}
 
 impl ZStream {
-    fn zeroed() -> Box<z_stream> {
-        //SAFETY: zlib expects a zeroed stream; null allocator pointers select its default allocator
-        #[allow(invalid_value)]
-        Box::new(unsafe { std::mem::MaybeUninit::zeroed().assume_init() })
+    fn zeroed() -> Box<std::mem::MaybeUninit<z_stream>> {
+        Box::new(super::zeroed_z_stream())
     }
 
     fn inflate() -> io::Result<ZStream> {
         let mut strm = Self::zeroed();
-        if unsafe { zng_inflateInit(&mut *strm) } != Z_OK {
+        if unsafe { zng_inflateInit(strm.as_mut_ptr()) } != Z_OK {
             return Err(io::Error::other("failed to init zlib-ng inflate"));
         }
-        Ok(ZStream { strm, deflate: false })
+        // SAFETY: successful initialization replaces the null allocator callbacks.
+        // Converting the box keeps the stream at the address zlib initialized.
+        Ok(ZStream { strm: unsafe { strm.assume_init() }, deflate: false })
     }
 
     /// Raw deflate (no zlib wrapper): the wrapper is written once, around
     /// all the blocks.
     fn deflate() -> io::Result<ZStream> {
         let mut strm = Self::zeroed();
-        if unsafe { zng_deflateInit2(&mut *strm, LEVEL, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) } != Z_OK {
+        if unsafe { zng_deflateInit2(strm.as_mut_ptr(), LEVEL, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) } != Z_OK {
             return Err(io::Error::other("failed to init zlib-ng deflate"));
         }
-        Ok(ZStream { strm, deflate: true })
+        // SAFETY: successful initialization replaces the null allocator callbacks.
+        // Converting the box keeps the stream at the address zlib initialized.
+        Ok(ZStream { strm: unsafe { strm.assume_init() }, deflate: true })
     }
 
     /// Deflate `raw` as a continuation of `dict`. The output ends on a byte

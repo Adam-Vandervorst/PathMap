@@ -1,4 +1,7 @@
-#![cfg(feature = "serialization")]
+// These integration tests require filesystem access and zlib's C API, which
+// cannot run under isolated Miri. Rust sorting/merging is tested in memory by
+// sort_and_merge_matches_bytewise_set_slim in src/paths_serialization_sort_par.rs.
+#![cfg(all(feature = "serialization", not(miri)))]
 use pathmap::paths_serialization::{
     for_each_deserialized_path, serialize_paths_from_funcs, sort_paths,
 };
