@@ -48,6 +48,8 @@ pathmap = "0.3"
 
 - `zipper_tracking`: Exports the `zipper_tracking` module publicly, allowing the host application to use the conflict-checking logic independently of zipper creation.
 
+- `trace_zipper`: Records zipper operations to buffers or files, for debugging or animated replay.
+
 - `viz`: Provide APIs to inspect and visualize pathmap trie structures.  Useful to observe structural sharing.
 
 - `random`: Provides utilities for generating random paths, tries, and zipper movements according to configurable distributions.

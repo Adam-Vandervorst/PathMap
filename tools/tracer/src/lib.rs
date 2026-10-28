@@ -1,4 +1,4 @@
-//! Replays trace files written by pathmap's [TraceZipper](pathmap::utils::debug::TraceZipper), and renders
+//! Replays trace files written by pathmap's [TraceZipper](pathmap::utils::debug::zipper_tracing::TraceZipper), and renders
 //! them as a self-contained, animated HTML page
 
 use std::io;

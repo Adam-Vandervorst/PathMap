@@ -7,13 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use pathmap::PathMap;
 use pathmap::arena_compact::ArenaCompactTree;
-use pathmap::utils::debug::TraceZipper;
-use pathmap::utils::debug::zipper_tracing::{self, decode_trace};
+use pathmap::utils::debug::zipper_tracing::{TraceTarget, TraceZipper, decode_trace};
 use pathmap::zipper::*;
 use tracer::{render_html, replay, Annotations, Replay, ReplayConfig};
 
-/// The trace is global, so tests that use it must not overlap
-static TRACE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Default)]
 struct SharedBuf(Arc<Mutex<Vec<u8>>>);
@@ -24,12 +21,11 @@ impl Write for SharedBuf {
 }
 
 /// Runs `f` with a trace open, and returns the trace
-fn traced(f: impl FnOnce()) -> Vec<u8> {
-    let _lock = TRACE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+fn traced(f: impl FnOnce(&TraceTarget)) -> Vec<u8> {
     let buf = SharedBuf::default();
-    zipper_tracing::open::<u64>(buf.clone()).unwrap();
-    f();
-    zipper_tracing::close().unwrap();
+    let target = TraceTarget::new::<u64>(buf.clone()).unwrap();
+    f(&target);
+    target.close().unwrap();
     let bytes = buf.0.lock().unwrap().clone();
     bytes
 }
@@ -61,8 +57,8 @@ fn entries(map: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> {
 #[test]
 fn one_zipper_assembles_paths() {
     let mut map = PathMap::<u64>::new();
-    let trace = traced(|| {
-        let mut wz = TraceZipper::new(1, map.write_zipper());
+    let trace = traced(|target| {
+        let mut wz = TraceZipper::with_id(1, map.write_zipper(), target.clone());
         //The zipper's path runs past the trie until a value is set at the end of it
         for &byte in b"hello" {
             wz.descend_to_byte(byte);
@@ -102,10 +98,10 @@ fn one_zipper_assembles_paths() {
 #[test]
 fn two_zipper_dance() {
     let mut map = PathMap::<u64>::new();
-    let trace = traced(|| {
+    let trace = traced(|target| {
         let zh = map.zipper_head();
-        let mut a = TraceZipper::new(1, zh.write_zipper_at_exclusive_path(b"ab/x/").unwrap());
-        let mut b = TraceZipper::new(2, zh.write_zipper_at_exclusive_path(b"ab/y/").unwrap());
+        let mut a = TraceZipper::with_id(1, zh.write_zipper_at_exclusive_path(b"ab/x/").unwrap(), target.clone());
+        let mut b = TraceZipper::with_id(2, zh.write_zipper_at_exclusive_path(b"ab/y/").unwrap(), target.clone());
         //The two writers take turns building words in their own regions
         for (val, (a_word, b_word)) in [("cat", "dog"), ("car", "dot"), ("cart", "do")].into_iter().enumerate() {
             a.descend_to(a_word);
@@ -117,7 +113,7 @@ fn two_zipper_dance() {
         }
         drop(b);
         //A reader walks the values the second writer left behind
-        let mut r = TraceZipper::new(3, zh.read_zipper_at_path(b"ab/y/").unwrap());
+        let mut r = TraceZipper::with_id(3, zh.read_zipper_at_path(b"ab/y/").unwrap(), target.clone());
         while r.to_next_val() {}
         r.reset();
         r.descend_to(b"do");
@@ -148,11 +144,11 @@ fn act_seeded_replay() {
     std::fs::create_dir_all(out_dir()).unwrap();
     let act_path = out_dir().join("seed.act");
     ArenaCompactTree::dump_from_zipper(map.read_zipper(), |val: &u64| *val, &act_path).unwrap();
-    let trace = traced(|| {
-        let mut rz = TraceZipper::new(1, map.read_zipper());
+    let trace = traced(|target| {
+        let mut rz = TraceZipper::with_id(1, map.read_zipper(), target.clone());
         while rz.to_next_val() {}
         drop(rz);
-        let mut wz = TraceZipper::new(2, map.write_zipper());
+        let mut wz = TraceZipper::with_id(2, map.write_zipper(), target.clone());
         wz.descend_to(b"ban");
         wz.remove_branches(true);
         wz.reset();
@@ -171,9 +167,9 @@ fn act_seeded_replay() {
 #[test]
 fn wide_trie() {
     let mut map = PathMap::<u64>::new();
-    let trace = traced(|| {
+    let trace = traced(|target| {
         //More children per node than are shown
-        let mut wz = TraceZipper::new(1, map.write_zipper());
+        let mut wz = TraceZipper::with_id(1, map.write_zipper(), target.clone());
         for (idx, first) in (b'a'..=b'z').enumerate() {
             for second in b"xyz" {
                 wz.set_val_at([first, *second], idx as u64);
@@ -181,7 +177,7 @@ fn wide_trie() {
         }
         drop(wz);
         //Zippers at the root are on separate maps unless they reuse an id, so the reader reuses the writer's id
-        let mut rz = TraceZipper::new(1, map.read_zipper());
+        let mut rz = TraceZipper::with_id(1, map.read_zipper(), target.clone());
         for _ in 0..4 {
             rz.to_next_val();
         }
@@ -225,13 +221,13 @@ fn aunt_kg() {
     ArenaCompactTree::dump_from_zipper(family.read_zipper(), |val: &u64| *val, &act_path).unwrap();
 
     let mut output = PathMap::<u64>::new();
-    let trace = traced(|| {
+    let trace = traced(|target| {
         let family_head = family.zipper_head();
         let output_head = output.zipper_head();
 
         //family |= (child $y $x) for each (parent $x $y)
-        let mut parent = TraceZipper::new(1, family_head.read_zipper_at_path(b"kg/parent/").unwrap());
-        let mut child_index = TraceZipper::new(2, family_head.write_zipper_at_exclusive_path(b"kg/child/").unwrap());
+        let mut parent = TraceZipper::with_id(1, family_head.read_zipper_at_path(b"kg/parent/").unwrap(), target.clone());
+        let mut child_index = TraceZipper::with_id(2, family_head.write_zipper_at_exclusive_path(b"kg/child/").unwrap(), target.clone());
         while parent.to_next_val() {
             let fact = parent.path().to_vec();
             let (p, c) = fact.split_at(SYMBOL_LEN);
@@ -245,24 +241,24 @@ fn aunt_kg() {
         parent.reset();
 
         //person = female ∪ male
-        let female = TraceZipper::new(3, family_head.read_zipper_at_path(b"kg/female/").unwrap());
-        let male = TraceZipper::new(4, family_head.read_zipper_at_path(b"kg/male/").unwrap());
-        let mut person_index = TraceZipper::new(5, family_head.write_zipper_at_exclusive_path(b"kg/person/").unwrap());
+        let female = TraceZipper::with_id(3, family_head.read_zipper_at_path(b"kg/female/").unwrap(), target.clone());
+        let male = TraceZipper::with_id(4, family_head.read_zipper_at_path(b"kg/male/").unwrap(), target.clone());
+        let mut person_index = TraceZipper::with_id(5, family_head.write_zipper_at_exclusive_path(b"kg/person/").unwrap(), target.clone());
         person_index.graft(&female);
         let _ = person_index.join_into(&male);
         drop(person_index);
         drop(male);
 
         //Every person's parents
-        let child = TraceZipper::new(6, family_head.read_zipper_at_path(b"kg/child/").unwrap());
-        let mut person = TraceZipper::new(7, family_head.read_zipper_at_path(b"kg/person/").unwrap());
-        let mut parents_out = TraceZipper::new(8, output_head.write_zipper_at_exclusive_path(b"out/parents/").unwrap());
+        let child = TraceZipper::with_id(6, family_head.read_zipper_at_path(b"kg/child/").unwrap(), target.clone());
+        let mut person = TraceZipper::with_id(7, family_head.read_zipper_at_path(b"kg/person/").unwrap(), target.clone());
+        let mut parents_out = TraceZipper::with_id(8, output_head.write_zipper_at_exclusive_path(b"out/parents/").unwrap(), target.clone());
         parents_out.graft(&child);
         let _ = parents_out.restrict(&person);
         drop(parents_out);
 
         //my_parents is positioned at the parents of each person in turn.  People without recorded parents are skipped
-        let mut my_parents = TraceZipper::new(9, family_head.read_zipper_at_path(b"kg/child/").unwrap());
+        let mut my_parents = TraceZipper::with_id(9, family_head.read_zipper_at_path(b"kg/child/").unwrap(), target.clone());
         let next_person = |person: &mut TraceZipper<_>, my_parents: &mut TraceZipper<_>| -> Option<Vec<u8>> {
             while person.to_next_val() {
                 let mut dir = person.path().to_vec();
@@ -276,7 +272,7 @@ fn aunt_kg() {
         };
 
         //mother(p) = parents(p) ∩ female
-        let mut mother_out = TraceZipper::new(10, output_head.write_zipper_at_exclusive_path(b"out/mother/").unwrap());
+        let mut mother_out = TraceZipper::with_id(10, output_head.write_zipper_at_exclusive_path(b"out/mother/").unwrap(), target.clone());
         while let Some(dir) = next_person(&mut person, &mut my_parents) {
             mother_out.move_to_path(&dir);
             let _ = mother_out.meet_2(&my_parents, &female);
@@ -285,7 +281,7 @@ fn aunt_kg() {
         person.reset();
 
         //sister(p) = (children of p's parents ∩ female) - p
-        let mut sister_out = TraceZipper::new(11, output_head.write_zipper_at_exclusive_path(b"out/sister/").unwrap());
+        let mut sister_out = TraceZipper::with_id(11, output_head.write_zipper_at_exclusive_path(b"out/sister/").unwrap(), target.clone());
         while let Some(dir) = next_person(&mut person, &mut my_parents) {
             sister_out.move_to_path(&dir);
             sister_out.graft(&my_parents);
@@ -300,7 +296,7 @@ fn aunt_kg() {
         person.reset();
 
         //aunt(p) = (children of p's grandparents - p's parents) ∩ female
-        let mut aunt_out = TraceZipper::new(12, output_head.write_zipper_at_exclusive_path(b"out/aunt/").unwrap());
+        let mut aunt_out = TraceZipper::with_id(12, output_head.write_zipper_at_exclusive_path(b"out/aunt/").unwrap(), target.clone());
         while let Some(dir) = next_person(&mut person, &mut my_parents) {
             aunt_out.move_to_path(&dir);
             aunt_out.graft(&my_parents);
