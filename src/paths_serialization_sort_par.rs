@@ -1194,3 +1194,86 @@ pub fn sort_paths<R: Read, W: Write>(
     }
     result.and_then(|stats| cleanup.map(|()| stats))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests segment sorting and merging directly
+    #[test]
+    fn sort_and_merge_matches_bytewise_set_slim() {
+        #[cfg(not(miri))]
+        const ROUNDS: u8 = 32;
+        #[cfg(miri)]
+        const ROUNDS: u8 = 2;
+
+        let mut paths = Vec::new();
+        for n in 0..ROUNDS {
+            for len in [0, 1, 7, 8, 9, 15, 16, 17, 100] {
+                let mut path = vec![0; len];
+                if let Some(last) = path.last_mut() {
+                    *last = n;
+                }
+                paths.push(path);
+            }
+            paths.push(vec![255; 17]);
+        }
+        paths.reverse();
+        paths.extend(paths.clone().into_iter().rev());
+        let mut expected = paths.clone();
+        expected.sort();
+        expected.dedup();
+        let mut expected_raw = Vec::new();
+        for path in &expected {
+            expected_raw.extend_from_slice(&(path.len() as u32).to_le_bytes());
+            expected_raw.extend_from_slice(path);
+        }
+
+        for (memory, records_per_segment) in [(MIB, 19), (3 * MIB, 41), (64 * MIB, paths.len())] {
+            let mut sorter = Sorter::new(memory, Path::new("")); // Scratch path is unused by in-memory merges.
+            // Small ranges exercise splitter boundaries without large inputs;
+            // one worker also keeps the interpreted workload small under Miri.
+            sorter.range_bytes = 128;
+            sorter.out_threads = 1;
+            let segments: Vec<_> = paths.chunks(records_per_segment).map(|chunk| {
+                let mut segment = Segment::default();
+                for path in chunk {
+                    segment.bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+                    segment.bytes.extend_from_slice(path);
+                }
+                segment.records = chunk.len();
+                segment.sort(1);
+                segment
+            }).collect();
+
+            let assert_merge = |sources: &[Source<'_>]| {
+                let mut actual = Vec::new();
+                let mut count = 0;
+                sorter.merge(sources, |slots, _| {
+                    for slot in slots {
+                        let slot = lock(slot);
+                        actual.extend_from_slice(&slot.raw);
+                        count += slot.count;
+                    }
+                    Ok(())
+                }).unwrap();
+                assert_eq!(actual, expected_raw, "budget={memory}");
+                assert_eq!(count, expected.len() as u64);
+            };
+            let sources = mem_sources(&segments);
+            assert_merge(&sources);
+
+            // Check run-record parsing and cursor bounds using an in-memory buffer.
+            for (start, end) in [(0, expected.len()), (1, expected.len() - 1)] {
+                let lo = expected.get(start).map(Vec::as_slice);
+                let hi = expected.get(end).map(Vec::as_slice);
+                let mut cursor = Cursor::disk(&expected_raw, lo, hi).unwrap().unwrap();
+                for (index, path) in expected[start..end].iter().enumerate() {
+                    assert_eq!(cursor.cur, path);
+                    assert_eq!(cursor.advance().unwrap(), index + 1 < end - start);
+                }
+            }
+
+        }
+    }
+}

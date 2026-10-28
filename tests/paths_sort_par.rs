@@ -1,8 +1,12 @@
+// These compressed-stream tests call zlib's C API, which Miri cannot execute.
+// The Rust sort-and-merge companion has a reduced Miri workload in
+// src/paths_serialization_sort_par.rs (sort_and_merge_matches_bytewise_set_slim).
 #![cfg(all(feature = "serialization", not(miri)))]
 //! `paths_serialization::sort_paths_par` must behave like `sort_paths`.
 use pathmap::paths_serialization::{
-    sort_paths_par, for_each_deserialized_path, serialize_paths_from_funcs, sort_paths,
+    sort_paths_par, for_each_deserialized_path, serialize_paths_from_funcs,
 };
+use pathmap::paths_serialization::sort_paths;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
     fs::{self, File},
@@ -176,6 +180,51 @@ fn nasty_paths(rng: &mut StdRng, n: usize) -> Vec<Vec<u8>> {
 }
 
 #[test]
+/// Fast end-to-end budget comparison that preserves spill and deduplication coverage in the default test suite.
+fn matches_sort_paths_across_budgets_slim() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut rng = StdRng::seed_from_u64(0x5eed);
+    let mut paths = nasty_paths(&mut rng, 256);
+    // Explicit boundary and prefix cases, rather than relying on the RNG.
+    for len in [0, 1, 7, 8, 9, 15, 16, 17, 100] {
+        paths.push(vec![0; len]);
+        paths.push(vec![255; len]);
+    }
+    // ~2 MiB including duplicates: exercises spills at 1 MiB and keeps
+    // everything in memory at 64 MiB. Long paths fill the budget with few records;
+    // their identical first 8 bytes exercise comparisons beyond cached keys.
+    for n in (0..128u16).rev() {
+        let mut path = vec![0; 8192];
+        path[8..10].copy_from_slice(&n.to_be_bytes());
+        paths.push(path);
+    }
+    // Repeat the whole input so duplicates also cross segment/run boundaries.
+    paths.extend(paths.clone().into_iter().rev());
+    let input = encode(&paths);
+    paths.sort();
+    paths.dedup();
+    let expected_bytes: usize = paths.iter().map(|p| 4 + p.len()).sum();
+
+    for memory in [1 << 20, 3 << 20, 64 << 20] {
+        let mut expected_out = Vec::new();
+        let expected = sort_paths(input.as_slice(), &mut expected_out, memory, scratch.path()).unwrap();
+        let mut out = Vec::new();
+        let stats = sort_paths_par(input.as_slice(), &mut out, memory, scratch.path()).unwrap();
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0, "runs left behind");
+        assert_eq!(decode(&out), paths, "parallel, budget={memory}");
+        assert_eq!(decode(&expected_out), paths, "serial, budget={memory}");
+        for stats in [expected, stats] {
+            assert_eq!(stats.path_count, paths.len());
+            assert_eq!(stats.bytes_in, expected_bytes);
+        }
+        assert_eq!(stats.bytes_out, out.len());
+        assert_eq!(expected.bytes_out, expected_out.len());
+    }
+}
+
+#[cfg(feature = "heavy_tests")]
+#[test]
+/// Thorough randomized comparison across memory budgets; gated by heavy_tests because its large workloads are slow.
 fn matches_sort_paths_across_budgets() {
     let scratch = tempfile::tempdir().unwrap();
     let mut rng = StdRng::seed_from_u64(0x5eed);

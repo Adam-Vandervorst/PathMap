@@ -936,6 +936,9 @@ mod tests {
             assert_eq!(z.path(), expected.path());
         }
 
+        // Keep the full Cartesian product natively; Miri uses representative
+        // cases below, retaining both zipper types and exhaustion/restart checks.
+        #[cfg(not(miri))]
         for keys in [
             &[b"ab".as_slice(), b"cd"][..],
             &[b"".as_slice(), b"ab", b"cd"][..],
@@ -960,6 +963,38 @@ mod tests {
                         .with_origin(origin).unwrap();
                     check(z, &materialized, origin, start);
                 }
+            }
+        }
+
+        #[cfg(miri)]
+        {
+            let branches: &[&[u8]] = &[b"ab", b"cd"];
+            let root_and_branches: &[&[u8]] = &[b"", b"ab", b"cd"];
+            let root_only: &[&[u8]] = &[b""];
+            for (keys, prefix, origin, start) in [
+                // Missing paths before/after the prefix and between source values.
+                (branches, b"p".as_slice(), b"".as_slice(), b"ozz".as_slice()),
+                (branches, b"p", b"", b"qzz"),
+                (branches, b"p", b"", b"pbb"),
+                // A partially consumed prefix, a missing prefix branch, and a
+                // focus inside the prefix before crossing into the source.
+                (branches, b"pre.p", b"pre.", b"pbb"),
+                (root_and_branches, b"pre.p", b"", b"pre.ozz"),
+                (branches, b"pre.p", b"", b"pr"),
+                // A value at the seam, a singleton, no prefix, and an empty map.
+                (root_and_branches, b"pre.p", b"pre.", b"p"),
+                (root_only, b"p", b"", b"pzz"),
+                (branches, b"", b"", b"bb"),
+                (&[][..], b"", b"", b""),
+            ] {
+                let source: PathMap<u64> = keys.iter().map(|key| (key, 1)).collect();
+                let materialized: PathMap<u64> = keys.iter()
+                    .map(|key| ([prefix, key].concat(), 1)).collect();
+                let z = PrefixZipper::new(prefix, source.read_zipper()).with_origin(origin).unwrap();
+                check(z, &materialized, origin, start);
+                let z = PrefixZipper::new(prefix, source.into_write_zipper(b""))
+                    .with_origin(origin).unwrap();
+                check(z, &materialized, origin, start);
             }
         }
     }
