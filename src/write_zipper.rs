@@ -206,7 +206,8 @@ pub trait ZipperWriting<V: Clone + Send + Sync, A: Allocator = GlobalAlloc>: Wri
     /// Collapses all the paths below the zipper's focus by removing the leading `byte_cnt` bytes from
     /// each path and meets together all of the downstream subtries
     ///
-    /// Returns `true` if the focus has at least one downstream continuation, otherwise returns `false`.
+    /// Returns `true` if the resulting subtrie contains a focus value or downstream branches,
+    /// otherwise returns `false`.
     ///
     /// `prune=false` leaves an emptied focus dangling; `true` applies [Self::prune_path]
     /// afterward, including at a pre-existing dangling tip. See the [pruning guide](https://pathmap-rs.github.io/1.02.06_zipper_writing.html#pruning-behavior).
@@ -1943,6 +1944,16 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [ZipperWriting::meet_k_path_into]
     pub fn meet_k_path_into(&mut self, byte_cnt: usize, prune: bool) -> bool where V: Lattice {
+        if byte_cnt == 0 {
+            let result = self.is_val() || self.child_count() > 0;
+            if prune && !result { self.prune_path(); }
+            return result
+        }
+        // The provisional k-path iterator requires at least one child to terminate.
+        if self.child_count() == 0 {
+            self.remove_subtrie(prune);
+            return false
+        }
         //GOAT, this is a provisional implementation with the wrong performance characteristics, but should have the right behavior
         let temp_map = if self.descend_first_k_path(byte_cnt) {
             let mut temp_map = self.take_map(false).unwrap_or_else(|| PathMap::new_in(self.alloc.clone()));
@@ -1960,7 +1971,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             PathMap::new_in(self.alloc.clone())
         };
         if temp_map.is_empty() {
-            self.remove_branches(prune);
+            self.remove_subtrie(prune);
             false
         } else {
             self.graft_map(temp_map);
@@ -5158,7 +5169,7 @@ mod tests {
         let mut map: PathMap<()> = keys.iter().map(|k| (k, ())).collect();
         let mut wz = map.write_zipper_at_path(b"123:");
 
-        wz.meet_k_path_into(4, true);
+        assert!(wz.meet_k_path_into(4, true));
 
         assert_eq!(map.val_count(), 2);
         assert_eq!(map.get(b"123:Bob"), Some(&()));
@@ -5180,10 +5191,99 @@ mod tests {
 
         // /\(keys <| {foo, bar}) == {e0}
         wz.restrict(&PathMap::from_iter([&b"foo"[..], &b"bar"[..]]).into_read_zipper(&[]));
-        wz.meet_k_path_into(4, true);
+        assert!(wz.meet_k_path_into(4, true));
         drop(wz);
         assert_eq!(map.val_count(), 1);
         assert_eq!(map.get(b"123:e0"), Some(&()));
+    }
+
+    #[test]
+    fn write_zipper_meet_k_path_empty_removes_focus_value() {
+        for focus in [b"".as_slice(), b"p".as_slice()] {
+            for prune in [false, true] {
+                let mut map = PathMap::<()>::new();
+                map.set_val_at(focus, ());
+                for suffix in [b"ax", b"by", b"cz"] {
+                    let key = [focus, suffix.as_slice()].concat();
+                    map.set_val_at(key, ());
+                }
+                let mut wz = map.write_zipper();
+                wz.descend_to(focus);
+                // The meet becomes empty before the last depth-one subtrie is consumed.
+                assert!(!wz.meet_k_path_into(1, prune));
+                assert_eq!(wz.path(), focus);
+                assert!(!wz.is_val());
+                assert_eq!(wz.child_count(), 0);
+                assert_eq!(wz.path_exists(), focus.is_empty() || !prune);
+                drop(wz);
+                assert_eq!(map.val_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn write_zipper_meet_k_path_edge_cases() {
+        // Input and expected keys are relative to the target focus. Include value-only
+        // results: they are nonempty even though they have no downstream branches.
+        type Case = (&'static str, &'static [&'static [u8]], usize, &'static [&'static [u8]]);
+        let cases: &[Case] = &[
+            ("empty", &[], 1, &[]),
+            ("leaf", &[b""], 1, &[]),
+            ("depth exceeds all paths", &[b"", b"a", b"bc"], 3, &[]),
+            ("single subtrie", &[b"", b"ab", b"abc"], 2, &[b"", b"c"]),
+            ("value-only result", &[b"", b"a", b"b"], 1, &[b""]),
+            ("focus value removed by nonempty meet", &[b"", b"ax", b"bx"], 1, &[b"x"]),
+            ("only some depth-k roots have values", &[b"a", b"ax", b"bx"], 1, &[b"x"]),
+            ("short paths do not participate", &[b"", b"a", b"bcx", b"dex"], 2, &[b"x"]),
+            ("empty meet on final subtrie", &[b"", b"ax", b"by"], 1, &[]),
+            ("zero depth empty", &[], 0, &[]),
+            ("zero depth leaf", &[b""], 0, &[b""]),
+            ("zero depth branches", &[b"", b"a", b"bc"], 0, &[b"", b"a", b"bc"]),
+        ];
+        for &(name, input, k, expected) in cases {
+            for focus in [b"".as_slice(), b"p".as_slice()] {
+                for prune in [false, true] {
+                    let mut map = PathMap::<()>::new();
+                    for key in input {
+                        map.set_val_at([focus, key].concat(), ());
+                    }
+                    // A sibling must survive iteration and pruning at a non-root focus.
+                    if !focus.is_empty() { map.set_val_at(b"sibling", ()); }
+                    let mut wz = map.write_zipper();
+                    wz.descend_to(focus);
+                    let status = wz.meet_k_path_into(k, prune);
+                    assert_eq!(status, !expected.is_empty(), "{name}, focus={focus:?}, prune={prune}");
+                    assert_eq!(wz.path(), focus, "{name}");
+                    drop(wz);
+                    let mut expected_map = PathMap::<()>::new();
+                    for key in expected {
+                        expected_map.set_val_at([focus, key].concat(), ());
+                    }
+                    if !focus.is_empty() { expected_map.set_val_at(b"sibling", ()); }
+                    assert_map_unchanged(&expected_map, &map, &[]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_zipper_meet_k_path_dangling_focus() {
+        for k in [0, 1, 10] {
+            for prune in [false, true] {
+                let mut map = PathMap::<()>::new();
+                map.create_path(b"prefix/tip");
+                map.set_val_at(b"sibling", ());
+                let mut wz = map.write_zipper_at_path(b"prefix");
+                wz.descend_to(b"/tip");
+                assert!(!wz.meet_k_path_into(k, prune));
+                assert_eq!(wz.path(), b"/tip");
+                assert_eq!(wz.path_exists(), !prune);
+                drop(wz);
+                assert!(map.path_exists_at(b"prefix"), "zipper root must survive pruning");
+                assert_eq!(map.val_at(b"sibling"), Some(&()));
+                assert_eq!(map.val_count(), 1);
+            }
+        }
     }
 
     #[test]
