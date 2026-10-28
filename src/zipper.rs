@@ -1929,6 +1929,7 @@ impl Drop for ErasedVecAlloc {
 pub(crate) mod read_zipper_core {
     use crate::PathMap;
     use crate::zipper::*;
+    use maybe_dangling::ManuallyDrop;
 
     /// A [Zipper] that is unable to modify the trie
     ///
@@ -1945,7 +1946,10 @@ pub(crate) mod read_zipper_core {
         /// In the cases where this field is not used, it will be set to [usize::MAX]
         root_parent_key_start: usize,
         /// A value at the zipper root, including a value held by `root_node`.
-        root_val: Option<&'a V>,
+        /// `maybe_dangling::ManuallyDrop` avoids retagging this self-reference
+        /// when the zipper moves or drops. Only the reference is wrapped;
+        /// `root_node` still drops the owned value normally.
+        root_val: ManuallyDrop<Option<&'a V>>,
         /// The node from which the zipper is descended.
         root_node: OwnedOrBorrowed<'a, TrieNodeODRc<V, A>, V>,
         /// A reference to the focus node
@@ -1966,8 +1970,9 @@ pub(crate) mod read_zipper_core {
         Owned(T),
         Borrowed(&'a T),
         None,
-        /// A private node and root value with stable addresses for the zipper's references.
-        Private(Box<(T, V)>),
+        /// A private node and root value. The wrapper lets the owner move without
+        /// invalidating the zipper's references into the box.
+        Private(MaybeDangling<Box<(T, V)>>),
     }
 
     impl<'a, T, V> OwnedOrBorrowed<'a, T, V> {
@@ -2064,13 +2069,13 @@ pub(crate) mod read_zipper_core {
             // box rather than at `self`'s.  The box keeps its address while the copy lives.
             let root_val = match &root_node {
                 OwnedOrBorrowed::Private(private) => Some(unsafe { &*(&private.1 as *const V) }),
-                _ => self.root_val,
+                _ => *self.root_val,
             };
             Self {
                 origin_path: self.origin_path.clone(),
                 root_key_start: self.root_key_start,
                 root_parent_key_start: self.root_parent_key_start,
-                root_val,
+                root_val: ManuallyDrop::new(root_val),
                 root_node,
                 focus_node: self.focus_node.clone(),
                 focus_iter_token: NODE_ITER_INVALID,
@@ -2737,7 +2742,7 @@ pub(crate) mod read_zipper_core {
                 } else {
                     if self.root_val.is_some() || self.root_parent_key_start == usize::MAX {
                         //No parent key: the zipper root is the root node itself, and its value is `root_val`
-                        if self.root_node.is_owned() { witness.1.as_ref() } else { self.root_val }
+                        if self.root_node.is_owned() { witness.1.as_ref() } else { *self.root_val }
                     } else {
                         //We know the node in the witness and the node in self.root_node are the same,
                         // but we borrow it from the witness here because that has the lifetime we need
@@ -2924,7 +2929,7 @@ pub(crate) mod read_zipper_core {
                 origin_path: SliceOrLen::from(path),
                 root_key_start,
                 root_parent_key_start,
-                root_val,
+                root_val: ManuallyDrop::new(root_val),
                 focus_node: MiriWrapper::new(focus),
                 root_node,
                 focus_iter_token: NODE_ITER_INVALID,
@@ -2974,8 +2979,9 @@ pub(crate) mod read_zipper_core {
             let root_key_start = if exists { path.len() } else { path.len() - 1 };
             let node = subtree.unwrap_or_else(TrieNodeODRc::new_empty);
             if let Some(val) = val {
-                let private = Box::new((node, val));
-                // Box storage remains at the same address when the zipper moves.
+                // Wrap before borrowing: moving a bare Box would invalidate the
+                // root-value reference even though its allocation stays in place.
+                let private = MaybeDangling::new(Box::new((node, val)));
                 let root_val = Some(unsafe { &*(&private.1 as *const V) });
                 Self::new_with_node_and_path_internal_in(OwnedOrBorrowed::Private(private), path, root_key_start, root_val, alloc)
             } else {
@@ -3109,7 +3115,7 @@ pub(crate) mod read_zipper_core {
                     // we currently share the same implementation between `val()` and `get_val()` because the only difference is the return
                     // lifetime, and the current ZipperHead implementation is actually ok with referencing the value in the root of the ZipperHead.
                     // debug_assert!(self.root_node.is_borrowed());
-                    self.root_val
+                    *self.root_val
                 }
             }
         }
