@@ -67,19 +67,15 @@ agree exactly or every input with a skip diverges.
   the trait the op needs.
 * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root, where
   the native read zipper escapes its own root.
-* `skip:k0` — a degenerate `k = 0` on `join`/`meet_k_path_into`.
 * `skip:empty-focus` — the focus has nothing below it, where the op's behaviour
   is a function of node materialisation rather than trie state.
-* `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 * `skip:quarantined` — the op is disabled outright (op 54).
 
 Each is recorded in FINDINGS.md and commented at its site. -/
 
 def skipAct : String := "skip:act"
 def skipAtRoot : String := "skip:at-root"
-def skipK0 : String := "skip:k0"
 def skipEmptyFocus : String := "skip:empty-focus"
-def skipEmptyPath : String := "skip:empty-path"
 def skipQuarantined : String := "skip:quarantined"
 
 /-! ## Rendering -/
@@ -419,26 +415,17 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                let (r, z) := s.wz.restricting s.rz
                some (emit { s with wz := z } "restricting" (showBool r), d)
   | 42 => do let (k, d) ← d.mod 4; let (pr, d) ← d.bool
-             -- `join_k_path_into(0)` should be the identity but destroys the
-             -- subtrie in pathmap 0.3.1; see `Zip.joinKPathInto`.
-             if k == 0 then some (emit s "join_k_path_into" skipK0, d)
-             else
-               -- The bool is another `AbstractNodeRef` leak: an empty node still
-               -- comes back as `Some(...)` from `into_option()` for some
-               -- representations, so `true` gets reported for a collapse that
-               -- produced nothing.  Compared only when something survived.
-               -- See FINDINGS.md #8.
-               let (r, z) := s.wz.joinKPathInto ops k pr
-               some (emit { s with wz := z } "join_k_path_into"
-                 (if z.focusNodeIsEmpty then "?" else showBool r), d)
+             -- The bool is another `AbstractNodeRef` leak: an empty node still
+             -- comes back as `Some(...)` from `into_option()` for some
+             -- representations, so `true` gets reported for a collapse that
+             -- produced nothing.  Compared only when something survived.
+             -- See FINDINGS.md #8.
+             let (r, z) := s.wz.joinKPathInto ops k pr
+             some (emit { s with wz := z } "join_k_path_into"
+               (if z.focusNodeIsEmpty then "?" else showBool r), d)
   | 43 => do let (p, d) ← d.path
-             -- `insert_prefix("")` destroys the subtrie in pathmap 0.3.1; see
-             -- `Zip.insertPrefix`.  Skipped so the known bug does not mask others.
-             if p.isEmpty then
-               some (emit s "insert_prefix" skipEmptyPath, d)
-             else
-               let (r, z) := s.wz.insertPrefix p
-               some (emit { s with wz := z } "insert_prefix" (showBool r), d)
+             let (r, z) := s.wz.insertPrefix p
+             some (emit { s with wz := z } "insert_prefix" (showBool r), d)
   | 44 => do let (n, d) ← d.mod 6
              let (r, z) := s.wz.removePrefix n
              some (emit { s with wz := z } "remove_prefix" (toString r), d)
@@ -453,15 +440,8 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              | some mm => some (emit { s with wz := z.graftMap mm } "take_map_restore" "1", d)
              | none => some (emit { s with wz := z } "take_map_restore" "0", d)
   | 46 => do let (k, d) ← d.mod 4; let (pr, d) ← d.bool
-             -- `meet_k_path_into` is not implementable for these arguments; see
-             -- `Zip.meetKPathUnspecified`, whose two disjuncts are split out here
-             -- so the skip names which one fired.  The Rust side matches.
-             if k == 0 then some (emit s "meet_k_path_into" skipK0, d)
-             else if s.wz.focusNodeIsEmpty then
-               some (emit s "meet_k_path_into" skipEmptyFocus, d)
-             else
-               let (r, z) := s.wz.meetKPathInto ops k pr
-               some (emit { s with wz := z } "meet_k_path_into" (showBool r), d)
+             let (r, z) := s.wz.meetKPathInto ops k pr
+             some (emit { s with wz := z } "meet_k_path_into" (showBool r), d)
   | 47 => do let (t, d) ← d.mod 2
              -- The blind-zipper addition: `descend_until` reporting the bytes it
              -- descended.  The observer's output is a blind zipper's only account

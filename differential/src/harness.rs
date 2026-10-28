@@ -62,6 +62,11 @@ impl<'a> Dec<'a> {
         };
         Some(Self { bytes, pos, op_count })
     }
+    /// A decoder with no header handling, for streams whose caller picks the
+    /// operation itself (the pruned fuzzer).
+    pub fn legacy(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0, op_count: LEGACY_NOPS }
+    }
     pub fn op(&mut self) -> Option<usize> {
         self.modn(self.op_count)
     }
@@ -175,18 +180,14 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 ///   implement the trait the op needs.
 /// * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root,
 ///   where the native read zipper escapes its own root.
-/// * `skip:k0` — a degenerate `k = 0` on `join`/`meet_k_path_into`.
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
-/// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 /// * `skip:quarantined` — the op is disabled outright (op 54).
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
 pub const SKIP_ACT: &str = "skip:act";
 pub const SKIP_AT_ROOT: &str = "skip:at-root";
-pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
-pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
 pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 
 /// Does the focus have no descendants at all?
@@ -785,28 +786,18 @@ pub fn run_ops<R: ReadSource>(
                 42 => {
                     let k = get!(d.modn(4));
                     let pr = get!(d.boolean());
-                    // `join_k_path_into(0)` destroys the subtrie in pathmap 0.3.1.
-                    if k == 0 {
-                        ("join_k_path_into", SKIP_K0.to_string())
+                    // The bool leaks node materialisation; see FINDINGS.md #8.
+                    let r = wz.join_k_path_into(k, pr);
+                    let s = if focus_node_empty(&wz) {
+                        "?".to_string()
                     } else {
-                        // The bool leaks node materialisation; see FINDINGS.md #8.
-                        let r = wz.join_k_path_into(k, pr);
-                        let s = if focus_node_empty(&wz) {
-                            "?".to_string()
-                        } else {
-                            show_bool(r).to_string()
-                        };
-                        ("join_k_path_into", s)
-                    }
+                        show_bool(r).to_string()
+                    };
+                    ("join_k_path_into", s)
                 }
                 43 => {
                     let p = get!(d.path(6));
-                    // `insert_prefix("")` destroys the subtrie in pathmap 0.3.1.
-                    if p.is_empty() {
-                        ("insert_prefix", SKIP_EMPTY_PATH.to_string())
-                    } else {
-                        ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
-                    }
+                    ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
                 }
                 44 => {
                     let n = get!(d.modn(6));
@@ -827,19 +818,7 @@ pub fn run_ops<R: ReadSource>(
                 46 => {
                     let k = get!(d.modn(4));
                     let pr = get!(d.boolean());
-                    // `meet_k_path_into` spins forever when the focus has no
-                    // children, and escapes the focus subtree when k == 0.
-                    // See `Zip.meetKPathUnspecified`.
-                    if k == 0 {
-                        ("meet_k_path_into", SKIP_K0.to_string())
-                    } else if wz.child_count() == 0 {
-                        ("meet_k_path_into", SKIP_EMPTY_FOCUS.to_string())
-                    } else {
-                        (
-                            "meet_k_path_into",
-                            show_bool(wz.meet_k_path_into(k, pr)).to_string(),
-                        )
-                    }
+                    ("meet_k_path_into", show_bool(wz.meet_k_path_into(k, pr)).to_string())
                 }
                 48 => {
                     let v = get!(d.u8()) as u64;

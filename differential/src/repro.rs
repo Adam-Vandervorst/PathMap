@@ -189,16 +189,14 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             40 => "wz.restrict(&rz);".to_string(),
             41 => "wz.restricting(&rz);".to_string(),
             42 => { let k = g!(d.modn(4)); let pr = g!(d.boolean());
-                    if k == 0 { "// join_k_path_into(0): skipped by the harness".to_string() }
-                    else { format!("wz.join_k_path_into({k}, {pr});") } }
+                    format!("wz.join_k_path_into({k}, {pr});") }
             43 => { let p = g!(d.path(6));
-                    if p.is_empty() { "// insert_prefix(\"\"): skipped by the harness".to_string() }
-                    else { format!("wz.insert_prefix({});", rs_bytes(&p)) } }
+                    format!("wz.insert_prefix({});", rs_bytes(&p)) }
             44 => { let n = g!(d.modn(6)); format!("wz.remove_prefix({n});") }
             45 => { let pr = g!(d.boolean());
                     format!("if let Some(m) = wz.take_map({pr}) {{ wz.graft_map(m); }}") }
             46 => { let k = g!(d.modn(4)); let pr = g!(d.boolean());
-                    format!("if {k} != 0 && wz.child_count() != 0 {{ wz.meet_k_path_into({k}, {pr}); }}") }
+                    format!("wz.meet_k_path_into({k}, {pr});") }
             47 => { let t = g!(d.modn(2));
                     format!("{{ let mut obs = Vec::new(); {}.descend_until_observed(&mut obs); }}", z!(t)) }
             48 => { let v = g!(d.u8()) as u64;
