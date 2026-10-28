@@ -3203,6 +3203,7 @@ mod tests {
     use crate::alloc::GlobalAlloc;
 
     /// Paths that branch 4 ways at each of 6 levels, so traversals cross several nodes
+    #[cfg(not(miri))]
     fn branchy_map() -> PathMap<usize> {
         let mut map = PathMap::new();
         let mut path = [0u8; 6];
@@ -3213,6 +3214,14 @@ mod tests {
             map.set_val_at(&path, i);
         }
         map
+    }
+
+    // Keep the buffer tests' probe paths and branching peers without 4096 insertions.
+    #[cfg(miri)]
+    fn branchy_map() -> PathMap<usize> {
+        [b"dcbadc".as_slice(), b"abcdab", b"abcdaa", b"abcaab", b"abadab", b"aacdab", b"bacdab",
+            b"da", b"db", b"dd", b"dca", b"dcc", b"dcd"]
+            .into_iter().map(|path| (path, branchy_val(path))).collect()
     }
 
     fn buffer_ptrs<V: Clone + Send + Sync + Unpin, A: crate::alloc::Allocator>(z: &WriteZipperCore<'_, '_, V, A>) -> (*const u8, *const usize, Option<*const TaggedNodePtr<V, A>>) {
@@ -3300,7 +3309,10 @@ mod tests {
         let mut wz = zh.write_zipper_at_exclusive_path_with_buffer(b"ba", buffer).unwrap();
         assert_eq!(wz.path(), b"");
         assert_eq!(wz.origin_path(), b"ba");
+        #[cfg(not(miri))]
         assert_eq!(wz.val_count(), 4usize.pow(4));
+        #[cfg(miri)]
+        assert_eq!(wz.val_count(), 1);
         wz.descend_to(b"cdab");
         assert_eq!(wz.z.key.prefix_buf.as_ptr(), prefix_ptr);
         assert_eq!(wz.z.key.prefix_idx.as_ptr(), idx_ptr);
@@ -4614,7 +4626,10 @@ mod tests {
     /// compressed `LineListNode` handling during subtraction.
     #[test]
     fn write_zipper_subtract_into_test4() {
+        #[cfg(not(miri))]
         let n = 200u64;
+        #[cfg(miri)]
+        let n = 8u64; // Retains a nonempty result after the full operation chain.
 
         // Build 8 maps with keys "k_{j*step}" for step 1..8
         let maps: Vec<PathMap<u64>> = (0..8).map(|i| {
@@ -6300,9 +6315,21 @@ mod tests {
         }
 
         #[cfg(miri)]
-        const CASE_COUNT: usize = 10;
+        const CASE_COUNT: usize = 1;
         #[cfg(not(miri))]
         const CASE_COUNT: usize = 400;
+        #[cfg(not(miri))]
+        const PATH_COUNT: usize = 12;
+        #[cfg(miri)]
+        const PATH_COUNT: usize = 2;
+        #[cfg(not(miri))]
+        const EXTRA_PATH_COUNT: usize = 4;
+        #[cfg(miri)]
+        const EXTRA_PATH_COUNT: usize = 1;
+        #[cfg(not(miri))]
+        const MAX_SHORT_PATH_LEN: usize = 7;
+        #[cfg(miri)]
+        const MAX_SHORT_PATH_LEN: usize = 2;
         const OPS: [&str; 8] = [
             "remove_val", "remove_branches", "remove_unmasked_branches", "take_map",
             "join_k_path_into", "meet_into", "subtract_into", "join_into_take",
@@ -6316,11 +6343,15 @@ mod tests {
             let mut map = PathMap::<u64>::new();
             let mut source = PathMap::<u64>::new();
             let mut paths = Vec::new();
-            for path_idx in 0..rng.random_range(1..=12usize) {
+            for path_idx in 0..rng.random_range(1..=PATH_COUNT) {
                 let len = if case_idx % 8 == 0 && path_idx == 0 {
-                    rng.random_range(48..=55usize)
+                    #[cfg(not(miri))]
+                    let range = 48..=55usize;
+                    #[cfg(miri)]
+                    let range = 3..=4usize;
+                    rng.random_range(range)
                 } else {
-                    rng.random_range(0..=7usize)
+                    rng.random_range(0..=MAX_SHORT_PATH_LEN)
                 };
                 let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
                 map.set_val_at(&path, 1u64 << rng.random_range(0..8));
@@ -6329,14 +6360,14 @@ mod tests {
                 }
                 paths.push(path);
             }
-            for _ in 0..rng.random_range(0..=4usize) {
-                let len = rng.random_range(1..=7usize);
+            for _ in 0..rng.random_range(0..=EXTRA_PATH_COUNT) {
+                let len = rng.random_range(1..=MAX_SHORT_PATH_LEN);
                 let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
                 map.create_path(&path);
                 paths.push(path);
             }
-            for _ in 0..rng.random_range(0..=4usize) {
-                let len = rng.random_range(0..=7usize);
+            for _ in 0..rng.random_range(0..=EXTRA_PATH_COUNT) {
+                let len = rng.random_range(0..=MAX_SHORT_PATH_LEN);
                 let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
                 source.set_val_at(&path, 1u64 << rng.random_range(0..8));
             }
@@ -7938,12 +7969,29 @@ mod tests {
 
     #[test]
     fn remove_subtrie_removes_focus_and_descendants() {
+        #[cfg(not(miri))]
+        let sibling_counts = [1u8, 8];
+        #[cfg(miri)]
+        let sibling_counts = [1u8];
+        #[cfg(not(miri))]
+        let root_lengths = [0, 1, 3];
+        #[cfg(miri)]
+        let root_lengths = [1];
+        #[cfg(not(miri))]
+        const CONTINUATION_LEN: usize = 64;
+        #[cfg(miri)]
+        const CONTINUATION_LEN: usize = 4;
+        #[cfg(not(miri))]
+        const SHAPES: &[usize] = &[0, 1, 2, 3, 4, 5];
+        #[cfg(miri)]
+        const SHAPES: &[usize] = &[4]; // Combines a focus value, child value, and dangling descendant.
+
         for prune in [false, true] {
-            for siblings in [1u8, 8] {
-                for root_len in [0, 1, 3] {
+            for siblings in sibling_counts {
+                for root_len in root_lengths {
                     // Include a long compressed continuation and a dangling descendant.
                     let focus = [0u8, 0, 0];
-                    for shape in 0..6 {
+                    for &shape in SHAPES {
                         let mut original = PathMap::<u64>::new();
                         original.set_val_at([], 99);
                         for byte in 1..=siblings {
@@ -7953,13 +8001,13 @@ mod tests {
                             0 => {}, // Absent focus.
                             1 => { original.create_path(focus); },
                             2 => { original.set_val_at(focus, 42); },
-                            3 => { original.set_val_at([0; 64], 43); },
+                            3 => { original.set_val_at([0; CONTINUATION_LEN], 43); },
                             4 => {
                                 original.set_val_at(focus, 42);
-                                original.set_val_at([0; 64], 43);
+                                original.set_val_at([0; CONTINUATION_LEN], 43);
                                 original.create_path([0, 0, 0, 1]);
                             },
-                            5 => { original.create_path([0; 64]); },
+                            5 => { original.create_path([0; CONTINUATION_LEN]); },
                             _ => unreachable!(),
                         }
                         let before = all_locations(&original);
