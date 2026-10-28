@@ -101,11 +101,16 @@ theorem ascend_le (n : Nat) : ((z.ascend n).2).path.length ≤ z.path.length := 
 @[simp] theorem trie_reset : z.reset.trie = z.trie := rfl
 
 /-- A fork sees the same location its parent was looking at, and is at its root. -/
-@[simp] theorem focus_fork : z.forkReadZipper.focus = z.focus := by
-  simp [forkReadZipper, focus]
+@[simp] theorem focus_fork (h : z.pathExists = true) :
+    z.forkReadZipper.map Zip.focus = some z.focus := by
+  simp [forkReadZipper, h, focus]
 
-@[simp] theorem atRoot_fork : z.forkReadZipper.atRoot = true := by
-  simp [forkReadZipper, atRoot]
+@[simp] theorem atRoot_fork (h : z.pathExists = true) :
+    z.forkReadZipper.map Zip.atRoot = some true := by
+  simp [forkReadZipper, h, atRoot]
+
+@[simp] theorem fork_absent (h : z.pathExists = false) : z.forkReadZipper = none := by
+  simp [forkReadZipper, h]
 
 /-- `child_count` is the population count of `child_mask`, by construction. -/
 @[simp] theorem childCount_eq : z.childCount = z.childMask.length := rfl
@@ -293,6 +298,44 @@ finishes at the root. -/
 def toNextValMonotone (z : Zip V) : Bool :=
   let (moved, z') := z.toNextVal
   if moved then Path.lt z.path z'.path && z'.isVal else z'.atRoot
+
+/-- Reverse stepping lands on an existing non-root predecessor, except for
+the initial wrap from the root. Exhaustion returns to the root. -/
+def toPrevStepMonotone (z : Zip V) : Bool :=
+  let (moved, z') := z.toPrevStep
+  if moved then z'.pathExists && !z'.atRoot && (z.atRoot || Path.lt z'.path z.path)
+  else z'.atRoot
+
+/-- Reverse value iteration has the same ordering and boundary as stepping. -/
+def toPrevValMonotone (z : Zip V) : Bool :=
+  let (moved, z') := z.toPrevVal
+  if moved then z'.isVal && !z'.atRoot && (z.atRoot || Path.lt z'.path z.path)
+  else z'.atRoot
+
+/-- Forward then backward returns to an existing non-root starting position. -/
+def stepRoundTrip (z : Zip V) : Bool :=
+  if !z.pathExists || z.atRoot then true
+  else
+    let (moved, next) := z.toNextStep
+    let (back, prev) := next.toPrevStep
+    !moved || (back && prev.path == z.path)
+
+/-- Forward then backward returns to a non-root starting value. -/
+def valRoundTrip (z : Zip V) : Bool :=
+  if !z.isVal || z.atRoot then true
+  else
+    let (moved, next) := z.toNextVal
+    let (back, prev) := next.toPrevVal
+    !moved || (back && prev.path == z.path)
+
+/-- Last-value descent stays within the starting subtree, includes the focus,
+and leaves it unchanged when no value is found. Repeating success is stable. -/
+def descendLastValLands (z : Zip V) : Bool :=
+  let (found, z') := z.descendLastVal
+  if found then
+    z'.isVal && z'.pathExists && (z.path ≼ z'.path) &&
+      z'.descendLastVal.1 && z'.descendLastVal.2.path == z'.path
+  else z'.path == z.path
 
 /-- `join` is commutative **on locations**, but not on values.
 

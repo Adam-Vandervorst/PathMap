@@ -11,7 +11,7 @@ use crate::harness::*;
 
 impl<'t, S: AsRef<[u8]>> ReadSource for ACTZipper<'t, S, u64> {
     fn dump_fork(&self) -> String {
-        dump(&mut self.fork_read_zipper())
+        dump_fork(self)
     }
     /// ACT implements `ZipperSubtries` only for `Value = ()`, and
     /// `ZipperInfallibleSubtries` not at all, so a subtrie cannot be

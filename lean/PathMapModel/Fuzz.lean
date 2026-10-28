@@ -345,7 +345,10 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit s "make_map_val_count" (toString (z.makeMap.valCount [])), d)
   | 26 => do let (t, d) ← d.mod 2
              let z := getTarget s t
-             some (emit s "dump" (dumpAt z.trie z.focus), d)
+             let result := match z.forkReadZipper with
+               | some fork => dumpAt fork.trie fork.root
+               | none => "_:-"
+             some (emit s "dump" result, d)
   | 27 => do let (v, d) ← d.u8
              let (old, z) := s.wz.setVal (UInt64.ofNat v.toNat)
              some (emit { s with wz := z } "set_val" (showVal old), d)
@@ -529,6 +532,15 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 56 => do let (pr, d) ← d.bool
              let (removed, z) := s.wz.removeSubtrie pr
              some (emit { s with wz := z } "remove_subtrie" (showBool removed), d)
+  | 57 => do let (_, d) ← d.mod 2
+             let (r, z) := s.rz.descendLastVal
+             some (emit { s with rz := z } "descend_last_val" (showBool r), d)
+  | 58 => do let (t, d) ← d.mod 2
+             let (r, s) := onTarget s t (fun z => z.toPrevStep)
+             some (emit s "to_prev_step" (showBool r), d)
+  | 59 => do let (_, d) ← d.mod 2
+             let (r, z) := s.rz.toPrevVal
+             some (emit { s with rz := z } "to_prev_val" (showBool r), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/

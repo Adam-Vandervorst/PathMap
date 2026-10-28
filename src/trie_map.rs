@@ -229,6 +229,12 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         ReadZipperUntracked::new_with_node_and_path_internal_in(self.root().unwrap(), &[], 0, root_val, self.alloc.clone())
     }
 
+    /// Creates a new read-only [Zipper], starting at the root of a `PathMap`, that reuses the
+    /// allocations held by `buffer`.  See [ZipperBuffer]
+    pub fn read_zipper_with_buffer<'a>(&'a self, buffer: ZipperBuffer<V, A>) -> ReadZipperUntracked<'a, 'static, V, A> {
+        ReadZipperUntracked::new_with_buffer(self, buffer)
+    }
+
     /// Creates a new read-only [Zipper], with the specified path from the root of the map; This method is much more
     /// efficient than [read_zipper_at_path](Self::read_zipper_at_path), but means the resulting zipper is bound by
     /// the `'path` lifetime
@@ -258,6 +264,15 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
         let root_node = self.root.get_mut().as_mut().unwrap();
         let root_val = self.root_val.get_mut();
         WriteZipperUntracked::new_with_node_and_path_internal_in(root_node, Some(root_val), &[], 0, self.alloc.clone())
+    }
+
+    /// Creates a new [write zipper](ZipperWriting) starting at the root of the `PathMap`, that reuses the
+    /// allocations held by `buffer`.  See [WriteZipperBuffer]
+    pub fn write_zipper_with_buffer(&mut self, buffer: WriteZipperBuffer<V, A>) -> WriteZipperUntracked<'_, 'static, V, A> {
+        self.ensure_root();
+        let root_node = self.root.get_mut().as_mut().unwrap();
+        let root_val = self.root_val.get_mut();
+        WriteZipperUntracked::new_with_node_and_buffer_internal_in(root_node, Some(root_val), &[], 0, self.alloc.clone(), buffer)
     }
 
     /// Creates a new [write zipper](ZipperWriting) with the specified path from the root of the map

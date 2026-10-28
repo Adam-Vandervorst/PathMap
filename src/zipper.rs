@@ -24,6 +24,7 @@ pub use crate::overlay_zipper::{OverlayZipper};
 pub use crate::prefix_zipper::{PrefixZipper};
 pub use crate::path_tracker::{PathTracker};
 pub use crate::empty_zipper::{EmptyZipper};
+pub use crate::subtract_zipper::{SubtractZipper};
 pub use crate::poly_zipper::{PolyZipper, PolyZipperExplicit};
 pub use crate::dependent_zipper::DependentProductZipperG;
 use crate::zipper_tracking::*;
@@ -107,15 +108,20 @@ pub trait ZipperValuesAt<V>: ZipperValues<V> {
 /// Method to fork a read zipper from the parent zipper
 pub trait ZipperForking<V> {
     /// The read-zipper type returned from [fork_read_zipper](ZipperForking::fork_read_zipper)
-    type ReadZipperT<'a>: ZipperAbsolutePath + ZipperIteration + ZipperValues<V> where Self: 'a;
+    type ReadZipperT<'a>: ZipperAbsolutePath + ZipperIteration + ZipperValues<V> + ZipperValuesAt<V> where Self: 'a;
 
     /// Returns a new read-only Zipper, with the new zipper's root being at the zipper's current focus
+    ///
+    /// Returns `None` if the focus path does not exist.
+    ///
+    /// The child zipper's [`root_prefix_path`](ZipperAbsolutePath::root_prefix_path) is based on
+    /// the parent zipper's [`origin_path`](ZipperAbsolutePath::origin_path).
     ///
     /// Discussion: The main uses of this method is to construct a child zipper with a different root
     /// from the parent, to construct a read zipper when you have another zipper type, or to cheaply
     /// create a zipper you can pass to a function that takes ownership.  Often however, you want to
     /// clone the parent zipper instead.
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a>;
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>>;
 }
 
 /// Methods for zippers that can access concrete subtries
@@ -452,8 +458,10 @@ pub trait ZipperMoving: Zipper {
     /// Advances the zipper to visit every existing path within the trie in a depth-first order,
     /// reporting movement to `obs`.
     ///
-    /// Returns `true` if the position of the zipper has moved, or `false` if the zipper has returned
-    /// to the root
+    /// Returns `false` when zipper has returned to the zipper’s root, otherwise `true`. If the zipper's
+    /// focus is on a non-existent path, this method moves to the next existing path in the sequence of
+    /// existing paths.
+    ///
     /// `obs` is notified of every movement made, so a caller can track the zipper's location without
     /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
     fn to_next_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
@@ -486,6 +494,59 @@ pub trait ZipperMoving: Zipper {
                 },
                 None => false
             }
+        }
+        true
+    }
+
+    /// Convenience form of [`ZipperMoving::to_prev_step_observed`] that does not observe path movement.
+    fn to_prev_step(&mut self) -> bool {
+        self.to_prev_step_observed(&mut ())
+    }
+
+    /// Moves the zipper to the previous existing path within the trie, visiting every path in the exact
+    /// reverse of the order used by [`to_next_step`](ZipperMoving::to_next_step), and reporting movement to `obs`.
+    ///
+    /// Returns `false` when traversal ends at the zipper's root, otherwise `true`.
+    /// Called at the root, this method moves to the last existing path by sort order.
+    ///
+    /// If the zipper's focus is on a non-existent path, this method moves to the existing path immediately
+    /// before the focus path in the sequence of existing paths.
+    ///
+    /// `obs` is notified of every movement made, so a caller can track the zipper's location without
+    /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
+    fn to_prev_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        if self.at_root() {
+            if self.child_count() == 0 {
+                return false
+            }
+        } else {
+            loop {
+                match self.to_prev_sibling_byte() {
+                    Some(byte) => {
+                        //A sibling step replaces the last byte rather than adding one, so the
+                        //observer sees the old byte retracted before the new one arrives.
+                        obs.ascend(1);
+                        obs.descend_to_byte(byte);
+                        break
+                    },
+                    None => {
+                        if !self.ascend_byte() {
+                            return false
+                        }
+                        obs.ascend(1);
+                        if self.at_root() {
+                            return false
+                        }
+                        if self.path_exists() {
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+        //Descend to the last leaf below the focus, which is the predecessor in depth-first order
+        while let Some(byte) = self.descend_last_byte() {
+            obs.descend_to_byte(byte);
         }
         true
     }
@@ -955,6 +1016,94 @@ pub trait ZipperIteration: ZipperMoving {
         }
     }
 
+    /// Convenience form of [`ZipperIteration::to_prev_val_observed`] that does not observe path movement.
+    fn to_prev_val(&mut self) -> bool {
+        self.to_prev_val_observed(&mut ())
+    }
+
+    /// Systematically moves to the previous value accessible from the zipper, visiting values in the
+    /// exact reverse of the order used by [`to_next_val`](ZipperIteration::to_next_val), and reporting
+    /// movement to `obs`.
+    ///
+    /// Returns `true` if the zipper is positioned at the previous value, or `false` if the zipper has
+    /// encountered the root.  Called at the root, this method moves to the last value in the trie.
+    ///
+    /// `obs` is notified of every movement made, so a caller can track the zipper's location without
+    /// the zipper needing to maintain a path buffer of its own.  Pass `&mut ()` to discard them.
+    fn to_prev_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        //This walks the same positions as repeated calls to `to_prev_step`, but uses
+        //`descend_last_path` to reach the last leaf below a subtrie in one call
+        if self.at_root() {
+            if !self.descend_last_path_observed(obs) {
+                return false
+            }
+            if self.is_val() {
+                return true
+            }
+        }
+        loop {
+            match self.to_prev_sibling_byte() {
+                Some(byte) => {
+                    //A sibling step replaces the last byte rather than adding one, so the
+                    //observer sees the old byte retracted before the new one arrives.
+                    obs.ascend(1);
+                    obs.descend_to_byte(byte);
+                    self.descend_last_path_observed(obs);
+                },
+                None => {
+                    if !self.ascend_byte() {
+                        return false
+                    }
+                    obs.ascend(1);
+                    if self.at_root() {
+                        return false
+                    }
+                }
+            }
+            if self.is_val() {
+                return true
+            }
+        }
+    }
+
+    /// Convenience form of [`ZipperIteration::descend_last_val_observed`] that does not observe path movement.
+    fn descend_last_val(&mut self) -> bool {
+        self.descend_last_val_observed(&mut ())
+    }
+
+    /// Positions the zipper at the last value by sort order in the subtree at the current focus,
+    /// and reports movement to `obs`.
+    ///
+    /// Returns `true` if the zipper focus is at a position containing a value, regardless of whether or not
+    /// the focus was moved.  Returns `false` and leaves the focus unchanged if the subtrie below the focus
+    /// does not contain any values.
+    ///
+    /// Worst case search time is proportional to the number of positions in the subtree, even if they are not
+    /// occupied by values.
+    ///
+    /// `obs` is notified of every movement made, including movements retracted while searching.
+    /// Pass `&mut ()` to discard them.
+    fn descend_last_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        let start_depth = self.depth();
+        self.descend_last_path_observed(obs);
+        loop {
+            if self.is_val() {
+                return true
+            }
+            if self.depth() == start_depth {
+                return false
+            }
+            if let Some(byte) = self.to_prev_sibling_byte() {
+                obs.ascend(1);
+                obs.descend_to_byte(byte);
+                self.descend_last_path_observed(obs);
+            } else {
+                self.ascend_byte();
+                obs.ascend(1);
+            }
+        }
+    }
+
     /// Convenience form of [`ZipperIteration::descend_last_path_observed`] that does not observe path movement.
     fn descend_last_path(&mut self) -> bool {
         self.descend_last_path_observed(&mut ())
@@ -1266,7 +1415,9 @@ use zipper_priv::*;
 macro_rules! zipper_impl_lens {
     (ZipperIteration $s: ident => $e:expr) => {
         fn to_next_val_observed<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.to_next_val_observed(obs) }
+        fn to_prev_val_observed<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.to_prev_val_observed(obs) }
         fn descend_last_path_observed<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.descend_last_path_observed(obs) }
+        fn descend_last_val_observed<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.descend_last_val_observed(obs) }
         fn descend_first_k_path_observed<Obs: PathObserver>(&mut $s, k: usize, obs: &mut Obs) -> bool { $e.descend_first_k_path_observed(k, obs) }
         fn to_next_k_path_observed<Obs: PathObserver>(&mut $s, k: usize, obs: &mut Obs) -> bool { $e.to_next_k_path_observed(k, obs) }
     };
@@ -1291,7 +1442,7 @@ macro_rules! zipper_impl_lens {
         fn val_at<K: AsRef<[u8]>>(&$s, path: K) -> Option<&V> { $e.val_at(path) }
     };
     (ZipperForking $s: ident => $e:expr) => {
-        fn fork_read_zipper<'a>(&'a $s) -> Self::ReadZipperT<'a> { $e.fork_read_zipper() }
+        fn fork_read_zipper<'a>(&'a $s) -> Option<Self::ReadZipperT<'a>> { $e.fork_read_zipper() }
     };
     (ZipperSubtries $s: ident => $e:expr) => {
         fn native_subtries(&$s) -> bool { $e.native_subtries() }
@@ -1322,6 +1473,7 @@ macro_rules! zipper_impl_lens {
         fn ascend_until(&mut $s) -> usize { $e.ascend_until() }
         fn ascend_until_branch(&mut $s) -> usize { $e.ascend_until_branch() }
         fn to_next_step_observed<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.to_next_step_observed(obs) }
+        fn to_prev_step_observed<Obs: PathObserver>(&mut $s, obs: &mut Obs) -> bool { $e.to_prev_step_observed(obs) }
     };
     (ZipperInfallibleSubtries $s: ident => $e:expr) => {
         fn make_map(&$s) -> crate::PathMap<V, A> { $e.make_map() }
@@ -1457,9 +1609,9 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperTracked<'_, '_, V, A>{
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let forked_zipper = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let forked_zipper = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper))
     }
 }
 
@@ -1494,6 +1646,24 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ReadZipperTra
     pub(crate) fn new_with_node_and_cloned_path_in(root_node: &'a TrieNodeODRc<V, A>, owned_root: bool, path: &[u8], root_prefix_len: usize, root_key_start: usize, root_val: Option<&'a V>, alloc: A, tracker: Option<ZipperTracker<TrackingRead>>) -> Self {
         let core = ReadZipperCore::new_with_node_and_cloned_path_in(root_node, owned_root, path, root_prefix_len, root_key_start, root_val, alloc);
         Self { z: core, tracker }
+    }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(mut self) -> ZipperBuffer<V, A> {
+        let placeholder = ReadZipperCore::new_with_node_and_path_internal_in(
+            OwnedOrBorrowed::None,
+            &[],
+            0,
+            None,
+            self.z.alloc.clone(),
+        );
+        core::mem::replace(&mut self.z, placeholder).into_zipper_buffer()
+    }
+
+    /// Same as [Clone::clone], but the new zipper stores its path and ancestor
+    /// stack in the allocations held by `buffer`.
+    pub fn clone_with_buffer(&self, buffer: ZipperBuffer<V, A>) -> Self {
+        Self { z: self.z.clone_with_buffer(buffer), tracker: self.tracker.clone() }
     }
 }
 
@@ -1548,9 +1718,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ReadZipper
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperUntracked<'_, '_, V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let forked_zipper = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let forked_zipper = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper))
     }
 }
 
@@ -1603,10 +1773,29 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin + 'a, A: Allocator + 'a> ReadZipp
         let core = ReadZipperCore::new_with_node_and_cloned_path_in(root_node, false, path, root_prefix_len, root_key_start, root_val, alloc);
         Self { z: core }
     }
-    /// Makes a new `ReadZipperUntracked` for use in the implementation of [Zipper::fork_read_zipper].
+    /// Makes a new `ReadZipperUntracked` for use in the implementation of [ZipperForking::fork_read_zipper].
     /// Forked zippers never need to be tracked because they are always fully covered by their parent's permissions
     pub(crate) fn new_forked_with_inner_zipper(core: ReadZipperCore<'a, 'path, V, A>) -> Self {
         ReadZipperUntracked{ z: core }
+    }
+
+    /// Creates a new zipper at the root of `map`, reusing the allocations held by `buffer`.
+    /// See [PathMap::read_zipper_with_buffer]
+    pub(crate) fn new_with_buffer(map: &'a PathMap<V, A>, buffer: ZipperBuffer<V, A>) -> ReadZipperUntracked<'a, 'static, V, A> {
+        let mut zipper = map.read_zipper();
+        zipper.z.install_buffer(buffer);
+        zipper
+    }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(self) -> ZipperBuffer<V, A> {
+        self.z.into_zipper_buffer()
+    }
+
+    /// Same as [Clone::clone], but the new zipper stores its path and ancestor
+    /// stack in the allocations held by `buffer`.
+    pub fn clone_with_buffer(&self, buffer: ZipperBuffer<V, A>) -> Self {
+        Self { z: self.z.clone_with_buffer(buffer) }
     }
 }
 
@@ -1695,6 +1884,11 @@ impl<V: 'static + Clone + Send + Sync + Unpin, A: Allocator> ReadZipperOwned<V, 
         let map = MaybeDangling::into_inner(self.map);
         *map
     }
+
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(self) -> ZipperBuffer<V, A> {
+        self.z.into_zipper_buffer()
+    }
 }
 
 
@@ -1720,9 +1914,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for ReadZip
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperOwned<V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let forked_zipper = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let forked_zipper = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(forked_zipper))
     }
 }
 
@@ -1765,9 +1959,69 @@ pub(crate) const EXPECTED_DEPTH: usize = 16;
 /// Size in bytes to preallocate path storage in the zipper
 pub(crate) const EXPECTED_PATH_LEN: usize = 64;
 
+/// Buffers taken from a read zipper for reuse by another read zipper.
+///
+/// A zipper's path buffer and ancestor stack can grow substantially while it
+/// is being used.  A [`ZipperBuffer`] keeps those allocations alive after the
+/// zipper is dropped, so they can be handed to
+/// [PathMap::read_zipper_with_buffer] or [ReadZipperUntracked::clone_with_buffer].
+///
+/// A `ZipperBuffer` holds no cursor state: both buffers are always empty, and
+/// only their capacity is carried over to the next zipper.
+pub struct ZipperBuffer<V: Clone + Send + Sync, A: Allocator = GlobalAlloc> {
+    prefix_buf: Vec<u8>,
+    // The ancestor stack's element type borrows from the map, so its
+    // allocation is stored with the element type erased.
+    ancestors: ErasedVecAlloc,
+    phantom: core::marker::PhantomData<fn() -> (V, A)>,
+}
+
+/// The allocation of an empty `Vec`, with the element type erased so it is no
+/// longer bound by any lifetime in that type
+struct ErasedVecAlloc {
+    ptr: core::ptr::NonNull<u8>,
+    cap: usize,
+    elem: core::alloc::Layout,
+}
+
+// SAFETY: An `ErasedVecAlloc` owns an allocation with no live elements in it
+unsafe impl Send for ErasedVecAlloc {}
+unsafe impl Sync for ErasedVecAlloc {}
+
+impl ErasedVecAlloc {
+    fn from_vec<T>(mut vec: Vec<T>) -> Self {
+        vec.clear();
+        let mut vec = core::mem::ManuallyDrop::new(vec);
+        let ptr = core::ptr::NonNull::new(vec.as_mut_ptr()).unwrap().cast();
+        Self { ptr, cap: vec.capacity(), elem: core::alloc::Layout::new::<T>() }
+    }
+
+    /// Returns an empty `Vec` that owns the allocation.  `T` must have the same layout
+    /// as the element type of the `Vec` the allocation came from.  The zipper only
+    /// converts between ancestor stacks that differ in lifetime, so this always holds
+    fn into_vec<T>(self) -> Vec<T> {
+        assert_eq!(self.elem, core::alloc::Layout::new::<T>());
+        let this = core::mem::ManuallyDrop::new(self);
+        // SAFETY: The allocation came from a `Vec` with capacity `cap` whose element
+        // has the same size and alignment as `T`, and it holds no elements
+        unsafe { Vec::from_raw_parts(this.ptr.as_ptr().cast::<T>(), 0, this.cap) }
+    }
+}
+
+impl Drop for ErasedVecAlloc {
+    fn drop(&mut self) {
+        let size = self.elem.size() * self.cap;
+        if size > 0 {
+            // SAFETY: This is the layout `Vec` allocated with: `cap` elements of `elem`
+            unsafe { std::alloc::dealloc(self.ptr.as_ptr(), core::alloc::Layout::from_size_align_unchecked(size, self.elem.align())) }
+        }
+    }
+}
+
 pub(crate) mod read_zipper_core {
     use crate::PathMap;
     use crate::zipper::*;
+    use maybe_dangling::ManuallyDrop;
 
     /// A [Zipper] that is unable to modify the trie
     ///
@@ -1784,7 +2038,10 @@ pub(crate) mod read_zipper_core {
         /// In the cases where this field is not used, it will be set to [usize::MAX]
         root_parent_key_start: usize,
         /// A value at the zipper root, including a value held by `root_node`.
-        root_val: Option<&'a V>,
+        /// `maybe_dangling::ManuallyDrop` avoids retagging this self-reference
+        /// when the zipper moves or drops. Only the reference is wrapped;
+        /// `root_node` still drops the owned value normally.
+        root_val: ManuallyDrop<Option<&'a V>>,
         /// The node from which the zipper is descended.
         root_node: OwnedOrBorrowed<'a, TrieNodeODRc<V, A>, V>,
         /// A reference to the focus node
@@ -1805,8 +2062,9 @@ pub(crate) mod read_zipper_core {
         Owned(T),
         Borrowed(&'a T),
         None,
-        /// A private node and root value with stable addresses for the zipper's references.
-        Private(Box<(T, V)>),
+        /// A private node and root value. The wrapper lets the owner move without
+        /// invalidating the zipper's references into the box.
+        Private(MaybeDangling<Box<(T, V)>>),
     }
 
     impl<'a, T, V> OwnedOrBorrowed<'a, T, V> {
@@ -1880,22 +2138,41 @@ pub(crate) mod read_zipper_core {
 
     impl<V: Clone + Send + Sync, A: Allocator> Clone for ReadZipperCore<'_, '_, V, A> where V: Clone {
         fn clone(&self) -> Self {
+            self.clone_into_buffers(Vec::new(), Vec::new())
+        }
+    }
+
+    impl<'a, V: Clone + Send + Sync, A: Allocator> ReadZipperCore<'a, '_, V, A> {
+        /// Copies the zipper, storing the copy's path and ancestor stack in `prefix_buf`
+        /// and `ancestors`, which must be empty.  Shared by `clone` and `clone_with_buffer`
+        fn clone_into_buffers(&self, mut prefix_buf: Vec<u8>, mut ancestors: Vec<(TaggedNodeRef<'a, V, A>, IterToken, usize)>) -> Self {
+            debug_assert!(prefix_buf.is_empty() && ancestors.is_empty());
+            if self.prefix_buf.capacity() > 0 {
+                prefix_buf.extend_from_slice(&self.prefix_buf);
+                ancestors.extend_from_slice(&self.ancestors);
+            } else if prefix_buf.capacity() > 0 {
+                // A non-zero capacity marks `prefix_buf` as initialized, so it must begin with
+                // the origin path.  `self` hasn't moved yet, so its path is just the origin path
+                debug_assert!(self.ancestors.is_empty());
+                prefix_buf.extend_from_slice(self.origin_path.as_slice());
+            }
             let root_node = self.root_node.clone();
-            // The cloned private root has a new address. Its reference is valid while the clone lives.
+            // A private root value lives in `root_node`'s box, so the copy must point at its own
+            // box rather than at `self`'s.  The box keeps its address while the copy lives.
             let root_val = match &root_node {
                 OwnedOrBorrowed::Private(private) => Some(unsafe { &*(&private.1 as *const V) }),
-                _ => self.root_val,
+                _ => *self.root_val,
             };
             Self {
                 origin_path: self.origin_path.clone(),
                 root_key_start: self.root_key_start,
                 root_parent_key_start: self.root_parent_key_start,
-                root_val,
+                root_val: ManuallyDrop::new(root_val),
                 root_node,
                 focus_node: self.focus_node.clone(),
                 focus_iter_token: NODE_ITER_INVALID,
-                prefix_buf: self.prefix_buf.clone(),
-                ancestors: self.ancestors.clone(),
+                prefix_buf,
+                ancestors,
                 alloc: self.alloc.clone(),
             }
         }
@@ -1935,12 +2212,13 @@ pub(crate) mod read_zipper_core {
 
     impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for ReadZipperCore<'_, '_, V, A> {
         type ReadZipperT<'a> = ReadZipperCore<'a, 'a, V, A> where Self: 'a;
-        fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+        fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
             timed_span!(ForkReadZipper, COUNTERS);
+            if !self.path_exists() { return None; }
             let new_root_val = self.val();
             let new_root_path = self.origin_path();
             let new_root_key_start = new_root_path.len() - self.node_key().len();
-            Self::ReadZipperT::new_with_node_and_path_internal_in(OwnedOrBorrowed::Borrowed(self.focus_parent()), new_root_path, new_root_key_start, new_root_val, self.alloc.clone())
+            Some(Self::ReadZipperT::new_with_node_and_path_internal_in(OwnedOrBorrowed::Borrowed(self.focus_parent()), new_root_path, new_root_key_start, new_root_val, self.alloc.clone()))
         }
     }
 
@@ -2553,7 +2831,7 @@ pub(crate) mod read_zipper_core {
                 } else {
                     if self.root_val.is_some() || self.root_parent_key_start == usize::MAX {
                         //No parent key: the zipper root is the root node itself, and its value is `root_val`
-                        if self.root_node.is_owned() { witness.1.as_ref() } else { self.root_val }
+                        if self.root_node.is_owned() { witness.1.as_ref() } else { *self.root_val }
                     } else {
                         //We know the node in the witness and the node in self.root_node are the same,
                         // but we borrow it from the witness here because that has the lifetime we need
@@ -2740,7 +3018,7 @@ pub(crate) mod read_zipper_core {
                 origin_path: SliceOrLen::from(path),
                 root_key_start,
                 root_parent_key_start,
-                root_val,
+                root_val: ManuallyDrop::new(root_val),
                 focus_node: MiriWrapper::new(focus),
                 root_node,
                 focus_iter_token: NODE_ITER_INVALID,
@@ -2790,8 +3068,9 @@ pub(crate) mod read_zipper_core {
             let root_key_start = if exists { path.len() } else { path.len() - 1 };
             let node = subtree.unwrap_or_else(TrieNodeODRc::new_empty);
             if let Some(val) = val {
-                let private = Box::new((node, val));
-                // Box storage remains at the same address when the zipper moves.
+                // Wrap before borrowing: moving a bare Box would invalidate the
+                // root-value reference even though its allocation stays in place.
+                let private = MaybeDangling::new(Box::new((node, val)));
                 let root_val = Some(unsafe { &*(&private.1 as *const V) });
                 Self::new_with_node_and_path_internal_in(OwnedOrBorrowed::Private(private), path, root_key_start, root_val, alloc)
             } else {
@@ -2824,6 +3103,41 @@ pub(crate) mod read_zipper_core {
                 ancestors: self.ancestors,
                 alloc: self.alloc
             }
+        }
+
+        /// Consumes the zipper and keeps its buffer allocations for reuse.
+        pub(crate) fn into_zipper_buffer(mut self) -> ZipperBuffer<V, A> {
+            // Ancestor entries contain references into this zipper's map, so
+            // no entry may survive.  Only the allocations are kept.
+            self.prefix_buf.clear();
+            self.ancestors.clear();
+            ZipperBuffer {
+                prefix_buf: self.prefix_buf,
+                ancestors: ErasedVecAlloc::from_vec(self.ancestors),
+                phantom: core::marker::PhantomData,
+            }
+        }
+
+        /// Moves the allocations in `buffer` into a freshly created zipper, which must
+        /// not have moved yet (its buffers are still uninitialized)
+        pub(crate) fn install_buffer(&mut self, buffer: ZipperBuffer<V, A>) {
+            debug_assert_eq!(self.prefix_buf.capacity(), 0);
+            debug_assert!(self.ancestors.is_empty());
+            let ZipperBuffer { mut prefix_buf, ancestors, phantom: _ } = buffer;
+            // A non-zero capacity marks `prefix_buf` as initialized, in which case
+            // it must begin with the origin path.  See `reserve_buffers`
+            if prefix_buf.capacity() > 0 {
+                prefix_buf.extend_from_slice(self.origin_path.as_slice());
+            }
+            self.prefix_buf = prefix_buf;
+            self.ancestors = ancestors.into_vec();
+        }
+
+        /// Same as [Clone::clone], but writes the path and ancestor stack into the
+        /// allocations held by `buffer`
+        pub(crate) fn clone_with_buffer(&self, buffer: ZipperBuffer<V, A>) -> Self {
+            let ZipperBuffer { prefix_buf, ancestors, phantom: _ } = buffer;
+            self.clone_into_buffers(prefix_buf, ancestors.into_vec())
         }
 
         /// Returns the length of the `self.path()`, saving a couple instructions, but is internal because it may panic
@@ -2890,7 +3204,7 @@ pub(crate) mod read_zipper_core {
                     // we currently share the same implementation between `val()` and `get_val()` because the only difference is the return
                     // lifetime, and the current ZipperHead implementation is actually ok with referencing the value in the root of the ZipperHead.
                     // debug_assert!(self.root_node.is_borrowed());
-                    self.root_val
+                    *self.root_val
                 }
             }
         }
@@ -3451,6 +3765,131 @@ pub(crate) mod read_zipper_core {
         assert_eq!(&rz.path(), b"-howdy");
         assert_eq!(rz.origin_path(), b"hi-howdy");
     }
+
+    #[test]
+    fn read_zipper_with_buffer_reuses_allocations() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alpha", 1);
+        map.set_val_at(b"alphabet", 2);
+
+        let mut zipper = map.read_zipper();
+        zipper.reserve_buffers(4096, 512);
+        zipper.descend_to(b"alphabet");
+        let prefix_ptr = zipper.z.prefix_buf.as_ptr();
+        let ancestors_ptr = zipper.z.ancestors.as_ptr();
+        let prefix_capacity = zipper.z.prefix_buf.capacity();
+        let ancestors_capacity = zipper.z.ancestors.capacity();
+
+        let buffer = zipper.into_zipper_buffer();
+
+        let mut other_map = PathMap::<usize>::new();
+        other_map.set_val_at(b"alphabet", 3);
+        let mut zipper = other_map.read_zipper_with_buffer(buffer);
+
+        assert_eq!(zipper.path(), b"");
+        assert_eq!(zipper.origin_path(), b"");
+        assert_eq!(zipper.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(zipper.z.prefix_buf.capacity(), prefix_capacity);
+        assert_eq!(zipper.z.ancestors.as_ptr(), ancestors_ptr);
+        assert_eq!(zipper.z.ancestors.capacity(), ancestors_capacity);
+
+        assert!(zipper.descend_to_check(b"alphabet"));
+        assert_eq!(zipper.val(), Some(&3));
+        assert_eq!(zipper.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(zipper.z.ancestors.as_ptr(), ancestors_ptr);
+    }
+
+    #[test]
+    fn read_zipper_with_unallocated_buffer() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alphabet", 1);
+
+        let buffer = map.read_zipper().into_zipper_buffer();
+        let mut zipper = map.read_zipper_with_buffer(buffer);
+        assert!(zipper.descend_to_check(b"alphabet"));
+        assert_eq!(zipper.val(), Some(&1));
+    }
+
+    #[test]
+    fn zipper_buffer_drop_and_send() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alphabet", 1);
+
+        let mut zipper = map.read_zipper();
+        zipper.reserve_buffers(256, 32);
+        zipper.descend_to(b"alphabet");
+        let buffer = zipper.into_zipper_buffer();
+        assert_send_sync(&buffer);
+        drop(buffer);
+    }
+
+    #[test]
+    fn read_zipper_clone_with_buffer() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"alphabet", 1);
+        map.set_val_at(b"alpine", 2);
+
+        let mut donor = map.read_zipper();
+        donor.reserve_buffers(4096, 512);
+        let prefix_ptr = donor.z.prefix_buf.as_ptr();
+        let ancestors_ptr = donor.z.ancestors.as_ptr();
+
+        // Clone a zipper that has moved below a non-root origin
+        let mut zipper = map.read_zipper_at_borrowed_path(b"al");
+        zipper.descend_to(b"pha");
+        let mut cloned = zipper.clone_with_buffer(donor.into_zipper_buffer());
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(cloned.z.ancestors.as_ptr(), ancestors_ptr);
+        assert_eq!(cloned.path(), b"pha");
+        assert_eq!(cloned.origin_path(), b"alpha");
+        assert!(cloned.descend_to_check(b"bet"));
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(cloned.ascend(6), 6);
+        assert!(cloned.descend_to_check(b"pine"));
+        assert_eq!(cloned.val(), Some(&2));
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+
+        // Clone a zipper that has not moved yet, so its buffers are uninitialized
+        let mut donor = map.read_zipper();
+        donor.reserve_buffers(4096, 512);
+        let prefix_ptr = donor.z.prefix_buf.as_ptr();
+        let fresh = map.read_zipper_at_borrowed_path(b"alp");
+        let mut cloned = fresh.clone_with_buffer(donor.into_zipper_buffer());
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(cloned.origin_path(), b"alp");
+        assert!(cloned.descend_to_check(b"habet"));
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(cloned.origin_path(), b"alphabet");
+        assert_eq!(cloned.z.prefix_buf.as_ptr(), prefix_ptr);
+    }
+
+    /// A zipper from a [ZipperHead] keeps a private copy of its root value.  A buffered
+    /// clone must point at its own copy, so it stays valid after the original is dropped
+    #[test]
+    fn read_zipper_clone_with_buffer_private_root() {
+        let mut map = PathMap::<usize>::new();
+        map.set_val_at(b"ab", 1);
+        map.set_val_at(b"abcd", 2);
+        let zh = map.zipper_head();
+
+        let (mut cloned, mut buffered) = {
+            let rz = zh.read_zipper_at_path(b"ab").unwrap();
+            let buffer = PathMap::<usize>::new().read_zipper().into_zipper_buffer();
+            (rz.clone(), rz.clone_with_buffer(buffer))
+        };
+        // Reuse the freed memory, so a dangling reference reads garbage outside miri too
+        let junk = Box::new([0xdead_usize; 2]);
+        assert_eq!(cloned.val(), Some(&1));
+        assert_eq!(buffered.val(), Some(&1));
+        assert!(buffered.descend_to_check(b"cd"));
+        assert_eq!(buffered.val(), Some(&2));
+        assert_eq!(buffered.ascend(2), 2);
+        assert_eq!(buffered.val(), Some(&1));
+        assert!(cloned.descend_to_check(b"cd"));
+        assert_eq!(cloned.val(), Some(&2));
+        drop(junk);
+    }
 }
 use read_zipper_core::*;
 
@@ -3815,6 +4254,20 @@ pub(crate) mod zipper_moving_tests {
                 fn [<$z_name _to_next_step_test1>]() {
                     let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_TO_NEXT_STEP_TEST1_KEYS);
                     crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::to_next_step_test1)
+                }
+
+                #[test]
+                fn [<$z_name _to_prev_step_test1>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_TO_NEXT_STEP_TEST1_KEYS);
+                    crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_moving_tests::to_prev_step_test1)
+                }
+
+                #[test]
+                fn [<$z_name _to_prev_step_from_missing_path>]() {
+                    for root in [b"".as_slice(), b"rom".as_slice()] {
+                        let mut temp_store = $read_keys(crate::zipper::zipper_moving_tests::ZIPPER_TO_NEXT_STEP_TEST1_KEYS);
+                        crate::zipper::zipper_moving_tests::run_test(&mut temp_store, $make_z, root, crate::zipper::zipper_moving_tests::to_prev_step_from_missing_path)
+                    }
                 }
 
                 #[test]
@@ -4350,45 +4803,6 @@ pub(crate) mod zipper_moving_tests {
         assert_eq!(zip.ascend_until_branch(), 5);
         assert_eq!(zip.path(), b"");
         assert!(zip.at_root());
-
-        //Try with some actual branches in the trie.
-        //Some paths encountered will be values only, some will be branches only, and some will be both
-        let keys = ["1", "123", "12345", "1abc", "1234abc"];
-        let map: PathMap<()> = keys.into_iter().map(|v| (v, ())).collect();
-        let mut zip = map.read_zipper();
-
-        zip.descend_to(b"12345");
-        assert!(zip.path_exists());
-        assert_eq!(zip.path(), b"12345");
-        assert_eq!(zip.ascend_until(), 1);
-        assert_eq!(zip.path(), b"1234"); // "1234" is a branch only
-        assert_eq!(zip.is_val(), false);
-        assert_eq!(zip.child_count(), 2);
-        assert_eq!(zip.ascend_until(), 1);
-        assert_eq!(zip.path(), b"123"); // "123" is a value only
-        assert_eq!(zip.child_count(), 1);
-        assert_eq!(zip.is_val(), true);
-        assert_eq!(zip.ascend_until(), 2); // Jump over "12" because it's neither a branch nor a value
-        assert_eq!(zip.path(), b"1"); // "1" is both a branch and a value
-        assert_eq!(zip.is_val(), true);
-        assert_eq!(zip.child_count(), 2);
-        assert_eq!(zip.ascend_until(), 1);
-        assert_eq!(zip.path(), b"");
-        assert_eq!(zip.child_count(), 1);
-        assert_eq!(zip.ascend_until(), 0);
-        assert!(zip.at_root());
-
-        //Test that ascend_until_branch skips over all the values
-        zip.descend_to(b"12345");
-        assert!(zip.path_exists());
-        assert_eq!(zip.ascend_until_branch(), 1);
-        assert_eq!(zip.path(), b"1234");
-        assert_eq!(zip.ascend_until_branch(), 3);
-        assert_eq!(zip.path(), b"1");
-        assert_eq!(zip.ascend_until_branch(), 1);
-        assert_eq!(zip.path(), b"");
-        assert_eq!(zip.ascend_until_branch(), 0);
-        assert!(zip.at_root());
     }
 
     /// Test a trie with some actual branches
@@ -4637,6 +5051,67 @@ pub(crate) mod zipper_moving_tests {
         }
     }
 
+    /// `to_prev_step` must visit exactly the positions `to_next_step` visits, in reverse order, and
+    /// return `false` once it is back at the root
+    pub fn to_prev_step_test1<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        let mut forward = vec![];
+        while zipper.to_next_step() {
+            forward.push(zipper.path().to_vec());
+        }
+        assert!(zipper.at_root());
+        assert_eq!(forward.len(), 43);
+
+        let mut backward = vec![];
+        let mut observed = Vec::<u8>::new();
+        while zipper.to_prev_step_observed(&mut observed) {
+            assert_eq!(&observed[..], zipper.path(), "observer disagreed with path at step {}", backward.len());
+            backward.push(zipper.path().to_vec());
+        }
+        assert!(zipper.at_root());
+        assert_eq!(observed.len(), 0);
+        backward.reverse();
+        assert_eq!(forward, backward);
+
+        //Stepping back from the middle of a traversal
+        zipper.descend_to(b"romu");
+        assert!(zipper.to_prev_step());
+        assert_eq!(zipper.path(), b"romanus");
+        assert!(zipper.to_prev_step());
+        assert_eq!(zipper.path(), b"romanu");
+        zipper.reset();
+        zipper.descend_to(b"rom");
+        assert!(zipper.to_prev_step());
+        assert_eq!(zipper.path(), b"ro");
+        zipper.reset();
+        zipper.descend_to(b"a");
+        assert!(!zipper.to_prev_step());
+        assert!(zipper.at_root());
+    }
+
+    /// Missing suffixes must be skipped without skipping an existing parent or predecessor subtree.
+    pub fn to_prev_step_from_missing_path<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
+        let mut paths = vec![];
+        while zipper.to_next_step() {
+            paths.push(zipper.path().to_vec());
+        }
+        for start in [b"zzzz".as_slice(), b"0zzz", b"romanusZZ", b"romzzz", b"aaaa"] {
+            zipper.reset();
+            zipper.descend_to(start);
+            assert!(!zipper.path_exists(), "test focus must be missing: {start:?}");
+            let expected = paths.iter().rev().find(|path| path.as_slice() < start);
+            let mut observed = start.to_vec();
+            assert_eq!(zipper.to_prev_step_observed(&mut observed), expected.is_some(), "from {start:?}");
+            assert_eq!(zipper.path(), expected.map_or(b"".as_slice(), |path| path.as_slice()), "from {start:?}");
+            assert_eq!(observed, zipper.path(), "observer from {start:?}");
+            assert!(zipper.at_root() || zipper.path_exists());
+
+            zipper.reset();
+            zipper.descend_to(start);
+            assert_eq!(zipper.to_prev_step(), expected.is_some());
+            assert_eq!(zipper.path(), observed);
+        }
+    }
+
     pub const ZIPPER_BYTES_ITER_TEST1_KEYS: &[&[u8]] = &[b"ABCDEFGHIJKLMNOPQRSTUVWXYZ", b"ab",];
 
     pub fn zipper_byte_iter_test1<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
@@ -4802,6 +5277,28 @@ pub(crate) mod zipper_iteration_tests {
                 }
 
                 #[test]
+                fn [<$z_name _zipper_prev_iter_test1>]() {
+                    let mut temp_store = $read_keys(crate::zipper::zipper_iteration_tests::ZIPPER_ITER_TEST1_KEYS);
+                    crate::zipper::zipper_iteration_tests::run_test(&mut temp_store, $make_z, &[], crate::zipper::zipper_iteration_tests::zipper_prev_iter_test1)
+                }
+
+                #[test]
+                fn [<$z_name _zipper_prev_iter_test2>]() {
+                    let paths = crate::zipper::zipper_iteration_tests::zipper_iter_test2_paths();
+                    let path_refs: Vec<&[u8]> = paths.iter().map(|path| &path[..]).collect();
+                    let mut temp_store = $read_keys(&path_refs[..]);
+                    crate::zipper::zipper_iteration_tests::run_test(&mut temp_store, $make_z, b"in", crate::zipper::zipper_iteration_tests::zipper_prev_iter_test2)
+                }
+
+                #[test]
+                fn [<$z_name _descend_last_val>]() {
+                    for root in [b"".as_slice(), b"rom".as_slice()] {
+                        let mut temp_store = $read_keys(crate::zipper::zipper_iteration_tests::ZIPPER_ITER_TEST1_KEYS);
+                        crate::zipper::zipper_iteration_tests::run_test(&mut temp_store, $make_z, root, crate::zipper::zipper_iteration_tests::descend_last_val)
+                    }
+                }
+
+                #[test]
                 fn [<$z_name _zipper_iter_test2>]() {
                     let paths = crate::zipper::zipper_iteration_tests::zipper_iter_test2_paths();
                     let path_refs: Vec<&[u8]> = paths.iter().map(|path| &path[..]).collect();
@@ -4925,6 +5422,74 @@ pub(crate) mod zipper_iteration_tests {
             idx += 1;
         }
         assert_eq!(idx, keys.len());
+    }
+
+    /// Calls `to_prev_val` over the whole trie, ensuring all paths are visited exactly once, in the
+    /// reverse of the `to_next_val` order
+    pub fn zipper_prev_iter_test1<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+        let keys = ZIPPER_ITER_TEST1_KEYS;
+
+        let mut idx = keys.len();
+        let mut observed = Vec::<u8>::new();
+        while zipper.to_prev_val_observed(&mut observed) {
+            assert!(idx > 0, "to_prev_val visited more values than exist");
+            idx -= 1;
+            assert_eq!(keys[idx], zipper.path());
+            assert_eq!(&observed[..], zipper.path(), "observer disagreed with path at value {idx}");
+        }
+        assert_eq!(idx, 0);
+        assert!(zipper.at_root());
+
+        //A value that has descendants ("roman") comes before them, so stepping back from one of them
+        //lands on it, and stepping back from it lands on the previous sibling subtree's last value
+        zipper.descend_to(b"romane");
+        assert!(zipper.to_prev_val());
+        assert_eq!(zipper.path(), b"roman");
+        assert!(zipper.to_prev_val());
+        assert_eq!(zipper.path(), b"rom'i");
+
+        //Alternating directions returns to the same value
+        assert!(zipper.to_next_val());
+        assert_eq!(zipper.path(), b"roman");
+        assert!(zipper.to_prev_val());
+        assert_eq!(zipper.path(), b"rom'i");
+    }
+
+    pub fn zipper_prev_iter_test2<'a, Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+        //Iterating backwards using a zipper that has a root that is not the map root
+        let mut count: usize = ZIPPER_ITER_TEST2_COUNT;
+        let mut observed = Vec::<u8>::new();
+        while zipper.to_prev_val_observed(&mut observed) {
+            assert_eq!(zipper.is_val(), true);
+            count -= 1;
+            assert_eq!(zipper.path(), count.to_be_bytes());
+            assert_eq!(&observed[..], zipper.path(), "observer disagreed with path at value {count}");
+        }
+        assert_eq!(count, 0);
+    }
+
+    pub fn descend_last_val<Z: ZipperIteration + ZipperPath>(mut zipper: Z) {
+        let mut positions = vec![(vec![], zipper.is_val())];
+        while zipper.to_next_step() {
+            positions.push((zipper.path().to_vec(), zipper.is_val()));
+        }
+        let starts = positions.iter().map(|(path, _)| path.clone())
+            .chain(positions.iter().map(|(path, _)| [path.as_slice(), &[255, 255]].concat()));
+        for start in starts {
+            let expected = positions.iter().rev()
+                .find(|(path, valued)| *valued && path.starts_with(&start))
+                .map(|(path, _)| path.as_slice());
+            zipper.reset();
+            zipper.descend_to(&start);
+            let mut observed = start.clone();
+            assert_eq!(zipper.descend_last_val_observed(&mut observed), expected.is_some(), "from {start:?}");
+            assert_eq!(zipper.path(), expected.unwrap_or(&start), "from {start:?}");
+            assert_eq!(observed, zipper.path(), "observer from {start:?}");
+            zipper.reset();
+            zipper.descend_to(&start);
+            assert_eq!(zipper.descend_last_val(), expected.is_some());
+            assert_eq!(zipper.path(), observed);
+        }
     }
 
     const ZIPPER_ITER_TEST2_COUNT: usize = 32;
@@ -5639,7 +6204,7 @@ mod tests {
 
         //Fork a sub-zipper, and test iteration of that subtree
         zipper.descend_to(b"rub");
-        let mut sub_zipper = zipper.fork_read_zipper();
+        let mut sub_zipper = zipper.fork_read_zipper().expect("focus path exists");
         while let Some(&val) = sub_zipper.to_next_get_val() {
             // println!("{val}  {} = {}", std::str::from_utf8(sub_zipper.path()).unwrap(), std::str::from_utf8(&rs[val].as_bytes()[3..]).unwrap());
             assert_eq!(&rs[val].as_bytes()[3..], sub_zipper.path());
@@ -5725,7 +6290,7 @@ mod tests {
         // Test val_count & iteration on a ReadZipper forked off of a WriteZipper
         let wz = map.write_zipper_at_path(b"r");
         assert_eq!(wz.val_count(), R_KEY_CNT);
-        let rz = wz.fork_read_zipper();
+        let rz = wz.fork_read_zipper().expect("focus path exists");
         assert_eq!(rz.val_count(), R_KEY_CNT);
         let mut count = 0;
         for (_path, _) in rz {
@@ -5775,7 +6340,7 @@ mod tests {
         let mut r0 = map.read_zipper();
         r0.descend_to_byte(0);
         assert_eq!(r0.path_exists(), true);
-        let mut r1 = r0.fork_read_zipper();
+        let mut r1 = r0.fork_read_zipper().expect("focus path exists");
         assert_eq!(r1.to_next_sibling_byte(), None);
         assert_eq!(r1.child_mask().0[0], (1<<3) | (1<<4) | (1<<5));
         r1.descend_to_byte(3);
@@ -6036,6 +6601,47 @@ mod tests {
         assert!(rz.descend_last_path_observed(&mut observed));
         assert_eq!(rz.path(), b"rubicundus");
         assert_eq!(&observed[..], rz.path());
+    }
+
+    #[test]
+    fn descend_last_val_skips_dangling_paths_and_includes_focus() {
+        fn check<Z: ZipperIteration + ZipperPath>(mut z: Z, start: &[u8], expected: Option<&[u8]>) {
+            z.descend_to(start);
+            let mut observed = start.to_vec();
+            assert_eq!(z.descend_last_val_observed(&mut observed), expected.is_some());
+            assert_eq!(z.path(), expected.unwrap_or(start));
+            assert_eq!(observed, z.path());
+            assert_eq!(z.is_val(), expected.is_some());
+        }
+
+        let mut map = PathMap::<u64>::new();
+        for (key, value) in [(b"".as_slice(), 0), (b"a", 1), (b"aa", 2), (b"c", 3)] {
+            map.set_val_at(key, value);
+        }
+        for path in [b"aaz".as_slice(), b"bzz", b"czz", b"zzz"] {
+            map.write_zipper_at_path(path).create_path();
+        }
+        for (start, expected) in [
+            (b"".as_slice(), Some(b"c".as_slice())),
+            (b"a", Some(b"aa".as_slice())),
+            (b"aa", Some(b"aa".as_slice())),
+            (b"b", None), (b"czz", None), (b"missing", None),
+        ] {
+            check(map.read_zipper(), start, expected);
+            check(PathTracker::new(map.read_zipper()), start, expected);
+            check(map.clone().into_write_zipper(b""), start, expected);
+        }
+        check(map.read_zipper_at_path(b"a"), b"", Some(b"a"));
+        check(map.read_zipper_at_path(b"b"), b"", None);
+
+        for key in [b"a".as_slice(), b"aa", b"c"] {
+            map.write_zipper_at_path(key).remove_val(false);
+        }
+        check(map.read_zipper(), b"", Some(b""));
+        map.write_zipper().remove_val(false);
+        check(map.read_zipper(), b"", None);
+        check(PathMap::<u64>::new().read_zipper(), b"", None);
+        check(PathMap::from_iter([(b"", 9u64)]).read_zipper(), b"", Some(b""));
     }
 
     /// A sibling step at the zipper's own root must not move.  `to_next_sibling_byte`
@@ -6795,9 +7401,9 @@ mod tests {
     fn read_zipper_fork_root_to_next_step_terminates() {
         let mut m = PathMap::<u64>::new(); m.set_val_at(&[0u8,0,2,3,0], 1); m.create_path(&[0u8,3]);
         let rz = m.read_zipper_at_path(&[0u8,3]);
-        let mut f = rz.fork_read_zipper();
+        let mut f = rz.fork_read_zipper().expect("focus path exists");
         assert!(!f.ascend_byte());        // fad58f4: true (release) / subtract-with-overflow (debug)
-        let mut f = rz.fork_read_zipper();
+        let mut f = rz.fork_read_zipper().expect("focus path exists");
         assert!(!f.to_next_step());       // fad58f4: never returns
     }
 
@@ -6875,5 +7481,23 @@ mod tests {
         let m: PathMap<()> = [&[10u8,1][..], &[200,1]].into_iter().collect();     // line-list node
         let mut z = m.read_zipper(); z.descend_to(&[100]);
         assert_eq!(z.to_prev_sibling_byte(), Some(10));     // fad58f4 and master: None
+    }
+
+    #[test]
+    fn read_zipper_forks_handle_missing_paths_and_empty_roots() {
+        let mut map = PathMap::<u64>::new();
+        assert!(map.read_zipper().fork_read_zipper().is_some());
+        assert!(map.clone().into_read_zipper(b"").fork_read_zipper().is_some());
+        map.insert(b"ab", 7);
+        assert!(map.read_zipper_at_path(b"missing").fork_read_zipper().is_none());
+        assert!(map.clone().into_read_zipper(b"missing").fork_read_zipper().is_none());
+
+        // The associated type must expose val_at through the trait bound alone.
+        fn check_val_at<Z: ZipperForking<u64>>(zipper: Z) {
+            let fork = zipper.fork_read_zipper().unwrap();
+            assert_eq!(fork.val_at(b"b"), Some(&7));
+        }
+        check_val_at(map.read_zipper_at_path(b"a"));
+        check_val_at(map.into_read_zipper(b"a"));
     }
 }

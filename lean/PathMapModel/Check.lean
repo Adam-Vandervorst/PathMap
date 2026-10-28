@@ -204,6 +204,42 @@ pruning an already dangling focus does not count as removing content. -/
 #guard allZips.all descendIndexedLands
 #guard allZips.all siblingRoundTrip
 #guard allZips.all toNextValMonotone
+#guard allZips.all toPrevStepMonotone
+#guard allZips.all toPrevValMonotone
+#guard allZips.all stepRoundTrip
+#guard allZips.all valRoundTrip
+
+/-! Reverse traversal skips missing ancestors, stops at existing parents,
+wraps from the root, and stays within a zipper rooted below the map root. -/
+#guard ((zipAt fSide [] [3,3,3]).toPrevStep).2.path == [2]
+#guard ((zipAt fSide [] [0,0,3,3]).toPrevStep).2.path == [0,0]
+#guard ((zipAt fSide [] [0,1,3]).toPrevStep).2.path == [0,0]
+#guard ((zipAt fSide [] []).toPrevStep).2.path == [2]
+#guard !((zipAt fSide [] [0]).toPrevStep).1
+#guard !((zipAt fSide [0,0] [3,3]).toPrevStep).1
+#guard ((zipAt fSide [0] []).toPrevVal).2.path == [2]
+#guard ((zipAt fBranch [] [0,1]).toPrevVal).2.path == [0,0]
+#guard ((zipAt fBranch [] [0,0]).toPrevVal).2.path == [0]
+#guard !((zipAt fBranch [] [0]).toPrevVal).1
+#guard !((zipAt (mk [([], 9)]) [] []).toPrevVal).1
+#guard !((zipAt fEmpty [] []).toPrevStep).1
+#guard !((zipAt fEmpty [] [3,3]).toPrevVal).1
+#guard ((zipAt fDangle [] []).toPrevVal).2.path == [0]
+
+#guard allZips.all descendLastValLands
+
+/-! Last-value descent includes the focus and skips dangling suffixes. -/
+#guard ((zipAt fDangle [] []).descendLastVal).2.path == [0]
+#guard ((zipAt fDangle [] [0]).descendLastVal).1
+#guard ((zipAt fDangle [] [0]).descendLastVal).2.path == [0]
+#guard !((zipAt fDangle [] [0,1]).descendLastVal).1
+#guard ((zipAt fDangle [] [0,1]).descendLastVal).2.path == [0,1]
+#guard !((zipAt fEmpty [] []).descendLastVal).1
+#guard ((zipAt (mk [([], 9)]) [] []).descendLastVal).1
+#guard ((zipAt (mk [([], 9)]) [] []).descendLastVal).2.path == []
+#guard ((zipAt fBranch [0] []).descendLastVal).2.path == [1]
+#guard !((zipAt fSide [] [3,3]).descendLastVal).1
+#guard ((zipAt fSide [] [3,3]).descendLastVal).2.path == [3,3]
 #guard allZips.all (fun z => probes.all (descendToExistingLands z))
 #guard allZips.all (fun z => setValThenVal ops z 42)
 #guard allZips.all (takeThenGraft ops)

@@ -407,6 +407,29 @@ impl<V: Clone + Send + Sync, Z, A: Allocator> WriteZipperPriv<V, A> for &mut Z w
 }
 
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
+// WriteZipperBuffer
+// ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
+
+/// Buffers taken from a write zipper for reuse by another write zipper.
+///
+/// A write zipper's path buffer and node stack can grow substantially while it is being used.
+/// A `WriteZipperBuffer` keeps those allocations alive after the zipper is dropped, so they can be
+/// handed to [PathMap::write_zipper_with_buffer] or
+/// [ZipperCreation::write_zipper_at_exclusive_path_with_buffer].
+///
+/// A `WriteZipperBuffer` holds no cursor state: all its buffers are always empty, and only their
+/// capacity is carried over to the next zipper.
+pub struct WriteZipperBuffer<V: Clone + Send + Sync, A: Allocator = GlobalAlloc> {
+    prefix_buf: Vec<u8>,
+    prefix_idx: Vec<usize>,
+    stack: NodeStackVec<V, A>,
+}
+
+// SAFETY: The node stack is always empty, so the buffer doesn't refer to any node
+unsafe impl<V: Clone + Send + Sync, A: Allocator> Send for WriteZipperBuffer<V, A> {}
+unsafe impl<V: Clone + Send + Sync, A: Allocator> Sync for WriteZipperBuffer<V, A> {}
+
+// ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 // WriteZipperTracked
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 
@@ -438,9 +461,9 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValuesAt<V> fo
 
 impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<V> for WriteZipperTracked<'trie, '_, V, A>{
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let rz_core = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(rz_core)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let rz_core = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(rz_core))
     }
 }
 
@@ -534,6 +557,21 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator> WriteZipperTracked<'a, 's
         let core = WriteZipperCore::<'a, 'static, V, A>::new_with_node_and_cloned_path_internal_in(root_node, root_val, path, root_key_start, alloc);
         Self { z: core, _tracker: tracker }
     }
+    /// Same as [Self::new_with_node_and_cloned_path_internal_in], but reuses the allocations held by `buffer`
+    pub(crate) fn new_with_node_and_buffer_internal_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &[u8], root_key_start: usize, alloc: A, buffer: WriteZipperBuffer<V, A>, tracker: Option<ZipperTracker<TrackingWrite>>) -> Self {
+        let core = WriteZipperCore::<'a, 'static, V, A>::new_with_node_and_buffer_internal_in(root_node, root_val, path, root_key_start, alloc, buffer);
+        Self { z: core, _tracker: tracker }
+    }
+}
+
+impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator> WriteZipperTracked<'a, 'path, V, A> {
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    ///
+    /// NOTE: For a zipper created by a [ZipperHead], this does not prune the zipper's root prefix path the
+    /// way [ZipperCreation::cleanup_write_zipper] does
+    pub fn into_zipper_buffer(mut self) -> WriteZipperBuffer<V, A> {
+        self.z.take_zipper_buffer()
+    }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting<V, A> for WriteZipperTracked<'a, 'path, V, A> {
@@ -608,9 +646,9 @@ impl<'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperValuesAt<V> fo
 
 impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<V> for WriteZipperUntracked<'trie, '_, V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let rz_core = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(rz_core)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let rz_core = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(rz_core))
     }
 }
 
@@ -706,6 +744,18 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperU
     pub(crate) fn core(&mut self) -> &mut WriteZipperCore<'a, 'path, V, A> {
         &mut self.z
     }
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(mut self) -> WriteZipperBuffer<V, A> {
+        self.z.take_zipper_buffer()
+    }
+}
+
+impl <'a, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperUntracked<'a, 'static, V, A> {
+    /// See [WriteZipperCore::new_with_node_and_buffer_internal_in]
+    pub(crate) fn new_with_node_and_buffer_internal_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &[u8], root_key_start: usize, alloc: A, buffer: WriteZipperBuffer<V, A>) -> Self {
+        let core = WriteZipperCore::<'a, 'static, V, A>::new_with_node_and_buffer_internal_in(root_node, root_val, path, root_key_start, alloc, buffer);
+        Self { z: core }
+    }
 }
 
 impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperWriting<V, A> for WriteZipperUntracked<'a, 'path, V, A> {
@@ -787,9 +837,9 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperAbsolutePath for WriteZ
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for WriteZipperOwned<V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        let rz_core = self.z.fork_read_zipper();
-        Self::ReadZipperT::new_forked_with_inner_zipper(rz_core)
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let rz_core = self.z.fork_read_zipper()?;
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(rz_core))
     }
 }
 
@@ -831,6 +881,10 @@ impl <V: Clone + Send + Sync + Unpin, A: Allocator> WriteZipperOwned<V, A> {
         drop(self.z);
         let map = MaybeDangling::into_inner(self.map);
         *map
+    }
+    /// Consumes the zipper and returns its reusable traversal buffers.
+    pub fn into_zipper_buffer(mut self) -> WriteZipperBuffer<V, A> {
+        self.z.take_zipper_buffer()
     }
     /// Consumes the `WriteZipperOwned`, and returns a [ReadZipperOwned] in its place
     ///
@@ -1032,11 +1086,12 @@ impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zipper for Wri
 
 impl<'trie, V: Clone + Send + Sync + Unpin, A: Allocator + 'trie> ZipperForking<V> for WriteZipperCore<'trie, '_, V, A> {
     type ReadZipperT<'a> = crate::zipper::read_zipper_core::ReadZipperCore<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
         let new_root_val = self.val();
         let path = self.origin_path();
 
-        read_zipper_core::ReadZipperCore::new_with_node_and_path_in(self.focus_parent(), false, path, path.len(), self.key.node_key_start(), new_root_val, self.alloc.clone())
+        Some(read_zipper_core::ReadZipperCore::new_with_node_and_path_in(self.focus_parent(), false, path, path.len(), self.key.node_key_start(), new_root_val, self.alloc.clone()))
     }
 }
 
@@ -1191,6 +1246,19 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> ZipperPathBuf
 }
 
 impl <'a, V: Clone + Send + Sync + Unpin, A: Allocator> WriteZipperCore<'a, 'static, V, A> {
+    /// Same as [Self::new_with_node_and_cloned_path_internal_in], but stores the path and node stack in
+    /// the allocations held by `buffer`
+    pub(crate) fn new_with_node_and_buffer_internal_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &[u8], root_key_start: usize, alloc: A, buffer: WriteZipperBuffer<V, A>) -> Self {
+        let WriteZipperBuffer { prefix_buf, prefix_idx, stack } = buffer;
+        let focus_stack = MutNodeStack::new_with_stack(root_node, stack);
+        debug_assert!((path.len()-root_key_start == 0) != (root_val.is_none())); //We must have either a node_path or a root_val, but never both
+        Self {
+            key: KeyFields::new_cloned_path_in_buffer(path, root_key_start, prefix_buf, prefix_idx),
+            root_val: root_val.map(|val| val as *mut Option<V>),
+            focus_stack,
+            alloc,
+        }
+    }
     pub(crate) fn new_with_node_and_cloned_path_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &[u8], root_prefix_len: usize, root_key_start: usize, alloc: A) -> Self {
         let (key, node) = node_along_path_mut(root_node, &path[root_key_start..], true);
 
@@ -1211,6 +1279,16 @@ impl <'a, V: Clone + Send + Sync + Unpin, A: Allocator> WriteZipperCore<'a, 'sta
 }
 
 impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperCore<'a, 'path, V, A> {
+    /// Takes the buffer allocations out of the zipper for reuse.  The zipper is left without its path,
+    /// so it must be dropped right after this call
+    pub(crate) fn take_zipper_buffer(&mut self) -> WriteZipperBuffer<V, A> {
+        let mut prefix_buf = core::mem::take(&mut self.key.prefix_buf);
+        prefix_buf.clear();
+        let mut prefix_idx = core::mem::take(&mut self.key.prefix_idx);
+        prefix_idx.clear();
+        let stack = self.focus_stack.take_stack();
+        WriteZipperBuffer { prefix_buf, prefix_idx, stack }
+    }
     /// Creates a new zipper, with a path relative to a node
     pub(crate) fn new_with_node_and_path_in(root_node: &'a mut TrieNodeODRc<V, A>, root_val: Option<&'a mut Option<V>>, path: &'path [u8], root_prefix_len: usize, root_key_start: usize, alloc: A) -> Self {
         let (key, node) = node_along_path_mut(root_node, &path[root_key_start..], true);
@@ -2826,6 +2904,18 @@ fn make_parents_in<V: Clone + Send + Sync, A: Allocator>(path: &[u8], child_node
 }
 
 impl KeyFields<'static> {
+    /// Same as [Self::new_cloned_path], but copies `path` into `prefix_buf`, which must be empty
+    #[inline]
+    fn new_cloned_path_in_buffer(path: &[u8], root_key_start: usize, mut prefix_buf: Vec<u8>, prefix_idx: Vec<usize>) -> Self {
+        debug_assert!(prefix_buf.is_empty() && prefix_idx.is_empty());
+        prefix_buf.extend_from_slice(path);
+        Self {
+            origin_path: SliceOrLen::new_owned(path.len()),
+            root_key_start,
+            prefix_buf,
+            prefix_idx,
+        }
+    }
     #[inline]
     fn new_cloned_path(path: &[u8], root_key_start: usize) -> Self {
         let prefix_buf = path.to_vec();
@@ -2929,13 +3019,16 @@ impl<'k> KeyFields<'k> {
 // MutNodeStack: A replacement for MutCursor, follows the same pattern but stores TaggedNodeRefMut internally
 // ***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---***---
 
-use mut_node_stack::MutNodeStack;
+use mut_node_stack::{MutNodeStack, NodeStackVec};
 mod mut_node_stack {
     use smallvec::{SmallVec, smallvec};
     use core::ptr::NonNull;
     use core::marker::PhantomData;
     use crate::alloc::Allocator;
     use super::{TaggedNodeRef, TaggedNodeRefMut, TaggedNodePtr, TrieNodeODRc};
+
+    /// The storage behind a [MutNodeStack], which can be moved between stacks for reuse
+    pub type NodeStackVec<V, A> = SmallVec<[TaggedNodePtr<V, A>; 1]>;
 
     /// See [mutcursor::MutCursorRootedVec] for discussion about behavior
     pub struct MutNodeStack<'a, V: Clone + Send + Sync, A: Allocator> {
@@ -2949,6 +3042,23 @@ mod mut_node_stack {
         #[inline]
         pub fn new(root: &'a mut TrieNodeODRc<V, A>) -> Self {
             Self { root: Some(NonNull::from(root)), stack: smallvec![], phantom: PhantomData }
+        }
+        /// Same as [Self::new], but uses `stack`, which must be empty, as the storage
+        #[inline]
+        pub(crate) fn new_with_stack(root: &'a mut TrieNodeODRc<V, A>, stack: NodeStackVec<V, A>) -> Self {
+            debug_assert!(stack.is_empty());
+            Self { root: Some(NonNull::from(root)), stack, phantom: PhantomData }
+        }
+        /// Returns the heap allocation backing the stack, if it has spilled out of its inline slot
+        #[cfg(test)]
+        pub fn heap_ptr(&self) -> Option<*const TaggedNodePtr<V, A>> {
+            self.stack.spilled().then(|| self.stack.as_ptr())
+        }
+        /// Moves to the root, and takes the (empty) storage out of the stack
+        #[inline]
+        pub fn take_stack(&mut self) -> NodeStackVec<V, A> {
+            self.stack.clear();
+            core::mem::take(&mut self.stack)
         }
         #[inline]
         pub fn top(&self) -> Option<TaggedNodeRef<'_, V, A>> {
@@ -3068,6 +3178,140 @@ mod tests {
     use crate::trie_node::*;
     use crate::alloc::GlobalAlloc;
 
+    /// Paths that branch 4 ways at each of 6 levels, so traversals cross several nodes
+    #[cfg(not(miri))]
+    fn branchy_map() -> PathMap<usize> {
+        let mut map = PathMap::new();
+        let mut path = [0u8; 6];
+        for i in 0..4usize.pow(6) {
+            for (level, byte) in path.iter_mut().enumerate() {
+                *byte = b'a' + ((i >> (2 * level)) & 3) as u8;
+            }
+            map.set_val_at(&path, i);
+        }
+        map
+    }
+
+    // Keep the buffer tests' probe paths and branching peers without 4096 insertions.
+    #[cfg(miri)]
+    fn branchy_map() -> PathMap<usize> {
+        [b"dcbadc".as_slice(), b"abcdab", b"abcdaa", b"abcaab", b"abadab", b"aacdab", b"bacdab",
+            b"da", b"db", b"dd", b"dca", b"dcc", b"dcd"]
+            .into_iter().map(|path| (path, branchy_val(path))).collect()
+    }
+
+    fn buffer_ptrs<V: Clone + Send + Sync + Unpin, A: crate::alloc::Allocator>(z: &WriteZipperCore<'_, '_, V, A>) -> (*const u8, *const usize, Option<*const TaggedNodePtr<V, A>>) {
+        (z.key.prefix_buf.as_ptr(), z.key.prefix_idx.as_ptr(), z.focus_stack.heap_ptr())
+    }
+
+    #[test]
+    fn write_zipper_with_buffer_reuses_allocations() {
+        let mut map = branchy_map();
+        let mut wz = map.write_zipper();
+        wz.reserve_buffers(4096, 512);
+        wz.descend_to(b"dcbadc");
+        assert_eq!(wz.val(), Some(&branchy_val(b"dcbadc")));
+        let ptrs = buffer_ptrs(&wz.z);
+        assert!(ptrs.2.is_some(), "node stack should have spilled to the heap");
+        let buffer = wz.into_zipper_buffer();
+
+        let mut wz = map.write_zipper_with_buffer(buffer);
+        assert_eq!(wz.path(), b"");
+        assert_eq!(wz.origin_path(), b"");
+        wz.descend_to(b"abcdab");
+        assert_eq!(buffer_ptrs(&wz.z), ptrs);
+        assert_eq!(wz.set_val(7), Some(branchy_val(b"abcdab")));
+        assert_eq!(buffer_ptrs(&wz.z), ptrs);
+
+        // Move the buffer to a zipper on another map
+        let buffer = wz.into_zipper_buffer();
+        assert_eq!(map.val_at(b"abcdab"), Some(&7));
+        let mut other = PathMap::<usize>::new();
+        let mut wz = other.write_zipper_with_buffer(buffer);
+        wz.descend_to(b"xyz");
+        wz.set_val(1);
+        assert_eq!(wz.z.key.prefix_buf.as_ptr(), ptrs.0);
+        drop(wz);
+        assert_eq!(other.val_at(b"xyz"), Some(&1));
+        assert_eq!(other.val_count(), 1);
+    }
+
+    /// The value [branchy_map] stores at `path`
+    fn branchy_val(path: &[u8]) -> usize {
+        path.iter().enumerate().map(|(level, byte)| ((byte - b'a') as usize) << (2 * level)).sum()
+    }
+
+    #[test]
+    fn write_zipper_with_unallocated_buffer() {
+        let mut map = PathMap::<usize>::new();
+        let buffer = map.write_zipper().into_zipper_buffer();
+        let mut wz = map.write_zipper_with_buffer(buffer);
+        wz.descend_to(b"alphabet");
+        wz.set_val(1);
+        drop(wz);
+        assert_eq!(map.val_at(b"alphabet"), Some(&1));
+
+        let buffer = WriteZipperOwned::<usize>::new().into_zipper_buffer();
+        let mut wz = map.write_zipper_with_buffer(buffer);
+        wz.descend_to(b"alpine");
+        wz.set_val(2);
+        drop(wz);
+        assert_eq!(map.val_at(b"alpine"), Some(&2));
+    }
+
+    #[test]
+    fn write_zipper_buffer_drop_and_send() {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        let mut map = branchy_map();
+        let mut wz = map.write_zipper();
+        wz.reserve_buffers(256, 32);
+        wz.descend_to(b"abcdab");
+        let buffer = wz.into_zipper_buffer();
+        assert_send_sync(&buffer);
+        drop(buffer);
+    }
+
+    #[test]
+    fn zipper_head_write_zipper_with_buffer() {
+        let mut map = branchy_map();
+        let zh = map.zipper_head();
+
+        let mut wz = zh.write_zipper_at_exclusive_path(b"ab").unwrap();
+        wz.reserve_buffers(4096, 512);
+        wz.descend_to(b"cdab");
+        let (prefix_ptr, idx_ptr, _) = buffer_ptrs(&wz.z);
+        let buffer = wz.into_zipper_buffer();
+
+        let mut wz = zh.write_zipper_at_exclusive_path_with_buffer(b"ba", buffer).unwrap();
+        assert_eq!(wz.path(), b"");
+        assert_eq!(wz.origin_path(), b"ba");
+        #[cfg(not(miri))]
+        assert_eq!(wz.val_count(), 4usize.pow(4));
+        #[cfg(miri)]
+        assert_eq!(wz.val_count(), 1);
+        wz.descend_to(b"cdab");
+        assert_eq!(wz.z.key.prefix_buf.as_ptr(), prefix_ptr);
+        assert_eq!(wz.z.key.prefix_idx.as_ptr(), idx_ptr);
+        wz.set_val(100);
+
+        // A conflicting zipper is refused while `wz` is alive
+        let spare = PathMap::<usize>::new().write_zipper().into_zipper_buffer();
+        assert!(zh.write_zipper_at_exclusive_path_with_buffer(b"bacd", spare).is_err());
+
+        let buffer = wz.into_zipper_buffer();
+        let mut wz = unsafe{ zh.write_zipper_at_exclusive_path_with_buffer_unchecked(b"zz", buffer) };
+        assert_eq!(wz.origin_path(), b"zz");
+        wz.descend_to(b"top");
+        wz.set_val(200);
+        assert_eq!(wz.z.key.prefix_buf.as_ptr(), prefix_ptr);
+        zh.cleanup_write_zipper(wz);
+        drop(zh);
+
+        assert_eq!(map.val_at(b"bacdab"), Some(&100));
+        assert_eq!(map.val_at(b"zztop"), Some(&200));
+        assert_eq!(map.val_at(b"abcdab"), Some(&branchy_val(b"abcdab")));
+    }
+
     /// `PathMap::iter` exposes values but not dangling paths.  Check every value and, when a
     /// test cares about dangling structure, its explicitly supplied path probes as well.
     fn assert_map_unchanged<V>(before: &PathMap<V>, after: &PathMap<V>, path_probes: &[&[u8]])
@@ -3090,7 +3334,7 @@ mod tests {
     /// leave a path-preserving sentinel behind: the node would then hold two
     /// onward children under one key, and the accessors disagree about which
     /// one the byte leads to.  `node_get_child` picks the real subtrie (so
-    /// `get_val_at`, `descend_to` and `val_count` stay right) while
+    /// `val_at`, `descend_to` and `val_count` stay right) while
     /// `next_items` picks the empty sentinel, so every stepping traversal
     /// walks into nothing and reports the map as empty.
     ///
@@ -4531,7 +4775,10 @@ mod tests {
     /// compressed `LineListNode` handling during subtraction.
     #[test]
     fn write_zipper_subtract_into_test4() {
+        #[cfg(not(miri))]
         let n = 200u64;
+        #[cfg(miri)]
+        let n = 8u64; // Retains a nonempty result after the full operation chain.
 
         // Build 8 maps with keys "k_{j*step}" for step 1..8
         let maps: Vec<PathMap<u64>> = (0..8).map(|i| {
@@ -5984,7 +6231,7 @@ mod tests {
         // Test forking a zipper from a WriteZipper and make sure it inherits the origin_path
         wz.ascend(6);
         assert_eq!(wz.is_val(), false);
-        let mut rz = wz.fork_read_zipper();
+        let mut rz = wz.fork_read_zipper().expect("focus path exists");
         assert_eq!(rz.path(), b"");
         assert_eq!(rz.origin_path(), b"This path can take you anywhere.  Just close your eyes... and open your ");
         assert_eq!(rz.is_val(), false);
@@ -6583,9 +6830,21 @@ mod tests {
         }
 
         #[cfg(miri)]
-        const CASE_COUNT: usize = 10;
+        const CASE_COUNT: usize = 1;
         #[cfg(not(miri))]
         const CASE_COUNT: usize = 400;
+        #[cfg(not(miri))]
+        const PATH_COUNT: usize = 12;
+        #[cfg(miri)]
+        const PATH_COUNT: usize = 2;
+        #[cfg(not(miri))]
+        const EXTRA_PATH_COUNT: usize = 4;
+        #[cfg(miri)]
+        const EXTRA_PATH_COUNT: usize = 1;
+        #[cfg(not(miri))]
+        const MAX_SHORT_PATH_LEN: usize = 7;
+        #[cfg(miri)]
+        const MAX_SHORT_PATH_LEN: usize = 2;
         const OPS: [&str; 8] = [
             "remove_val", "remove_branches", "remove_unmasked_branches", "take_map",
             "join_k_path_into", "meet_into", "subtract_into", "join_into_take",
@@ -6599,11 +6858,15 @@ mod tests {
             let mut map = PathMap::<u64>::new();
             let mut source = PathMap::<u64>::new();
             let mut paths = Vec::new();
-            for path_idx in 0..rng.random_range(1..=12usize) {
+            for path_idx in 0..rng.random_range(1..=PATH_COUNT) {
                 let len = if case_idx % 8 == 0 && path_idx == 0 {
-                    rng.random_range(48..=55usize)
+                    #[cfg(not(miri))]
+                    let range = 48..=55usize;
+                    #[cfg(miri)]
+                    let range = 3..=4usize;
+                    rng.random_range(range)
                 } else {
-                    rng.random_range(0..=7usize)
+                    rng.random_range(0..=MAX_SHORT_PATH_LEN)
                 };
                 let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
                 map.set_val_at(&path, 1u64 << rng.random_range(0..8));
@@ -6612,14 +6875,14 @@ mod tests {
                 }
                 paths.push(path);
             }
-            for _ in 0..rng.random_range(0..=4usize) {
-                let len = rng.random_range(1..=7usize);
+            for _ in 0..rng.random_range(0..=EXTRA_PATH_COUNT) {
+                let len = rng.random_range(1..=MAX_SHORT_PATH_LEN);
                 let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
                 map.create_path(&path);
                 paths.push(path);
             }
-            for _ in 0..rng.random_range(0..=4usize) {
-                let len = rng.random_range(0..=7usize);
+            for _ in 0..rng.random_range(0..=EXTRA_PATH_COUNT) {
+                let len = rng.random_range(0..=MAX_SHORT_PATH_LEN);
                 let path: Vec<u8> = (0..len).map(|_| rng.random_range(0..alphabet)).collect();
                 source.set_val_at(&path, 1u64 << rng.random_range(0..8));
             }
@@ -8099,7 +8362,7 @@ mod tests {
         let rb = srcs.read_zipper_at_path(&[1u8, 0]);
         assert_eq!(wz.meet_2(&ra, &rb), AlgebraicStatus::None);
         wz.reset();
-        assert_eq!({ let mut probe = wz.fork_read_zipper(); probe.descend_to(&[2u8]); probe.path_exists() }, true, "the meet should leave [2] dangling");
+        assert_eq!({ let mut probe = wz.fork_read_zipper().expect("focus path exists"); probe.descend_to(&[2u8]); probe.path_exists() }, true, "the meet should leave [2] dangling");
         assert_eq!(wz.subtract_into(&ra, false), AlgebraicStatus::Element);
         drop(wz);
         assert_eq!(all_locations(&dst), vec![
@@ -8222,12 +8485,29 @@ mod tests {
 
     #[test]
     fn remove_subtrie_removes_focus_and_descendants() {
+        #[cfg(not(miri))]
+        let sibling_counts = [1u8, 8];
+        #[cfg(miri)]
+        let sibling_counts = [1u8];
+        #[cfg(not(miri))]
+        let root_lengths = [0, 1, 3];
+        #[cfg(miri)]
+        let root_lengths = [1];
+        #[cfg(not(miri))]
+        const CONTINUATION_LEN: usize = 64;
+        #[cfg(miri)]
+        const CONTINUATION_LEN: usize = 4;
+        #[cfg(not(miri))]
+        const SHAPES: &[usize] = &[0, 1, 2, 3, 4, 5];
+        #[cfg(miri)]
+        const SHAPES: &[usize] = &[4]; // Combines a focus value, child value, and dangling descendant.
+
         for prune in [false, true] {
-            for siblings in [1u8, 8] {
-                for root_len in [0, 1, 3] {
+            for siblings in sibling_counts {
+                for root_len in root_lengths {
                     // Include a long compressed continuation and a dangling descendant.
                     let focus = [0u8, 0, 0];
-                    for shape in 0..6 {
+                    for &shape in SHAPES {
                         let mut original = PathMap::<u64>::new();
                         original.set_val_at([], 99);
                         for byte in 1..=siblings {
@@ -8237,13 +8517,13 @@ mod tests {
                             0 => {}, // Absent focus.
                             1 => { original.create_path(focus); },
                             2 => { original.set_val_at(focus, 42); },
-                            3 => { original.set_val_at([0; 64], 43); },
+                            3 => { original.set_val_at([0; CONTINUATION_LEN], 43); },
                             4 => {
                                 original.set_val_at(focus, 42);
-                                original.set_val_at([0; 64], 43);
+                                original.set_val_at([0; CONTINUATION_LEN], 43);
                                 original.create_path([0, 0, 0, 1]);
                             },
-                            5 => { original.create_path([0; 64]); },
+                            5 => { original.create_path([0; CONTINUATION_LEN]); },
                             _ => unreachable!(),
                         }
                         let before = all_locations(&original);
@@ -8345,5 +8625,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn write_zipper_forks_handle_missing_paths_and_empty_roots() {
+        let mut map = PathMap::<u64>::new();
+        assert!(map.write_zipper().fork_read_zipper().is_some());
+        assert!(map.clone().into_write_zipper(b"").fork_read_zipper().is_some());
+        map.insert(b"ab", 7);
+        assert!(map.write_zipper_at_path(b"missing").fork_read_zipper().is_none());
+        assert!(map.into_write_zipper(b"missing").fork_read_zipper().is_none());
     }
 }

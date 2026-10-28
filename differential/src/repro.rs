@@ -170,7 +170,7 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             25 => { let t = g!(d.modn(2));
                     if t == 0 { "wz.make_map().val_count();".to_string() }
                     else { "rz.make_map().val_count();".to_string() } }
-            26 => { let t = g!(d.modn(2)); format!("{}.fork_read_zipper();", z!(t)) }
+            26 => { let t = g!(d.modn(2)); format!("let _ = {}.fork_read_zipper();", z!(t)) }
             27 => { let v = g!(d.u8()) as u64; format!("wz.set_val({v});") }
             28 => { let pr = g!(d.boolean()); format!("wz.remove_val({pr});") }
             29 => "wz.create_path();".to_string(),
@@ -216,6 +216,9 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                     format!("{{ let mut b = map1.read_zipper_at_path({}); b.descend_to({}); wz.meet_2(&rz, &b); }}",
                             rs_bytes(&r1), rs_bytes(&p)) }
             56 => { let pr = g!(d.boolean()); format!("wz.remove_subtrie({pr});") }
+            57 => { let _t = g!(d.modn(2)); "rz.descend_last_val();".to_string() }
+            58 => { let t = g!(d.modn(2)); format!("{}.to_prev_step();", z!(t)) }
+            59 => { let _t = g!(d.modn(2)); "rz.to_prev_val();".to_string() }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

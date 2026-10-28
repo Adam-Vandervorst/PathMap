@@ -21,6 +21,14 @@ Several crates implement radix-256 trie structures in Rust.  For example [radix_
 
 Check out the [book](https://pathmap-rs.github.io/).
 
+## Contributing
+
+We welcome contributions, including bug reports, documentation improvements, and code changes.  If you have an idea for a new feature, please reach out.
+
+Contributions must be licensed under both the MIT and Apache 2.0 licenses. See
+[CONTRIBUTORS](https://github.com/adam-Vandervorst/pathMap/blob/master/CONTRIBUTORS) for
+the contribution licensing terms.
+
 ## kvmap
 
 The crate name **`pathmap`** was previously used by **Canmi** for a different project, 

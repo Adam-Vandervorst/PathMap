@@ -341,6 +341,14 @@ def toNextStep : Bool × Zip V :=
   | some q => (true, { z with path := q })
   | none => (false, z.reset)
 
+/-- `ZipperMoving::to_prev_step`: the greatest non-root existing location
+strictly before the focus. At the root, wrap to the last non-root location.
+Missing focus paths are allowed; they are never returned as predecessors. -/
+def toPrevStep : Bool × Zip V :=
+  match (z.subPaths.filter (fun q => !q.isEmpty && (z.atRoot || Path.lt q z.path))).getLast? with
+  | some q => (true, { z with path := q })
+  | none => (false, z.reset)
+
 /-! ## `trait ZipperIteration` -/
 
 /-- `ZipperIteration::to_next_val`: the next existing location carrying a value,
@@ -348,6 +356,15 @@ in depth-first order.  Never reports the value at the starting focus.  On
 exhaustion the focus returns to the root and the result is `false`. -/
 def toNextVal : Bool × Zip V :=
   match z.subPaths.find? (fun q => Path.lt z.path q && (z.trie.valAt (z.root ++ q)).isSome) with
+  | some q => (true, { z with path := q })
+  | none => (false, z.reset)
+
+/-- `ZipperIteration::to_prev_val`: the greatest non-root valued location
+strictly before the focus, wrapping to the last such value from the root.
+The zipper-root value is excluded, as in `toNextVal`. -/
+def toPrevVal : Bool × Zip V :=
+  match (z.subPaths.filter (fun q => !q.isEmpty && (z.atRoot || Path.lt q z.path) &&
+      (z.trie.valAt (z.root ++ q)).isSome)).getLast? with
   | some q => (true, { z with path := q })
   | none => (false, z.reset)
 
@@ -362,6 +379,15 @@ def descendLastPath : Bool × Zip V :=
   let cands := z.subPaths.filter (fun q => z.path ≼ q)
   match cands.getLast? with
   | some q => if q == z.path then (false, z) else (true, { z with path := q })
+  | none => (false, z)
+
+/-- `ZipperIteration::descend_last_val`: the greatest valued path in the
+starting subtree, including the starting focus itself. Success reports that
+a value exists, even without movement. Failure leaves the focus unchanged. -/
+def descendLastVal : Bool × Zip V :=
+  match (z.subPaths.filter (fun q => z.path ≼ q &&
+      (z.trie.valAt (z.root ++ q)).isSome)).getLast? with
+  | some q => (true, { z with path := q })
   | none => (false, z)
 
 /-- The shared core of `descend_first_k_path` and `to_next_k_path`
@@ -395,8 +421,9 @@ def toNextKPath (k : Nat) : Bool × Zip V :=
 /-! ## `trait ZipperForking` -/
 
 /-- `ZipperForking::fork_read_zipper`: a new zipper rooted at the current focus,
-over a snapshot of the same trie. -/
-def forkReadZipper : Zip V := { z with root := z.focus, path := [] }
+over a snapshot of the same trie, or `none` when the focus path does not exist. -/
+def forkReadZipper : Option (Zip V) :=
+  if z.pathExists then some { z with root := z.focus, path := [] } else none
 
 end Zip
 end PathMapModel

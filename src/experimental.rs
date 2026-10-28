@@ -11,8 +11,6 @@ use crate::write_zipper::write_zipper_priv::WriteZipperPriv;
 
 #[cfg(feature = "serialization")]
 pub mod serialization;
-#[cfg(feature = "serialization")]
-pub mod tree_serialization;
 
 #[cfg(feature = "zipper_alg")]
 pub mod zipper_algebra;

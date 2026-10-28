@@ -26,7 +26,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 57;
+pub const NOPS: usize = 60;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -217,6 +217,15 @@ pub fn dump<Z: ZipperMoving + ZipperPath + ZipperValues<u64>>(z: &mut Z) -> Stri
     lines.join(",")
 }
 
+/// Dump a fork at the current focus. A missing path retains the trace's empty
+/// root marker, matching `Fuzz.dumpAt` on an absent subtree.
+pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
+    match z.fork_read_zipper() {
+        Some(mut fork) => dump(&mut fork),
+        None => "_:-".to_string(),
+    }
+}
+
 /// The read side of the harness: whatever the write zipper is reading *from*.
 ///
 /// Two implementations exist.  A `PathMap` read zipper supports everything.  An
@@ -266,7 +275,7 @@ pub trait ReadSource:
 
 impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     fn dump_fork(&self) -> String {
-        dump(&mut self.fork_read_zipper())
+        dump_fork(self)
     }
     fn make_map_val_count(&self) -> Option<usize> {
         Some(self.make_map().val_count())
@@ -684,7 +693,7 @@ pub fn run_ops<R: ReadSource>(
                 26 => {
                     let t = get!(d.modn(2));
                     let s = if t == 0 {
-                        dump(&mut wz.fork_read_zipper())
+                        dump_fork(&wz)
                     } else {
                         (*rz).dump_fork()
                     };
@@ -935,6 +944,19 @@ pub fn run_ops<R: ReadSource>(
                     let pr = get!(d.boolean());
                     ("remove_subtrie", show_bool(wz.remove_subtrie(pr)).to_string())
                 }
+                57 => {
+                    let _t = get!(d.modn(2));
+                    ("descend_last_val", show_bool(rz.descend_last_val()).to_string())
+                }
+                58 => {
+                    let t = get!(d.modn(2));
+                    let r = tgt!(t, wz, *rz, z, z.to_prev_step());
+                    ("to_prev_step", show_bool(r).to_string())
+                }
+                59 => {
+                    let _t = get!(d.modn(2));
+                    ("to_prev_val", show_bool(rz.to_prev_val()).to_string())
+                }
                 47 => {
                     let t = get!(d.modn(2));
                     // The blind-zipper addition: `descend_until` reporting the
@@ -1020,6 +1042,59 @@ mod input_format_tests {
             assert_eq!(run_act(&bytes, false), run_act(legacy, false));
             assert_eq!(emit_repro(&bytes, 256), emit_repro(legacy, 256));
         }
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_reverse_iteration() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            2, 1, 0, 10, 1, 2, 20, // map0: [0], [2].
+            4, 0, 9, 1, 0, 11, 2, 0, 1, 12, 1, 2, 13, // map1: [], [0], [0,1], [2].
+            0, 0, // Zipper roots.
+            0, 0, 3, 3, 3, 3, // Missing write focus [3,3,3].
+            58, 0, 58, 0, 58, 0, 58, 0, // Step backward, exhaust, wrap.
+            57, 1, // Initialize reverse value iteration at [2].
+            59, 1, 59, 1, 59, 1, 59, 1, // Iterate, exhaust at the valued root, wrap.
+        ]);
+        // ACT's known val_count defect prevents --check at a missing focus.
+        for trace in [run(&bytes, true), run_act(&bytes, false)] {
+            for expected in [
+                "1 to_prev_step ret=1 W=02",
+                "2 to_prev_step ret=1 W=00",
+                "3 to_prev_step ret=0 W=_",
+                "4 to_prev_step ret=1 W=02",
+                "5 descend_last_val ret=1",
+                "6 to_prev_val ret=1",
+                "7 to_prev_val ret=1",
+                "8 to_prev_val ret=0",
+                "9 to_prev_val ret=1",
+            ] {
+                assert!(trace.contains(expected), "missing {expected}:\n{trace}");
+            }
+        }
+        let repro = emit_repro(&bytes, 256);
+        assert!(repro.contains("wz.to_prev_step();"));
+        assert!(repro.contains("rz.to_prev_val();"));
+        assert!(repro.contains("rz.descend_last_val();"));
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_last_value_descent() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            0, // map0 empty.
+            3, 0, 9, 1, 0, 10, 2, 0, 1, 11, // map1: [], [0], [0,1].
+            0, 0, // Zipper roots.
+            57, 1, 57, 1, // Find the last value; succeed again without movement.
+            0, 1, 1, 3, // Descend to missing [0,1,3].
+            57, 1, // Fail without leaving that subtree.
+        ]);
+        let trace = run(&bytes, true);
+        assert!(trace.contains("0 descend_last_val ret=1"), "{trace}");
+        assert!(trace.contains("1 descend_last_val ret=1"), "{trace}");
+        assert!(trace.contains("3 descend_last_val ret=0"), "{trace}");
+        assert!(trace.contains("R=000103 o000103 e0"), "{trace}");
+        assert!(emit_repro(&bytes, 256).contains("rz.descend_last_val();"));
     }
 
     #[test]

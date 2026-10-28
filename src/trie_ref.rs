@@ -324,12 +324,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRef
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefBorrowed<'_, V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        //GOAT: this method will panic if the TrieRef is at an invalid / non-existent path
-        //The API needs to change.  See https://github.com/Adam-Vandervorst/PathMap/issues/96
-        let focus_node = self.focus_node.unwrap();
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let focus_node = self.focus_node?;
         let core_z = read_zipper_core::ReadZipperCore::new_with_node_and_path_internal_in(OwnedOrBorrowed::Borrowed(focus_node), self.node_key(), 0, self.val(), self.alloc.clone());
-        Self::ReadZipperT::new_forked_with_inner_zipper(core_z)
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(core_z))
     }
 }
 
@@ -665,12 +663,10 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRef
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRefOwned<V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        //GOAT: this method will panic if the TrieRef is at an invalid / non-existent path
-        //The API needs to change.  See https://github.com/Adam-Vandervorst/PathMap/issues/96
-        let focus_node = self.focus_node.as_ref().unwrap();
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        let focus_node = self.focus_node.as_ref()?;
         let core_z = read_zipper_core::ReadZipperCore::new_with_node_and_path_internal_in(OwnedOrBorrowed::Borrowed(focus_node), self.node_key(), 0, self.val(), self.alloc.clone());
-        Self::ReadZipperT::new_forked_with_inner_zipper(core_z)
+        Some(Self::ReadZipperT::new_forked_with_inner_zipper(core_z))
     }
 }
 
@@ -863,7 +859,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperValuesAt<V> for TrieRef
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperForking<V> for TrieRef<'_, V, A> {
     type ReadZipperT<'a> = ReadZipperUntracked<'a, 'a, V, A> where Self: 'a;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
         match self {
             TrieRef::Borrowed(trie_ref) => trie_ref.fork_read_zipper(),
             TrieRef::Owned(trie_ref) => trie_ref.fork_read_zipper(),
@@ -1092,7 +1088,7 @@ mod tests {
         assert_eq!(trie_ref.child_count(), 1);
 
         let trie_ref = btm.trie_ref_at_path(b"r");
-        let mut z = trie_ref.fork_read_zipper();
+        let mut z = trie_ref.fork_read_zipper().expect("focus path exists");
         assert_eq!(z.val_count(), 9);
         z.descend_to(b"om");
         assert_eq!(z.val_count(), 5);
@@ -1274,7 +1270,7 @@ mod tests {
         let mut rz = map.read_zipper();
         rz.descend_to(&[0u8]);
         assert_eq!(rz.val(), Some(&7));
-        assert!({ let mut z = rz.fork_read_zipper(); z.descend_to(&[3u8]); z.path_exists() });
+        assert!({ let mut z = rz.fork_read_zipper().expect("focus path exists"); z.descend_to(&[3u8]); z.path_exists() });
         assert_eq!(rz.val_at(&[3u8]), None);
         assert_eq!(rz.get_val_at(&[3u8]), None);
         assert_eq!(rz.val_at(&[3u8, 9]), None);

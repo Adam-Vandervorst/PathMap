@@ -74,7 +74,6 @@ use crate::utils::*;
 use crate::alloc::Allocator;
 use crate::PathMap;
 use crate::trie_node::TrieNodeODRc;
-use crate::zipper;
 use crate::zipper::*;
 
 use crate::gxhash::{self, HashMap, HashMapExt};
@@ -681,27 +680,6 @@ impl Stack {
             stack[*position].reset(zipper);
         }
     }
-}
-
-pub(crate) fn new_map_from_ana_jumping<'a, V, A: Allocator, WZ, W, CoAlgF, I>(wz: &mut WZ, w: W, mut coalg_f: CoAlgF)
-where
-    V: 'static + Clone + Send + Sync + Unpin,
-    W: Default,
-    I: IntoIterator<Item=W>,
-    WZ: ZipperWriting<V, A> + zipper::ZipperMoving + zipper::ZipperPath,
-    CoAlgF: Copy + FnMut(W, &[u8]) -> (&'a [u8], ByteMask, I, Option<V>),
-{
-    let (prefix, bm, ws, mv) = coalg_f(w, wz.path());
-    let prefix_len = prefix.len();
-
-    wz.descend_to(&prefix[..]);
-    if let Some(v) = mv { wz.set_val(v); }
-    for (b, w) in bm.iter().zip(ws) {
-        wz.descend_to_byte(b);
-        new_map_from_ana_jumping(wz, w, coalg_f);
-        wz.ascend_byte();
-    }
-    wz.ascend(prefix_len);
 }
 
 /// A trait to dictate if and how the value should be cached.
