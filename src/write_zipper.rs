@@ -1971,13 +1971,15 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         };
 
         let self_focus = self.get_focus();
-        let src = match src_root_node {
+        let src = match src_root_node.filter(|node| !node.as_tagged().node_is_empty()) {
             Some(src) => src,
             None => {
-                let node_status = if self_focus.is_none() {
-                    AlgebraicStatus::None
-                } else {
+                //Joining nothing changes nothing, at a focus that exists.  Whether an empty node
+                // happens to be materialised below the focus must not matter.
+                let node_status = if self.path_exists() {
                     AlgebraicStatus::Identity
+                } else {
+                    AlgebraicStatus::None
                 };
                 return node_status.merge(val_status, true, true);
             }
