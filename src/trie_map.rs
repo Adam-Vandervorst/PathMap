@@ -1645,6 +1645,22 @@ mod tests {
         assert_eq!(met.val_count(), 1);
     }
 
+    /// A join with a map holding only dangling paths the other side also has keeps everything
+    #[test]
+    fn map_join_with_shared_dangling_paths_keeps_values() {
+        let mut l = PathMap::<u64>::new();
+        l.set_val_at([0u8], 1);
+        l.create_path([1u8]);
+        l.create_path([3u8]);
+        let mut d = PathMap::<u64>::new();
+        d.create_path([1u8]);
+        d.create_path([3u8]);
+        for joined in [l.join(&d), d.join(&l), { let mut j = l.clone(); j.write_zipper().join_into(&d.read_zipper()); j }] {
+            assert_eq!(joined.val_at([0u8]), Some(&1));
+            assert!(joined.path_exists_at([1u8]) && joined.path_exists_at([3u8]));
+        }
+    }
+
     /// Joining a byte node with a list node whose only contents are dangling paths the byte node
     /// also has.  Each list slot joins to nothing, which must not make the whole join empty
     #[test]
