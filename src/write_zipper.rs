@@ -1395,12 +1395,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             self.focus_stack.to_root();
             self.focus_stack.root_mut()
         } else {
+            //A child that ends short of the focus is a node *above* the focus: the stack does not
+            // descend into an empty node (a dangling path, as `prune_path` can leave behind), so
+            // the focus key can run through one.  The focus then has no node of its own.
             match self.focus_stack.top_mut().unwrap().node_into_child_mut(node_key) {
-                Some((consumed_bytes, child_node)) => {
-                    debug_assert_eq!(consumed_bytes, node_key.len());
-                    Some(child_node)
-                },
-                None => None
+                Some((consumed_bytes, child_node)) if consumed_bytes == node_key.len() => Some(child_node),
+                _ => None
             }
         }
     }
