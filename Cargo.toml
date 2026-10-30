@@ -9,7 +9,7 @@ repository = "https://github.com/adam-Vandervorst/pathMap/"
 keywords = ["trie", "MORK", "path", "algebra"]
 categories = ["algorithms", "data-structures", "database-implementations"]
 readme = "README.md"
-exclude = ["target/", "benches/", "pathmap-book/", ".*"]
+exclude = ["target/", "benches/", "pathmap-book/", "tools/", ".*"]
 
 [package.metadata.docs.rs]
 rustc-args = ["-C", "target-feature=+aes,+sse2"]
@@ -19,6 +19,7 @@ name = "pathmap"
 path = "src/lib.rs"
 
 [dependencies]
+bitcode = { version = "0.6.9", optional = true }
 pathmap-derive = { version = "0.3.0", path = "./pathmap-derive" }
 maybe-dangling = "0.1.1"
 span-timing = { version = "0.1.0" }
@@ -42,6 +43,7 @@ heavy_tests = [] # Run with `cargo test` Enables slow thorough tests that are te
 nightly = ["fast-slice-utils/nightly"] # Uses features in the nightly tool chain for better performance, and the allocator and coroutine APIs
 jemalloc = ["dep:tikv-jemallocator"] # Enables [jemalloc](https://jemalloc.net/) as the default allocator.  This dramatically improves scaling for write-heavy workloads and is generally recommended.  The only reason it is not the default is to avoid interference with the host application allocator.
 zipper_tracking = [] #Exports the zipper_tracking module publicly
+trace_zipper = ["dep:bitcode"] # Records zipper operations for replay and visualization
 all_dense_nodes = [] # Exclusively use the DenseByteNode type, which generally performs worse but is useful for compatibility and perf comparisons.
 arena_compact = ["dep:memmap2"]
 
@@ -152,5 +154,5 @@ name = "act_line_cache"
 required-features = ["arena_compact", "serialization"]
 
 [workspace]
-members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "differential"]
+members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "differential", "tools/tracer"]
 resolver = "2"
