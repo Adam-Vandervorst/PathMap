@@ -257,8 +257,13 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for TinyRefNode<'a
     fn count_branches(&self, _key: &[u8]) -> usize {
         panic!();
     }
-    fn node_branches_mask(&self, _key: &[u8]) -> ByteMask {
-        panic!();
+    fn node_branches_mask(&self, key: &[u8]) -> ByteMask {
+        let node_key = self.key();
+        if node_key.len() > key.len() && starts_with(node_key, key) {
+            ByteMask::from(node_key[key.len()])
+        } else {
+            ByteMask::EMPTY
+        }
     }
     fn prior_branch_key<'key>(&self, _key: &'key [u8]) -> &'key [u8] {
         panic!();

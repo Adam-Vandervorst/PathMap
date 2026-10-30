@@ -490,61 +490,62 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     /// Internal method to restrict using nodes of an abstract type
-    fn prestrict_abstract(&self, other: &dyn TrieNode<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Clone {
-        let mut is_identity = true;
-        let mut new_node = Self::new_in(self.alloc.clone());
+    ///
+    /// `other_mask` holds the first byte of each of `other`'s keys.  Only those bytes can survive, so
+    /// only those are visited, keeping the cost proportional to the narrow `other` node instead of to
+    /// the width of `self`
+    fn prestrict_abstract(&self, other: &dyn TrieNode<V, A>, other_mask: ByteMask) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Clone {
+        let overlap = self.mask & other_mask;
+        //Restrict is non-commutative: dropping any of `self`'s branches changes the result
+        let mut is_identity = overlap == self.mask;
+        let mut new_node = Self::with_capacity_in(overlap.count_bits(), self.alloc.clone());
 
-        //Go over each populated entry in the node
-        self.for_each_item(|self_node, key_byte, cf_idx| {
-            if other.node_contains_partial_key(&[key_byte]) {
-                let cf = unsafe{ self_node.values.get_unchecked(cf_idx) };
+        for key_byte in overlap.iter() {
+            let cf = self.get(key_byte).unwrap();
 
-                //If there is a comparable value in other, keep the whole cf
-                if let Some(_) = other.node_get_val(&[key_byte]) {
-                    new_node.mask.set_bit(key_byte);
-                    new_node.values.push(cf.clone());
-                } else {
-
-                    //Dropping this value changes the destination
-                    if cf.val().is_some() {
-                        is_identity = false;
-                    }
-
-                    //If there is an onward link in the CF and other node, continue the restriction recursively
-                    if let Some(self_child) = cf.rec() {
-                        let other_child = other.get_node_at_key(&[key_byte]);
-                        match other_child.try_as_tagged() {
-                            Some(other_child) => {
-                                let mut new_cf = Cf::new(None, None);
-                                match self_child.as_tagged().prestrict_dyn(other_child) {
-                                    AlgebraicResult::None => { is_identity = false; }
-                                    AlgebraicResult::Identity(mask) => {
-                                        debug_assert_eq!(mask, SELF_IDENT); //restrict is not commutative
-                                        new_cf.set_rec(self_child.clone());
-                                    },
-                                    AlgebraicResult::Element(e) => {
-                                        is_identity = false;
-                                        new_cf.set_rec(e);
-                                    },
-                                }
-                                if new_cf.has_rec() {
-                                    new_node.mask.set_bit(key_byte);
-                                    new_node.values.push(new_cf);
-                                }
-                            },
-                            None => {
-                                is_identity = false;
-                            }
-                        }
-                    } else {
-                        //The target slot is dangling and the restrictor has no value here: drop it
-                        is_identity = false;
-                    }
-                }
+            //If there is a comparable value in other, keep the whole cf
+            if let Some(_) = other.node_get_val(&[key_byte]) {
+                new_node.mask.set_bit(key_byte);
+                new_node.values.push(cf.clone());
             } else {
-                is_identity = false;
+
+                //Dropping this value changes the destination
+                if cf.val().is_some() {
+                    is_identity = false;
+                }
+
+                //If there is an onward link in the CF and other node, continue the restriction recursively
+                if let Some(self_child) = cf.rec() {
+                    let other_child = other.get_node_at_key(&[key_byte]);
+                    match other_child.try_as_tagged() {
+                        Some(other_child) => {
+                            let mut new_cf = Cf::new(None, None);
+                            match self_child.as_tagged().prestrict_dyn(other_child) {
+                                AlgebraicResult::None => { is_identity = false; }
+                                AlgebraicResult::Identity(mask) => {
+                                    debug_assert_eq!(mask, SELF_IDENT); //restrict is not commutative
+                                    new_cf.set_rec(self_child.clone());
+                                },
+                                AlgebraicResult::Element(e) => {
+                                    is_identity = false;
+                                    new_cf.set_rec(e);
+                                },
+                            }
+                            if new_cf.has_rec() {
+                                new_node.mask.set_bit(key_byte);
+                                new_node.values.push(new_cf);
+                            }
+                        },
+                        None => {
+                            is_identity = false;
+                        }
+                    }
+                } else {
+                    //The target slot is dangling and the restrictor has no value here: drop it
+                    is_identity = false;
+                }
             }
-        });
+        }
         if new_node.is_empty() {
             AlgebraicResult::None
         } else {
@@ -1508,11 +1509,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             LINE_LIST_NODE_TAG => {
                 let other_list_node = unsafe { other.as_list_unchecked() };
-                self.prestrict_abstract(other_list_node)
+                self.prestrict_abstract(other_list_node, other_list_node.node_branches_mask(&[]))
             },
             #[cfg(feature = "bridge_nodes")]
             TaggedNodeRef::BridgeNode(other_bridge_node) => {
-                self.prestrict_abstract(other_bridge_node)
+                self.prestrict_abstract(other_bridge_node, ByteMask::FULL)
             },
             CELL_BYTE_NODE_TAG => {
                 let other_byte_node = unsafe { other.as_cell_unchecked() };
@@ -1520,7 +1521,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
             },
             TINY_REF_NODE_TAG => {
                 let tiny_node = unsafe { other.as_tiny_unchecked() };
-                self.prestrict_abstract(tiny_node)
+                self.prestrict_abstract(tiny_node, tiny_node.node_branches_mask(&[]))
             },
             EMPTY_NODE_TAG => AlgebraicResult::None,
             _ => unsafe{ unreachable_unchecked() }
