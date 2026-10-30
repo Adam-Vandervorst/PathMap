@@ -143,6 +143,10 @@ name = "prune"
 harness = false
 
 [[bench]]
+name = "restrict"
+harness = false
+
+[[bench]]
 name = "act_paths"
 harness = false
 required-features = ["arena_compact", "serialization"]

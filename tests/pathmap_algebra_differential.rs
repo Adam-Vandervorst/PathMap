@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
 use pathmap::PathMap;
+use pathmap::ring::AlgebraicStatus;
+use pathmap::zipper::*;
 
 type KeySet = BTreeSet<Vec<u8>>;
 
@@ -57,6 +59,49 @@ fn prefix_heavy_set(seed: u64, salt: u64) -> KeySet {
             key.extend_from_slice(&[0, index]);
             keys.insert(key);
         }
+    }
+    keys
+}
+
+/// Keys under a narrow top, so the upper levels of the trie are dense nodes, holding values and
+/// onward links side by side
+fn wide_set(seed: u64, salt: u64) -> KeySet {
+    let mut state = seed ^ salt;
+    let mut keys = KeySet::new();
+    for _ in 0..FIXED_WIDTH_KEYS * 2 {
+        let length = 1 + (next_u64(&mut state) % 6) as usize;
+        keys.insert((0..length).map(|position| {
+            let byte = (next_u64(&mut state) >> 32) as u8;
+            match position {
+                0 => byte % 4,
+                1 => byte % 32,
+                _ => byte,
+            }
+        }).collect());
+    }
+    keys
+}
+
+/// One to three paths of `left`, each cut short, run past its end, cut short and then diverging,
+/// or left whole.  Being sparse, the restrictor has list or tiny nodes where `left` has dense ones
+fn sparse_restrictor(left: &KeySet, seed: u64) -> KeySet {
+    let mut state = seed;
+    let left: Vec<&Vec<u8>> = left.iter().collect();
+    let mut keys = KeySet::new();
+    for _ in 0..1 + next_u64(&mut state) % 3 {
+        let mut key = left[(next_u64(&mut state) % left.len() as u64) as usize].clone();
+        let cut = 1 + (next_u64(&mut state) % key.len() as u64) as usize;
+        match next_u64(&mut state) % 4 {
+            0 => key.truncate(cut),
+            1 => key.extend_from_slice(&[0x5a, 0xa5]),
+            2 => {
+                key.truncate(cut);
+                key[cut - 1] ^= 0x80;
+                key.push(0x5a);
+            },
+            _ => {},
+        }
+        keys.insert(key);
     }
     keys
 }
@@ -250,5 +295,44 @@ fn restrict_matches_btreeset_oracle() {
                 "restrict mismatch for {name} at seed {seed}"
             );
         }
+    }
+}
+
+/// A dense node restricted by a list or tiny node only visits the restrictor's branches.  Check that
+/// skipping the rest of the dense node keeps both the result and the `Identity` status right, also
+/// through `restricting`, which swaps the roles
+#[test]
+fn wide_restricted_by_sparse_matches_btreeset_oracle() {
+    #[cfg(not(miri))]
+    const SEEDS: u64 = 512;
+    #[cfg(miri)]
+    const SEEDS: u64 = 2;
+
+    for seed in 0..SEEDS {
+        let left = wide_set(seed, 0x3c6e_f372_fe94_f82b);
+        let right = sparse_restrictor(&left, seed);
+        let expected = restrict_oracle(&left, &right);
+        let left_map = map_from_set(&left);
+        let mut right_map = map_from_set(&right);
+        //A dangling path validates nothing, even running along a path of `left`
+        right_map.create_path(left.iter().nth(seed as usize % left.len()).unwrap());
+
+        assert_eq!(set_from_map(&left_map.restrict(&right_map)), expected, "restrict seed {seed}");
+
+        let mut restricted = left_map.clone();
+        let status = restricted.write_zipper().restrict(&right_map.read_zipper());
+        assert_eq!(set_from_map(&restricted), expected, "WriteZipper::restrict seed {seed}");
+        let expected_status = if expected.is_empty() {
+            AlgebraicStatus::None
+        } else if expected == left {
+            AlgebraicStatus::Identity
+        } else {
+            AlgebraicStatus::Element
+        };
+        assert_eq!(status, expected_status, "WriteZipper::restrict status seed {seed}");
+
+        let mut stems = right_map.clone();
+        assert!(stems.write_zipper().restricting(&left_map.read_zipper()));
+        assert_eq!(set_from_map(&stems), expected, "WriteZipper::restricting seed {seed}");
     }
 }
