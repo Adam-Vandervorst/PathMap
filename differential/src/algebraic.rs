@@ -29,12 +29,13 @@ pub mod model;
 pub mod routes;
 pub mod shape;
 pub mod value;
+pub mod zippy_laws;
 
 use pathmap::PathMap;
 use pathmap::zipper::{ZipperMoving, ZipperWriting};
 
-use expr::{Expr, Op, MAX_VARS};
-use laws::{Level, EMPTY, LAW_OPERANDS};
+use expr::{Expr, Op, Un, MAX_VARS};
+use laws::{Binding, Hyp};
 use routes::Route;
 use shape::{shape_of_map, show_shape, Shape, Values};
 use value::FuzzValue;
@@ -119,11 +120,21 @@ pub enum Build {
     MerkleizedOf(usize),
 }
 
+/// Paths a case offers for the path variables of a law (see `laws.rs`).
+pub const LAW_PATHS: usize = 3;
+/// Bytes a case offers for the byte variables of a law.
+pub const LAW_BYTES: usize = 2;
+
 pub struct Case<V: FuzzValue> {
     pub expr: Expr,
     pub operands: Vec<PathMap<V>>,
     pub builds: Vec<Build>,
     pub alphabet: u16,
+    /// What the laws' path and byte variables are bound to.  Mostly prefixes
+    /// and first bytes of the operands' own paths, so that `unwrap`, `wrap`
+    /// and the hypotheses land on structure that exists.
+    pub law_paths: Vec<Vec<u8>>,
+    pub law_bytes: Vec<u8>,
 }
 
 /// Decode a byte string into a case.  Total: every input decodes.
@@ -149,7 +160,32 @@ pub fn decode<V: FuzzValue>(bytes: &[u8]) -> Case<V> {
     }
 
     let expr = gen_expr(&mut g, 3);
-    Case { expr, operands, builds, alphabet }
+
+    let keys: Vec<Vec<u8>> = operands
+        .iter()
+        .flat_map(|m| m.iter().map(|(k, _)| k).collect::<Vec<_>>())
+        .collect();
+    let law_paths = (0..LAW_PATHS)
+        .map(|_| {
+            if !keys.is_empty() && g.chance(70) {
+                let k = &keys[g.modn(keys.len())];
+                k[..g.modn(k.len() + 1)].to_vec()
+            } else {
+                g.path(2)
+            }
+        })
+        .collect();
+    let law_bytes = (0..LAW_BYTES)
+        .map(|_| {
+            let firsts: Vec<u8> = keys.iter().filter_map(|k| k.first().copied()).collect();
+            if !firsts.is_empty() && g.chance(70) {
+                firsts[g.modn(firsts.len())]
+            } else {
+                g.path_byte()
+            }
+        })
+        .collect();
+    Case { expr, operands, builds, alphabet, law_paths, law_bytes }
 }
 
 fn pick_build(g: &mut Gen, i: usize) -> Build {
@@ -254,14 +290,36 @@ fn gen_expr(g: &mut Gen, depth: usize) -> Expr {
     // never a chain of operands, so the whole-expression routes would almost
     // never apply.
     if depth == 0 || g.chance(35) {
-        return Expr::Var(g.modn(OPERANDS));
+        // Mostly an operand.  Zippy's two constant spaces now and then, since
+        // the laws use both and a route has to cope with them mid-expression.
+        return match g.modn(20) {
+            0 => Expr::Empty,
+            1 | 2 => Expr::Singleton(g.path(3)),
+            _ => Expr::Var(g.modn(OPERANDS)),
+        };
     }
-    let op = match g.modn(12) {
+    // The crate's own algebra keeps three quarters of the interior nodes, so
+    // the chain and DNF recognisers still fire often; Zippy's operators take
+    // the rest.  Their paths are short, because a long one rarely meets
+    // anything in tries this small.
+    let op = match g.modn(16) {
         0 | 1 | 2 | 3 => Op::Join,
         4 | 5 | 6 => Op::Meet,
         7 | 8 => Op::Subtract,
         9 | 10 => Op::SymDiff,
-        _ => Op::Restrict,
+        11 => Op::Restrict,
+        12 => return Expr::wrap(g.path(2), gen_expr(g, depth - 1)),
+        13 => {
+            let e = gen_expr(g, depth - 1);
+            return Expr::unwrap(e, g.path(2));
+        }
+        14 => {
+            let u = Un::ALL[g.modn(Un::ALL.len())];
+            return Expr::un(u, gen_expr(g, depth - 1));
+        }
+        _ => {
+            if g.boolean() { Op::Compose } else { Op::IterC }
+        }
     };
     Expr::bin(op, gen_expr(g, depth - 1), gen_expr(g, depth - 1))
 }
@@ -342,7 +400,7 @@ pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
         if got.values != baseline.values {
             out.push(Divergence {
                 class: Class::Values,
-                signature: signature::<V>("values", &route_key::<V>(route)),
+                signature: signature::<V>("values", &route_key::<V>(route, &case.expr)),
                 detail: format!(
                     "{} vs {name} evaluating {}: {}\n  {base_name}: {}\n  {name}: {}\n  {}",
                     base_name,
@@ -363,7 +421,7 @@ pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
             if bs != gs {
                 out.push(Divergence {
                     class: Class::Shape,
-                    signature: signature::<V>("shape", &route_key::<V>(route)),
+                    signature: signature::<V>("shape", &route_key::<V>(route, &case.expr)),
                     detail: format!(
                         "{} vs {name} evaluating {}: {}\n  {base_name}: {}\n  {name}: {}",
                         base_name,
@@ -387,52 +445,45 @@ pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
 /// and holds under another is already a route disagreement, which the loop
 /// above reports; running every law through every route would multiply the cost
 /// of a case by the number of laws for no new coverage.
+///
+/// A law's spaces are the case's operands in order, and its paths and bytes
+/// are [`Case::law_paths`] and [`Case::law_bytes`].  A law whose hypotheses
+/// are false for those is skipped for this case: the theorem says nothing.
 pub fn check_laws<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
-    // Operands 0..3 from the case, then the empty trie, which is what lets a
-    // law state a unit or annihilator.
-    let mut ops: Vec<PathMap<V>> = (0..EMPTY).map(|i| case.operands[i].clone()).collect();
-    ops.push(PathMap::new());
-    debug_assert_eq!(ops.len(), LAW_OPERANDS);
+    let bind = Binding { paths: &case.law_paths, bytes: &case.law_bytes };
+    let eval = |e: &Expr| {
+        routes::eval(Route::Pointwise(0), e, &case.operands)
+            .expect("route 0 applies to every expression")
+            .values
+    };
 
     let mut out = Vec::new();
-    for law in laws::laws::<V>() {
-        let l = routes::eval(Route::Pointwise(0), &law.lhs, &ops).unwrap();
-        let r = routes::eval(Route::Pointwise(0), &law.rhs, &ops).unwrap();
-        let (ok, detail) = match law.level {
-            Level::Values => (
-                l.values == r.values,
-                format!(
-                    "{}\n  lhs {}: {}\n  rhs {}: {}",
-                    shape::first_values_diff(&l.values, &r.values).unwrap_or_default(),
-                    law.lhs,
-                    shape::show_values(&l.values),
-                    law.rhs,
-                    shape::show_values(&r.values),
-                ),
-            ),
-            Level::Paths => {
-                // Compare the value-carrying paths only.  Comparing every path
-                // in the shape would drag the dangling-path question into laws
-                // that are not about it.
-                let lk: Vec<&Vec<u8>> = l.values.keys().collect();
-                let rk: Vec<&Vec<u8>> = r.values.keys().collect();
-                (
-                    lk == rk,
-                    format!(
-                        "lhs {}: {}\n  rhs {}: {}",
-                        law.lhs,
-                        shape::show_values(&l.values),
-                        law.rhs,
-                        shape::show_values(&r.values),
-                    ),
-                )
+    'laws: for law in laws::laws::<V>() {
+        let inst = laws::instantiate(law, &bind);
+        for h in &inst.pre {
+            let holds = match h {
+                Hyp::Holds(b) => *b,
+                Hyp::Mem(p, e, want) => eval(e).contains_key(p) == *want,
+                Hyp::Eq(l, r) => eval(l) == eval(r),
+            };
+            if !holds {
+                continue 'laws;
             }
-        };
-        if !ok {
+        }
+        let (l, r) = (eval(&inst.lhs), eval(&inst.rhs));
+        if l != r {
             out.push(Divergence {
                 class: Class::Law,
                 signature: signature::<V>("law", law.name),
-                detail: format!("{} ({:?}): {detail}", law.name, law.level),
+                detail: format!(
+                    "{}: {}\n  lhs {}: {}\n  rhs {}: {}",
+                    law.name,
+                    shape::first_values_diff(&l, &r).unwrap_or_default(),
+                    inst.lhs,
+                    shape::show_values(&l),
+                    inst.rhs,
+                    shape::show_values(&r),
+                ),
             });
         }
     }
@@ -470,11 +521,15 @@ pub fn signature<V: FuzzValue>(class: &str, rest: &str) -> String {
     format!("{}:{class}:{rest}", V::NAME)
 }
 
-fn route_key<V: FuzzValue>(r: Route) -> String {
-    match r {
+/// The route part of a signature.  `+zippy` when the expression uses one of
+/// Zippy's operators, so a defect in those cannot hide under a signature that
+/// `KNOWN` already attributes to a defect in the crate's own algebra.
+fn route_key<V: FuzzValue>(r: Route, e: &Expr) -> String {
+    let base = match r {
         Route::Pointwise(k) => format!("pw{k}"),
         _ => r.name(&Expr::Var(0)),
-    }
+    };
+    if e.has_zippy() { format!("{base}+zippy") } else { base }
 }
 
 // ---------------------------------------------------------------- known findings
@@ -520,8 +575,10 @@ pub struct Known {
 ///    merkleizes operands instead of only writing them fresh.
 ///
 /// 3. **Root values lost by the write-zipper forms** (`root`).  `join_into`
-///    into an empty destination drops the source's root value, and `meet_2`
-///    drops root values outright.  These are routes disagreeing with the
+///    into an empty destination drops the source's root value, `meet_2`
+///    drops root values outright, and `meet_into` keeps the destination's
+///    instead of meeting it with the source's (repro 8, visible only with
+///    `bits`).  These are routes disagreeing with the
 ///    baseline in the ordinary way.
 ///
 /// 4. **Dangling paths** (`dangling`).  The lockstep traversals in
@@ -534,11 +591,17 @@ pub struct Known {
 ///    algebraic defect: it fires while the operands are still being written,
 ///    before any operation runs, which is what the `build` in its signature
 ///    means.
+///
+/// 6. **`take_map` of a value-only focus** (`take_map`).  The map it returns
+///    holds the value at its root, and the first write below that root panics:
+///    "Attempted to make_unique on an empty sentinel node".  Fixed on
+///    `fix/fvc-leftovers` (f1bdca9), not on master.
 const BIAS: &str = "value bias by node layout, u64-only (repro 3)";
 const LOSS: &str = "join loses a value across shared structure (repro 4)";
-const ROOT: &str = "write-zipper forms lose root values (repros 1, 2)";
+const ROOT: &str = "write-zipper forms lose root values (repros 1, 2, 8)";
 const DANGLING: &str = "zipper traversals drop dangling paths, map ops keep them (repro 7)";
 const MERKLEIZE: &str = "merkleize panics on dangling-only structure (repro 5)";
+const TAKE_MAP: &str = "take_map of a value-only focus returns a map that panics on write (repro 9)";
 /// Re-nesting a join moves which operand is on the left *and* which pair of
 /// tries meets a shared node first, so both cause 1 and cause 2 reach these.
 /// Under the lawful type only cause 2 survives, which is why the counts collapse.
@@ -573,16 +636,6 @@ pub const KNOWN: &[Known] = &[
     // baseline join or meet that consumes it is what then goes wrong.
     Known { signature: "u64:values:subtract_zipper", cause: BIAS_OR_LOSS },
     Known { signature: "u64:shape:subtract_zipper", cause: DANGLING },
-    Known { signature: "u64:law:join-associative", cause: BIAS_OR_LOSS },
-    Known { signature: "u64:law:join-distributes-over-meet", cause: BIAS_OR_LOSS },
-    Known { signature: "u64:law:majority-is-pairwise-meets", cause: BIAS_OR_LOSS },
-    Known { signature: "u64:law:join-commutative", cause: LOSS },
-    // These four fire only for u64: they need join and meet to be different
-    // functions, and for u64 they are the same one.
-    Known { signature: "u64:law:meet-associative", cause: BIAS },
-    Known { signature: "u64:law:meet-distributes-over-join", cause: BIAS },
-    Known { signature: "u64:law:absorb-join-meet", cause: BIAS },
-    Known { signature: "u64:law:sym-diff-is-join-minus-meet", cause: BIAS },
     Known { signature: "u64:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
     Known { signature: "u64:panic:eval:line_list_node.rs:2732", cause: LOSS },
     Known { signature: "u64:panic:eval:line_list_node.rs:2783", cause: LOSS },
@@ -620,11 +673,6 @@ pub const KNOWN: &[Known] = &[
     // operand's value (the debug assert behind cause 2 fires).
     Known { signature: "bits:values:subtract_zipper", cause: LOSS },
     Known { signature: "bits:shape:subtract_zipper", cause: DANGLING },
-    Known { signature: "bits:law:join-associative", cause: LOSS },
-    Known { signature: "bits:law:join-commutative", cause: LOSS },
-    Known { signature: "bits:law:join-distributes-over-meet", cause: LOSS },
-    Known { signature: "bits:law:sym-diff-is-join-minus-meet", cause: LOSS },
-    Known { signature: "bits:law:majority-is-pairwise-meets", cause: LOSS },
     Known { signature: "bits:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
     Known { signature: "bits:panic:eval:line_list_node.rs:2732", cause: LOSS },
     Known { signature: "bits:panic:eval:line_list_node.rs:2783", cause: LOSS },
@@ -654,37 +702,90 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "unit:shape:dnf", cause: DANGLING },
     Known { signature: "unit:values:subtract_zipper", cause: LOSS },
     Known { signature: "unit:shape:subtract_zipper", cause: DANGLING },
-    Known { signature: "unit:law:join-associative", cause: LOSS },
-    Known { signature: "unit:law:join-commutative", cause: LOSS },
-    Known { signature: "unit:law:join-distributes-over-meet", cause: LOSS },
-    Known { signature: "unit:law:sym-diff-is-join-minus-meet", cause: LOSS },
-    Known { signature: "unit:law:majority-is-pairwise-meets", cause: LOSS },
     Known { signature: "unit:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
     Known { signature: "unit:panic:eval:line_list_node.rs:2732", cause: LOSS },
     Known { signature: "unit:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
     // Fires roughly once per million random cases, and the corpus reproduces it
     // for all three types.
     Known { signature: "unit:panic:eval:line_list_node.rs:2783", cause: LOSS },
-    // Two laws that fire only under `unit`, both once per couple of million
-    // cases, and both cause 2.  `unit` reaches it where the other types do not
-    // because every value is identical, so `merkleize` and `clone` share far
-    // more structure and the dangling-only operand that triggers the loss is
-    // easier to generate.
-    Known { signature: "unit:law:meet-distributes-over-join", cause: LOSS },
-    // One of the four identities that are only checked for a lawful value type.
-    // It failing is still cause 2, not a bad identity: the shrunk case has a
-    // dangling-only `b` and a `c` that is `b` plus one value, so `b | c` is
-    // exactly repro 4.
-    Known { signature: "unit:law:subtract-over-join", cause: LOSS },
     Known { signature: "unit:values:ternary", cause: LOSS },
 
-    // Of the four identities in `laws::lawful_only` -- checked only for a lawful
-    // value type -- three have never failed: subtract-over-meet,
-    // subtract-is-subtract-meet and sym-diff-associative.  They are the
-    // strongest laws the harness has, and they are deliberately absent from this
-    // table so that one of them firing is news.  The fourth,
-    // subtract-over-join, fires once per couple of million cases under `unit`,
-    // and is cause 2 rather than a bad identity.
+    // ---------------------------------------------------------------- Zippy
+    // Expressions using Zippy's operators (`+zippy`).  Triaged 2026-10-31 by
+    // shrinking one input per signature, and by a sweep with the crate's own
+    // operators pinned to their baseline strategy so that only the new
+    // operators' strategies varied: every residue is one of the causes above,
+    // or cause 6.  They fire far more often than their plain counterparts
+    // because `unwrap`, `singleton` and `tails_*` put values at the root, which
+    // is exactly where cause 3 lives.
+    Known { signature: "u64:values:pw1+zippy", cause: ROOT },
+    Known { signature: "u64:values:pw2+zippy", cause: ROOT },
+    Known { signature: "u64:values:pw3+zippy", cause: ROOT },
+    // `composition`'s `wrap_join` strategy goes through `PathMap::join`.
+    Known { signature: "u64:values:pw4+zippy", cause: BIAS },
+    Known { signature: "u64:values:pw5+zippy", cause: BIAS },
+    Known { signature: "u64:values:model+zippy", cause: BIAS },
+    Known { signature: "u64:values:subtract_zipper+zippy", cause: BIAS_OR_LOSS },
+    // Includes `meet_into` keeping the destination's focus value instead of
+    // meeting it (repro 8), which only a value type with a real meet can see.
+    Known { signature: "bits:values:pw1+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw2+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw3+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw5+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw4+zippy", cause: LOSS },
+    Known { signature: "bits:values:model+zippy", cause: LOSS },
+    Known { signature: "bits:values:subtract_zipper+zippy", cause: LOSS },
+    Known { signature: "unit:values:pw1+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw2+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw3+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw5+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw4+zippy", cause: LOSS },
+    Known { signature: "unit:values:model+zippy", cause: LOSS },
+    Known { signature: "unit:values:subtract_zipper+zippy", cause: LOSS },
+    // Includes `PrefixZipper` reporting the prefix of an empty source as
+    // existing, so `wrap p {}` materialises a dangling `p`.
+    Known { signature: "u64:shape:pw1+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw2+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw3+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw4+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw5+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:subtract_zipper+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw1+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw2+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw3+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw4+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw5+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:subtract_zipper+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw1+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw2+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw3+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw4+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw5+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:subtract_zipper+zippy", cause: DANGLING },
+    // `unwrap`'s take_map strategy feeding `wrap`'s insert_prefix one.
+    Known { signature: "u64:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
+    Known { signature: "bits:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
+    Known { signature: "unit:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
+    // The laws from `Zippy.lean` that fail, all of them under `PathMap::join`
+    // losing a value: every shrunk case is `x | y` with `y` sharing nodes with
+    // `x` (a clone, or a join result that reuses `x`'s nodes) or carrying
+    // dangling structure, and the union dropping a path one side has.  One of
+    // them, `singleton_union_composition`, needs no clone at all:
+    // `{_, dangling 1, 2} | {_, 0000}` is `{_}` on master.  Both that and
+    // repro 4 are fixed on `fix/fvc-leftovers`.  Every other generated law has
+    // never failed, and is deliberately absent so that one failing is news.
+    Known { signature: "unit:law:union_comm", cause: LOSS },
+    Known { signature: "unit:law:union_assoc", cause: LOSS },
+    Known { signature: "unit:law:union_subtr_distrib", cause: LOSS },
+    Known { signature: "unit:law:unwrap_union", cause: LOSS },
+    Known { signature: "unit:law:head_union", cause: LOSS },
+    Known { signature: "unit:law:tailsUnion_union", cause: LOSS },
+    Known { signature: "unit:law:iterC_union", cause: LOSS },
+    Known { signature: "unit:law:composition_union", cause: LOSS },
+    Known { signature: "unit:law:union_composition", cause: LOSS },
+    Known { signature: "unit:law:singleton_union_composition", cause: LOSS },
+    Known { signature: "unit:law:union_inter_distrib", cause: LOSS },
+    Known { signature: "unit:law:restriction_union", cause: LOSS },
 ];
 
 pub fn known(signature: &str) -> Option<&'static Known> {

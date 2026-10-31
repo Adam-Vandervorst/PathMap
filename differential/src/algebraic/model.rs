@@ -27,18 +27,31 @@
 
 use pathmap::ring::{DistributiveLattice, Lattice};
 
-use super::expr::{Expr, Op};
+use super::expr::{Expr, Op, Un};
 use super::shape::Values;
 use super::value::{resolve, FuzzValue};
 
 pub fn eval<V: FuzzValue>(e: &Expr, operands: &[Values<V>]) -> Values<V> {
     match e {
         Expr::Var(i) => operands[*i].clone(),
+        Expr::Empty => Values::new(),
+        Expr::Singleton(p) => singleton(p),
         Expr::Bin(op, l, r) => {
             let a = eval(l, operands);
             let b = eval(r, operands);
             apply(*op, &a, &b)
         }
+        Expr::Wrap(p, e) => wrap(p, &eval(e, operands)),
+        Expr::Unwrap(e, p) => unwrap(&eval(e, operands), p),
+        Expr::Un(u, e) => unary(*u, &eval(e, operands)),
+    }
+}
+
+pub fn unary<V: FuzzValue>(u: Un, a: &Values<V>) -> Values<V> {
+    match u {
+        Un::Head => head(a),
+        Un::TailsUnion => tails_union(a),
+        Un::TailsInter => tails_inter(a),
     }
 }
 
@@ -49,6 +62,8 @@ pub fn apply<V: FuzzValue>(op: Op, a: &Values<V>, b: &Values<V>) -> Values<V> {
         Op::Subtract => subtract(a, b),
         Op::SymDiff => sym_diff(a, b),
         Op::Restrict => restrict(a, b),
+        Op::Compose => compose(a, b),
+        Op::IterC => iter_c(a, b),
     }
 }
 
@@ -111,4 +126,63 @@ pub fn restrict<V: FuzzValue>(a: &Values<V>, b: &Values<V>) -> Values<V> {
         .filter(|(k, _)| (0..=k.len()).any(|n| b.contains_key(&k[..n])))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+// ---------------------------------------------------------------- Zippy
+//
+// Each of these is the membership lemma `Zippy.lean` proves for the operator
+// (`mem_wrap`, `mem_unwrap`, `mem_head`, ...), read as a definition.  Values
+// come along with the paths they sit on; where several paths land on one, they
+// are joined in ascending key order, which is the order every crate route
+// visits them in too.
+
+pub fn singleton<V: FuzzValue>(p: &[u8]) -> Values<V> {
+    Values::from([(p.to_vec(), V::canonical())])
+}
+
+/// `p ∈ wrap q s ↔ ∃ r, p = q ++ r ∧ r ∈ s`.
+pub fn wrap<V: FuzzValue>(p: &[u8], a: &Values<V>) -> Values<V> {
+    a.iter().map(|(k, v)| ([p, &k[..]].concat(), v.clone())).collect()
+}
+
+/// `p ∈ unwrap s q ↔ q ++ p ∈ s`.
+pub fn unwrap<V: FuzzValue>(a: &Values<V>, p: &[u8]) -> Values<V> {
+    a.iter().filter_map(|(k, v)| k.strip_prefix(p).map(|r| (r.to_vec(), v.clone()))).collect()
+}
+
+/// The first bytes of `a`'s non-empty paths, ascending.  A space has no
+/// dangling paths, so this is also what `child_mask` would say of one.
+pub fn heads<V: FuzzValue>(a: &Values<V>) -> Vec<u8> {
+    let mut hs: Vec<u8> = a.keys().filter_map(|k| k.first().copied()).collect();
+    hs.dedup();
+    hs
+}
+
+/// `p ∈ head s ↔ ∃ b r, p = [b] ∧ b :: r ∈ s`.
+pub fn head<V: FuzzValue>(a: &Values<V>) -> Values<V> {
+    heads(a).into_iter().map(|b| (vec![b], V::canonical())).collect()
+}
+
+/// `p ∈ tailsUnion s ↔ ∃ b, b :: p ∈ s`, folded with `join` over the heads.
+pub fn tails_union<V: FuzzValue>(a: &Values<V>) -> Values<V> {
+    heads(a).into_iter().fold(Values::new(), |acc, b| join(&acc, &unwrap(a, &[b])))
+}
+
+/// The tails under the first head, met with each later one's in turn; nothing
+/// when there is no head.  This is egg's `tails-intersection-acc` fold.
+pub fn tails_inter<V: FuzzValue>(a: &Values<V>) -> Values<V> {
+    let mut hs = heads(a).into_iter();
+    let Some(first) = hs.next() else { return Values::new() };
+    hs.fold(unwrap(a, &[first]), |acc, b| meet(&acc, &unwrap(a, &[b])))
+}
+
+/// `t` under every path of `s`, joined in ascending order of those paths.
+/// `s`'s own values are not carried: Composition reads only its paths.
+pub fn compose<V: FuzzValue>(s: &Values<V>, t: &Values<V>) -> Values<V> {
+    s.keys().fold(Values::new(), |acc, u| join(&acc, &wrap(u, t)))
+}
+
+/// `p ∈ iterC src b ↔ (∃ h r, h :: r ∈ src) ∧ p ∈ b`.
+pub fn iter_c<V: FuzzValue>(src: &Values<V>, b: &Values<V>) -> Values<V> {
+    if src.keys().any(|k| !k.is_empty()) { b.clone() } else { Values::new() }
 }

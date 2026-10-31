@@ -16,7 +16,7 @@
 
 use differential::algebraic::{
     self,
-    expr::{Expr, Op},
+    expr::{Expr, Kind, Op},
     known, signatures,
     value::{Bits, FuzzValue},
 };
@@ -407,8 +407,8 @@ fn every_strategy_index_is_reachable_from_some_pointwise_route() {
     // Route `k` picks strategy `k % n` per operator, so POINTWISE_ROUTES has to
     // be at least as large as the widest operator's strategy table or some
     // implementation would never be exercised.
-    for op in Op::ALL {
-        let n = algebraic::routes::strategies(op).len();
+    for op in Kind::ALL {
+        let n = algebraic::routes::kind_strategies(op).len();
         assert!(
             n <= algebraic::routes::POINTWISE_ROUTES,
             "{op:?} has {n} strategies but only {} pointwise routes",
@@ -456,4 +456,76 @@ fn every_whole_expression_route_applies_to_some_random_case() {
     for (r, n) in routes.iter().zip(&applied) {
         assert!(*n > 0, "route {} never applies in {CASES} random cases", r.name(&Expr::Var(0)));
     }
+}
+
+// ------------------------------------------------------------- Zippy laws
+
+/// The case must offer as many spaces, paths and bytes as any law binds.
+#[test]
+fn every_law_variable_has_something_to_bind_to() {
+    let (spaces, paths, bytes) = algebraic::laws::arity();
+    assert!(spaces <= algebraic::OPERANDS, "a law needs {spaces} spaces");
+    assert!(paths <= algebraic::LAW_PATHS, "a law needs {paths} paths");
+    assert!(bytes <= algebraic::LAW_BYTES, "a law needs {bytes} bytes");
+}
+
+/// Every generated law holds in the flat model.
+///
+/// The laws are theorems about Zippy's operators, and `model.rs` is those
+/// operators' membership lemmas read as code, with no trie anywhere.  So a
+/// failure here is never the crate: it is the Lean-to-Rust translation, the
+/// variable binding, or the model -- exactly the parts of the harness that, if
+/// wrong, would make every law finding a false one.
+#[test]
+fn zippy_laws_hold_in_the_model() {
+    use algebraic::laws::{instantiate, laws, Binding, Hyp};
+    use algebraic::routes::{eval, Route};
+    const CASES: usize = 3_000;
+    let mut rng = algebraic::Rng::for_job(20261031, 0);
+    let mut checked = vec![0usize; laws::<()>().len()];
+    let mut failures = Vec::new();
+    let _ = with_quiet_panics(|| {
+        for _ in 0..CASES {
+            let bytes = rng.input();
+            let Ok(case) = std::panic::catch_unwind(|| algebraic::decode::<()>(&bytes)) else {
+                continue;
+            };
+            let bind = Binding { paths: &case.law_paths, bytes: &case.law_bytes };
+            let model = |e: &Expr| eval(Route::Model, e, &case.operands).unwrap().values;
+            'laws: for (i, law) in laws::<()>().iter().enumerate() {
+                let inst = instantiate(law, &bind);
+                for h in &inst.pre {
+                    let holds = match h {
+                        Hyp::Holds(b) => *b,
+                        Hyp::Mem(p, e, want) => model(e).contains_key(p) == *want,
+                        Hyp::Eq(l, r) => model(l) == model(r),
+                    };
+                    if !holds {
+                        continue 'laws;
+                    }
+                }
+                checked[i] += 1;
+                if model(&inst.lhs) != model(&inst.rhs) {
+                    failures.push(format!("{}: {} vs {}", law.name, inst.lhs, inst.rhs));
+                }
+            }
+        }
+    });
+    assert!(failures.is_empty(), "laws false in the model:\n{}", failures.join("\n"));
+    // A law whose hypotheses never hold is checked by nothing.
+    let never: Vec<&str> = laws::<()>()
+        .iter()
+        .zip(&checked)
+        .filter(|(_, n)| **n == 0)
+        .map(|(l, _)| l.name)
+        .collect();
+    assert!(never.is_empty(), "laws never applicable in {CASES} cases: {never:?}");
+}
+
+/// Laws are checked for the set type only; see `laws.rs`.
+#[test]
+fn zippy_laws_apply_to_the_set_type_only() {
+    assert!(!algebraic::laws::laws::<()>().is_empty());
+    assert!(algebraic::laws::laws::<u64>().is_empty());
+    assert!(algebraic::laws::laws::<Bits>().is_empty());
 }

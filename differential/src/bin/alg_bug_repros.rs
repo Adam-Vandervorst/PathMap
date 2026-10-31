@@ -16,6 +16,8 @@ use pathmap::PathMap;
 use pathmap::experimental::zipper_algebra::{zipper_join, zipper_meet, zipper_sym_diff};
 use pathmap::zipper::{ZipperMoving, ZipperPath, ZipperValues, ZipperWriting};
 
+use differential::algebraic::value::Bits;
+
 /// A trie holding only dangling paths: structure written with `create_path`
 /// and no value anywhere.
 fn dangling(paths: &[&[u8]]) -> PathMap<u64> {
@@ -269,7 +271,59 @@ fn main() {
         println!("   => not counted as a failure; the crate has not settled this");
     }
 
-    println!("\n{} of 6 still reproduce", r.failed);
+    // ---------------------------------------------------------------- 8
+    // `meet_into` keeps the destination's focus value when the source has one,
+    // rather than meeting the two.  Invisible with `u64`, whose `pmeet` returns
+    // the left operand anyway; a value type whose meet makes a new value shows
+    // it.  Found as `tails_inter` disagreeing between its fold strategies.
+    {
+        let mut dst = PathMap::<Bits>::new();
+        dst.set_val_at([], Bits(0b1111));
+        let mut src = PathMap::<Bits>::new();
+        src.set_val_at([], Bits(0b0001));
+        let eager = dst.meet(&src);
+        let mut out = dst.clone();
+        out.write_zipper().meet_into(&src.read_zipper(), false);
+        r.case(
+            "8",
+            "meet_into at a focus value: {_:1111} & {_:0001}",
+            format!("root value {:?} (PathMap::meet)", eager.get([])),
+            format!("root value {:?} (meet_into)", out.get([])),
+        );
+    }
+
+    // ---------------------------------------------------------------- 9
+    // `take_map` at a focus that holds a value and nothing below it returns a
+    // map holding that value at its root -- and any later write below that
+    // root panics with "Attempted to make_unique on an empty sentinel node".
+    // Found through `wrap(unwrap(..))`, the take_map route of `unwrap` feeding
+    // the insert_prefix route of `wrap`.  Fixed on `fix/fvc-leftovers` by
+    // f1bdca9 (join_map_into, take_map and restricting ignore empty
+    // materialised nodes); still panics on master and on focus_value_consistency.
+    {
+        let got = std::panic::catch_unwind(|| {
+            let mut a = PathMap::<u64>::new();
+            a.set_val_at([1, 0], 1);
+            let mut m = {
+                let mut wz = a.write_zipper();
+                wz.descend_to([1, 0]);
+                wz.take_map(false).unwrap()
+            };
+            m.set_val_at([5], 2);
+            m.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>()
+        });
+        r.case(
+            "9",
+            "take_map of a value-only focus, then set_val_at([5])",
+            "[([], 1), ([5], 2)]".to_string(),
+            match got {
+                Ok(v) => format!("{v:?}"),
+                Err(_) => "panic: make_unique on an empty sentinel node".to_string(),
+            },
+        );
+    }
+
+    println!("\n{} of 8 still reproduce", r.failed);
     if r.failed > 0 {
         std::process::exit(1);
     }

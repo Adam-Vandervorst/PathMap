@@ -16,6 +16,22 @@
 //!   [`zipper_merge_dnf`](pathmap::experimental::zipper_algebra::zipper_merge_dnf).
 //!
 //! [`Expr::dnf`] and [`Expr::chain`] are the recognisers for the last three.
+//!
+//! # Zippy's operators
+//!
+//! On top of the crate's algebra the language has the rest of Zippy's space
+//! algebra (`formal.egg`, proved over `PrunedMap Unit` in
+//! `lean/PrunedModel/Zippy.lean`): the empty space, singletons, `Wrap`,
+//! `Unwrap`, `Head`, `TailsUnion`, `TailsIntersection`, `Composition` and
+//! `IterC`.  They are there so that the laws `laws.rs` takes from that file can
+//! be stated at all, and so that the routes get trees in which a subtrie is
+//! moved, cut out or replicated between algebraic steps -- grafted and
+//! prefixed nodes are shared differently from freshly built ones.
+//!
+//! A space in Zippy has no dangling paths, so where one of these operators
+//! looks at structure (`Head`, the two tails, `IterC`) it looks only at
+//! children that lead to a value.  A child that is dangling-only is the
+//! unsettled dangling-path question again, which `shape.rs` keeps apart.
 
 use core::fmt;
 
@@ -34,10 +50,16 @@ pub enum Op {
     Subtract,
     SymDiff,
     Restrict,
+    /// Zippy's `Composition s t`: a copy of `t` under every path of `s`.
+    Compose,
+    /// Zippy's `IterC src b`: `b` if `src` has a value below its root, else
+    /// nothing.
+    IterC,
 }
 
 impl Op {
-    pub const ALL: [Op; 5] = [Op::Join, Op::Meet, Op::Subtract, Op::SymDiff, Op::Restrict];
+    pub const ALL: [Op; 7] =
+        [Op::Join, Op::Meet, Op::Subtract, Op::SymDiff, Op::Restrict, Op::Compose, Op::IterC];
 
     pub fn sym(self) -> &'static str {
         match self {
@@ -46,7 +68,14 @@ impl Op {
             Op::Subtract => "-",
             Op::SymDiff => "^",
             Op::Restrict => "/",
+            Op::Compose => ".",
+            Op::IterC => "iter_c",
         }
+    }
+
+    /// One of Zippy's operators rather than one of the crate's own algebra.
+    pub fn is_zippy(self) -> bool {
+        matches!(self, Op::Compose | Op::IterC)
     }
 
     /// Whether `(a op b) op c == a op (b op c)` holds, which is what makes a
@@ -78,10 +107,81 @@ impl Op {
     }
 }
 
+/// Zippy's one-operand operators that take no path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Un {
+    /// `Head s`: the first byte of every path, as one-byte paths.
+    Head,
+    /// `TailsUnion s`: the union of the subtries one byte down.
+    TailsUnion,
+    /// `TailsIntersection s`: their intersection; nothing when there are none.
+    TailsInter,
+}
+
+impl Un {
+    pub const ALL: [Un; 3] = [Un::Head, Un::TailsUnion, Un::TailsInter];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Un::Head => "head",
+            Un::TailsUnion => "tails_union",
+            Un::TailsInter => "tails_inter",
+        }
+    }
+}
+
+/// Every kind of interior node, for naming the strategy a route picked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Op(Op),
+    Singleton,
+    Wrap,
+    Unwrap,
+    Un(Un),
+}
+
+impl Kind {
+    pub const ALL: [Kind; 13] = [
+        Kind::Op(Op::Join),
+        Kind::Op(Op::Meet),
+        Kind::Op(Op::Subtract),
+        Kind::Op(Op::SymDiff),
+        Kind::Op(Op::Restrict),
+        Kind::Op(Op::Compose),
+        Kind::Op(Op::IterC),
+        Kind::Singleton,
+        Kind::Wrap,
+        Kind::Unwrap,
+        Kind::Un(Un::Head),
+        Kind::Un(Un::TailsUnion),
+        Kind::Un(Un::TailsInter),
+    ];
+
+    pub fn sym(self) -> &'static str {
+        match self {
+            Kind::Op(op) => op.sym(),
+            Kind::Singleton => "singleton",
+            Kind::Wrap => "wrap",
+            Kind::Unwrap => "unwrap",
+            Kind::Un(u) => u.name(),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Expr {
     Var(usize),
+    /// The empty space.
+    Empty,
+    /// One path, carrying [`FuzzValue::canonical`](super::value::FuzzValue::canonical).
+    Singleton(Vec<u8>),
     Bin(Op, Box<Expr>, Box<Expr>),
+    /// Zippy's `Wrap p s`: every path of `s`, prefixed by `p`.
+    Wrap(Vec<u8>, Box<Expr>),
+    /// Zippy's `Unwrap s p`: the subtrie of `s` at `p`, the value at `p`
+    /// included (it becomes the root value).
+    Unwrap(Box<Expr>, Vec<u8>),
+    Un(Un, Box<Expr>),
 }
 
 impl Expr {
@@ -89,10 +189,70 @@ impl Expr {
         Expr::Bin(op, Box::new(l), Box::new(r))
     }
 
+    pub fn wrap(p: Vec<u8>, e: Expr) -> Expr {
+        Expr::Wrap(p, Box::new(e))
+    }
+
+    pub fn unwrap(e: Expr, p: Vec<u8>) -> Expr {
+        Expr::Unwrap(Box::new(e), p)
+    }
+
+    pub fn un(u: Un, e: Expr) -> Expr {
+        Expr::Un(u, Box::new(e))
+    }
+
     pub fn nodes(&self) -> usize {
         match self {
-            Expr::Var(_) => 1,
+            Expr::Var(_) | Expr::Empty | Expr::Singleton(_) => 1,
             Expr::Bin(_, l, r) => 1 + l.nodes() + r.nodes(),
+            Expr::Wrap(_, e) | Expr::Unwrap(e, _) | Expr::Un(_, e) => 1 + e.nodes(),
+        }
+    }
+
+    /// The node kinds the expression uses, each once.
+    pub fn kinds(&self) -> Vec<Kind> {
+        let mut out = Vec::new();
+        self.collect_kinds(&mut out);
+        out
+    }
+
+    fn collect_kinds(&self, out: &mut Vec<Kind>) {
+        let mut add = |k: Kind| {
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        };
+        match self {
+            Expr::Var(_) | Expr::Empty => {}
+            Expr::Singleton(_) => add(Kind::Singleton),
+            Expr::Bin(op, l, r) => {
+                add(Kind::Op(*op));
+                l.collect_kinds(out);
+                r.collect_kinds(out);
+            }
+            Expr::Wrap(_, e) => {
+                add(Kind::Wrap);
+                e.collect_kinds(out);
+            }
+            Expr::Unwrap(e, _) => {
+                add(Kind::Unwrap);
+                e.collect_kinds(out);
+            }
+            Expr::Un(u, e) => {
+                add(Kind::Un(*u));
+                e.collect_kinds(out);
+            }
+        }
+    }
+
+    /// Whether any node is one of Zippy's operators rather than the crate's own
+    /// algebra.  Signatures say so, so that a finding in the new operators
+    /// cannot hide under a signature already attributed to an old defect.
+    pub fn has_zippy(&self) -> bool {
+        match self {
+            Expr::Var(_) => false,
+            Expr::Empty | Expr::Singleton(_) | Expr::Wrap(..) | Expr::Unwrap(..) | Expr::Un(..) => true,
+            Expr::Bin(op, l, r) => op.is_zippy() || l.has_zippy() || r.has_zippy(),
         }
     }
 
@@ -108,10 +268,12 @@ impl Expr {
     fn collect_vars(&self, out: &mut Vec<usize>) {
         match self {
             Expr::Var(i) => out.push(*i),
+            Expr::Empty | Expr::Singleton(_) => {}
             Expr::Bin(_, l, r) => {
                 l.collect_vars(out);
                 r.collect_vars(out);
             }
+            Expr::Wrap(_, e) | Expr::Unwrap(e, _) | Expr::Un(_, e) => e.collect_vars(out),
         }
     }
 
@@ -151,9 +313,10 @@ impl Expr {
                         true
                     }
                     Expr::Bin(..) => op.right_nestable() && r.collect_chain(op, out),
+                    _ => false,
                 }
             }
-            Expr::Bin(..) => false,
+            _ => false,
         }
     }
 
@@ -208,11 +371,23 @@ impl Expr {
     }
 }
 
+/// A path as its bytes, `[]` for the empty one.
+pub fn show_path(p: &[u8]) -> String {
+    let bs: Vec<String> = p.iter().map(|b| b.to_string()).collect();
+    format!("[{}]", bs.join(","))
+}
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Var(i) => write!(f, "{}", (b'a' + *i as u8) as char),
+            Expr::Empty => write!(f, "{{}}"),
+            Expr::Singleton(p) => write!(f, "{{{}}}", show_path(p)),
+            Expr::Bin(Op::IterC, l, r) => write!(f, "iter_c({l}, {r})"),
             Expr::Bin(op, l, r) => write!(f, "({l} {} {r})", op.sym()),
+            Expr::Wrap(p, e) => write!(f, "wrap{}({e})", show_path(p)),
+            Expr::Unwrap(e, p) => write!(f, "unwrap({e}){}", show_path(p)),
+            Expr::Un(u, e) => write!(f, "{}({e})", u.name()),
         }
     }
 }

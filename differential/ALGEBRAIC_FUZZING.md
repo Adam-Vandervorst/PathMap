@@ -75,6 +75,23 @@ is reached by some route and the routes mix them:
 | subtract `-` | `PathMap::subtract`, `subtract_into`, `zipper_subtract` |
 | sym. difference `^` | `zipper_sym_diff`, `(a \| b) - (a & b)` |
 | restrict `/` | `PathMap::restrict`, `WriteZipper::restrict` |
+| composition `.` | `descend_to u` + `join_map_into t` per path `u`, or `PathMap::join` of grafted copies |
+| `iter_c` | `val_count` below the root, or `iter` |
+| `singleton` | `PathMap::single`, or `descend_to` + `set_val` |
+| `wrap` | `descend_to` + `graft_map`, a materialised `PrefixZipper`, or `insert_prefix` (with the focus value moved by hand) |
+| `unwrap` | `read_zipper_at_path(p).make_map()`, `descend_to` + `make_map`, or `take_map` |
+| `head` | `child_mask`, or first bytes from `iter` |
+| `tails_union` | a fold of `PathMap::join`, or `join_map_into` at the root |
+| `tails_inter` | a fold of `PathMap::meet`, or `meet_into` |
+
+The operators from `composition` down are the rest of Zippy's space algebra
+(`formal.egg`, proved in `lean/PrunedModel/Zippy.lean`). They are in the language
+so the laws below can be stated, and because they hand the algebra tries in which
+a subtrie has been moved, cut out or copied — node layouts and sharing the
+crate's own operators never produce from fresh operands. A Zippy space has no
+dangling paths, so `head`, the tails and `iter_c` look only at children that lead
+to a value. An expression using any of them gets `+zippy` on its signatures,
+so a finding there cannot hide under a signature already blamed on an old defect.
 
 **Whole-expression** routes recognise a shape and hand the entire thing to one
 call. These are the routes with real independence, because no intermediate trie
@@ -106,17 +123,37 @@ fastest, because it has no node layout to be biased by.
 ### Laws
 
 Route comparison catches an implementation that disagrees with its siblings. It
-cannot catch a mistake they all share. `src/algebraic/laws.rs` is the other
-half: each law is two *different expressions* that must evaluate to the same
-trie, so a wrong answer is visible even when every route computes it the same
-wrong way. Idempotence, units, associativity, absorption, distributivity, and
-the definition `zipper_sym_diff`'s own documentation gives.
+cannot catch a mistake they all share. Laws are the other half: each law is two
+*different expressions* that must evaluate to the same trie, so a wrong answer is
+visible even when every route computes it the same wrong way.
+
+The laws are **generated from Lean**, not written here. `lean/ZippyLaws.lean`
+(branch `spec/zippy-laws`) loads the elaborated `PrunedModel.Zippy` module, takes
+every theorem that is an equation between spaces over the operators above, checks
+its proof is `sorry`-free, and prints it as Rust:
+`src/algebraic/zippy_laws.rs`, 70 laws. A theorem may quantify over paths and
+bytes and carry hypotheses (`a ≠ b`, `p ∉ s`, `head x = empty`); each case
+carries a few paths and bytes for those, mostly prefixes and first bytes of the
+operands' own paths, and a law whose hypotheses are false for them is skipped.
+The 75 theorems it does not export are listed at the bottom of the generated
+file with the reason (membership lemmas, `≠` results, raw-zipper-op theorems,
+function-typed binders).
+
+```sh
+cd lean && lake env lean --run ZippyLaws.lean > ../differential/src/algebraic/zippy_laws.rs
+```
+
+The theorems are about `PrunedMap Unit` — a set of paths — so they are checked
+for `unit` only. Under `u64` or `bits` several are false for reasons that have
+nothing to do with the crate (subtraction removes a path only when the values
+cancel; a meet of two values can be bottom). `tests/algebraic.rs` checks every
+generated law against the flat model, which is the membership lemmas read as
+code; a failure there is the translation or the harness, never the crate.
 
 Laws are the reason a defect in the *baseline* is findable at all. When
-`PathMap::meet` takes the wrong operand's value, no route disagrees with the
-baseline in an interesting way — the baseline is what everyone is compared
-against. `meet-distributes-over-join` has no baseline to be fooled by: it puts
-the operands on different sides of a meet and notices.
+`PathMap::join` loses a value, no route disagrees with the baseline in an
+interesting way — the baseline is what everyone is compared against.
+`union_comm` has no baseline to be fooled by.
 
 ### Three value types, and the difference between them is a measurement
 
@@ -200,26 +237,15 @@ reaches them. `bin/alg_lattice_check` prints the table:
 `pathmap::utils` already implements exactly this for `[u64; 4]` and `ByteMask`,
 via `bitmask_algebraic_result`; `Bits` is the same construction at 64 bits.
 
-### What the lawful type unlocked
+### Before the generated laws
 
-Four identities are checked **only** for a lawful value type, in
-`laws::lawful_only` — De Morgan for relative complement both ways,
-`a - b == a - (a & b)`, and symmetric difference being associative on *values*
-rather than only on paths. Each fails for `u64`, for the same reason everything
-else does.
-
-**Three of the four hold** across several million cases in both profiles:
-`subtract-over-meet`, `subtract-is-subtract-meet` and `sym-diff-associative`.
-They are the strongest laws the harness has and are deliberately absent from
-`KNOWN`, so one of them firing is news.
-
-The fourth, `subtract-over-join`, fires about once per two million cases under
-`unit` — and is cause 2 rather than a bad identity. Its shrunk case has a
-dangling-only `b` and a `c` that is `b` plus one value, so `b | c` is exactly
-finding 4.
-
-The `Level::Paths` laws are also promoted to `Level::Values` for a lawful type,
-so commutativity of join and meet is checked on values there.
+Until 2026-10-31 the laws were a hand-written list in `laws.rs`, run for every
+value type, with some checked on paths only for `u64` and four more only for a
+lawful type. The `law:join-associative`-style signatures and the counts above
+come from that list. It found finding 4 (`join-commutative`) and showed five
+findings to be `u64` artefacts; the Zippy set covers its union, intersection,
+subtraction and restriction identities with proofs behind them, but has no
+symmetric difference and no laws for `u64` or `bits`.
 
 ### One thing the lawful type cannot do
 
@@ -363,7 +389,7 @@ expects the `panic:eval:*` signatures.
 
 ## Findings
 
-Six defects on `master` at `b4a6abd`, reproduced without the fuzzer in
+Six defects on `master` at `b4a6abd` (two more below), reproduced without the fuzzer in
 `src/bin/alg_bug_repros.rs`, plus the unsettled dangling-path question as case 7.
 `algebraic::KNOWN` maps every signature onto one of them.
 
@@ -384,7 +410,8 @@ Six defects on `master` at `b4a6abd`, reproduced without the fuzzer in
    is a least upper bound, so no ordering of the operands may lose a path; this
    is the one finding that needs no argument about value bias. Found by
    `join-commutative`, which is checked on paths only and so cannot be fooled by
-   cause 3.
+   cause 3. The Zippy laws also reach a form with no clone at all:
+   `{_, dangling 1, 2} | {_, 0000}` is `{_}` (both fixed on `fix/fvc-leftovers`).
 
 5. **`merkleize` panics on a trie holding only dangling paths.** Not algebraic:
    it fires while the operands are still being written. Kept rather than
@@ -398,6 +425,20 @@ Six defects on `master` at `b4a6abd`, reproduced without the fuzzer in
    `None` while the left side still has a non-empty onward node
    (`dense_byte_node.rs:2080`). Debug-assertions builds only, so it has no
    standalone reproducer — replay the `panic-eval-*` corpus inputs.
+
+Two more, found once the expression language had Zippy's operators (repros 8, 9):
+
+8. **`meet_into` keeps the destination's focus value** where both sides have one,
+   instead of meeting them: `{_:1111} & {_:0001}` is `{_:1111}`. Invisible with
+   `u64`, whose meet returns the left operand anyway. Found as `tails_inter`'s two
+   strategies disagreeing under `bits`.
+
+9. **`take_map` of a value-only focus returns a map that panics on write.** The
+   result holds the value at its root, and the first write below it fails with
+   "Attempted to make_unique on an empty sentinel node". Found as `unwrap`'s
+   `take_map` strategy feeding `wrap`'s `insert_prefix` one. Fixed on
+   `fix/fvc-leftovers` by f1bdca9; still present on master and on
+   `focus_value_consistency`.
 
 ## Harness invariants
 
@@ -427,7 +468,8 @@ disagrees with the rest, suspect the route first.
 | `src/algebraic.rs` | input decoding, operand generation, the comparison, `KNOWN` |
 | `src/algebraic/expr.rs` | the expression language and the shape recognisers |
 | `src/algebraic/routes.rs` | the routes, and one arm per strategy |
-| `src/algebraic/laws.rs` | the identities, and the ones deliberately absent |
+| `src/algebraic/laws.rs` | law templates, binding, and the builders the generated file uses |
+| `src/algebraic/zippy_laws.rs` | **generated** from `lean/PrunedModel/Zippy.lean`; do not edit |
 | `src/algebraic/model.rs` | flat `BTreeMap` semantics, delegating to the value algebra |
 | `src/algebraic/value.rs` | the `FuzzValue` trait and the lawful `Bits` type |
 | `src/algebraic/shape.rs` | what "the same result" means |

@@ -6,238 +6,267 @@
 //! the same trie, so a wrong answer is visible even when every route computes
 //! it the same wrong way.
 //!
-//! A law is written as a pair of [`Expr`]s and evaluated by the ordinary route
-//! machinery, which keeps this file declarative and means a law automatically
-//! inherits whatever the expression evaluator can do.
+//! # Where the laws come from
 //!
-//! # Strength depends on the value type
+//! Not from this file.  They are the theorems of `lean/PrunedModel/Zippy.lean`
+//! (branch `spec/zippy-laws`), which proves Adam Vandervorst's `formal.egg` --
+//! the reference semantics of Zippy's space algebra -- over the pruned model.
+//! `lean/ZippyLaws.lean` reads the *elaborated* theorems, keeps every equation
+//! between spaces whose operators the expression language has, and prints them
+//! as [`zippy_laws`](super::zippy_laws).  So each law here is a theorem, not a
+//! belief, and adding one means proving it.
 //!
-//! [`laws`] is parameterised by the value type, and returns a *stronger* set for
-//! one whose instances actually form a distributive lattice with a relative
-//! complement -- see [`FuzzValue::LAWFUL`].  Three things change:
+//! A theorem may quantify over paths and bytes as well as spaces, and may have
+//! hypotheses.  Hence [`ZippyLaw`] is a template: [`instantiate`] binds its
+//! spaces to the case's operands and its paths and bytes to ones the case
+//! carries for the purpose ([`super::Case::law_paths`]), and a law whose
+//! hypotheses are false for that binding is skipped for that case.
 //!
-//! * The laws marked [`Level::Paths`] are promoted to [`Level::Values`].  They
-//!   are weakened for `u64` only because its `pjoin` and `pmeet` both return the
-//!   left operand, so swapping the operands swaps the result's value and
-//!   commutativity cannot hold on values there.
+//! # Only for `()`
 //!
-//! * Three further identities are added, listed in [`lawful_only`].  They are
-//!   laws in any distributive lattice and fail for `u64`, again because join and
-//!   meet have collapsed into one function.
-//!
-//! * Symmetric difference becomes associative on values, not merely on paths.
-//!
-//! So the difference between the two sets is a measurement: a law that holds for
-//! `bits` and fails for `u64` is telling you about `u64`, and one that fails for
-//! `bits` is telling you about the crate.  That split is the whole reason for
-//! running both.
+//! The theorems are about `PrunedMap Unit`, a finite set of paths.  They are
+//! checked for the value type whose maps *are* sets -- [`FuzzValue::IS_SET`] --
+//! and no other.  Under `u64` or `bits` several are false for reasons that
+//! have nothing to do with the crate: subtraction removes a path only when the
+//! values cancel, and a meet of two values can be bottom.  Laws over values
+//! need a value-generic source (`Lattice.lean` has one); that is not this file.
 
-use super::expr::{Expr, Op};
+use super::expr::{Expr, Op, Un};
 use super::value::FuzzValue;
 
-/// Operand slot holding the empty trie, appended after the case's own
-/// operands so identities can mention it.  See [`LAW_OPERANDS`].
-pub const EMPTY: usize = 3;
-
-/// Operands a law may mention: three from the case, then the empty trie.
-pub const LAW_OPERANDS: usize = 4;
-
-/// How much of the result a law constrains.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Level {
-    /// Which path carries which value.
-    Values,
-    /// Which paths survive, values unconstrained.
-    Paths,
+/// A space-valued term of a law.
+#[derive(Clone, Debug)]
+pub enum T {
+    /// The `i`th space the theorem quantifies over.
+    S(usize),
+    Empty,
+    Singleton(P),
+    Bin(Op, Box<T>, Box<T>),
+    Wrap(P, Box<T>),
+    Unwrap(Box<T>, P),
+    Un(Un, Box<T>),
 }
 
-pub struct Law {
+/// A path-valued term.
+#[derive(Clone, Debug)]
+pub enum P {
+    Var(usize),
+    Nil,
+    Cons(B, Box<P>),
+    App(Box<P>, Box<P>),
+}
+
+/// A byte-valued term.
+#[derive(Clone, Copy, Debug)]
+pub enum B {
+    Var(usize),
+    Lit(u8),
+}
+
+/// A hypothesis of the theorem.
+#[derive(Clone, Debug)]
+pub enum Pre {
+    NePath(P, P),
+    NeByte(B, B),
+    Mem(P, T),
+    NotMem(P, T),
+    EqSpace(T, T),
+}
+
+/// One theorem of `Zippy.lean`, as generated.
+pub struct ZippyLaw {
+    /// The theorem's name in `PrunedModel.Zippy`.
     pub name: &'static str,
+    /// How many spaces, paths and bytes it quantifies over.
+    pub spaces: usize,
+    pub paths: usize,
+    pub bytes: usize,
+    pub pre: Vec<Pre>,
+    pub lhs: T,
+    pub rhs: T,
+}
+
+/// The builders `zippy_laws.rs` is written in.  Named after the Lean
+/// definitions, so the generated file reads like the theorems it came from.
+pub mod zippy {
+    pub use super::{Pre, ZippyLaw, B, P, T};
+    use super::{Op, Un};
+
+    fn bin(op: Op, a: T, b: T) -> T {
+        T::Bin(op, Box::new(a), Box::new(b))
+    }
+
+    pub fn s(i: usize) -> T {
+        T::S(i)
+    }
+    pub fn empty() -> T {
+        T::Empty
+    }
+    pub fn singleton(p: P) -> T {
+        T::Singleton(p)
+    }
+    pub fn union(a: T, b: T) -> T {
+        bin(Op::Join, a, b)
+    }
+    pub fn inter(a: T, b: T) -> T {
+        bin(Op::Meet, a, b)
+    }
+    pub fn subtr(a: T, b: T) -> T {
+        bin(Op::Subtract, a, b)
+    }
+    pub fn restriction(a: T, b: T) -> T {
+        bin(Op::Restrict, a, b)
+    }
+    /// Egg *defines* `Raffination x y` as `x \ (x <| y)`, and so does
+    /// `Zippy.lean`; the crate has no operation of its own for it.
+    pub fn raffination(a: T, b: T) -> T {
+        subtr(a.clone(), restriction(a, b))
+    }
+    pub fn composition(a: T, b: T) -> T {
+        bin(Op::Compose, a, b)
+    }
+    pub fn iter_c(a: T, b: T) -> T {
+        bin(Op::IterC, a, b)
+    }
+    pub fn wrap(p: P, a: T) -> T {
+        T::Wrap(p, Box::new(a))
+    }
+    pub fn unwrap(a: T, p: P) -> T {
+        T::Unwrap(Box::new(a), p)
+    }
+    pub fn head(a: T) -> T {
+        T::Un(Un::Head, Box::new(a))
+    }
+    pub fn tails_union(a: T) -> T {
+        T::Un(Un::TailsUnion, Box::new(a))
+    }
+    pub fn tails_inter(a: T) -> T {
+        T::Un(Un::TailsInter, Box::new(a))
+    }
+
+    pub fn pv(i: usize) -> P {
+        P::Var(i)
+    }
+    pub fn nil() -> P {
+        P::Nil
+    }
+    pub fn cons(b: B, p: P) -> P {
+        P::Cons(b, Box::new(p))
+    }
+    pub fn app(a: P, b: P) -> P {
+        P::App(Box::new(a), Box::new(b))
+    }
+
+    pub fn bv(i: usize) -> B {
+        B::Var(i)
+    }
+    pub fn lit(n: u8) -> B {
+        B::Lit(n)
+    }
+
+    pub fn ne_path(a: P, b: P) -> Pre {
+        Pre::NePath(a, b)
+    }
+    pub fn ne_byte(a: B, b: B) -> Pre {
+        Pre::NeByte(a, b)
+    }
+    pub fn mem(p: P, s: T) -> Pre {
+        Pre::Mem(p, s)
+    }
+    pub fn not_mem(p: P, s: T) -> Pre {
+        Pre::NotMem(p, s)
+    }
+    pub fn eq_space(a: T, b: T) -> Pre {
+        Pre::EqSpace(a, b)
+    }
+}
+
+/// Paths and bytes a case offers for a law's path and byte variables.
+pub struct Binding<'a> {
+    pub paths: &'a [Vec<u8>],
+    pub bytes: &'a [u8],
+}
+
+impl Binding<'_> {
+    pub fn byte(&self, b: B) -> u8 {
+        match b {
+            B::Var(i) => self.bytes[i],
+            B::Lit(n) => n,
+        }
+    }
+
+    pub fn path(&self, p: &P) -> Vec<u8> {
+        match p {
+            P::Var(i) => self.paths[*i].clone(),
+            P::Nil => Vec::new(),
+            P::Cons(b, t) => {
+                let mut out = vec![self.byte(*b)];
+                out.extend(self.path(t));
+                out
+            }
+            P::App(a, b) => [self.path(a), self.path(b)].concat(),
+        }
+    }
+
+    /// The expression a term denotes, its space `i` being operand `i`.
+    pub fn expr(&self, t: &T) -> Expr {
+        match t {
+            T::S(i) => Expr::Var(*i),
+            T::Empty => Expr::Empty,
+            T::Singleton(p) => Expr::Singleton(self.path(p)),
+            T::Bin(op, a, b) => Expr::bin(*op, self.expr(a), self.expr(b)),
+            T::Wrap(p, a) => Expr::wrap(self.path(p), self.expr(a)),
+            T::Unwrap(a, p) => Expr::unwrap(self.expr(a), self.path(p)),
+            T::Un(u, a) => Expr::un(*u, self.expr(a)),
+        }
+    }
+}
+
+/// A law with its variables bound: the two sides, and the hypotheses as
+/// expressions still to be decided against the operands.
+pub struct Instance {
     pub lhs: Expr,
     pub rhs: Expr,
-    pub level: Level,
+    pub pre: Vec<Hyp>,
 }
 
-fn v(i: usize) -> Expr {
-    Expr::Var(i)
-}
-fn j(a: Expr, b: Expr) -> Expr {
-    Expr::bin(Op::Join, a, b)
-}
-fn m(a: Expr, b: Expr) -> Expr {
-    Expr::bin(Op::Meet, a, b)
-}
-fn s(a: Expr, b: Expr) -> Expr {
-    Expr::bin(Op::Subtract, a, b)
-}
-fn x(a: Expr, b: Expr) -> Expr {
-    Expr::bin(Op::SymDiff, a, b)
-}
-fn r(a: Expr, b: Expr) -> Expr {
-    Expr::bin(Op::Restrict, a, b)
+/// A hypothesis with its variables bound.
+pub enum Hyp {
+    /// Decided already: it compared paths or bytes.
+    Holds(bool),
+    /// `path ∈ expr`, or `∉` when the flag is false.
+    Mem(Vec<u8>, Expr, bool),
+    /// `lhs = rhs` as spaces.
+    Eq(Expr, Expr),
 }
 
-/// The laws to check for value type `V`.
-///
-/// For a lawful `V` every `Paths` level is promoted to `Values` and
-/// [`lawful_only`] is appended.
-pub fn laws<V: FuzzValue>() -> Vec<Law> {
-    let mut out = base();
-    if V::LAWFUL {
-        for law in &mut out {
-            law.level = Level::Values;
-        }
-        out.extend(lawful_only());
-    }
-    out
+pub fn instantiate(law: &ZippyLaw, bind: &Binding) -> Instance {
+    let pre = law
+        .pre
+        .iter()
+        .map(|h| match h {
+            Pre::NePath(a, b) => Hyp::Holds(bind.path(a) != bind.path(b)),
+            Pre::NeByte(a, b) => Hyp::Holds(bind.byte(*a) != bind.byte(*b)),
+            Pre::Mem(p, s) => Hyp::Mem(bind.path(p), bind.expr(s), true),
+            Pre::NotMem(p, s) => Hyp::Mem(bind.path(p), bind.expr(s), false),
+            Pre::EqSpace(a, b) => Hyp::Eq(bind.expr(a), bind.expr(b)),
+        })
+        .collect();
+    Instance { lhs: bind.expr(&law.lhs), rhs: bind.expr(&law.rhs), pre }
 }
 
-/// Identities that hold whatever the value type.
-fn base() -> Vec<Law> {
-    use Level::{Paths, Values};
-    let (a, b, c, e) = (0usize, 1usize, 2usize, EMPTY);
-    vec![
-        // --- lattice basics
-        Law { name: "join-idempotent", lhs: j(v(a), v(a)), rhs: v(a), level: Values },
-        Law { name: "meet-idempotent", lhs: m(v(a), v(a)), rhs: v(a), level: Values },
-        Law { name: "join-unit", lhs: j(v(a), v(e)), rhs: v(a), level: Values },
-        Law { name: "meet-zero", lhs: m(v(a), v(e)), rhs: v(e), level: Values },
-        // Path set only: both `pjoin` and `pmeet` return the left operand, so
-        // swapping the operands swaps which value lands.  A real lattice would
-        // make these value-level laws; see the module comment.
-        Law { name: "join-commutative", lhs: j(v(a), v(b)), rhs: j(v(b), v(a)), level: Paths },
-        Law { name: "meet-commutative", lhs: m(v(a), v(b)), rhs: m(v(b), v(a)), level: Paths },
-        // Associativity does hold on values even here: both nestings select the
-        // leftmost present operand's value.
-        Law {
-            name: "join-associative",
-            lhs: j(j(v(a), v(b)), v(c)),
-            rhs: j(v(a), j(v(b), v(c))),
-            level: Values,
-        },
-        Law {
-            name: "meet-associative",
-            lhs: m(m(v(a), v(b)), v(c)),
-            rhs: m(v(a), m(v(b), v(c))),
-            level: Values,
-        },
-        Law { name: "absorb-meet-join", lhs: m(v(a), j(v(a), v(b))), rhs: v(a), level: Values },
-        Law { name: "absorb-join-meet", lhs: j(v(a), m(v(a), v(b))), rhs: v(a), level: Values },
-        Law {
-            name: "meet-distributes-over-join",
-            lhs: m(v(a), j(v(b), v(c))),
-            rhs: j(m(v(a), v(b)), m(v(a), v(c))),
-            level: Values,
-        },
-        Law {
-            name: "join-distributes-over-meet",
-            lhs: j(v(a), m(v(b), v(c))),
-            rhs: m(j(v(a), v(b)), j(v(a), v(c))),
-            level: Values,
-        },
-        // --- subtraction
-        Law { name: "subtract-self", lhs: s(v(a), v(a)), rhs: v(e), level: Values },
-        Law { name: "subtract-unit", lhs: s(v(a), v(e)), rhs: v(a), level: Values },
-        Law { name: "subtract-from-empty", lhs: s(v(e), v(a)), rhs: v(e), level: Values },
-        // Each step drops the paths whose value the subtrahend matches, and
-        // "matches b or matches c" does not depend on the order.
-        Law {
-            name: "subtract-steps-commute",
-            lhs: s(s(v(a), v(b)), v(c)),
-            rhs: s(s(v(a), v(c)), v(b)),
-            level: Values,
-        },
-        // Subtracting cannot add a path: re-joining the removed part recovers
-        // no more than the original.
-        Law { name: "subtract-shrinks", lhs: j(s(v(a), v(b)), v(a)), rhs: v(a), level: Values },
-        // --- symmetric difference
-        Law { name: "sym-diff-self", lhs: x(v(a), v(a)), rhs: v(e), level: Values },
-        Law { name: "sym-diff-unit", lhs: x(v(a), v(e)), rhs: v(a), level: Values },
-        // Fully commutative, values included: a coincident path cancels on both
-        // sides, so each surviving value comes from the single side that has it.
-        Law { name: "sym-diff-commutative", lhs: x(v(a), v(b)), rhs: x(v(b), v(a)), level: Values },
-        Law {
-            name: "sym-diff-associative-paths",
-            lhs: x(x(v(a), v(b)), v(c)),
-            rhs: x(v(a), x(v(b), v(c))),
-            level: Paths,
-        },
-        // The definition `zipper_sym_diff`'s own documentation gives.
-        Law {
-            name: "sym-diff-is-join-minus-meet",
-            lhs: x(v(a), v(b)),
-            rhs: s(j(v(a), v(b)), m(v(a), v(b))),
-            level: Values,
-        },
-        // --- restrict
-        // Every path is a prefix of itself, so restricting by its own operand
-        // admits everything.
-        Law { name: "restrict-self", lhs: r(v(a), v(a)), rhs: v(a), level: Values },
-        Law { name: "restrict-empty", lhs: r(v(a), v(e)), rhs: v(e), level: Values },
-        Law { name: "restrict-of-empty", lhs: r(v(e), v(a)), rhs: v(e), level: Values },
-        Law { name: "restrict-idempotent", lhs: r(r(v(a), v(b)), v(b)), rhs: r(v(a), v(b)), level: Values },
-        // A path present in both operands is admitted by itself, so the meet is
-        // contained in the restriction.
-        Law {
-            name: "meet-under-restrict",
-            lhs: m(m(v(a), v(b)), r(v(a), v(b))),
-            rhs: m(v(a), v(b)),
-            level: Values,
-        },
-        // --- majority, the worked example in `zipper_majority`'s docs, written
-        // out as the DNF it claims to equal.  Exercised here so the DNF engine
-        // is checked against a hand-written join of meets as well as against
-        // the pointwise routes.
-        Law {
-            name: "majority-is-pairwise-meets",
-            lhs: j(j(m(v(a), v(b)), m(v(a), v(c))), m(v(b), v(c))),
-            rhs: j(m(v(a), v(b)), j(m(v(a), v(c)), m(v(b), v(c)))),
-            level: Values,
-        },
-    ]
+/// The laws to check for value type `V`: all of `Zippy.lean`'s for the set
+/// type, none otherwise.  See the module comment.
+pub fn laws<V: FuzzValue>() -> &'static [ZippyLaw] {
+    use std::sync::OnceLock;
+    static LAWS: OnceLock<Vec<ZippyLaw>> = OnceLock::new();
+    if V::IS_SET { LAWS.get_or_init(super::zippy_laws::laws) } else { &[] }
 }
 
-/// Identities that need the value type to be a real distributive lattice with a
-/// relative complement.
-///
-/// Each of these fails for `u64`, and each failure is explained by the same
-/// thing: `pjoin` and `pmeet` both return the left operand, so `a | b == a & b`,
-/// and `psubtract` is `None` exactly on equality.
-fn lawful_only() -> Vec<Law> {
-    use Level::Values;
-    let (a, b, c) = (0usize, 1usize, 2usize);
-    vec![
-        // De Morgan for relative complement.  Fails for `u64` because `b | c`
-        // carries `b`'s value where both are present, so the left side keeps a
-        // path whose value matches `c` but not `b`.
-        Law {
-            name: "subtract-over-join",
-            lhs: s(v(a), j(v(b), v(c))),
-            rhs: m(s(v(a), v(b)), s(v(a), v(c))),
-            level: Values,
-        },
-        Law {
-            name: "subtract-over-meet",
-            lhs: s(v(a), m(v(b), v(c))),
-            rhs: j(s(v(a), v(b)), s(v(a), v(c))),
-            level: Values,
-        },
-        // Subtracting the overlap is the same as subtracting the whole.  Fails
-        // for `u64` because `a & b` carries *`a`'s* value, so the right side
-        // drops every shared path rather than only the equal ones.
-        Law {
-            name: "subtract-is-subtract-meet",
-            lhs: s(v(a), v(b)),
-            rhs: s(v(a), m(v(a), v(b))),
-            level: Values,
-        },
-        // Symmetric difference is the XOR of a Boolean ring, so it is
-        // associative on values and not merely on paths.
-        Law {
-            name: "sym-diff-associative",
-            lhs: x(x(v(a), v(b)), v(c)),
-            rhs: x(v(a), x(v(b), v(c))),
-            level: Values,
-        },
-    ]
+/// The most of each kind of variable any generated law uses.  The case has to
+/// supply at least this many; `tests/algebraic.rs` checks the bound.
+pub fn arity() -> (usize, usize, usize) {
+    super::zippy_laws::laws()
+        .iter()
+        .fold((0, 0, 0), |(s, p, b), l| (s.max(l.spaces), p.max(l.paths), b.max(l.bytes)))
 }

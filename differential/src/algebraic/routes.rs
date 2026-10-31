@@ -31,11 +31,11 @@ use pathmap::experimental::zipper_algebra::{
     zipper_subtract3, zipper_sym_diff, zipper_sym_diff3, ZipperMergeF,
 };
 use pathmap::zipper::{
-    OverlayZipper, ReadZipperUntracked, SubtractZipper, ZipperMoving, ZipperPath, ZipperValues,
-    ZipperWriting,
+    OverlayZipper, PrefixZipper, ReadZipperUntracked, SubtractZipper, Zipper,
+    ZipperInfallibleSubtries, ZipperMoving, ZipperPath, ZipperValues, ZipperWriting,
 };
 
-use super::expr::{Expr, Op};
+use super::expr::{Expr, Kind, Op, Un};
 use super::model;
 use super::shape::{shape_of_map, shape_of_zipper, values_of_shape, Shape, Values, ESCAPED_ROOT, TRUNCATED};
 use super::value::FuzzValue;
@@ -49,6 +49,14 @@ pub const MEET_STRATEGIES: &[&str] = &["map", "meet_into", "meet_2", "zipper_mee
 pub const SUBTRACT_STRATEGIES: &[&str] = &["map", "subtract_into", "zipper_subtract"];
 pub const SYM_DIFF_STRATEGIES: &[&str] = &["zipper_sym_diff", "join_minus_meet"];
 pub const RESTRICT_STRATEGIES: &[&str] = &["map", "wz_restrict"];
+pub const COMPOSE_STRATEGIES: &[&str] = &["join_map_into", "wrap_join"];
+pub const ITER_C_STRATEGIES: &[&str] = &["val_count", "iter"];
+pub const SINGLETON_STRATEGIES: &[&str] = &["single", "set_val"];
+pub const WRAP_STRATEGIES: &[&str] = &["graft_map", "prefix_zipper", "insert_prefix"];
+pub const UNWRAP_STRATEGIES: &[&str] = &["read_zipper_at_path", "descend_make_map", "take_map"];
+pub const HEAD_STRATEGIES: &[&str] = &["child_mask", "iter"];
+pub const TAILS_UNION_STRATEGIES: &[&str] = &["map", "join_map_into"];
+pub const TAILS_INTER_STRATEGIES: &[&str] = &["map", "meet_into"];
 
 /// The strategy table is the same for every value type, so route `k` means the
 /// same thing under each of them.
@@ -67,6 +75,21 @@ pub fn strategies(op: Op) -> &'static [&'static str] {
         Op::Subtract => SUBTRACT_STRATEGIES,
         Op::SymDiff => SYM_DIFF_STRATEGIES,
         Op::Restrict => RESTRICT_STRATEGIES,
+        Op::Compose => COMPOSE_STRATEGIES,
+        Op::IterC => ITER_C_STRATEGIES,
+    }
+}
+
+/// [`strategies`] for any node kind, Zippy's unary ones included.
+pub fn kind_strategies(kind: Kind) -> &'static [&'static str] {
+    match kind {
+        Kind::Op(op) => strategies(op),
+        Kind::Singleton => SINGLETON_STRATEGIES,
+        Kind::Wrap => WRAP_STRATEGIES,
+        Kind::Unwrap => UNWRAP_STRATEGIES,
+        Kind::Un(Un::Head) => HEAD_STRATEGIES,
+        Kind::Un(Un::TailsUnion) => TAILS_UNION_STRATEGIES,
+        Kind::Un(Un::TailsInter) => TAILS_INTER_STRATEGIES,
     }
 }
 
@@ -127,14 +150,13 @@ impl Route {
     pub fn name(&self, e: &Expr) -> String {
         match self {
             Route::Pointwise(k) => {
-                let mut used: Vec<Op> = Vec::new();
-                collect_ops(e, &mut used);
-                let picks: Vec<String> = Op::ALL
+                let used = e.kinds();
+                let picks: Vec<String> = Kind::ALL
                     .iter()
-                    .filter(|op| used.contains(op))
-                    .map(|op| {
-                        let t = strategies(*op);
-                        format!("{}={}", op.sym(), t[k % t.len()])
+                    .filter(|kind| used.contains(kind))
+                    .map(|kind| {
+                        let t = kind_strategies(*kind);
+                        format!("{}={}", kind.sym(), t[k % t.len()])
                     })
                     .collect();
                 format!("pw#{k}[{}]", picks.join(","))
@@ -150,14 +172,8 @@ impl Route {
     }
 }
 
-fn collect_ops(e: &Expr, out: &mut Vec<Op>) {
-    if let Expr::Bin(op, l, r) = e {
-        if !out.contains(op) {
-            out.push(*op);
-        }
-        collect_ops(l, out);
-        collect_ops(r, out);
-    }
+fn uses_op(e: &Expr, op: Op) -> bool {
+    e.kinds().contains(&Kind::Op(op))
 }
 
 /// What a route produced.  `shape` is `None` for a route that cannot represent
@@ -198,14 +214,31 @@ pub fn eval<V: FuzzValue>(route: Route, e: &Expr, operands: &[PathMap<V>]) -> Op
 /// `None` when the strategy route `k` selects for some operator in `e` does not
 /// apply to this value type.
 fn pointwise<V: FuzzValue>(k: usize, e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>> {
-    match e {
-        Expr::Var(i) => Some(operands[*i].clone()),
+    walk(e, operands, &mut |op, a, b| apply(op, k, a, b), k)
+}
+
+/// Bottom-up evaluation with `bin` for the binary nodes and strategy `k` for
+/// Zippy's unary ones.  Shared by every route that materialises intermediates,
+/// so the unary nodes go through the same code whichever route reaches them.
+fn walk<V: FuzzValue>(
+    e: &Expr,
+    operands: &[PathMap<V>],
+    bin: &mut dyn FnMut(Op, &PathMap<V>, &PathMap<V>) -> Option<PathMap<V>>,
+    k: usize,
+) -> Option<PathMap<V>> {
+    Some(match e {
+        Expr::Var(i) => operands[*i].clone(),
+        Expr::Empty => PathMap::new(),
+        Expr::Singleton(p) => singleton(k, p),
         Expr::Bin(op, l, r) => {
-            let a = pointwise(k, l, operands)?;
-            let b = pointwise(k, r, operands)?;
-            apply(*op, k, &a, &b)
+            let a = walk(l, operands, bin, k)?;
+            let b = walk(r, operands, bin, k)?;
+            bin(*op, &a, &b)?
         }
-    }
+        Expr::Wrap(p, e) => wrap(k, p, &walk(e, operands, bin, k)?),
+        Expr::Unwrap(e, p) => unwrap(k, &walk(e, operands, bin, k)?, p),
+        Expr::Un(u, e) => unary(*u, k, &walk(e, operands, bin, k)?),
+    })
 }
 
 /// One operator, one strategy.  Every arm is a different code path in the
@@ -353,8 +386,183 @@ pub fn apply<V: FuzzValue>(op: Op, k: usize, a: &PathMap<V>, b: &PathMap<V>) -> 
             out
         }
 
+        // -- composition: `b` under every value path of `a`.  Visited in
+        // `iter` order, ascending, so a path two copies land on is joined the
+        // same way round as the model joins it.
+        (Op::Compose, 0) => {
+            // Zippy's own definition: `descend_to u`, `join_map_into t`.
+            let mut out = PathMap::new();
+            {
+                let mut wz = out.write_zipper();
+                for (u, _) in a.iter() {
+                    wz.reset();
+                    wz.descend_to(&u);
+                    wz.join_map_into(b.clone());
+                }
+            }
+            out
+        }
+        (Op::Compose, 1) => {
+            let mut out = PathMap::new();
+            for (u, _) in a.iter() {
+                out = out.join(&wrap(0, &u, b));
+            }
+            out
+        }
+
+        // -- IterC: `b` when `a` has a value below its root.
+        (Op::IterC, s) => {
+            let below = if s == 0 {
+                let rz = a.read_zipper();
+                rz.val_count() > rz.is_val() as usize
+            } else {
+                a.iter().any(|(k, _)| !k.is_empty())
+            };
+            if below { b.clone() } else { PathMap::new() }
+        }
+
         _ => unreachable!("strategy index out of range for {op:?}"),
     })
+}
+
+// ---------------------------------------------------------------- Zippy
+
+/// `Singleton p`, carrying [`FuzzValue::canonical`].
+fn singleton<V: FuzzValue>(k: usize, p: &[u8]) -> PathMap<V> {
+    match k % SINGLETON_STRATEGIES.len() {
+        0 => PathMap::single(p, V::canonical()),
+        _ => {
+            let mut out = PathMap::new();
+            {
+                let mut wz = out.write_zipper();
+                wz.descend_to(p);
+                wz.set_val(V::canonical());
+            }
+            out
+        }
+    }
+}
+
+/// `Wrap p s`.
+fn wrap<V: FuzzValue>(k: usize, p: &[u8], s: &PathMap<V>) -> PathMap<V> {
+    match k % WRAP_STRATEGIES.len() {
+        0 => {
+            // Zippy's definition: `descend_to p` in an empty map, `graft_map s`.
+            // With `graft_root_vals` (a default feature) the root value moves too.
+            let mut out = PathMap::new();
+            {
+                let mut wz = out.write_zipper();
+                wz.descend_to(p);
+                wz.graft_map(s.clone());
+            }
+            out
+        }
+        1 => materialize(PrefixZipper::new(p.to_vec(), s.read_zipper())),
+        _ => {
+            // `insert_prefix` moves the node and, by its documentation, leaves
+            // the focus value where it is (Zippy §10, `rawWrap_ne_wrap`).  So
+            // that value is moved by hand, and what this tests is the node move.
+            let mut out = s.clone();
+            {
+                let mut wz = out.write_zipper();
+                let root = wz.remove_val(false);
+                wz.insert_prefix(p);
+                if let Some(v) = root {
+                    wz.descend_to(p);
+                    wz.set_val(v);
+                }
+            }
+            out
+        }
+    }
+}
+
+/// `Unwrap s p`: the subtrie at `p`, its value included.
+fn unwrap<V: FuzzValue>(k: usize, s: &PathMap<V>, p: &[u8]) -> PathMap<V> {
+    match k % UNWRAP_STRATEGIES.len() {
+        0 => s.read_zipper_at_path(p).make_map(),
+        1 => {
+            let mut rz = s.read_zipper();
+            rz.descend_to(p);
+            rz.make_map()
+        }
+        _ => {
+            let mut src = s.clone();
+            let mut wz = src.write_zipper();
+            wz.descend_to(p);
+            wz.take_map(false).unwrap_or_default()
+        }
+    }
+}
+
+/// The bytes one level down that lead to a value, ascending.
+///
+/// Strategy 0 reads `child_mask` and checks each child for a value; strategy 1
+/// collects first bytes from `iter`.  A child that is dangling-only is in the
+/// mask and not in a Zippy space, so it is dropped: the dangling-path question
+/// is `shape.rs`'s, and letting it in here would turn it into a value
+/// divergence.
+fn heads<V: FuzzValue>(k: usize, s: &PathMap<V>) -> Vec<u8> {
+    if k % 2 == 0 {
+        let rz = s.read_zipper();
+        rz.child_mask()
+            .iter()
+            .filter(|b| s.read_zipper_at_path([*b]).val_count() > 0)
+            .collect()
+    } else {
+        let mut hs: Vec<u8> = s.iter().filter_map(|(p, _)| p.first().copied()).collect();
+        hs.dedup();
+        hs
+    }
+}
+
+fn unary<V: FuzzValue>(u: Un, k: usize, s: &PathMap<V>) -> PathMap<V> {
+    match u {
+        Un::Head => {
+            let hs = heads(k % HEAD_STRATEGIES.len(), s);
+            let mut out = PathMap::new();
+            for b in hs {
+                out.set_val_at([b], V::canonical());
+            }
+            out
+        }
+        Un::TailsUnion => {
+            let hs = heads(k, s);
+            let tail = |b: u8| s.read_zipper_at_path([b]).make_map();
+            if k % TAILS_UNION_STRATEGIES.len() == 0 {
+                hs.into_iter().fold(PathMap::new(), |acc, b| acc.join(&tail(b)))
+            } else {
+                // Zippy's definition: `join_map_into` at the root, one child at
+                // a time.
+                let mut out = PathMap::new();
+                {
+                    let mut wz = out.write_zipper();
+                    for b in hs {
+                        wz.join_map_into(tail(b));
+                    }
+                }
+                out
+            }
+        }
+        Un::TailsInter => {
+            let mut hs = heads(k, s).into_iter();
+            let tail = |b: u8| s.read_zipper_at_path([b]).make_map();
+            let Some(first) = hs.next() else { return PathMap::new() };
+            if k % TAILS_INTER_STRATEGIES.len() == 0 {
+                hs.fold(tail(first), |acc, b| acc.meet(&tail(b)))
+            } else {
+                let mut out = tail(first);
+                {
+                    let mut wz = out.write_zipper();
+                    for b in hs {
+                        let t = tail(b);
+                        wz.meet_into(&t.read_zipper(), false);
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 /// Walk a zipper over a virtual trie and build the real trie it describes.
@@ -392,23 +600,17 @@ where
 /// [`Route::SubtractZipper`].  `None` when `e` has no subtraction, because the
 /// route would then be the baseline over again.
 fn subtract_zipper<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>> {
-    fn go<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> PathMap<V> {
-        match e {
-            Expr::Var(i) => operands[*i].clone(),
-            Expr::Bin(op, l, r) => {
-                let a = go(l, operands);
-                let b = go(r, operands);
-                if *op == Op::Subtract {
-                    materialize(SubtractZipper::new(a.read_zipper(), b.read_zipper()))
-                } else {
-                    apply(*op, 0, &a, &b).expect("strategy 0 applies to every value type")
-                }
-            }
-        }
+    let mut bin = |op: Op, a: &PathMap<V>, b: &PathMap<V>| {
+        Some(if op == Op::Subtract {
+            materialize(SubtractZipper::new(a.read_zipper(), b.read_zipper()))
+        } else {
+            apply(op, 0, a, b).expect("strategy 0 applies to every value type")
+        })
+    };
+    if !uses_op(e, Op::Subtract) {
+        return None;
     }
-    let mut ops = Vec::new();
-    collect_ops(e, &mut ops);
-    ops.contains(&Op::Subtract).then(|| go(e, operands))
+    walk(e, operands, &mut bin, 0)
 }
 
 // -------------------------------------------------------- whole-expression
@@ -474,7 +676,7 @@ fn ternary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>
             Op::Meet => zipper_meet3(&mut za, &mut zb, &mut zc, &mut wz),
             Op::Subtract => zipper_subtract3(&mut za, &mut zb, &mut zc, &mut wz),
             Op::SymDiff => zipper_sym_diff3(&mut za, &mut zb, &mut zc, &mut wz),
-            Op::Restrict => return None,
+            Op::Restrict | Op::Compose | Op::IterC => return None,
         }
     }
     Some(out)
@@ -488,7 +690,7 @@ fn ternary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>
 /// merge engine and are worth distinguishing, so `poly` selects between them.
 fn nary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>], poly: bool) -> Option<PathMap<V>> {
     let (op, idx) = e.chain()?;
-    if op == Op::Restrict {
+    if !matches!(op, Op::Join | Op::Meet | Op::Subtract | Op::SymDiff) {
         return None;
     }
     let mut out = PathMap::new();
@@ -506,7 +708,7 @@ fn nary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>], poly: bool) -> Option<P
                     Op::Meet => zipper_n_meet(&mut zs, &mut wz),
                     Op::Subtract => zipper_n_subtract(&mut zs, &mut wz),
                     Op::SymDiff => zipper_n_sym_diff(&mut zs, &mut wz),
-                    Op::Restrict => unreachable!(),
+                    Op::Restrict | Op::Compose | Op::IterC => unreachable!(),
                 }
             }};
         }
@@ -518,7 +720,7 @@ fn nary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>], poly: bool) -> Option<P
                     Op::Meet => t.meet_n(&mut wz),
                     Op::Subtract => t.subtract_n(&mut wz),
                     Op::SymDiff => t.sym_diff_n(&mut wz),
-                    Op::Restrict => unreachable!(),
+                    Op::Restrict | Op::Compose | Op::IterC => unreachable!(),
                 }
             }};
         }

@@ -74,7 +74,16 @@ pub trait FuzzValue:
     /// defect, so the strategy is dropped rather than reported.
     const JOIN_PICKS_LEFT: bool;
 
+    /// Whether a `PathMap<Self>` is exactly a finite set of paths -- true only
+    /// for `()`.  Zippy's laws (`laws.rs`) are proved in Lean over
+    /// `PrunedMap Unit`, so they are checked for this type and no other.
+    const IS_SET: bool = false;
+
     fn generate(g: &mut Gen) -> Self;
+
+    /// The value a constructed path carries: Zippy's `Singleton` and `Head`
+    /// make paths, not values, so they need one fixed value to put there.
+    fn canonical() -> Self;
 
     fn show(&self) -> String;
 }
@@ -159,6 +168,10 @@ impl FuzzValue for Bits {
         Bits(g.byte() as u64 % (n - 1) + 1)
     }
 
+    fn canonical() -> Self {
+        Bits(1)
+    }
+
     fn show(&self) -> String {
         format!("{:b}", self.0)
     }
@@ -191,8 +204,11 @@ impl FuzzValue for () {
     // Both operands are `()`, so returning either is returning the left one, and
     // `OverlayZipper`'s `a.or(b)` is the join.
     const JOIN_PICKS_LEFT: bool = true;
+    const IS_SET: bool = true;
 
     fn generate(_g: &mut Gen) -> Self {}
+
+    fn canonical() -> Self {}
 
     fn show(&self) -> String {
         "*".to_string()
@@ -213,6 +229,10 @@ impl FuzzValue for u64 {
 
     fn generate(g: &mut Gen) -> Self {
         g.byte() as u64 % U64_VALUES + 1
+    }
+
+    fn canonical() -> Self {
+        1
     }
 
     fn show(&self) -> String {
