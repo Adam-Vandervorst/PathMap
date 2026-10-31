@@ -63,14 +63,23 @@ struct Report {
 }
 
 impl Report {
-    fn case(&mut self, n: &str, what: &str, want: String, got: String) {
+    /// Compares the values only.  The labels say where each came from and are
+    /// printed, never compared -- an earlier version compared strings that
+    /// included them, so most cases could never print "fixed".
+    fn case<T: core::fmt::Debug + PartialEq>(
+        &mut self,
+        n: &str,
+        what: &str,
+        (want_label, want): (&str, T),
+        (got_label, got): (&str, T),
+    ) {
         let ok = want == got;
         if !ok {
             self.failed += 1;
         }
         println!("\n{n}. {what}");
-        println!("   expected: {want}");
-        println!("   got:      {got}");
+        println!("   expected: {want:?} ({want_label})");
+        println!("   got:      {got:?} ({got_label})");
         println!("   => {}", if ok { "fixed" } else { "REPRODUCES" });
     }
 }
@@ -94,8 +103,8 @@ fn main() {
         r.case(
             "1",
             "join_into on an empty destination: empty | {_:1}",
-            format!("root value {:?} (PathMap::join)", val_at(&eager, &[])),
-            format!("root value {:?} (join_into)", val_at(&out, &[])),
+            ("root value, PathMap::join", val_at(&eager, &[])),
+            ("root value, join_into", val_at(&out, &[])),
         );
     }
 
@@ -116,8 +125,8 @@ fn main() {
         r.case(
             "2",
             "meet_2 with root values only: {_:2} & {_:1}",
-            format!("root value {:?} (PathMap::meet)", val_at(&eager, &[])),
-            format!("root value {:?} (meet_2)", val_at(&out, &[])),
+            ("root value, PathMap::meet", val_at(&eager, &[])),
+            ("root value, meet_2", val_at(&out, &[])),
         );
     }
 
@@ -139,14 +148,14 @@ fn main() {
         r.case(
             "3a",
             "join value bias: {00:2} | {00:1, dangling below} at [0]",
-            "Some(2), the left operand's value".to_string(),
-            format!("{:?}", val_at(&c.join(&a), &[0])),
+            ("the left operand's value", Some(2)),
+            ("PathMap::join", val_at(&c.join(&a), &[0])),
         );
         r.case(
             "3b",
             "meet value bias: {00:1, dangling below} & {00:2} at [0]",
-            "Some(1), the left operand's value".to_string(),
-            format!("{:?}", val_at(&a.meet(&c), &[0])),
+            ("the left operand's value", Some(1)),
+            ("PathMap::meet", val_at(&a.meet(&c), &[0])),
         );
     }
 
@@ -169,12 +178,11 @@ fn main() {
         b.write_zipper_at_path(&[1, 0, 0, 0]).set_val(1);
 
         let ab = a.join(&b);
-        let ba = b.join(&a);
         r.case(
             "4",
             "join drops a value across clone-shared structure, at [1,0,0,0]",
-            format!("a|b == b|a == Some(1); b|a gives {:?}", val_at(&ba, &[1, 0, 0, 0])),
-            format!("a|b gives {:?}", val_at(&ab, &[1, 0, 0, 0])),
+            ("the value b adds, which b|a keeps", Some(1)),
+            ("a|b", val_at(&ab, &[1, 0, 0, 0])),
         );
     }
 
@@ -192,8 +200,8 @@ fn main() {
         r.case(
             "5",
             "merkleize over dangling-only structure",
-            "no panic".to_string(),
-            if res.is_ok() { "no panic".to_string() } else { "panic".to_string() },
+            ("", "no panic"),
+            ("merkleize", if res.is_ok() { "no panic" } else { "panic" }),
         );
     }
 
@@ -281,14 +289,13 @@ fn main() {
         dst.set_val_at([], Bits(0b1111));
         let mut src = PathMap::<Bits>::new();
         src.set_val_at([], Bits(0b0001));
-        let eager = dst.meet(&src);
         let mut out = dst.clone();
         out.write_zipper().meet_into(&src.read_zipper(), false);
         r.case(
             "8",
             "meet_into at a focus value: {_:1111} & {_:0001}",
-            format!("root value {:?} (PathMap::meet)", eager.get([])),
-            format!("root value {:?} (meet_into)", out.get([])),
+            ("root value, 1111 & 0001", Some(Bits(0b0001))),
+            ("root value, meet_into", out.get([]).copied()),
         );
     }
 
@@ -315,11 +322,14 @@ fn main() {
         r.case(
             "9",
             "take_map of a value-only focus, then set_val_at([5])",
-            "[([], 1), ([5], 2)]".to_string(),
-            match got {
-                Ok(v) => format!("{v:?}"),
-                Err(_) => "panic: make_unique on an empty sentinel node".to_string(),
-            },
+            ("", "[([], 1), ([5], 2)]".to_string()),
+            (
+                "the map after the write",
+                match got {
+                    Ok(v) => format!("{v:?}"),
+                    Err(_) => "panic: make_unique on an empty sentinel node".to_string(),
+                },
+            ),
         );
     }
 
