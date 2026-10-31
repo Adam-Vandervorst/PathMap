@@ -188,6 +188,14 @@ impl<V: FuzzValue> Outcome<V> {
         let shape = shape_of_map(m);
         Outcome { values: values_of_shape(&shape), shape: Some(shape) }
     }
+
+    /// Whether the walk stopped at [`SHAPE_CAP`](super::shape::SHAPE_CAP).
+    /// The values of a truncated trie are a prefix of its real ones, so they
+    /// cannot be compared with anything: against the model, which has no cap,
+    /// every route would seem to lose the same values.
+    pub fn truncated(&self) -> bool {
+        self.shape.as_ref().is_some_and(|s| s.last().is_some_and(|(p, _)| &p[..] == TRUNCATED))
+    }
 }
 
 /// Evaluate `e` over `operands` by `route`, or `None` if the route does not

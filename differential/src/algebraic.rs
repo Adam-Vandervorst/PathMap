@@ -35,7 +35,7 @@ use pathmap::PathMap;
 use pathmap::zipper::{ZipperMoving, ZipperWriting};
 
 use expr::{Expr, Op, Un, MAX_VARS};
-use laws::{Binding, Hyp};
+use laws::{Binding, Ctx, Hyp, Instance};
 use routes::Route;
 use shape::{shape_of_map, show_shape, Shape, Values};
 use value::FuzzValue;
@@ -135,6 +135,13 @@ pub struct Case<V: FuzzValue> {
     /// and the hypotheses land on structure that exists.
     pub law_paths: Vec<Vec<u8>>,
     pub law_bytes: Vec<u8>,
+    /// What each law's space variables stand for in the substitution
+    /// instance: `Var(i)` where space `i` is left alone, otherwise a small
+    /// expression.  See `laws.rs`.
+    pub law_spaces: Vec<Expr>,
+    /// The context the congruence instance puts both sides of each law in;
+    /// [`Ctx::Hole`] for none.
+    pub law_ctx: Ctx,
 }
 
 /// Decode a byte string into a case.  Total: every input decodes.
@@ -165,7 +172,7 @@ pub fn decode<V: FuzzValue>(bytes: &[u8]) -> Case<V> {
         .iter()
         .flat_map(|m| m.iter().map(|(k, _)| k).collect::<Vec<_>>())
         .collect();
-    let law_paths = (0..LAW_PATHS)
+    let law_paths: Vec<Vec<u8>> = (0..LAW_PATHS)
         .map(|_| {
             if !keys.is_empty() && g.chance(70) {
                 let k = &keys[g.modn(keys.len())];
@@ -185,7 +192,46 @@ pub fn decode<V: FuzzValue>(bytes: &[u8]) -> Case<V> {
             }
         })
         .collect();
-    Case { expr, operands, builds, alphabet, law_paths, law_bytes }
+    // Read last, so an input that ends before here -- every corpus input from
+    // before these existed -- decodes to the plain laws: a zero byte leaves a
+    // space alone and makes no context.
+    let law_spaces = (0..OPERANDS)
+        .map(|i| if g.modn(5) >= 3 { gen_expr(&mut g, 2) } else { Expr::Var(i) })
+        .collect();
+    let law_ctx = gen_ctx(&mut g, &law_paths, 2);
+    Case { expr, operands, builds, alphabet, law_paths, law_bytes, law_spaces, law_ctx }
+}
+
+/// A context for the congruence check: none half the time, otherwise one or
+/// two operators around the hole.  Its paths come from the law paths half the
+/// time, so an `unwrap` around the hole lands on structure that exists.
+fn gen_ctx(g: &mut Gen, paths: &[Vec<u8>], depth: usize) -> Ctx {
+    if depth == 0 || g.modn(2) == 0 {
+        return Ctx::Hole;
+    }
+    let path = |g: &mut Gen| {
+        if !paths.is_empty() && g.boolean() { paths[g.modn(paths.len())].clone() } else { g.path(2) }
+    };
+    match g.modn(8) {
+        0..=3 => {
+            let op = Op::ALL[g.modn(Op::ALL.len())];
+            let e = gen_expr(g, 1);
+            let c = Box::new(gen_ctx(g, paths, depth - 1));
+            if g.boolean() { Ctx::Right(op, e, c) } else { Ctx::Left(op, c, e) }
+        }
+        4 => {
+            let p = path(g);
+            Ctx::Wrap(p, Box::new(gen_ctx(g, paths, depth - 1)))
+        }
+        5 => {
+            let p = path(g);
+            Ctx::Unwrap(Box::new(gen_ctx(g, paths, depth - 1)), p)
+        }
+        _ => {
+            let u = Un::ALL[g.modn(Un::ALL.len())];
+            Ctx::Un(u, Box::new(gen_ctx(g, paths, depth - 1)))
+        }
+    }
 }
 
 fn pick_build(g: &mut Gen, i: usize) -> Build {
@@ -381,6 +427,13 @@ pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
         .expect("route 0 is the whole-map operations, which apply to everything");
     let base_name = baseline_route.name(&case.expr);
 
+    // Too big to compare (see `Outcome::truncated`).  Rare -- it takes a
+    // composition of compositions -- and the laws evaluate other expressions,
+    // so they still run.
+    if baseline.truncated() {
+        return check_laws(case);
+    }
+
     // The model is computed up front so every divergence can say which side it
     // backs.  Worth the one extra evaluation: the baseline is `PathMap::join`
     // and friends, which have defects of their own, so "route X disagrees with
@@ -449,42 +502,101 @@ pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
 /// A law's spaces are the case's operands in order, and its paths and bytes
 /// are [`Case::law_paths`] and [`Case::law_bytes`].  A law whose hypotheses
 /// are false for those is skipped for this case: the theorem says nothing.
+///
+/// Each law is then checked in up to three more forms, if the case asks
+/// (see `laws.rs`): with its spaces bound to [`Case::law_spaces`]
+/// (`+subst`), and the plain or substitution instance with both sides put in
+/// [`Case::law_ctx`] (`+ctx`, `+subst+ctx`) once its sides agree.
 pub fn check_laws<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
-    let bind = Binding { paths: &case.law_paths, bytes: &case.law_bytes };
+    let plain: Vec<Expr> = (0..OPERANDS).map(Expr::Var).collect();
+    let bind = Binding { spaces: &plain, paths: &case.law_paths, bytes: &case.law_bytes };
+    let subst = Binding { spaces: &case.law_spaces, ..bind };
+    // `None` for a trie too big to compare (see `Outcome::truncated`): an
+    // instance that needs one is skipped, as if its hypotheses were false.
     let eval = |e: &Expr| {
-        routes::eval(Route::Pointwise(0), e, &case.operands)
-            .expect("route 0 applies to every expression")
-            .values
+        let o = routes::eval(Route::Pointwise(0), e, &case.operands)
+            .expect("route 0 applies to every expression");
+        (!o.truncated()).then_some(o)
+    };
+    let holds = |inst: &Instance| {
+        inst.pre.iter().all(|h| match h {
+            Hyp::Holds(b) => *b,
+            Hyp::Mem(p, e, want) => eval(e).is_some_and(|o| o.values.contains_key(p) == *want),
+            Hyp::Eq(l, r) => match (eval(l), eval(r)) {
+                (Some(l), Some(r)) => l.values == r.values,
+                _ => false,
+            },
+        })
+    };
+    // Both sides of an instance, or `None` when the law says nothing here:
+    // its hypotheses are false, or a side is too big to compare.
+    let sides = |inst: &Instance| {
+        if !holds(inst) {
+            return None;
+        }
+        Some((eval(&inst.lhs)?, eval(&inst.rhs)?))
+    };
+    let report = |name: String, lhs: &Expr, rhs: &Expr, l: &Values<V>, r: &Values<V>, note: String| {
+        Divergence {
+            class: Class::Law,
+            signature: signature::<V>("law", &name),
+            detail: format!(
+                "{name}: {}\n  lhs {lhs}: {}\n  rhs {rhs}: {}{note}",
+                shape::first_values_diff(l, r).unwrap_or_default(),
+                shape::show_values(l),
+                shape::show_values(r),
+            ),
+        }
+    };
+
+    // `C[lhs]` against `C[rhs]`, given the two sides already agreed on values.
+    // Skipped when both are empty and built the same: the context then sees
+    // two copies of nothing, and that is about half of all instances.
+    let congruence = |name: String, inst: &Instance, l: &routes::Outcome<V>, r: &routes::Outcome<V>| {
+        if case.law_ctx.is_hole() || (l.values.is_empty() && l.shape == r.shape) {
+            return None;
+        }
+        let (cl, cr) = (case.law_ctx.plug(inst.lhs.clone()), case.law_ctx.plug(inst.rhs.clone()));
+        let (Some(ol), Some(or)) = (eval(&cl), eval(&cr)) else { return None };
+        let (vl, vr) = (ol.values, or.values);
+        if vl == vr {
+            return None;
+        }
+        // Both sides held the same set before the context saw them, so
+        // whatever differs between them is not a set: say what it was, when
+        // the route reports structure.
+        let inner = match (&l.shape, &r.shape) {
+            (Some(ls), Some(rs)) if ls != rs => format!(
+                "differ only in structure: {}",
+                shape::first_shape_diff(ls, rs).unwrap_or_default()
+            ),
+            (Some(_), Some(_)) => "have the same paths, dangling ones included".to_string(),
+            _ => "agree on values".to_string(),
+        };
+        let note = format!("\n  context {}; inside it, {} and {} {inner}", case.law_ctx, inst.lhs, inst.rhs);
+        Some(report(name, &cl, &cr, &vl, &vr, note))
     };
 
     let mut out = Vec::new();
-    'laws: for law in laws::laws::<V>() {
+    for law in laws::laws::<V>() {
         let inst = laws::instantiate(law, &bind);
-        for h in &inst.pre {
-            let holds = match h {
-                Hyp::Holds(b) => *b,
-                Hyp::Mem(p, e, want) => eval(e).contains_key(p) == *want,
-                Hyp::Eq(l, r) => eval(l) == eval(r),
-            };
-            if !holds {
-                continue 'laws;
+        if let Some((l, r)) = sides(&inst) {
+            if l.values != r.values {
+                out.push(report(law.name.to_string(), &inst.lhs, &inst.rhs, &l.values, &r.values, String::new()));
+                continue;
             }
+            out.extend(congruence(format!("{}+ctx", law.name), &inst, &l, &r));
         }
-        let (l, r) = (eval(&inst.lhs), eval(&inst.rhs));
-        if l != r {
-            out.push(Divergence {
-                class: Class::Law,
-                signature: signature::<V>("law", law.name),
-                detail: format!(
-                    "{}: {}\n  lhs {}: {}\n  rhs {}: {}",
-                    law.name,
-                    shape::first_values_diff(&l, &r).unwrap_or_default(),
-                    inst.lhs,
-                    shape::show_values(&l),
-                    inst.rhs,
-                    shape::show_values(&r),
-                ),
-            });
+        if laws::substituted(law, &case.law_spaces) {
+            let inst = laws::instantiate(law, &subst);
+            if let Some((l, r)) = sides(&inst) {
+                if l.values != r.values {
+                    let name = format!("{}+subst", law.name);
+                    out.push(report(name, &inst.lhs, &inst.rhs, &l.values, &r.values, String::new()));
+                    continue;
+                }
+                out.extend(congruence(format!("{}+subst+ctx", law.name), &inst, &l, &r));
+            }
         }
     }
     out
@@ -786,6 +898,22 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "unit:law:singleton_union_composition", cause: LOSS },
     Known { signature: "unit:law:union_inter_distrib", cause: LOSS },
     Known { signature: "unit:law:restriction_union", cause: LOSS },
+    // The same laws with their spaces bound to expressions: the same loss,
+    // reached through operands the crate built.  Eight of these were seen in
+    // 2M cases; the rest are listed because they are the same law and cause.
+    // Congruence forms (`+ctx`) have never failed and are absent on purpose.
+    Known { signature: "unit:law:union_comm+subst", cause: LOSS },
+    Known { signature: "unit:law:union_assoc+subst", cause: LOSS },
+    Known { signature: "unit:law:union_subtr_distrib+subst", cause: LOSS },
+    Known { signature: "unit:law:unwrap_union+subst", cause: LOSS },
+    Known { signature: "unit:law:head_union+subst", cause: LOSS },
+    Known { signature: "unit:law:tailsUnion_union+subst", cause: LOSS },
+    Known { signature: "unit:law:iterC_union+subst", cause: LOSS },
+    Known { signature: "unit:law:composition_union+subst", cause: LOSS },
+    Known { signature: "unit:law:union_composition+subst", cause: LOSS },
+    Known { signature: "unit:law:singleton_union_composition+subst", cause: LOSS },
+    Known { signature: "unit:law:union_inter_distrib+subst", cause: LOSS },
+    Known { signature: "unit:law:restriction_union+subst", cause: LOSS },
 ];
 
 pub fn known(signature: &str) -> Option<&'static Known> {
@@ -1029,6 +1157,27 @@ pub fn describe<V: FuzzValue>(case: &Case<V>) -> String {
             b,
             show_shape(&sh)
         ));
+    }
+    if V::IS_SET {
+        let shown = |p: &Vec<u8>| expr::show_path(p);
+        s.push_str(&format!(
+            "law paths: {}  bytes: {:?}\n",
+            case.law_paths.iter().map(shown).collect::<Vec<_>>().join(" "),
+            case.law_bytes
+        ));
+        let sub: Vec<String> = case
+            .law_spaces
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| !matches!(e, Expr::Var(j) if j == i))
+            .map(|(i, e)| format!("{} := {e}", (b'a' + i as u8) as char))
+            .collect();
+        if !sub.is_empty() {
+            s.push_str(&format!("law subst: {}\n", sub.join(", ")));
+        }
+        if !case.law_ctx.is_hole() {
+            s.push_str(&format!("law ctx:   {}\n", case.law_ctx));
+        }
     }
     s
 }

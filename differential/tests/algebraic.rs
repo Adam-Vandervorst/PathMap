@@ -469,20 +469,22 @@ fn every_law_variable_has_something_to_bind_to() {
     assert!(bytes <= algebraic::LAW_BYTES, "a law needs {bytes} bytes");
 }
 
-/// Every generated law holds in the flat model.
+/// Every generated law holds in the flat model, plain and in the substitution
+/// and congruence instances `check_laws` derives from it.
 ///
 /// The laws are theorems about Zippy's operators, and `model.rs` is those
 /// operators' membership lemmas read as code, with no trie anywhere.  So a
 /// failure here is never the crate: it is the Lean-to-Rust translation, the
-/// variable binding, or the model -- exactly the parts of the harness that, if
-/// wrong, would make every law finding a false one.
+/// variable binding, the derivation, or the model -- exactly the parts of the
+/// harness that, if wrong, would make every law finding a false one.
 #[test]
 fn zippy_laws_hold_in_the_model() {
-    use algebraic::laws::{instantiate, laws, Binding, Hyp};
+    use algebraic::laws::{instantiate, laws, substituted, Binding, Hyp, Instance};
     use algebraic::routes::{eval, Route};
     const CASES: usize = 3_000;
     let mut rng = algebraic::Rng::for_job(20261031, 0);
     let mut checked = vec![0usize; laws::<()>().len()];
+    let (mut by_subst, mut by_ctx) = (0usize, 0usize);
     let mut failures = Vec::new();
     let _ = with_quiet_panics(|| {
         for _ in 0..CASES {
@@ -490,23 +492,45 @@ fn zippy_laws_hold_in_the_model() {
             let Ok(case) = std::panic::catch_unwind(|| algebraic::decode::<()>(&bytes)) else {
                 continue;
             };
-            let bind = Binding { paths: &case.law_paths, bytes: &case.law_bytes };
+            let plain: Vec<Expr> = (0..algebraic::OPERANDS).map(Expr::Var).collect();
+            let bind = Binding { spaces: &plain, paths: &case.law_paths, bytes: &case.law_bytes };
+            let subst = Binding { spaces: &case.law_spaces, ..bind };
             let model = |e: &Expr| eval(Route::Model, e, &case.operands).unwrap().values;
-            'laws: for (i, law) in laws::<()>().iter().enumerate() {
+            let holds = |inst: &Instance| {
+                inst.pre.iter().all(|h| match h {
+                    Hyp::Holds(b) => *b,
+                    Hyp::Mem(p, e, want) => model(e).contains_key(p) == *want,
+                    Hyp::Eq(l, r) => model(l) == model(r),
+                })
+            };
+            for (i, law) in laws::<()>().iter().enumerate() {
                 let inst = instantiate(law, &bind);
-                for h in &inst.pre {
-                    let holds = match h {
-                        Hyp::Holds(b) => *b,
-                        Hyp::Mem(p, e, want) => model(e).contains_key(p) == *want,
-                        Hyp::Eq(l, r) => model(l) == model(r),
-                    };
-                    if !holds {
-                        continue 'laws;
+                if holds(&inst) {
+                    checked[i] += 1;
+                    if model(&inst.lhs) != model(&inst.rhs) {
+                        failures.push(format!("{}: {} vs {}", law.name, inst.lhs, inst.rhs));
+                    }
+                    if !case.law_ctx.is_hole() {
+                        by_ctx += 1;
+                        let (l, r) = (case.law_ctx.plug(inst.lhs), case.law_ctx.plug(inst.rhs));
+                        if model(&l) != model(&r) {
+                            failures.push(format!("{}+ctx: {l} vs {r}", law.name));
+                        }
                     }
                 }
-                checked[i] += 1;
-                if model(&inst.lhs) != model(&inst.rhs) {
-                    failures.push(format!("{}: {} vs {}", law.name, inst.lhs, inst.rhs));
+                if substituted(law, &case.law_spaces) {
+                    let inst = instantiate(law, &subst);
+                    if holds(&inst) {
+                        by_subst += 1;
+                        if model(&inst.lhs) != model(&inst.rhs) {
+                            failures.push(format!("{}+subst: {} vs {}", law.name, inst.lhs, inst.rhs));
+                        } else if !case.law_ctx.is_hole() {
+                            let (l, r) = (case.law_ctx.plug(inst.lhs), case.law_ctx.plug(inst.rhs));
+                            if model(&l) != model(&r) {
+                                failures.push(format!("{}+subst+ctx: {l} vs {r}", law.name));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -520,6 +544,11 @@ fn zippy_laws_hold_in_the_model() {
         .map(|(l, _)| l.name)
         .collect();
     assert!(never.is_empty(), "laws never applicable in {CASES} cases: {never:?}");
+    // Both derivations have to actually fire, or a broken decoder that always
+    // produces the plain law would pass unnoticed.
+    let plain_total: usize = checked.iter().sum();
+    assert!(by_subst * 5 > plain_total, "substitution instances: {by_subst} of {plain_total}");
+    assert!(by_ctx * 5 > plain_total, "congruence instances: {by_ctx} of {plain_total}");
 }
 
 /// Laws are checked for the set type only; see `laws.rs`.

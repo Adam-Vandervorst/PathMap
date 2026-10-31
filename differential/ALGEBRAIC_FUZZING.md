@@ -150,6 +150,28 @@ cancel; a meet of two values can be bottom). `tests/algebraic.rs` checks every
 generated law against the flat model, which is the membership lemmas read as
 code; a failure there is the translation or the harness, never the crate.
 
+Each theorem is checked in three forms, all valid without further proof:
+
+| form | signature | what it is |
+|---|---|---|
+| plain | `law:<name>` | spaces bound to the operands |
+| substitution | `law:<name>+subst` | some spaces bound to small expressions (`Case::law_spaces`), or two to the same operand |
+| congruence | `law:<name>+ctx`, `+subst+ctx` | both sides of the plain or substitution instance put in one context `C[_]` (`Case::law_ctx`) |
+
+Substitution holds because a theorem is about every space and any expression
+denotes one; it gives a law operands the crate built — its sharing, node
+layout and root values — rather than only ones the generator wrote. Congruence
+holds because `l = r` gives `C[l] = C[r]`; the two sides hold the same set but
+were built differently, so a failure means some operation in `C` answered
+according to how its input was stored rather than what it held. That is the
+question behind the layout and sharing defects (causes 1 and 2), which nothing
+else asks directly. A context is applied only once the two sides have agreed,
+and not when both are empty and built alike (half of all instances, and
+nothing for a context to tell apart), so a defect is reported in the
+simplest form that shows it. The extra forms are decoded
+from bytes after everything else, so an older input that ends early decodes to
+the plain laws only.
+
 Laws are the reason a defect in the *baseline* is findable at all. When
 `PathMap::join` loses a value, no route disagrees with the baseline in an
 interesting way — the baseline is what everyone is compared against.
