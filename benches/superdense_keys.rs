@@ -357,32 +357,62 @@ fn from_prefix_key(k: Vec<u8>) -> u64 {
     u64::from_le_bytes(buf) & (!0u64 >> shift)
 }
 
-#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
-fn superdense_val_count_bench(bencher: Bencher, n: u64) {
+// Identical fixtures for native recursive, native iterative, and ACT traversal.
+// Map/tree construction and zipper creation are outside the timed closures.
+mod val_count {
+    use divan::{Bencher, black_box};
+    use pathmap::PathMap;
 
-    let mut map: PathMap<u64> = PathMap::new();
-    for i in 0..n { map.set_val_at(prefix_key(&i), i); }
+    fn build_map(n: u64) -> PathMap<u64> {
+        let mut map = PathMap::new();
+        for i in 0..n {
+            map.set_val_at(super::prefix_key(&i), i);
+        }
+        map
+    }
 
-    //Benchmark the time taken to count the number of values in the map
-    let mut sink = 0;
-    bencher.bench_local(|| {
-        *black_box(&mut sink) = map.val_count()
-    });
-    assert_eq!(sink, n as usize);
-}
+    #[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
+    fn recursive(bencher: Bencher, n: u64) {
+        use pathmap::morphisms::CatamorphismCached;
 
-#[cfg(feature="arena_compact")]
-#[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
-fn superdense_val_count_bench_act(bencher: Bencher, n: u64) {
-    use pathmap::{morphisms::CatamorphismCachedIterative, arena_compact::ArenaCompactTree};
-    let mut map: PathMap<u64> = PathMap::new();
-    for i in 0..n { map.set_val_at(prefix_key(&i), i); }
-    let act = ArenaCompactTree::from_zipper(map.read_zipper(), |&v| v);
-    let zipper = act.read_zipper();
-    //Benchmark the time taken to count the number of values in the map
-    let mut sink = 0;
-    bencher.bench_local(|| {
-        *black_box(&mut sink) = zipper.val_count();
-    });
-    assert_eq!(sink, n as usize);
+        let map = build_map(n);
+        let expected = map.iter().count();
+        let zipper = map.read_zipper();
+        let mut sink = 0;
+        bencher.bench_local(|| {
+            *black_box(&mut sink) = zipper.val_count();
+        });
+        assert_eq!(sink, expected);
+    }
+
+    #[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
+    fn iterative(bencher: Bencher, n: u64) {
+        use pathmap::morphisms::CatamorphismCachedIterative;
+
+        let map = build_map(n);
+        let expected = map.iter().count();
+        let zipper = map.read_zipper();
+        let mut sink = 0;
+        bencher.bench_local(|| {
+            *black_box(&mut sink) = zipper.val_count();
+        });
+        assert_eq!(sink, expected);
+    }
+
+    #[cfg(feature = "arena_compact")]
+    #[divan::bench(sample_size = 1, args = [100, 200, 400, 800, 1600, 3200, 20_000, 100_000])]
+    fn act(bencher: Bencher, n: u64) {
+        use pathmap::arena_compact::ArenaCompactTree;
+        use pathmap::morphisms::CatamorphismCachedIterative;
+
+        let map = build_map(n);
+        let expected = map.iter().count();
+        let tree = ArenaCompactTree::from_zipper(map.read_zipper(), |&value| value);
+        let zipper = tree.read_zipper_u64();
+        let mut sink = 0;
+        bencher.bench_local(|| {
+            *black_box(&mut sink) = zipper.val_count();
+        });
+        assert_eq!(sink, expected);
+    }
 }
