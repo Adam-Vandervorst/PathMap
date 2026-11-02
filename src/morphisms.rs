@@ -2070,9 +2070,9 @@ pub(crate) mod cached_catamorphism_tests {
         assert_reconstructs_like(&map, &map);
     }
 
-    // Isolate regressions that have aborted or hung, so they cannot take down
-    // the entire suite. Under Miri, run the body directly for UB diagnostics.
-    fn run_cata_regression_in_child(name: &str) -> bool {
+    // Isolate traversal checks so an abort or timeout is reported as a test
+    // failure. Under Miri, run the body directly for UB diagnostics.
+    fn run_cata_test_in_child(name: &str) -> bool {
         #[cfg(miri)]
         {
             let _ = name;
@@ -2114,7 +2114,7 @@ pub(crate) mod cached_catamorphism_tests {
 
     // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5516518307, case 1.
     #[test]
-    fn recursive_cata_regression_value_above_long_child_run() {
+    fn cached_catas_preserve_values_above_compressed_child_runs() {
         use crate::morphisms::{CatamorphismCached, CatamorphismCachedIterative};
 
         let map = map_from_keys(&[b"a", b"abcd", b"abce"]);
@@ -2124,10 +2124,10 @@ pub(crate) mod cached_catamorphism_tests {
 
     // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5516518307, case 2.
     #[test]
-    fn cached_cata_regression_dangling_branch() {
+    fn cached_catas_traverse_retained_branches_after_value_removal() {
         use crate::morphisms::{CatamorphismCached, CatamorphismCachedIterative};
 
-        if run_cata_regression_in_child("cached_cata_regression_dangling_branch") {
+        if run_cata_test_in_child("cached_catas_traverse_retained_branches_after_value_removal") {
             return;
         }
         let mut map = map_from_keys(&[b"aa", b"ab", b"ba", b"bb", b"b"]);
@@ -2140,7 +2140,7 @@ pub(crate) mod cached_catamorphism_tests {
 
     // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5516518307, case 3.
     #[test]
-    fn recursive_cata_regression_prefix_zipper() {
+    fn cached_catas_reconstruct_prefixed_subtries() {
         use crate::zipper::{PrefixZipper, ZipperInfallibleSubtries};
 
         let map = map_from_keys(&[b"ab", b"ac"]);
@@ -2150,12 +2150,66 @@ pub(crate) mod cached_catamorphism_tests {
         assert_reconstructs_like(&zipper, &expected);
     }
 
+    #[test]
+    fn cached_catas_follow_prefixed_focus_for_readers_and_writers() {
+        use crate::morphisms::CatamorphismCached;
+        use crate::zipper::PrefixZipper;
+
+        let source = map_from_keys(&[b"", b"ab", b"ac"]);
+        for (prefix, origin) in [
+            (b"xy".as_slice(), b"".as_slice()), (b"xy", b"x"), (b"", b""),
+        ] {
+            for focus in [b"".as_slice(), b"x", b"xy", b"xya", b"xyab", b"xz", b"xyaz", b"y", b"yab"] {
+                let absolute_focus = [origin, focus].concat();
+                let expected_keys: Vec<Vec<u8>> = [b"".as_slice(), b"ab", b"ac"].iter()
+                    .filter_map(|key| [prefix, key].concat().strip_prefix(absolute_focus.as_slice()).map(ToOwned::to_owned))
+                    .collect();
+                let expected = map_from_owned_keys(&expected_keys);
+                let mut reader = PrefixZipper::new(prefix, source.read_zipper()).with_origin(origin).unwrap();
+                reader.descend_to(focus);
+                assert_eq!(CatamorphismCached::hash(&reader), CatamorphismCached::hash(&expected.read_zipper()));
+                assert_eq!(CatamorphismCached::val_count(&reader), expected_keys.len());
+                #[cfg(feature = "graft_root_vals")]
+                assert_reconstructs_like(&reader, &expected);
+
+                let mut writer = PrefixZipper::new(prefix, source.clone().into_write_zipper(b""))
+                    .with_origin(origin).unwrap();
+                writer.descend_to(focus);
+                assert_eq!(CatamorphismCached::hash(&writer), CatamorphismCached::hash(&reader));
+                assert_eq!(CatamorphismCached::val_count(&writer), expected_keys.len());
+            }
+        }
+        let inner = PrefixZipper::new(b"xy".as_slice(), source.read_zipper());
+        let outer = PrefixZipper::new(b"uv".as_slice(), inner);
+        let expected = map_from_keys(&[b"uvxy", b"uvxyab", b"uvxyac"]);
+        assert_eq!(CatamorphismCached::hash(&outer), CatamorphismCached::hash(&expected.read_zipper()));
+        #[cfg(feature = "graft_root_vals")]
+        assert_reconstructs_like(&outer, &expected);
+    }
+
+    #[cfg(feature = "graft_root_vals")]
+    #[test]
+    fn grafting_from_a_prefixed_path_preserves_its_subtrie() {
+        use crate::zipper::PrefixZipper;
+
+        let source = map_from_keys(&[b"", b"ab", b"ac"]);
+        let zipper = PrefixZipper::new(b"xy".as_slice(), source.read_zipper());
+        let full_keys: &[&[u8]] = &[b"xy", b"xyab", b"xyac"];
+        for path in [b"".as_slice(), b"x", b"xy", b"xya", b"xyab", b"xz", b"xyaz"] {
+            let expected_keys: Vec<Vec<u8>> = full_keys.iter()
+                .filter_map(|key| key.strip_prefix(path).map(ToOwned::to_owned)).collect();
+            let mut grafted = PathMap::new();
+            grafted.write_zipper().graft_src_at(&zipper, path);
+            assert_same_paths(&grafted, &map_from_owned_keys(&expected_keys));
+        }
+    }
+
     // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5518280164.
     #[test]
-    fn cached_cata_regression_join_k_path_shared_first_byte() {
+    fn cached_catas_traverse_join_k_path_results() {
         use crate::morphisms::{CatamorphismCached, CatamorphismCachedIterative};
 
-        if run_cata_regression_in_child("cached_cata_regression_join_k_path_shared_first_byte") {
+        if run_cata_test_in_child("cached_catas_traverse_join_k_path_results") {
             return;
         }
         let mut map = map_from_keys(&[b"aaa", b"bab"]);
@@ -2163,8 +2217,8 @@ pub(crate) mod cached_catamorphism_tests {
         assert_eq!(map.iter().map(|(path, _)| path).collect::<Vec<_>>(),
             [b"aa".to_vec(), b"ab".to_vec()]);
 
-        // Check indexed descent first: the malformed shape can make the
-        // iterative catamorphism loop forever if traversal proceeds past it.
+        // Indexed traversal and both catamorphisms must agree on the two
+        // children after removing the leading path byte.
         let mut zipper = map.read_zipper();
         zipper.descend_to_byte(b'a');
         assert_eq!(zipper.child_count(), 2);

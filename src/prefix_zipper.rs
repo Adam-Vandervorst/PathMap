@@ -3,7 +3,7 @@ use fast_slice_utils::{find_prefix_overlap, starts_with};
 use crate::alloc::Allocator;
 use crate::utils::ByteMask;
 use crate::PathMap;
-use crate::trie_node::TaggedNodeRef;
+use crate::trie_node::{AbstractNodeRef, TaggedNodeRef};
 use crate::zipper::*;
 
 #[derive(Clone)]
@@ -784,9 +784,46 @@ impl<'prefix, V: Clone + Send + Sync + Unpin, Z, A: Allocator> ZipperInfallibleS
             TrieRefOwned::new_invalid_in(self.source.alloc()).into()
         }
     }
-    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> { self.source.get_focus() }
-    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> { self.source.get_focus_at(path) }
-    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> { self.source.try_borrow_focus() }
+    fn get_focus(&self) -> OpaqueAbstractNodeRef<'_, V, A> {
+        match self.prefix_path_below_focus() {
+            Some([]) => self.source.get_focus(),
+            Some(prefix) if self.source.path_exists() => {
+                // The virtual prefix is part of the logical subtrie. Own the
+                // prefix nodes while sharing the source's downstream nodes.
+                let mut map = PathMap::new_in(self.source.alloc());
+                {
+                    let mut zipper = map.write_zipper_at_path(prefix);
+                    zipper.graft(&self.source);
+                    #[cfg(not(feature = "graft_root_vals"))]
+                    if let Some(value) = self.source.val() {
+                        zipper.set_val(value.clone());
+                    }
+                }
+                OpaqueAbstractNodeRef(map.into_root().0.map_or(AbstractNodeRef::None, AbstractNodeRef::OwnedRc))
+            },
+            _ => OpaqueAbstractNodeRef(AbstractNodeRef::None),
+        }
+    }
+    fn get_focus_at<K: AsRef<[u8]>>(&self, path: K) -> OpaqueAbstractNodeRef<'_, V, A> {
+        let path = path.as_ref();
+        match self.prefix_path_below_focus() {
+            Some(prefix) if path.starts_with(prefix) => self.source.get_focus_at(&path[prefix.len()..]),
+            Some(prefix) if prefix.starts_with(path) => {
+                let Some(node) = self.get_focus().into_option() else {
+                    return OpaqueAbstractNodeRef(AbstractNodeRef::None);
+                };
+                let focus = node.as_tagged().get_node_at_key(path).into_option();
+                OpaqueAbstractNodeRef(focus.map_or(AbstractNodeRef::None, AbstractNodeRef::OwnedRc))
+            },
+            _ => OpaqueAbstractNodeRef(AbstractNodeRef::None),
+        }
+    }
+    fn try_borrow_focus(&self) -> Option<OpaqueTrieNodeRef<'_, V, A>> {
+        match self.position {
+            PrefixPos::Source => self.source.try_borrow_focus(),
+            _ => None,
+        }
+    }
 }
 
 impl<'prefix, 'a, V: Clone + Send + Sync + 'a, Z, A: Allocator + 'a> ZipperReadOnlySubtries<'a, V, A> for PrefixZipper<'prefix, Z> where Z: ZipperReadOnlySubtries<'a, V, A>, Self: zipper_priv::ZipperReadOnlyPriv<'a, V, A> + ZipperSubtries<V, A> {

@@ -3235,7 +3235,11 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
                         recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, Some(val), start_f, fold_child_f, finalize_f, cache)?
                     } else {
                         let child_w = recursive_cata_cached::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(child_node, None, start_f, fold_child_f, finalize_f, cache)?;
-                        summarize!(Some(val), Some(child_w), &key1[1..])?
+                        let child_w = summarize!(None, Some(child_w), &key1[2..])?;
+                        let mask = ByteMask::from(key1[1]);
+                        let mut acc = start_f(&mask)?;
+                        fold_child_f(&mask, child_w, &mut acc)?;
+                        finalize_f(&mask, Some(val), Some(acc), &[])?
                     };
                     summarize!(passed_in_val, Some(child_w), key0)
                 } else {
