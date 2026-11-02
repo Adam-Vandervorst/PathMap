@@ -3088,11 +3088,11 @@ mod mut_node_stack {
         pub fn top(&self) -> Option<TaggedNodeRef<'_, V, A>> {
             match self.stack.last() {
                 Some(top) => Some(unsafe{ top.as_tagged() }),
-                None => unsafe{ self.root.and_then(|mut ptr| {
-                    let ptr = ptr.as_mut();
+                None => unsafe{ self.root.and_then(|ptr| {
+                    let ptr = ptr.as_ref();
                     match ptr.is_empty() {
                         true => None,
-                        false => Some(ptr.make_mut().cast())
+                        false => Some(ptr.as_tagged())
                     }
                 }) }
             }
@@ -6425,6 +6425,28 @@ mod tests {
         wz.remove_unmasked_branches(ByteMask::EMPTY, true);
         assert!(!wz.path_exists());
         assert!(map.path_exists_at(&[0, 1]));
+    }
+
+    #[test]
+    fn write_zipper_shared_queries_preserve_focus_borrows() {
+        let mut map = PathMap::from_iter([(b"a".as_slice(), 10u64), (b"ab", 20), (b"ac", 30)]);
+        let mut wz = map.write_zipper();
+        wz.descend_to(b"a");
+        // The value and the child-node handle both reside in the stack's root node.
+        assert_eq!(wz.z.focus_stack.depth(), 1);
+        let focus = wz.get_focus();
+        assert!(matches!(focus.0, AbstractNodeRef::BorrowedRc(_)));
+        let value = wz.val();
+        assert_eq!(wz.child_count(), 2);
+        assert_eq!(wz.val_count(), 3);
+        assert_eq!(focus.0.as_tagged().node_branches_mask(&[]), ByteMask::from_iter([b'b', b'c']));
+        assert_eq!(value, Some(&10));
+
+        // Shared queries must also work when the value is borrowed first.
+        let value = wz.val();
+        let focus = wz.get_focus();
+        assert_eq!(focus.0.as_tagged().node_branches_mask(&[]), ByteMask::from_iter([b'b', b'c']));
+        assert_eq!(value, Some(&10));
     }
 
     /// Tests [`ZipperInfallibleSubtries::get_focus`] and [`ZipperInfallibleSubtries::try_borrow_focus`] internal APIs on [`WriteZipperCore`]
