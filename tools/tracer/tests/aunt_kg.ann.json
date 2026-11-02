@@ -1,0 +1,47 @@
+{
+  "comment": "Annotations for the aunt_kg test's animation.  Event numbers are the trace's seq numbers",
+  "ranges": [
+    { "events": [0, 88], "speed": 4, "caption": "Invert the \"parent\" paths to create the \"child\" subtrie" },
+    { "events": [89, 95], "caption": "person = female ∪ male" },
+    { "events": [96, 101], "caption": "Every person's parents: graft the child subtrie, then restrict it to people" },
+    { "events": [102, 168], "speed": 3, "caption": "mother(p) = parents(p) ∩ female, as one meet_2 per person" },
+    { "events": [169, 275], "speed": 3, "caption": "sister(p) = (children of p's parents ∩ female) − p" },
+    { "events": [276, 375], "speed": 3, "caption": "aunt(p) = (children of p's grandparents − p's parents) ∩ female" },
+
+    { "comment": "Slow down for jon, who has two parents, and zoom in on jon's aunts as they're computed",
+      "events": [339, 343], "speed": 1, "caption": "aunt(jon)" },
+    { "events": [344, 350], "speed": 0.5, "hold": 1.5, "zoom": { "path": "out/aunt/jon/", "max_scale": 1.25 } },
+    { "events": 344, "caption": "aunt(jon): start from jon's parents, bob and eve" },
+    { "events": 345, "caption": "aunt(jon): fill in the parents of each of jon's parents" },
+    { "events": 346, "caption": "aunt(jon): drop the parent symbol, leaving jon's grandparents, ann and gus" },
+    { "events": 347, "caption": "aunt(jon): fill in each grandparent's children" },
+    { "events": 348, "caption": "aunt(jon): drop the grandparent symbol, leaving the grandparents' children" },
+    { "events": 349, "caption": "aunt(jon): subtract jon's parents" },
+    { "events": 350, "caption": "aunt(jon): keep the women — jon's aunts are cat, dee and ivy" },
+
+    { "comment": "Event 375 is the last before the aunt writer is dropped, after which the result is greyed out",
+      "events": [375, 381], "zoom": { "path": "out/aunt/" }, "caption": "The result: every person's aunts" },
+    { "events": 375, "hold": 4 }
+  ],
+  "labels": [
+    { "path": "kg/parent/", "text": "parent index" },
+    { "path": "kg/child/", "text": "child index" },
+    { "path": "kg/female/", "text": "female" },
+    { "path": "kg/male/", "text": "male" },
+    { "path": "kg/person/", "text": "person" },
+    { "path": "out/parents/", "text": "parents" },
+    { "path": "out/mother/", "text": "mother" },
+    { "path": "out/sister/", "text": "sister" },
+    { "path": "out/aunt/", "text": "aunt" }
+  ],
+  "marks": [
+    { "event": 0, "label": "child index" },
+    { "event": 89, "label": "person index" },
+    { "event": 96, "label": "parents" },
+    { "event": 102, "label": "mothers" },
+    { "event": 169, "label": "sisters" },
+    { "event": 276, "label": "aunts" },
+    { "event": 339, "label": "aunt(jon)" },
+    { "event": 375, "label": "result" }
+  ]
+}
