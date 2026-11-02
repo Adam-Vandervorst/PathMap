@@ -9,7 +9,7 @@ repository = "https://github.com/adam-Vandervorst/pathMap/"
 keywords = ["trie", "MORK", "path", "algebra"]
 categories = ["algorithms", "data-structures", "database-implementations"]
 readme = "README.md"
-exclude = ["target/", "benches/", "pathmap-book/", ".*", "fuzz/"]
+exclude = ["target/", "benches/", "pathmap-book/", ".*"]
 
 [package.metadata.docs.rs]
 rustc-args = ["-C", "target-feature=+aes,+sse2"]
@@ -38,6 +38,7 @@ distr-combinators = { version = "0.1.0", optional = true }
 
 [features]
 default = ["graft_root_vals", "slim_ptrs", "serialization"]
+heavy_tests = [] # Run with `cargo test` Enables slow thorough tests that are tedious for quick test runs
 nightly = ["fast-slice-utils/nightly"] # Uses features in the nightly tool chain for better performance, and the allocator and coroutine APIs
 jemalloc = ["dep:tikv-jemallocator"] # Enables [jemalloc](https://jemalloc.net/) as the default allocator.  This dramatically improves scaling for write-heavy workloads and is generally recommended.  The only reason it is not the default is to avoid interference with the host application allocator.
 zipper_tracking = [] #Exports the zipper_tracking module publicly
@@ -143,10 +144,18 @@ name = "zipper_head_owned"
 harness = false
 
 [[bench]]
+name = "prune"
+harness = false
+
+[[bench]]
 name = "act_paths"
 harness = false
 required-features = ["arena_compact", "serialization"]
 
+[[example]]
+name = "act_line_cache"
+required-features = ["arena_compact", "serialization"]
+
 [workspace]
-members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests"]
+members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "differential"]
 resolver = "2"

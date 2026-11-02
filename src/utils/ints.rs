@@ -306,107 +306,113 @@ fn int_range_generator_2() {
     }
 }
 
-#[cfg(not(miri))]
-#[test]
-fn int_range_generator_3() {
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::zipper::ZipperValuesAt;
 
-    //Just doing spot validation becaue validating every entry is too expensive at this level
-    let params: Vec<(u64, u64, u64, Vec<u64>, Vec<u64>)> = vec![
-        (0, 0xFFFFFFFFFFFFFFFF, 1, vec![0xFFFFFFFFFFFFFFFE, 0, 255, 256, 257, 0x0123456789ABCDEF], vec![]), //The whole range
-        (0xFFF0000000000000, 0xFFFFFFFFFFFFFFFF, 0x4000000000000, vec![0xFFF0000000000000, 0xFFF4000000000000, 0xFFF8000000000000, 0xFFFC000000000000], vec![]),
-    ];
+    #[cfg(not(miri))]
+    #[test]
+    fn int_range_generator_3() {
 
-    for (start, stop, step, good_list, bad_list) in params.into_iter() {
-        let map = gen_int_range(start, stop, step, ());
+        //Just doing spot validation becaue validating every entry is too expensive at this level
+        let params: Vec<(u64, u64, u64, Vec<u64>, Vec<u64>)> = vec![
+            (0, 0xFFFFFFFFFFFFFFFF, 1, vec![0xFFFFFFFFFFFFFFFE, 0, 255, 256, 257, 0x0123456789ABCDEF], vec![]), //The whole range
+            (0xFFF0000000000000, 0xFFFFFFFFFFFFFFFF, 0x4000000000000, vec![0xFFF0000000000000, 0xFFF4000000000000, 0xFFF8000000000000, 0xFFFC000000000000], vec![]),
+        ];
 
-        // let mut it = map.iter().enumerate();
-        // while let Some((_counter, (path, _))) = it.next() {
-        //     let cn = u64::from_be_bytes(path.try_into().unwrap());
-        //     println!("{cn:x}");
-        // }
+        for (start, stop, step, good_list, bad_list) in params.into_iter() {
+            let map = gen_int_range(start, stop, step, ());
 
-        for num in good_list {
-            assert_eq!(map.get_val_at(num.to_be_bytes()), Some(&()));
-        }
-        for num in bad_list {
-            assert_eq!(map.get_val_at(num.to_be_bytes()), None);
+            // let mut it = map.iter().enumerate();
+            // while let Some((_counter, (path, _))) = it.next() {
+            //     let cn = u64::from_be_bytes(path.try_into().unwrap());
+            //     println!("{cn:x}");
+            // }
+
+            for num in good_list {
+                assert_eq!(map.val_at(num.to_be_bytes()), Some(&()));
+            }
+            for num in bad_list {
+                assert_eq!(map.val_at(num.to_be_bytes()), None);
+            }
         }
     }
-}
 
-#[cfg(not(miri))]
-#[test]
-fn int_range_generator_4() {
-    let start = 2u128.pow(58);
-    let end = 2u128.pow(63);
-    let step = 3u128 * 7u128 * 11u128 * 2u128.pow(32);
-    let map = gen_int_range(start, end, step, ());
+    #[cfg(not(miri))]
+    #[test]
+    fn int_range_generator_4() {
+        let start = 2u128.pow(58);
+        let end = 2u128.pow(63);
+        let step = 3u128 * 7u128 * 11u128 * 2u128.pow(32);
+        let map = gen_int_range(start, end, step, ());
 
-    //GOAT, I haven't done the math to figure out what the right answer is here yet!
-    println!("{}", map.val_count());
-}
+        //GOAT, I haven't done the math to figure out what the right answer is here yet!
+        println!("{}", map.val_count());
+    }
 
-/// This was a failure isolated from one of the benchmarks, but it's been further-simplified into a
-/// zipper_head test.  However there is no such thing as a worthless test, so I'll leave it here
-#[cfg(not(miri))]
-#[test]
-fn int_range_generator_5() {
-    use crate::zipper::*;
+    /// This was a failure isolated from one of the benchmarks, but it's been further-simplified into a
+    /// zipper_head test.  However there is no such thing as a worthless test, so I'll leave it here
+    #[cfg(not(miri))]
+    #[test]
+    fn int_range_generator_5() {
+        use crate::zipper::*;
 
-    const K: u64 = 1_000_000_000;
+        const K: u64 = 1_000_000_000;
 
-    let mut map = PathMap::new();
-    let zh = map.zipper_head();
+        let mut map = PathMap::new();
+        let zh = map.zipper_head();
 
-    let mut buildz = zh.write_zipper_at_exclusive_path(&[0]).unwrap();
-    buildz.graft_map(gen_int_range(0, K, 1, ()));
-    drop(buildz);
-    let mut z = zh.read_zipper_at_path(&[0]).unwrap();
+        let mut buildz = zh.write_zipper_at_exclusive_path(&[0]).unwrap();
+        buildz.graft_map(gen_int_range(0, K, 1, ()));
+        drop(buildz);
+        let mut z = zh.read_zipper_at_path(&[0]).unwrap();
 
-    z.descend_until();
-    z.descend_first_byte();
-    let _z2 = zh.read_zipper_at_path(z.origin_path()).unwrap();
+        z.descend_until();
+        z.descend_first_byte();
+        let _z2 = zh.read_zipper_at_path(z.origin_path()).unwrap();
 
-    z.to_next_sibling_byte();
-    z.ascend_byte();
-}
+        z.to_next_sibling_byte();
+        z.ascend_byte();
+    }
 
-#[cfg(not(miri))]
-#[test]
-fn bob_and_weave_simple() {
-    let is = [10usize, 30, 100];
-    // [*map(bin, is)] --> ['0b1010', '0b11110', '0b1100100']
-    // [*map(lambda x: [*x.to_bytes()], is)] --> [[10], [30], [100]]
-    let mut is_ = [0, 0, 0];
-    let mut weave = vec![];
-    let mut bob = vec![];
-    indices_to_weave::<8, usize>(&is[..], &mut weave);
-    weave_to_indices(&weave[..], &mut is_[..]);
-    println!("weave {:?}", weave);
-    // weave [10, 30, 100]
-    assert_eq!(is, is_);
-    let mut is_ = [0, 0, 0];
-    indices_to_bob(&is[..], &mut bob);
-    bob_to_indices(&bob[..], &mut is_[..]);
-    println!("bob {:?}", bob.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>());
-    // bob ["0", "11", "110", "11", "10", "100", "100"]
-    assert_eq!(is, is_);
+    #[cfg(not(miri))]
+    #[test]
+    fn bob_and_weave_simple() {
+        let is = [10usize, 30, 100];
+        // [*map(bin, is)] --> ['0b1010', '0b11110', '0b1100100']
+        // [*map(lambda x: [*x.to_bytes()], is)] --> [[10], [30], [100]]
+        let mut is_ = [0, 0, 0];
+        let mut weave = vec![];
+        let mut bob = vec![];
+        indices_to_weave::<8, usize>(&is[..], &mut weave);
+        weave_to_indices(&weave[..], &mut is_[..]);
+        println!("weave {:?}", weave);
+        // weave [10, 30, 100]
+        assert_eq!(is, is_);
+        let mut is_ = [0, 0, 0];
+        indices_to_bob(&is[..], &mut bob);
+        bob_to_indices(&bob[..], &mut is_[..]);
+        println!("bob {:?}", bob.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>());
+        // bob ["0", "11", "110", "11", "10", "100", "100"]
+        assert_eq!(is, is_);
 
-    let is = [3333, 30, 1000];
-    // [*map(bin, is)] --> ['0b110100000101', '0b11110', '0b1111101000'
-    // [*map(lambda x: [*x.to_bytes(2)], is)] --> [[13, 5], [0, 30], [3, 232]]
-    let mut is_ = [0, 0, 0];
-    let mut weave = vec![];
-    let mut bob = vec![];
-    indices_to_weave::<8, usize>(&is[..], &mut weave);
-    weave_to_indices(&weave[..], &mut is_[..]);
-    println!("weave {:?}", weave);
-    // weave [13, 0, 3, 5, 30, 232]
-    assert_eq!(is, is_);
-    let mut is_ = [0, 0, 0];
-    indices_to_bob(&is[..], &mut bob);
-    bob_to_indices(&bob[..], &mut is_[..]);
-    println!("bob {:?}", bob.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>());
-    // bob ["1", "10", "11", "110", "10", "100", "100", "100", "101", "100", "1", "1"]
-    assert_eq!(is, is_);
+        let is = [3333, 30, 1000];
+        // [*map(bin, is)] --> ['0b110100000101', '0b11110', '0b1111101000'
+        // [*map(lambda x: [*x.to_bytes(2)], is)] --> [[13, 5], [0, 30], [3, 232]]
+        let mut is_ = [0, 0, 0];
+        let mut weave = vec![];
+        let mut bob = vec![];
+        indices_to_weave::<8, usize>(&is[..], &mut weave);
+        weave_to_indices(&weave[..], &mut is_[..]);
+        println!("weave {:?}", weave);
+        // weave [13, 0, 3, 5, 30, 232]
+        assert_eq!(is, is_);
+        let mut is_ = [0, 0, 0];
+        indices_to_bob(&is[..], &mut bob);
+        bob_to_indices(&bob[..], &mut is_[..]);
+        println!("bob {:?}", bob.iter().map(|x| format!("{:b}", x)).collect::<Vec<_>>());
+        // bob ["1", "10", "11", "110", "10", "100", "100", "100", "101", "100", "1", "1"]
+        assert_eq!(is, is_);
+    }
 }

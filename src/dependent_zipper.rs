@@ -161,6 +161,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
 
     /// a combination between `to_next_sibling` and `to_prev_sibling`
     fn to_sibling_byte(&mut self, next: bool) -> Option<u8> {
+        if self.depth() == 0 { return None }
         let byte = self.focus_byte()?;
         let ascended = self.ascend(1);
         debug_assert_eq!(ascended, 1, "must ascend");
@@ -239,6 +240,15 @@ impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8],
             self.primary.val()
         }
     }
+}
+
+impl<'trie, PrimaryZ, SecondaryZ, V, C, F : Clone + for <'a> FnOnce(C, &'a [u8], usize) -> (C, Option<SecondaryZ>)> ZipperValuesAt<V>
+    for DependentProductZipperG<'trie, PrimaryZ, SecondaryZ, V, C, F>
+    where
+        V: Clone + Send + Sync,
+        PrimaryZ: ZipperMoving + ZipperPath + ZipperValuesAt<V>,
+        SecondaryZ: ZipperMoving + ZipperPath + ZipperValuesAt<V>,
+{
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> {
         if let Some(idx) = self.factor_idx(true) {
             self.secondary[idx].val_at(path)

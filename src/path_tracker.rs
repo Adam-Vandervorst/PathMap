@@ -1,9 +1,7 @@
 use crate::{
     utils::ByteMask,
     zipper::{
-        PathObserver, Zipper, ZipperAbsolutePath, ZipperMoving, ZipperIteration,
-        ZipperPath, ZipperPathBuffer, ZipperValues,
-        ZipperReadOnlyValues, ZipperReadOnlyConditionalValues,
+        PathObserver, Zipper, ZipperAbsolutePath, ZipperIteration, ZipperMoving, ZipperPath, ZipperPathBuffer, ZipperReadOnlyConditionalValues, ZipperReadOnlyValues, ZipperValues, ZipperValuesAt
     },
 };
 
@@ -143,6 +141,9 @@ impl<Z: ZipperMoving> ZipperMoving for PathTracker<Z> {
     fn to_next_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.zipper.to_next_step_observed(&mut (&mut self.path, &mut *obs))
     }
+    fn to_prev_step_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.to_prev_step_observed(&mut (&mut self.path, &mut *obs))
+    }
     fn to_next_sibling_byte(&mut self) -> Option<u8> {
         let byte = self.zipper.to_next_sibling_byte()?;
         *self.path.last_mut().expect("path must not be empty") = byte;
@@ -162,8 +163,14 @@ impl<Z: ZipperIteration> ZipperIteration for PathTracker<Z> {
     fn to_next_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.zipper.to_next_val_observed(&mut (&mut self.path, &mut *obs))
     }
+    fn to_prev_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.to_prev_val_observed(&mut (&mut self.path, &mut *obs))
+    }
     fn descend_last_path_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
         self.zipper.descend_last_path_observed(&mut (&mut self.path, &mut *obs))
+    }
+    fn descend_last_val_observed<Obs: PathObserver>(&mut self, obs: &mut Obs) -> bool {
+        self.zipper.descend_last_val_observed(&mut (&mut self.path, &mut *obs))
     }
     fn descend_first_k_path_observed<Obs: PathObserver>(&mut self, k: usize, obs: &mut Obs) -> bool {
         self.zipper.descend_first_k_path_observed(k, &mut (&mut self.path, &mut *obs))
@@ -184,6 +191,9 @@ impl<Z: ZipperMoving> ZipperAbsolutePath for PathTracker<Z> {
 
 impl<Z: ZipperValues<V>, V> ZipperValues<V> for PathTracker<Z> {
     fn val(&self) -> Option<&V> { self.zipper.val() }
+}
+
+impl<Z: ZipperValuesAt<V>, V> ZipperValuesAt<V> for PathTracker<Z> {
     fn val_at<K: AsRef<[u8]>>(&self, path: K) -> Option<&V> { self.zipper.val_at(path) }
 }
 

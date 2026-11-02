@@ -4,8 +4,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use crate::PathMap;
-use crate::zipper::{ReadZipperUntracked, Zipper, ZipperAbsolutePath, ZipperForking, ZipperMoving, ZipperPath, ZipperReadOnlyValues, ZipperWriting, ZipperIteration, ZipperReadOnlyIteration, };
+use crate::write_zipper::WriteZipperOwned;
+use crate::zipper::{Zipper, ZipperAbsolutePath, ZipperMoving, ZipperPath, ZipperValues, ZipperWriting, ZipperIteration, };
 
 /// Marker to track an outstanding read zipper
 pub struct TrackingRead;
@@ -108,14 +108,14 @@ impl Conflict {
         }
     }
 
-    fn check_for_lock_along_path<'a, A: Clone + Send + Sync + Unpin>(
+    fn check_for_lock_along_path<A: Clone + Send + Sync + Unpin>(
         path: &[u8],
-        zipper: &'a mut ReadZipperUntracked<A>,
-    ) -> Option<&'a A> {
+        zipper: &mut WriteZipperOwned<A>,
+    ) -> Option<A> {
         let mut current_path = path;
         loop {
             if zipper.is_val() {
-                return zipper.get_val();
+                return zipper.val().cloned();
             } else if current_path.is_empty() {
                 return None;
             } else {
@@ -128,18 +128,17 @@ impl Conflict {
         }
     }
 
-    fn check_for_write_conflict<C, ConflictF: FnOnce(&[u8])->C>(path: &[u8], all_paths: &PathMap<()>, conflict_f: ConflictF) -> Result<(), C> {
-        let mut zipper = all_paths.read_zipper();
-        match Conflict::check_for_lock_along_path(path, &mut zipper) {
+    fn check_for_write_conflict<C, ConflictF: FnOnce(&[u8])->C>(path: &[u8], zipper: &mut WriteZipperOwned<()>, conflict_f: ConflictF) -> Result<(), C> {
+        zipper.reset();
+        match Conflict::check_for_lock_along_path(path, zipper) {
             None =>
             /* at this point zipper is either focued on the given path (when it exists)
             , or the procedure broke out early, because it was determined that the path does not exist */
             {
                 if zipper.depth() == path.len() {
-                    let mut subtree = zipper.fork_read_zipper();
-                    match subtree.to_next_val() {
+                    match zipper.to_next_val() {
                         false => Ok(()),
-                        true => Err(conflict_f(subtree.origin_path())),
+                        true => Err(conflict_f(zipper.origin_path())),
                     }
                 } else {
                     Ok(())
@@ -151,26 +150,22 @@ impl Conflict {
 
     fn check_for_read_conflict<C, ConflictF: FnOnce(NonZeroU32, &[u8])->C>(
         path: &[u8],
-        all_paths: &PathMap<NonZeroU32>,
+        zipper: &mut WriteZipperOwned<NonZeroU32>,
         conflict_f: ConflictF
     ) -> Result<(), C> {
-        let mut zipper = all_paths.read_zipper();
-        match Conflict::check_for_lock_along_path(path, &mut zipper) {
+        zipper.reset();
+        match Conflict::check_for_lock_along_path(path, zipper) {
             None => {
                 if zipper.depth() == path.len() {
-                    let mut subtree = zipper.fork_read_zipper();
-                    match subtree.to_next_get_val() {
-                        None => Ok(()),
-                        Some(lock) => Err(conflict_f(
-                            *lock,
-                            subtree.origin_path(),
-                        )),
+                    match zipper.to_next_val() {
+                        false => Ok(()),
+                        true => Err(conflict_f(*zipper.val().unwrap(), zipper.origin_path())),
                     }
                 } else {
                     Ok(())
                 }
             }
-            Some(lock) => Err(conflict_f(*lock, zipper.path())),
+            Some(lock) => Err(conflict_f(lock, zipper.path())),
         }
     }
 
@@ -194,10 +189,15 @@ impl Conflict {
 #[derive(Clone, Default)]
 pub struct SharedTrackerPaths(Arc<RwLock<TrackerPaths>>);
 
-#[derive(Clone, Default)]
 struct TrackerPaths {
-    read_paths: PathMap<NonZeroU32>,
-    written_paths: PathMap<()>,
+    read_paths: WriteZipperOwned<NonZeroU32>,
+    written_paths: WriteZipperOwned<()>,
+}
+
+impl Default for TrackerPaths {
+    fn default() -> Self {
+        Self { read_paths: WriteZipperOwned::new(), written_paths: WriteZipperOwned::new() }
+    }
 }
 
 /// Represents the status of a specific path, returned by [SharedTrackerPaths::path_status]
@@ -231,11 +231,11 @@ impl SharedTrackerPaths {
     pub fn path_status<P: AsRef<[u8]>>(&self, path: P) -> PathStatus {
         let path = path.as_ref();
         self.with_paths(|all_paths: &mut TrackerPaths| {
-            match Conflict::check_for_write_conflict(path, &all_paths.written_paths, |_| ()) {
+            match Conflict::check_for_write_conflict(path, &mut all_paths.written_paths, |_| ()) {
                 Ok(()) => {},
                 Err(()) => return PathStatus::Unavailable
             }
-            match Conflict::check_for_read_conflict(path, &all_paths.read_paths, |_, _| ()) {
+            match Conflict::check_for_read_conflict(path, &mut all_paths.read_paths, |_, _| ()) {
                 Ok(()) => {},
                 Err(()) => return PathStatus::AvailableForReading
             }
@@ -245,9 +245,11 @@ impl SharedTrackerPaths {
 
     fn try_add_writer(&self, path: &[u8]) -> Result<(), Conflict> {
         let try_add_writer_internal = |all_paths: &mut TrackerPaths| {
-            Conflict::check_for_write_conflict(path, &all_paths.written_paths, Conflict::write_conflict)?;
-            Conflict::check_for_read_conflict(path, &all_paths.read_paths, Conflict::read_conflict)?;
-            let mut writer = all_paths.written_paths.write_zipper_at_path(path);
+            Conflict::check_for_write_conflict(path, &mut all_paths.written_paths, Conflict::write_conflict)?;
+            Conflict::check_for_read_conflict(path, &mut all_paths.read_paths, Conflict::read_conflict)?;
+            let writer = &mut all_paths.written_paths;
+            writer.reset();
+            writer.descend_to(path);
             writer.set_val(());
             Ok(())
         };
@@ -257,8 +259,10 @@ impl SharedTrackerPaths {
 
     fn try_add_reader(&self, path: &[u8]) -> Result<(), Conflict> {
         let try_add_reader_internal = |all_paths: &mut TrackerPaths| {
-            Conflict::check_for_write_conflict(path, &all_paths.written_paths, Conflict::write_conflict)?;
-            let mut writer = all_paths.read_paths.write_zipper_at_path(path);
+            Conflict::check_for_write_conflict(path, &mut all_paths.written_paths, Conflict::write_conflict)?;
+            let writer = &mut all_paths.read_paths;
+            writer.reset();
+            writer.descend_to(path);
             let value = writer.get_val_mut();
             match value {
                 Some(cnt) => match cnt.checked_add(1) {
@@ -281,7 +285,9 @@ impl SharedTrackerPaths {
     /// Adds a new reader without checking to see whether it conflicts with existing writers
     fn add_reader_unchecked(&self, path: &[u8]) {
         let add_reader = |paths: &mut TrackerPaths| {
-            let mut writer = paths.read_paths.write_zipper_at_path(path);
+            let writer = &mut paths.read_paths;
+            writer.reset();
+            writer.descend_to(path);
             match writer.get_val_mut() {
                 Some(cnt) => {
                     *cnt = unsafe { NonZero::new_unchecked(cnt.get() + 1) };
@@ -312,11 +318,15 @@ impl<M: TrackingMode> core::fmt::Debug for ZipperTracker<M> {
             self.this_path
         );
         let _ = writeln!(f, "\tRead Zippers:");
-        for (rz, cnt) in all_paths.read_paths.iter() {
+        let mut read_paths = all_paths.read_paths.clone();
+        read_paths.reset();
+        for (rz, cnt) in read_paths.into_iter() {
             let _ = writeln!(f, "\t\t{rz:?} ({cnt:?})");
         }
         let _ = writeln!(f, "\tWrite Zippers:");
-        for (wz, _) in all_paths.written_paths.iter() {
+        let mut written_paths = all_paths.written_paths.clone();
+        written_paths.reset();
+        for (wz, _) in written_paths.into_iter() {
             let _ = writeln!(f, "\t\t{wz:?}");
         }
         write!(f, "}}")
@@ -373,7 +383,9 @@ impl<M: TrackingMode> ZipperTracker<M> {
     fn remove_lock(all_paths: &SharedTrackerPaths, this_path: &[u8]) {
         let is_removed = all_paths.with_paths(|paths| {
             if M::tracks_reads() {
-                let mut write_zipper = paths.read_paths.write_zipper_at_path(this_path);
+                let write_zipper = &mut paths.read_paths;
+                write_zipper.reset();
+                write_zipper.descend_to(this_path);
                 match write_zipper.get_val_mut() {
                     Some(cnt) => {
                         if *cnt == NonZero::<u32>::MIN {
@@ -386,10 +398,10 @@ impl<M: TrackingMode> ZipperTracker<M> {
                     None => false,
                 }
             } else {
-                let removed = paths
-                    .written_paths
-                    .write_zipper_at_path(this_path)
-                    .remove_val(true);
+                let write_zipper = &mut paths.written_paths;
+                write_zipper.reset();
+                write_zipper.descend_to(this_path);
+                let removed = write_zipper.remove_val(true);
                 removed.is_some()
             }
         });
@@ -402,5 +414,36 @@ impl<M: TrackingMode> ZipperTracker<M> {
 impl<M: TrackingMode> Drop for ZipperTracker<M> {
     fn drop(&mut self) {
         Self::remove_lock(&self.all_paths, &self.this_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistent_tracker_zippers_check_conflicts_and_prune_released_paths() {
+        let paths = SharedTrackerPaths::default();
+        let first = ZipperTracker::<TrackingWrite>::new(paths.clone(), b"a/one").unwrap();
+        let second = ZipperTracker::<TrackingWrite>::new(paths.clone(), b"b/two").unwrap();
+
+        assert!(ZipperTracker::<TrackingRead>::new(paths.clone(), b"a").is_err());
+        assert!(ZipperTracker::<TrackingRead>::new(paths.clone(), b"a/one/child").is_err());
+        assert!(ZipperTracker::<TrackingWrite>::new(paths.clone(), b"b").is_err());
+        let debug = format!("{first:?}");
+        assert!(debug.contains("[97, 47, 111, 110, 101]"));
+        assert!(debug.contains("[98, 47, 116, 119, 111]"));
+
+        drop(first);
+        paths.with_paths(|all| {
+            all.written_paths.reset();
+            all.written_paths.descend_to(b"a/one");
+            assert!(!all.written_paths.path_exists());
+        });
+        let reader = ZipperTracker::<TrackingRead>::new(paths.clone(), b"a/one").unwrap();
+        assert!(ZipperTracker::<TrackingWrite>::new(paths.clone(), b"a/one").is_err());
+        drop(reader);
+        drop(second);
+        assert!(ZipperTracker::<TrackingWrite>::new(paths, b"a").is_ok());
     }
 }
