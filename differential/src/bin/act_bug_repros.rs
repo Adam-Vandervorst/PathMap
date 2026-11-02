@@ -44,9 +44,9 @@ fn main() {
 fn run(name: &str) {
     match name {
         // `val_count` is documented as "the total number of values contained at
-        // and below the zipper's focus".  ACT's implementation clones the zipper,
-        // calls `reset()` -- moving to the zipper's root -- and counts from there,
-        // so the focus is ignored entirely.
+        // and below the zipper's focus". The former ACT implementation called
+        // `reset()` and counted from the root. The cached catamorphism should
+        // now agree with PathMap at every focus.
         "val_count_ignores_focus" => {
             let m = src();
             let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
@@ -55,11 +55,13 @@ fn run(name: &str) {
                 let mut pz = m.read_zipper();
                 az.descend_to(path);
                 pz.descend_to(path);
+                let pathmap_count = pz.val_count();
+                let act_count = az.val_count();
                 println!(
                     "  focus {:8?}: exists={:<5} PathMap val_count={}  ACT val_count={}{}",
                     String::from_utf8_lossy(path), pz.path_exists(),
-                    pz.val_count(), az.val_count(),
-                    if pz.val_count() == az.val_count() { "" } else { "   <-- differs" },
+                    pathmap_count, act_count,
+                    if pathmap_count == act_count { "" } else { "   <-- differs" },
                 );
             }
         }
