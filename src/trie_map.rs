@@ -608,10 +608,14 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for PathMap<V, A> {
     #[inline]
     fn shared_node_id(&self) -> Option<u64> {
-        if self.root_val().is_some() || !self.is_shared() {
+        if !self.is_shared() {
             return None;
         }
-        self.root().map(|root| root.as_tagged().shared_node_id())
+        self.root().map(|root| {
+            // Rotate before XORing so nearby node and value addresses don't cancel out.
+            root.as_tagged().shared_node_id()
+                ^ self.root_val().map_or(0, |value| (value as *const V as u64).rotate_left(32))
+        })
     }
 
     #[inline]
@@ -1549,7 +1553,7 @@ mod tests {
         let mut with_root_value = snapshot.clone();
         with_root_value.insert(b"", ());
         assert!(with_root_value.is_shared());
-        assert_eq!(with_root_value.shared_node_id(), None);
+        assert!(with_root_value.shared_node_id().is_some());
 
         // Root values live outside the root node, and inserting at the empty key goes through
         // `set_root_val` without touching `root`, so these two maps share a root node while

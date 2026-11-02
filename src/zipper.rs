@@ -1347,8 +1347,8 @@ pub trait ZipperAbsolutePath: ZipperPath {
 /// In some cases `ZipperConcrete` can be implemented on projection zippers, such as [ProductZipper],
 /// because it is composed of concrete tries
 pub trait ZipperConcrete {
-    /// Get an identifier unique to the node at the zipper's focus, if the zipper's focus is at the
-    /// root of a node in memory.  When zipper's focus is inside of a node, returns `None`.
+    /// Get an identifier unique to the subtrie at the zipper's focus, if the zipper's focus is at the
+    /// root of a discrete node in memory.  Returns `None` when the zipper's focus is inside of a node.
     ///
     /// NOTE: The returned value is not a logical hash of the contents, but is based on
     /// the node's memory address.  Therefore it is not stable across runs and can't be
@@ -2898,18 +2898,12 @@ pub(crate) mod read_zipper_core {
     #[inline]
     pub(crate) fn read_zipper_shared_node_id<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a, Z: Zipper + ZipperReadOnlyPriv<'a, V, A> + ZipperConcrete>(zipper: &Z) -> Option<u64> {
         let (node, key, value) = zipper.borrow_raw_parts();
-        if !zipper.is_shared() || !key.is_empty() || value.is_some() {
-            // TODO(igorm): Currently values associated with a nodes that can be shared
-            // are stored outside of the node. This means one focus address can
-            // correspond to two different points which have different values.
-            // Therefore, we can't cache nodes that have values themselves.
-            // Relevant discussion:
-            // https://github.com/Adam-Vandervorst/PathMap/pull/8#discussion_r2005555762
-            // https://github.com/Adam-Vandervorst/PathMap/blob/cleanup_to_release/pathmap-book/src/A.0001_map_root_values.md
-            // https://discord.com/channels/@me/1215835387432271922/1352463443541754068
+        if !zipper.is_shared() || !key.is_empty() {
             return None
         }
-        Some(node.shared_node_id())
+        // Rotate before XORing so nearby node and value addresses don't cancel out.
+        Some(node.shared_node_id()
+            ^ value.map_or(0, |value| (value as *const V as u64).rotate_left(32)))
     }
 
     //GOAT.  Need to add `to_first_val` method that moves the zipper to the root, and if the root contains a
@@ -6482,6 +6476,43 @@ mod tests {
         assert!(zipper.shared_node_id().is_some());
         assert_eq!(zipper.shared_node_id(), snapshot.shared_node_id());
         assert!(snapshot.is_shared());
+    }
+
+    #[test]
+    fn shared_node_id_with_root_values() {
+        let mut map = PathMap::<u64>::new();
+        map.insert(b"a", 1);
+        let without_value = map.clone();
+        map.insert(b"", 2);
+        let mut different_value = map.clone();
+        different_value.insert(b"", 3);
+
+        let node_id = without_value.shared_node_id().unwrap();
+        let map_id = map.shared_node_id().unwrap();
+        let different_id = different_value.shared_node_id().unwrap();
+        assert_ne!(map_id, node_id);
+        assert_ne!(map_id, different_id);
+
+        // All three views borrow the same external value and ought to report the same fingerprint.
+        assert_eq!(map.read_zipper().shared_node_id(), Some(map_id));
+        assert_eq!(map.trie_ref_at_path(b"").shared_node_id(), Some(map_id));
+        assert_eq!(different_value.read_zipper().shared_node_id(), Some(different_id));
+
+        // Verify the maps still share the same underlying node, so the differing public IDs
+        // above exercise value-address mixing rather than different node addresses.
+        assert_eq!(map.root().unwrap().as_tagged().shared_node_id(), node_id);
+        assert_eq!(different_value.root().unwrap().as_tagged().shared_node_id(), node_id);
+
+        let owned = TrieRefOwned::from(different_value);
+        assert!(owned.shared_node_id().is_some());
+        assert_ne!(owned.shared_node_id(), Some(node_id));
+
+        // A root value alone still does not constitute a shared node.
+        let mut value_only = PathMap::<u64>::new();
+        value_only.insert(b"", 4);
+        let _alias = value_only.clone();
+        assert_eq!(value_only.shared_node_id(), None);
+        assert_eq!(value_only.read_zipper().shared_node_id(), None);
     }
 
     /// A retained dangling path is represented by an empty sentinel.  It is not a

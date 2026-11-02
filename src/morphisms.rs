@@ -1338,6 +1338,31 @@ mod tests {
         }, &mut assert);
     }
 
+    #[test]
+    fn cached_catas_distinguish_shared_nodes_with_different_values() {
+        let subtree: PathMap<u64> = [(b"a", 1), (b"b", 2)].into_iter().collect();
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut z = map.write_zipper();
+            for prefix in [b"x", b"y"] {
+                z.reset();
+                z.descend_to(prefix);
+                z.graft_map(subtree.clone());
+            }
+        }
+        map.insert(b"x", 10);
+        map.insert(b"y", 20);
+
+        let x = map.read_zipper_at_path(b"x");
+        let y = map.read_zipper_at_path(b"y");
+        assert!(x.shared_node_id().is_some());
+        assert!(y.shared_node_id().is_some());
+        assert_ne!(x.shared_node_id(), y.shared_node_id());
+        check_all_catas(map.read_zipper(),
+            |_mask, children: &mut [u64], val| children.iter().sum::<u64>() + val.copied().unwrap_or(0),
+            |sum, name| assert_eq!(sum, 36, "{name}"));
+    }
+
     /// Adds up all the the path bytes at each value
     #[test]
     fn cata_test1() {
