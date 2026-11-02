@@ -6463,13 +6463,13 @@ mod tests {
         let value = wz.val();
         assert_eq!(wz.child_count(), 2);
         assert_eq!(wz.val_count(), 3);
-        assert_eq!(focus.0.as_tagged().node_branches_mask(&[]), ByteMask::from((b'b', b'c')));
+        assert_eq!(focus.0.as_tagged().node_branches_mask(&[]), ByteMask::from_iter([b'b', b'c']));
         assert_eq!(value, Some(&10));
 
         // Shared queries must also work when the value is borrowed first.
         let value = wz.val();
         let focus = wz.get_focus();
-        assert_eq!(focus.0.as_tagged().node_branches_mask(&[]), ByteMask::from((b'b', b'c')));
+        assert_eq!(focus.0.as_tagged().node_branches_mask(&[]), ByteMask::from_iter([b'b', b'c']));
         assert_eq!(value, Some(&10));
     }
 

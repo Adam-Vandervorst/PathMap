@@ -59,6 +59,46 @@ jobs:
       - name: doc tests + docs
         run: cargo doc --no-deps
 
+  miri:
+    name: cargo miri
+    # Runs the unit and integration tests under Miri (default Stacked Borrows, isolation on).
+    # Under cfg(miri) the crate swaps gxhash for xxhash, uses fast-slice-utils' miri_safe
+    # paths, skips the zlib FFI tests and shrinks the slowest workloads.  cargo-nextest runs
+    # one Miri process per test in parallel; plain `cargo miri test` is serial and takes over
+    # an hour.  Ordered after the tests but not gated on them, like the fuzz job.
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 60
+    env:
+      # Pinned because Miri changes with every nightly; bump it deliberately.
+      RUSTUP_TOOLCHAIN: nightly-2026-09-23
+      # Overrides `-C target-cpu=native` from .cargo/config.toml.  rustdoc never gets that flag,
+      # so on an AVX-512 runner the libraries take fast-slice-utils' AVX-512 path while the
+      # doc-test binary lacks the feature, and Miri reports the call as UB.  Baseline x86-64
+      # keeps libraries, tests and doc tests consistent on any runner CPU.
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - uses: actions/checkout@v5
+      - name: toolchain + miri setup
+        # rustup and cargo-nextest are installed per runner user on first use.  `cargo miri setup`
+        # builds Miri's sysroot up front, so the test step's log and timing are only the tests.
+        run: |
+          [ -x "$HOME/.cargo/bin/rustup" ] || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # own target dir: miri builds would otherwise evict the stable incremental cache
+          echo "CARGO_TARGET_DIR=$HOME/cache/miri-target" >> "$GITHUB_ENV"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src
+          command -v cargo-nextest >/dev/null || cargo install cargo-nextest --locked
+          cargo miri setup
+          rustc --version && cargo miri --version && cargo nextest --version
+      - name: tests under miri
+        run: cargo miri nextest run --no-fail-fast
+      - name: doc tests under miri
+        # nextest does not run doc tests
+        run: cargo miri test --doc
+
   bench:
     name: bench A/B vs base
     # Runs last, after the tests and the fuzz gate pass (skipped when either fails), on PRs
