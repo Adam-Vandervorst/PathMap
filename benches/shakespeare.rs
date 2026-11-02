@@ -1,6 +1,6 @@
 
 use divan::{Divan, Bencher, black_box};
-use pathmap::{PathMap, zipper::*};
+use pathmap::{PathMap, zipper::ZipperValuesAt};
 
 use std::fs::File;
 use std::io::prelude::*;

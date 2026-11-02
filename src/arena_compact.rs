@@ -2487,6 +2487,104 @@ where Storage: AsRef<[u8]>
     }
 }
 
+impl<Storage: AsRef<[u8]>> crate::morphisms::CatamorphismCached<u64> for ACTZipper<'_, Storage, u64> {
+    fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+        &self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF,
+    ) -> Result<W, Err>
+    where
+        W: Clone,
+        NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&u64>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    {
+        if self.invalid > 0 {
+            return summarize_f(&ByteMask::EMPTY, None, None, &[]);
+        }
+        let frame = self.stack.last().unwrap();
+        recursive_act_cata::<_, _, _, _, _, _, _, _, _, COMPUTE_PATH>(
+            self.tree, &self.cur_node, frame.node_depth,
+            new_acc_f, fold_child_f, summarize_f, |value| value,
+        )
+    }
+}
+
+impl<Storage: AsRef<[u8]>> crate::morphisms::CatamorphismCached<()> for ACTZipper<'_, Storage, ()> {
+    fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+        &self, new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF,
+    ) -> Result<W, Err>
+    where
+        W: Clone,
+        NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&()>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    {
+        if self.invalid > 0 {
+            return summarize_f(&ByteMask::EMPTY, None, None, &[]);
+        }
+        let frame = self.stack.last().unwrap();
+        recursive_act_cata::<_, _, _, _, _, _, _, _, _, COMPUTE_PATH>(
+            self.tree, &self.cur_node, frame.node_depth,
+            new_acc_f, fold_child_f, summarize_f, |_| (),
+        )
+    }
+}
+
+// Match iterative traversal's sharing policy: ACT's shared_node_id() always
+// returns None, so neither implementation memoizes results. When ACT gains
+// sharing metadata, both traversal strategies should use it.
+fn recursive_act_cata<Storage, V, Acc, W, Err, NewAccF, FoldChildF, SummarizeF, ValueF, const COMPUTE_PATH: bool>(
+    tree: &ArenaCompactTree<Storage>, node: &Node, node_depth: usize,
+    new_acc_f: NewAccF, fold_child_f: FoldChildF, summarize_f: SummarizeF, value_f: ValueF,
+) -> Result<W, Err>
+where
+    Storage: AsRef<[u8]>,
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    ValueF: Copy + Fn(u64) -> V,
+{
+    let result = match node {
+        Node::Branch(branch) => {
+            let value = branch.value.map(value_f);
+            let mut accumulator = None;
+            if let Some(mut child_id) = branch.first_child {
+                let mut acc = new_acc_f(&branch.bytemask)?;
+                for _ in branch.bytemask.iter() {
+                    let (child, next_id) = tree.get_node(child_id);
+                    let child_result = recursive_act_cata::<_, _, _, _, _, _, _, _, _, COMPUTE_PATH>(
+                        tree, &child, 0,
+                        new_acc_f, fold_child_f, summarize_f, value_f,
+                    )?;
+                    fold_child_f(&branch.bytemask, child_result, &mut acc)?;
+                    child_id = next_id;
+                }
+                accumulator = Some(acc);
+            }
+            summarize_f(&branch.bytemask, value.as_ref(), accumulator, &[])?
+        }
+        Node::Line(line) => {
+            let prefix = &tree.get_line(line.path)[node_depth..];
+            if let Some(child_id) = line.child {
+                let (child, _) = tree.get_node(child_id);
+                let child_result = recursive_act_cata::<_, _, _, _, _, _, _, _, _, COMPUTE_PATH>(
+                    tree, &child, 0,
+                    new_acc_f, fold_child_f, summarize_f, value_f,
+                )?;
+                crate::morphisms::summarize_run::<_, _, _, _, _, _, _, COMPUTE_PATH>(
+                    None, Some(child_result), prefix, new_acc_f, fold_child_f, summarize_f,
+                )?
+            } else {
+                let value = line.value.map(value_f);
+                summarize_f(
+                    &ByteMask::EMPTY, value.as_ref(), None,
+                    if COMPUTE_PATH { prefix } else { &[] },
+                )?
+            }
+        }
+    };
+    Ok(result)
+}
+
 impl<'tree, Storage, Value> Zipper for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
@@ -2996,11 +3094,12 @@ impl<'tree, Storage, Value> ZipperConcrete for ACTZipper<'tree, Storage, Value>
 where Storage: AsRef<[u8]>
 {
     fn shared_node_id(&self) -> Option<u64> {
-        // TODO: no way to detect now
+        // TODO: expose ACT sharing metadata. Both cached catamorphism strategies
+        // currently revisit shared subtries because this information is absent.
         None
     }
     fn is_shared(&self) -> bool {
-        // TODO: no way to detect now
+        // TODO: expose ACT sharing metadata.
         false
     }
 }
@@ -3464,6 +3563,16 @@ mod tests {
             }
         }
     }
+
+    crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!(
+        act_zipper,
+        |keys: &[&[u8]]| {
+            let map = keys.iter().enumerate().map(|(idx, path)| (*path, idx as u64)).collect::<PathMap<u64>>();
+            ArenaCompactTree::from_zipper(map.read_zipper(), |&value| value)
+        },
+        |tree: &mut ArenaCompactTree<Vec<u8>>| tree.read_zipper_u64(),
+        CatamorphismCached
+    );
 
     crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!(
         act_zipper,

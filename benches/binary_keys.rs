@@ -248,7 +248,24 @@ mod val_count {
 
     #[cfg(feature = "arena_compact")]
     #[divan::bench(args = [125, 250, 500, 1000, 2000, 4000, 100000])]
-    fn act(bencher: Bencher, n: u64) {
+    fn act_recursive(bencher: Bencher, n: u64) {
+        use pathmap::arena_compact::ArenaCompactTree;
+        use pathmap::morphisms::CatamorphismCached;
+
+        let map = build_map(n);
+        let expected = map.iter().count();
+        let tree = ArenaCompactTree::from_zipper(map.read_zipper(), |&value| value);
+        let zipper = tree.read_zipper_u64();
+        let mut sink = 0;
+        bencher.bench_local(|| {
+            *black_box(&mut sink) = zipper.val_count();
+        });
+        assert_eq!(sink, expected);
+    }
+
+    #[cfg(feature = "arena_compact")]
+    #[divan::bench(args = [125, 250, 500, 1000, 2000, 4000, 100000])]
+    fn act_iterative(bencher: Bencher, n: u64) {
         use pathmap::arena_compact::ArenaCompactTree;
         use pathmap::morphisms::CatamorphismCachedIterative;
 
