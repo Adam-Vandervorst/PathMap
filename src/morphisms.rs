@@ -2070,6 +2070,110 @@ pub(crate) mod cached_catamorphism_tests {
         assert_reconstructs_like(&map, &map);
     }
 
+    // Isolate regressions that have aborted or hung, so they cannot take down
+    // the entire suite. Under Miri, run the body directly for UB diagnostics.
+    fn run_cata_regression_in_child(name: &str) -> bool {
+        #[cfg(miri)]
+        {
+            let _ = name;
+            false
+        }
+        #[cfg(not(miri))]
+        {
+            use std::process::{Command, Stdio};
+            use std::time::{Duration, Instant};
+
+            let test = format!("morphisms::cached_catamorphism_tests::{name}");
+            const CHILD_TEST: &str = "PATHMAP_CATA_REGRESSION_CHILD";
+            if std::env::var(CHILD_TEST).as_deref() == Ok(test.as_str()) {
+                return false;
+            }
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD_TEST, &test)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("{test} did not finish within 20 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{test} failed: {}\n{}\n{}",
+                output.status, String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr));
+            true
+        }
+    }
+
+    // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5516518307, case 1.
+    #[test]
+    fn recursive_cata_regression_value_above_long_child_run() {
+        use crate::morphisms::{CatamorphismCached, CatamorphismCachedIterative};
+
+        let map = map_from_keys(&[b"a", b"abcd", b"abce"]);
+        assert_reconstructs_like(&map, &map);
+        assert_eq!(CatamorphismCached::hash(&map), CatamorphismCachedIterative::hash(&map));
+    }
+
+    // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5516518307, case 2.
+    #[test]
+    fn cached_cata_regression_dangling_branch() {
+        use crate::morphisms::{CatamorphismCached, CatamorphismCachedIterative};
+
+        if run_cata_regression_in_child("cached_cata_regression_dangling_branch") {
+            return;
+        }
+        let mut map = map_from_keys(&[b"aa", b"ab", b"ba", b"bb", b"b"]);
+        map.remove_val_at(b"ba", false);
+        map.remove_val_at(b"bb", false);
+        assert_eq!(CatamorphismCached::val_count(&map), 3);
+        assert_eq!(CatamorphismCachedIterative::val_count(&map), 3);
+        assert_reconstructs_like(&map, &map_from_keys(&[b"aa", b"ab", b"b"]));
+    }
+
+    // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5516518307, case 3.
+    #[test]
+    fn recursive_cata_regression_prefix_zipper() {
+        use crate::zipper::{PrefixZipper, ZipperInfallibleSubtries};
+
+        let map = map_from_keys(&[b"ab", b"ac"]);
+        let zipper = PrefixZipper::new(b"xy".as_slice(), map.read_zipper());
+        let expected = map_from_keys(&[b"xyab", b"xyac"]);
+        assert_same_paths(&zipper.make_map(), &expected);
+        assert_reconstructs_like(&zipper, &expected);
+    }
+
+    // https://github.com/Adam-Vandervorst/PathMap/pull/31#issuecomment-5518280164.
+    #[test]
+    fn cached_cata_regression_join_k_path_shared_first_byte() {
+        use crate::morphisms::{CatamorphismCached, CatamorphismCachedIterative};
+
+        if run_cata_regression_in_child("cached_cata_regression_join_k_path_shared_first_byte") {
+            return;
+        }
+        let mut map = map_from_keys(&[b"aaa", b"bab"]);
+        assert!(map.write_zipper().join_k_path_into(1, false));
+        assert_eq!(map.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+            [b"aa".to_vec(), b"ab".to_vec()]);
+
+        // Check indexed descent first: the malformed shape can make the
+        // iterative catamorphism loop forever if traversal proceeds past it.
+        let mut zipper = map.read_zipper();
+        zipper.descend_to_byte(b'a');
+        assert_eq!(zipper.child_count(), 2);
+        assert_eq!(zipper.descend_indexed_byte(1), Some(b'b'));
+        assert_eq!(CatamorphismCached::val_count(&map), 2);
+        assert_eq!(CatamorphismCachedIterative::val_count(&map), 2);
+        assert_reconstructs_like(&map, &map_from_keys(&[b"aa", b"ab"]));
+    }
+
     /// A value and a child with different first bytes must be folded in ascending byte order.
     ///
     /// The keys are deliberately chosen only through the public map API; their physical node
