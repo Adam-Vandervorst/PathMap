@@ -606,17 +606,6 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 }
 
 impl<V: Clone + Send + Sync, A: Allocator> CellByteNode<V, A> {
-
-    /// Clones this node into its ordinary representation without cloning its pinned CoFrees.
-    pub(crate) fn clone_as_dense(&self) -> DenseByteNode<V, A> {
-        let mut dense_node = DenseByteNode::with_capacity_in(self.values.len(), self.alloc.clone());
-        dense_node.mask = self.mask;
-        dense_node.values.extend(self.values.iter().map(|cf| {
-            OrdinaryCoFree::new(cf.rec().cloned(), cf.val().cloned())
-        }));
-        dense_node
-    }
-
     /// Ensures that a CoFree exists for the specified key, and returns a reference to the node and
     /// value option
     ///
@@ -1454,8 +1443,10 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 self.pmeet(other_dense_node).map(|new_node| TrieNodeODRc::new_in(new_node, self.alloc.clone()))
             },
             LINE_LIST_NODE_TAG => {
+                //The list node enumerates its payloads, but `self` is the left operand of every
+                // collision, hence `swapped`
                 let other_list_node = unsafe { other.as_list_unchecked() };
-                other_list_node.pmeet_dyn(self.as_tagged()).invert_identity()
+                other_list_node.pmeet_dyn_oriented(self.as_tagged(), true).invert_identity()
             },
             #[cfg(feature = "bridge_nodes")]
             TaggedNodeRef::BridgeNode(other_bridge_node) => {
@@ -1465,9 +1456,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> TrieNode<V, A> 
                 let other_byte_node = unsafe { other.as_cell_unchecked() };
                 self.pmeet(other_byte_node).map(|new_node| TrieNodeODRc::new_in(new_node, self.alloc.clone()))
             },
-            TINY_REF_NODE_TAG => {
-                let tiny_node = unsafe { other.as_tiny_unchecked() };
-                tiny_node.pmeet_dyn(self.as_tagged()).invert_identity()
+            TINY_REF_NODE_TAG => match unsafe { other.as_tiny_unchecked() }.into_full() {
+                Some(full_node) => self.pmeet_dyn(full_node.as_tagged()),
+                None => AlgebraicResult::None,
             },
             EMPTY_NODE_TAG => AlgebraicResult::None,
             _ => unsafe{ unreachable_unchecked() }
