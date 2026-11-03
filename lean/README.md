@@ -200,7 +200,10 @@ into a program over two maps and two zippers — `wz` writing into map 0, `rz`
 reading map 1, kept in separate maps so the real crate can hold both at once.
 
 ```
-header:
+version header (new inputs only):
+  magic := "PMFUZZ\x01\x00"                  -- eight bytes
+  selectors := u16le                        -- 1 through 256
+map/zipper header:
   n  := u8 % 8                              -- entries seeded into map0
   n × ( len := u8 % 6 ; len × pathbyte ; val := u8 )
   n  := u8 % 8                              -- entries seeded into map1
@@ -208,29 +211,13 @@ header:
   r0 := u8 % 4 ; r0 × pathbyte              -- write zipper root
   r1 := u8 % 4 ; r1 × pathbyte              -- read  zipper root
 body:
-  repeated: op := u8 % 56 ; operands per op
+  repeated: op := u8 % selectors ; operands per op
 ```
 
-This is the headerless format, whose selector count is permanently 56. New
-inputs start with the eight bytes `PMFUZZ\x01\x00`, then a little-endian u16
-selector count (1 through 256), followed by the same map/zipper header. Operation
-bytes are reduced modulo the recorded count, independently of the running
-software's operation table. Truncated headers and invalid counts are rejected.
-Readers auto-detect this format by the magic string; inputs without it use the
-legacy selector count of 56.
-Operation 56 is `remove_subtrie`, with one boolean prune operand.
-Operation 57 is `descend_last_val`. It consumes a target byte and always uses
-the read zipper, like `to_next_val`.
-The model selects the greatest valued path in the starting subtree, including
-the focus itself. Success means a value was found, even without movement;
-failure leaves the focus unchanged.
-
-Operations 58 and 59 are `to_prev_step` and `to_prev_val`, each with a target
-byte. Stepping can target either zipper; value iteration always uses the read
-zipper, matching `to_next_val`. The model selects the greatest existing
-non-root path (or valued path) strictly before the focus, wrapping from the
-root to the last such location. Nonexistent starting paths are allowed;
-exhaustion returns `false` at the zipper root, even when it holds a value.
+Readers detect the version header by its magic bytes and reject truncated
+headers or invalid selector counts. Headerless inputs use 56 selectors.
+Each input's selector count controls decoding independently of the running
+software's operation table.
 
 Generators always write the current header, using `NOPS` in
 `lean/input_format.py`, which must match `differential/src/harness.rs`.
@@ -251,12 +238,6 @@ is a textual diff.
 
 The op table lives in `Fuzz.lean` (`PathMapModel.Fuzz.step`) and
 `differential/src/harness.rs`; **the two must be changed together.**
-
-`Zip.removeSubtrie` clears the focus value and all descendants, then optionally
-prunes. Its boolean result counts removal of a value or branch, including a
-dangling descendant, but not pruning an already dangling focus. Build-time
-checks cover removal, unrelated content, cursor stability, and the zipper-root
-bound; differential operation 56 exercises the optimized Rust implementation.
 
 ### Front ends
 

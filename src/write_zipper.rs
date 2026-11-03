@@ -7069,6 +7069,61 @@ mod tests {
     }
 
     #[test]
+    fn set_val_at_through_shared_child_keeps_clone_unchanged() {
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(b"x");
+            wz.set_val_at(b"ab", 0);
+            wz.set_val_at(b"ac", 1);
+        }
+        let snapshot = map.clone();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(b"x");
+            assert_eq!(wz.set_val_at(b"ab", 2), Some(0));
+            assert_eq!(wz.set_val_at(b"ad", 3), None);
+            assert_eq!(wz.path(), b"x");
+        }
+        assert_eq!(map.val_count(), 3);
+        assert_eq!(map.val_at(b"xab"), Some(&2));
+        assert_eq!(map.val_at(b"xac"), Some(&1));
+        assert_eq!(map.val_at(b"xad"), Some(&3));
+        assert_eq!(snapshot.val_count(), 2);
+        assert_eq!(snapshot.val_at(b"xab"), Some(&0));
+        assert_eq!(snapshot.val_at(b"xac"), Some(&1));
+        assert_eq!(snapshot.val_at(b"xad"), None);
+    }
+
+    #[test]
+    fn set_val_at_through_child_at_node_key_length_boundary() {
+        let focus = [0u8; 40];
+        for combined_len in [MAX_NODE_KEY_BYTES, MAX_NODE_KEY_BYTES + 1] {
+            let mut path = b"ab".to_vec();
+            path.resize(combined_len - focus.len(), b'1');
+            let mut map = PathMap::<u64>::new();
+            {
+                let mut wz = map.write_zipper();
+                wz.descend_to(&focus);
+                assert_eq!(wz.set_val_at(b"ab", 0), None);
+                assert_eq!(wz.set_val_at(b"ac", 1), None);
+                assert_eq!(wz.set_val_at(&path, 2), None);
+                assert_eq!(wz.set_val_at(&path, 3), Some(2));
+                assert_eq!(wz.path(), focus);
+                assert_eq!(wz.val_at(b"ab"), Some(&0));
+                assert_eq!(wz.val_at(b"ac"), Some(&1));
+                assert_eq!(wz.val_at(&path), Some(&3));
+            }
+            assert_eq!(map.val_count(), 3);
+            for (suffix, val) in [(&b"ab"[..], 0), (b"ac", 1), (&path, 3)] {
+                let mut full_path = focus.to_vec();
+                full_path.extend_from_slice(suffix);
+                assert_eq!(map.val_at(&full_path), Some(&val));
+            }
+        }
+    }
+
+    #[test]
     fn set_val_at_empty_path_sets_focus() {
         let mut map = PathMap::<u64>::new();
         {

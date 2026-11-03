@@ -41,6 +41,13 @@ def setVal (v : V) : Option V × Zip V :=
   let (old, t) := z.trie.setVal z.focus v
   (old, z.withTrie t)
 
+/-- `ZipperWriting::set_val_at`: set the value at a path relative to the focus,
+creating it if absent and returning the replaced value. The cursor and zipper
+root stay fixed; an empty path writes the focus itself. -/
+def setValAt (p : Path) (v : V) : Option V × Zip V :=
+  let (old, t) := z.trie.setVal (z.focus ++ p) v
+  (old, z.withTrie t)
+
 /-- Writing through the reference `get_val_mut` returns.
 
 Specified as: when there is a value, this is `set_val`; when there is not, it is

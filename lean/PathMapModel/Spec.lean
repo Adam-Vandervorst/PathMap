@@ -56,6 +56,14 @@ theorem descendTo_append (a b : Path) :
 theorem focus_descendTo (k : Path) : (z.descendTo k).focus = z.focus ++ k := by
   simp [focus, descendTo, List.append_assoc]
 
+@[simp] theorem path_setValAt (p : Path) (v : V) : (z.setValAt p v).2.path = z.path := rfl
+
+@[simp] theorem root_setValAt (p : Path) (v : V) : (z.setValAt p v).2.root = z.root := rfl
+
+/-- Writing an empty relative path is exactly writing the focus. -/
+@[simp] theorem setValAt_nil (v : V) : z.setValAt [] v = z.setVal v := by
+  simp [setValAt, setVal]
+
 /-- `origin_path = root_prefix_path ++ path`, as documented on `ZipperAbsolutePath`. -/
 theorem origin_eq_root_append_path : z.rootPrefixPath ++ z.path = z.focus := rfl
 
@@ -225,6 +233,10 @@ def setValThenVal (ops : ValOps V) (z : Zip V) (v : V) : Bool :=
   match ((z.setVal v).2).entry with
   | .valued w => ops.beq w v
   | .bare | .absent => false
+
+/-- A relative write produces the same trie as descending and setting there. -/
+def setValAtAgrees (ops : ValOps V) (z : Zip V) (p : Path) (v : V) : Bool :=
+  PathMap.beqT ops (z.setValAt p v).2.trie ((z.descendTo p).setVal v).2.trie
 
 /-- `remove_val` clears the value but leaves the location dangling — which is
 to say the focus ends up exactly `.bare`. -/

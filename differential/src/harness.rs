@@ -26,7 +26,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 60;
+pub const NOPS: usize = 61;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -957,6 +957,11 @@ pub fn run_ops<R: ReadSource>(
                     let _t = get!(d.modn(2));
                     ("to_prev_val", show_bool(rz.to_prev_val()).to_string())
                 }
+                60 => {
+                    let p = get!(d.path(6));
+                    let v = get!(d.u8()) as u64;
+                    ("set_val_at", show_val(wz.set_val_at(&p, v).as_ref()))
+                }
                 47 => {
                     let t = get!(d.modn(2));
                     // The blind-zipper addition: `descend_until` reporting the
@@ -1042,6 +1047,44 @@ mod input_format_tests {
             assert_eq!(run_act(&bytes, false), run_act(legacy, false));
             assert_eq!(emit_repro(&bytes, 256), emit_repro(legacy, 256));
         }
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_relative_writes() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            0, 0, 0, 0, // Empty maps and zipper roots.
+            0, 0, 1, 1, // Descend the write zipper to [1].
+            60, 2, 0, 1, 0, // [0,1] := 0.
+            60, 2, 0, 2, 1, // [0,2] := 1.
+            60, 2, 0, 1, 2, // [0,1] := 2, replacing 0 (issue #175).
+            60, 0, 9, 60, 0, 10, // Empty path writes the focus, then replaces it.
+            60, 2, 3, // Truncated path must not execute a write.
+        ]);
+        for trace in [run(&bytes, true), run_act(&bytes, false)] {
+            for expected in [
+                "1 set_val_at ret=- W=01",
+                "2 set_val_at ret=- W=01",
+                "3 set_val_at ret=0 W=01",
+                "4 set_val_at ret=- W=01",
+                "5 set_val_at ret=9 W=01",
+                "MAP0 _:-,01:10,0100:-,010001:2,010002:1",
+            ] {
+                assert!(trace.contains(expected), "missing {expected}:\n{trace}");
+            }
+            assert!(!trace.contains("6 set_val_at"), "{trace}");
+        }
+        let repro = emit_repro(&bytes, 256);
+        assert!(repro.contains("wz.set_val_at(&[0u8, 1], 2);"), "{repro}");
+        assert!(repro.contains("wz.set_val_at(&[], 10);"), "{repro}");
+
+        // With 60 selectors, byte 60 remains descend_to (op 0), not a write.
+        let mut old = WIRE_MAGIC.to_vec();
+        old.extend_from_slice(&60u16.to_le_bytes());
+        old.extend_from_slice(&[0, 0, 0, 0, 60, 0, 1, 2]);
+        let trace = run(&old, true);
+        assert!(trace.contains("0 descend_to"), "{trace}");
+        assert!(!trace.contains("set_val_at"), "{trace}");
     }
 
     #[test]
