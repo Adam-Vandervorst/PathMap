@@ -137,7 +137,7 @@ const U64_SIZE: usize = core::mem::size_of::<u64>();
 /// Size of the trailer that [`ArenaCompactTree::merge_zipper_into_file`]
 /// appends after each merge: two little-endian `u64`s,
 /// `[previous_suffix, previous_root]` (see [`ArenaCompactTree::root_history`]).
-const ROOT_TRAILER_SIZE: usize = 2 * U64_SIZE;
+pub const ROOT_TRAILER_SIZE: usize = 2 * U64_SIZE;
 
 /// File magic signature
 pub const MAGIC_LENGTH: usize = 8;
@@ -547,7 +547,7 @@ impl Counters {
 ///
 /// [ArenaCompactTree] can be constructed using [`ArenaCompactTree::<Vec<u8>>::from_zipper`]:
 ///
-/// ... Or opened from disk using [`ArenaCompactTree::<Mmap>::open`]:
+/// ... Or opened from disk using [`ArenaCompactTree::<Mmap>::open_mmap`]:
 pub struct ArenaCompactTree<Storage> {
     /// Backing storage for the trie
     storage: Storage,
@@ -1491,8 +1491,57 @@ use std::fs::{File, OpenOptions};
 
 pub struct FileDumper {
     buf_writer: BufWriter<File>,
-    line_buf: Vec<u8>,
-    line_map: HashMap::<u64, (usize, usize, LineId)>,
+    line_cache_entries: usize,
+}
+
+impl FileDumper {
+    fn line_matches(&mut self, offset: u64, end: u64, path: &[u8]) -> std::io::Result<bool> {
+        let mut header = [0; MAX_VARINT_SIZE];
+        let header_len = push_varint_u64(&mut &mut header[..], path.len() as u64)?;
+        let total = header_len + path.len();
+        if total as u64 > end - offset { return Ok(false); }
+        let buffered_start = end - self.buf_writer.buffer().len() as u64;
+        if offset >= buffered_start {
+            let start = (offset - buffered_start) as usize;
+            let stored = &self.buf_writer.buffer()[start..start + total];
+            return Ok(stored[..header_len] == header[..header_len] && stored[header_len..] == *path);
+        }
+        let mut bytes = [0; 8192];
+        for start in (0..total).step_by(bytes.len()) {
+            let len = (total - start).min(bytes.len());
+            let position = offset + start as u64;
+            let on_disk = buffered_start.saturating_sub(position).min(len as u64) as usize;
+            if on_disk != 0 {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileExt;
+                    self.buf_writer.get_ref().read_exact_at(&mut bytes[..on_disk], position)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    // Preserve the append position without flushing the buffered suffix.
+                    let file = self.buf_writer.get_mut();
+                    file.seek(SeekFrom::Start(position))?;
+                    let read = std::io::Read::read_exact(file, &mut bytes[..on_disk]);
+                    let restored = file.seek(SeekFrom::Start(buffered_start));
+                    read?;
+                    restored?;
+                }
+            }
+            if on_disk < len {
+                let buffered_offset = (position + on_disk as u64 - buffered_start) as usize;
+                bytes[on_disk..len].copy_from_slice(
+                    &self.buf_writer.buffer()[buffered_offset..buffered_offset + len - on_disk]);
+            }
+            let prefix = header_len.saturating_sub(start).min(len);
+            if prefix != 0 && bytes[..prefix] != header[start..start + prefix] { return Ok(false); }
+            if prefix < len {
+                let path_start = start + prefix - header_len;
+                if bytes[prefix..len] != path[path_start..path_start + len - prefix] { return Ok(false); }
+            }
+        }
+        Ok(true)
+    }
 }
 
 impl Write for FileDumper {
@@ -1520,8 +1569,7 @@ impl ArenaCompactTree<FileDumper> {
         let buf_writer = BufWriter::with_capacity(DUMPER_BUFFER_SIZE, file);
         let storage = FileDumper {
             buf_writer,
-            line_buf: Default::default(),
-            line_map: Default::default(),
+            line_cache_entries: usize::MAX,
         };
         let act = ArenaCompactTree {
             storage,
@@ -1550,16 +1598,17 @@ impl ArenaCompactTree<FileDumper> {
         let mut hasher = self.hasher.clone();
         hasher.write(path);
         let hash = hasher.finish();
-        if let Some(&(start, len, prev)) = self.storage.line_map.get(&hash) {
-            let buf = &self.storage.line_buf[start..start+len];
-            if buf == path {
+        if let Some(&prev) = self.line_map.get(&hash) {
+            if self.storage.line_matches(prev.0, self.position, path)? {
                 self.counters.add_line_data_reuse(path.len());
                 return Ok(prev);
             }
         }
+        // Only fingerprints and offsets are cached; stored bytes verify collisions.
+        if self.line_map.len() >= self.storage.line_cache_entries {
+            self.line_map.clear();
+        }
         let line_id = LineId(self.position);
-        let line_start = self.storage.line_buf.len();
-        self.storage.line_buf.extend_from_slice(path);
         let lenlen = push_varint_u64(
             &mut self.storage, path.len() as u64
         )? as u64;
@@ -1567,7 +1616,9 @@ impl ArenaCompactTree<FileDumper> {
         self.storage.write_all(path)?;
         self.position += path.len() as u64;
         self.counters.add_line_data(lenlen as usize + path.len());
-        self.storage.line_map.insert(hash, (line_start, path.len(), line_id));
+        if self.storage.line_cache_entries != 0 {
+            self.line_map.insert(hash, line_id);
+        }
         Ok(line_id)
     }
 }
@@ -1792,10 +1843,21 @@ pub struct ACTOutputStream {
 }
 
 impl ACTOutputStream {
-    /// Create (or truncate) the file at `path` and start streaming a trie into it
+    /// Create (or truncate) the file at `path` and start streaming a trie into it.
+    /// The reuse cache holds at most 262144 fingerprint-to-offset entries.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        Self::with_cache_limit(path, 262144)
+    }
+
+    /// Create a stream with at most `entries` cached fingerprints and ACT offsets.
+    /// Line bytes stay in the output file or its write buffer. Hash-table capacity
+    /// and metadata are additional. A zero entry limit disables caching.
+    /// Eviction may increase file size but never changes the tree's contents.
+    pub fn with_cache_limit(path: impl AsRef<Path>, entries: usize) -> Result<Self, std::io::Error> {
+        let mut act = ArenaCompactTree::<FileDumper>::open(path)?;
+        act.storage.line_cache_entries = entries;
         Ok(ACTOutputStream {
-            act: ArenaCompactTree::<FileDumper>::open(path)?,
+            act,
             stack: Vec::from([StreamFrame::empty()]),
             prev_path: Vec::new(),
             count: 0,
@@ -2868,8 +2930,9 @@ impl<'tree, Storage> ZipperForking<()> for ACTZipper<'tree, Storage, ()>
 where Storage: AsRef<[u8]>
 {
     type ReadZipperT<'t> = ACTZipper<'t, Storage, ()> where Self: 't;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        self.clone().with_root_here()
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
+        Some(self.clone().with_root_here())
     }
 }
 
@@ -2877,8 +2940,9 @@ impl<'tree, Storage> ZipperForking<u64> for ACTZipper<'tree, Storage, u64>
 where Storage: AsRef<[u8]>
 {
     type ReadZipperT<'t> = ACTZipper<'t, Storage, u64> where Self: 't;
-    fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
-        self.clone().with_root_here()
+    fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
+        if !self.path_exists() { return None; }
+        Some(self.clone().with_root_here())
     }
 }
 
@@ -4187,8 +4251,8 @@ mod tests {
         }
     }
 
-    /// A zipper can be rooted at a path that does not exist -- `fork_read_zipper` at an
-    /// off-trie focus makes one.  `reset` put the path back but cleared `invalid`
+    /// A zipper can be constructed at a path that does not exist.
+    /// `reset` put the path back but cleared `invalid`
     /// unconditionally, so the zipper came back believing it was rooted at its deepest
     /// real ancestor and answered `val()` with that ancestor's value.
     #[test]
@@ -4200,11 +4264,15 @@ mod tests {
         m.insert(&[1u8, 1], 72);
         let t = ArenaCompactTree::from_zipper(m.read_zipper(), |&v| v);
 
+        assert!(t.read_zipper_at_path(&[1u8]).fork_read_zipper().is_some());
+
         for root in [&[1u8, 1, 3][..], &[9u8], &[1u8, 0, 2, 5, 5]] {
             let mut az = t.read_zipper_u64();
             az.descend_to(root);
             assert!(!az.path_exists(), "{root:?}");
-            let mut fork = az.fork_read_zipper();
+            assert!(az.fork_read_zipper().is_none(), "{root:?}");
+            assert!(t.read_zipper_at_path(root).fork_read_zipper().is_none(), "{root:?}");
+            let mut fork = t.read_zipper_at_path_u64(root);
             assert!(!fork.path_exists(), "{root:?}");
             assert_eq!(fork.val(), None, "{root:?}");
             fork.reset();

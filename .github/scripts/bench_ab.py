@@ -165,6 +165,11 @@ class Bench:
         cmp = self.fmt.compare_fields(avg['base'], avg['head'], 'median_ns')
         self.results[bench] = {f'{g}/{c}': {'base': r['base'], 'head': r['other'], 'pct': r['pct']} for (g, c), r in cmp.items()}
         table = re.sub(r'\x1b\[[0-9;]*m', '', self.fmt.render_divan_table(cmp))
+        # a PR that adds, removes or renames cases leaves them on one side only; say so rather than drop them silently
+        for side, mine, theirs in (('base', avg['base'], avg['head']), ('head', avg['head'], avg['base'])):
+            only = sorted(f'{g}/{c}' for g, c in mine.keys() - theirs.keys())
+            if only:
+                table += f'\nonly in {side} ({len(only)}): ' + ', '.join(only)
         text = (f'{bench}  (base {self.short(self.base_sha)}  head {self.short(self.head_sha)}'
                 f'  rounds {rounds_so_far}  median ns)\n{table}\n\n')
         (self.out / f'cmp-{bench}.txt').write_text(text)

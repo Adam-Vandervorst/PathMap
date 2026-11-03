@@ -24,8 +24,21 @@ use pathmap::zipper::*;
 // `str::lines()` recovers them then.
 use core::fmt::Write as _;
 
-/// Number of distinct operations. Must match `PathMapModel.Fuzz.nops`.
-pub const NOPS: usize = 56;
+/// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
+/// Keep operation IDs permanently assigned.
+pub const NOPS: usize = 61;
+/// Unversioned inputs retain their original operation decoding.
+pub const LEGACY_NOPS: usize = 56;
+/// Input header marker, followed by a little-endian u16 selector count (1..=256).
+pub const WIRE_MAGIC: &[u8] = b"PMFUZZ\x01\x00";
+
+/// Header for new inputs. Decoding always uses the recorded count, never `NOPS`.
+pub fn input_header() -> Vec<u8> {
+    assert!((1..=256).contains(&NOPS));
+    let mut header = WIRE_MAGIC.to_vec();
+    header.extend_from_slice(&(NOPS as u16).to_le_bytes());
+    header
+}
 /// Maximum operations executed. Must match the `maxSteps` default in `Fuzz.run`.
 pub const MAX_STEPS: usize = 256;
 /// Maximum entries in a `dump`. Must match `Fuzz.dumpAt`.
@@ -34,9 +47,24 @@ pub const DUMP_CAP: usize = 64;
 pub struct Dec<'a> {
     pub bytes: &'a [u8],
     pub pos: usize,
+    op_count: usize,
 }
 
 impl<'a> Dec<'a> {
+    pub fn new(bytes: &'a [u8]) -> Option<Self> {
+        let (pos, op_count) = if bytes.starts_with(WIRE_MAGIC) {
+            let count_bytes = bytes.get(WIRE_MAGIC.len()..WIRE_MAGIC.len() + 2)?;
+            let count = u16::from_le_bytes([count_bytes[0], count_bytes[1]]) as usize;
+            if !(1..=256).contains(&count) { return None; }
+            (WIRE_MAGIC.len() + 2, count)
+        } else {
+            (0, LEGACY_NOPS)
+        };
+        Some(Self { bytes, pos, op_count })
+    }
+    pub fn op(&mut self) -> Option<usize> {
+        self.modn(self.op_count)
+    }
     pub fn u8(&mut self) -> Option<u8> {
         let b = *self.bytes.get(self.pos)?;
         self.pos += 1;
@@ -151,8 +179,6 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
 /// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
-/// * `skip:off-root-prune` — a prune on a write zipper not rooted at the map
-///   root, where the depth pruned is a function of internal node layout.
 /// * `skip:quarantined` — the op is disabled outright (op 54).
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
@@ -161,7 +187,6 @@ pub const SKIP_AT_ROOT: &str = "skip:at-root";
 pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
 pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
-pub const SKIP_OFF_ROOT_PRUNE: &str = "skip:off-root-prune";
 pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 
 /// Does the focus have no descendants at all?
@@ -190,6 +215,15 @@ pub fn dump<Z: ZipperMoving + ZipperPath + ZipperValues<u64>>(z: &mut Z) -> Stri
         lines.push(format!("{}:{}", hex_path(z.path()), show_val(z.val())));
     }
     lines.join(",")
+}
+
+/// Dump a fork at the current focus. A missing path retains the trace's empty
+/// root marker, matching `Fuzz.dumpAt` on an absent subtree.
+pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
+    match z.fork_read_zipper() {
+        Some(mut fork) => dump(&mut fork),
+        None => "_:-".to_string(),
+    }
 }
 
 /// The read side of the harness: whatever the write zipper is reading *from*.
@@ -241,7 +275,7 @@ pub trait ReadSource:
 
 impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     fn dump_fork(&self) -> String {
-        dump(&mut self.fork_read_zipper())
+        dump_fork(self)
     }
     fn make_map_val_count(&self) -> Option<usize> {
         Some(self.make_map().val_count())
@@ -430,7 +464,7 @@ pub fn decode_header(d: &mut Dec) -> Option<(PathMap<u64>, PathMap<u64>, Vec<u8>
 /// Decode and execute a fuzzer input against a `PathMap` read source.
 ///
 pub fn run(bytes: &[u8], check: bool) -> String {
-    let mut d = Dec { bytes, pos: 0 };
+    let Some(mut d) = Dec::new(bytes) else { return "EMPTY\n".to_string(); };
     let (mut map0, map1, root0, root1) = match decode_header(&mut d) {
         Some(x) => x,
         None => return "EMPTY\n".to_string(),
@@ -465,14 +499,8 @@ pub fn run_ops<R: ReadSource>(
     {
         let mut wz = map0.write_zipper_at_path(root0);
         let mut step = 0usize;
-        // Explicit pruning is only well-defined for a zipper at the map root;
-        // off it the depth pruned depends on internal node layout.
-        let pruneable = root0.is_empty();
-        // The `prune` flag on the other operations is passed straight to
-        // `node_remove_*`, which prunes within the node even when it finds
-        // nothing and reports `None` -- so its effect is a function of node
-        // layout, not of the trie.  Always false.  See lean/FINDINGS.md #7.
-        let no_prune = false;
+        // Run pruning at every zipper root so layout-dependent defects remain
+        // visible to the differential comparison.
 
         macro_rules! get {
             ($e:expr) => {
@@ -487,7 +515,7 @@ pub fn run_ops<R: ReadSource>(
             if step >= MAX_STEPS {
                 break;
             }
-            let op = get!(d.u8()) as usize % NOPS;
+            let op = get!(d.op());
             let (name, ret): (&str, String) = match op {
                 0 => {
                     let t = get!(d.modn(2));
@@ -665,7 +693,7 @@ pub fn run_ops<R: ReadSource>(
                 26 => {
                     let t = get!(d.modn(2));
                     let s = if t == 0 {
-                        dump(&mut wz.fork_read_zipper())
+                        dump_fork(&wz)
                     } else {
                         (*rz).dump_fork()
                     };
@@ -676,40 +704,28 @@ pub fn run_ops<R: ReadSource>(
                     ("set_val", show_val(wz.set_val(v).as_ref()))
                 }
                 28 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    ("remove_val", show_val(wz.remove_val(no_prune).as_ref()))
+                    let pr = get!(d.boolean());
+                    ("remove_val", show_val(wz.remove_val(pr).as_ref()))
                 }
                 29 => ("create_path", show_bool(wz.create_path()).to_string()),
-                30 => {
-                    if pruneable {
-                        ("prune_path", format!("{}", wz.prune_path()))
-                    } else {
-                        ("prune_path", SKIP_OFF_ROOT_PRUNE.to_string())
-                    }
-                }
-                31 => {
-                    if pruneable {
-                        ("prune_ascend", format!("{}", wz.prune_ascend()))
-                    } else {
-                        ("prune_ascend", SKIP_OFF_ROOT_PRUNE.to_string())
-                    }
-                }
+                30 => ("prune_path", format!("{}", wz.prune_path())),
+                31 => ("prune_ascend", format!("{}", wz.prune_ascend())),
                 32 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     let leaky = focus_node_empty(&wz);
-                    let r = wz.remove_branches(no_prune);
+                    let r = wz.remove_branches(pr);
                     let s = if leaky { "?".to_string() } else { show_bool(r).to_string() };
                     ("remove_branches", s)
                 }
                 33 => {
                     let n = get!(d.modn(4));
                     let m = get!(d.path_n(n));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    let mask = ByteMask::from_iter(m.iter().copied());
-                    wz.remove_unmasked_branches(mask, no_prune);
+                    let pr = get!(d.boolean());
                     let mut canon: Vec<u8> = m.clone();
                     canon.sort_unstable();
                     canon.dedup();
+                    let mask = ByteMask::from_iter(m.iter().copied());
+                    wz.remove_unmasked_branches(mask, pr);
                     ("remove_unmasked_branches", hex_path(&canon))
                 }
                 34 => {
@@ -737,15 +753,12 @@ pub fn run_ops<R: ReadSource>(
                     ("join_map_into", s)
                 }
                 38 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, no_prune)))
+                    let pr = get!(d.boolean());
+                    ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, pr)))
                 }
                 39 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
-                    (
-                        "subtract_into",
-                        show_status_opt((*rz).do_subtract_into(&mut wz, no_prune)),
-                    )
+                    let pr = get!(d.boolean());
+                    ("subtract_into", show_status_opt((*rz).do_subtract_into(&mut wz, pr)))
                 }
                 40 => {
                     let leaky = focus_node_empty(&wz);
@@ -771,13 +784,13 @@ pub fn run_ops<R: ReadSource>(
                 }
                 42 => {
                     let k = get!(d.modn(4));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     // `join_k_path_into(0)` destroys the subtrie in pathmap 0.3.1.
                     if k == 0 {
                         ("join_k_path_into", SKIP_K0.to_string())
                     } else {
                         // The bool leaks node materialisation; see FINDINGS.md #8.
-                        let r = wz.join_k_path_into(k, no_prune);
+                        let r = wz.join_k_path_into(k, pr);
                         let s = if focus_node_empty(&wz) {
                             "?".to_string()
                         } else {
@@ -800,9 +813,9 @@ pub fn run_ops<R: ReadSource>(
                     ("remove_prefix", show_bool(wz.remove_prefix(n)).to_string())
                 }
                 45 => {
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     let leaky = focus_node_empty(&wz) && wz.val().is_none();
-                    let r = match wz.take_map(no_prune) {
+                    let r = match wz.take_map(pr) {
                         Some(m) => {
                             wz.graft_map(m);
                             "1"
@@ -813,7 +826,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 46 => {
                     let k = get!(d.modn(4));
-                    let _pr = get!(d.boolean()); // decoded for stream alignment; see `no_prune`
+                    let pr = get!(d.boolean());
                     // `meet_k_path_into` spins forever when the focus has no
                     // children, and escapes the focus subtree when k == 0.
                     // See `Zip.meetKPathUnspecified`.
@@ -824,7 +837,7 @@ pub fn run_ops<R: ReadSource>(
                     } else {
                         (
                             "meet_k_path_into",
-                            show_bool(wz.meet_k_path_into(k, no_prune)).to_string(),
+                            show_bool(wz.meet_k_path_into(k, pr)).to_string(),
                         )
                     }
                 }
@@ -927,6 +940,28 @@ pub fn run_ops<R: ReadSource>(
                     let p = get!(d.path(6));
                     ("meet_2", show_status_opt((*rz).do_meet_2(&mut wz, &p)))
                 }
+                56 => {
+                    let pr = get!(d.boolean());
+                    ("remove_subtrie", show_bool(wz.remove_subtrie(pr)).to_string())
+                }
+                57 => {
+                    let _t = get!(d.modn(2));
+                    ("descend_last_val", show_bool(rz.descend_last_val()).to_string())
+                }
+                58 => {
+                    let t = get!(d.modn(2));
+                    let r = tgt!(t, wz, *rz, z, z.to_prev_step());
+                    ("to_prev_step", show_bool(r).to_string())
+                }
+                59 => {
+                    let _t = get!(d.modn(2));
+                    ("to_prev_val", show_bool(rz.to_prev_val()).to_string())
+                }
+                60 => {
+                    let p = get!(d.path(6));
+                    let v = get!(d.u8()) as u64;
+                    ("set_val_at", show_val(wz.set_val_at(&p, v).as_ref()))
+                }
                 47 => {
                     let t = get!(d.modn(2));
                     // The blind-zipper addition: `descend_until` reporting the
@@ -955,4 +990,181 @@ pub fn run_ops<R: ReadSource>(
         }
     }
 
+}
+
+#[cfg(test)]
+mod input_format_tests {
+    use super::*;
+    use crate::{emit_repro, run_act};
+
+    #[test]
+    fn unversioned_inputs_keep_legacy_operation_decoding() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        let mut d = Dec::new(&bytes).unwrap();
+        for byte in 0..=255 {
+            assert_eq!(d.op(), Some(byte % 56));
+        }
+    }
+
+    #[test]
+    fn input_header_count_controls_decoding_independently_of_current_operation_count() {
+        for count in [1u16, 32, 56, 57, 58, 256] {
+            let mut bytes = WIRE_MAGIC.to_vec();
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend(0..=255);
+            let mut d = Dec::new(&bytes).unwrap();
+            for byte in 0..=255 {
+                assert_eq!(d.op(), Some(byte % count as usize));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_or_truncated_input_headers_are_rejected() {
+        let mut bytes = WIRE_MAGIC.to_vec();
+        assert!(Dec::new(&bytes).is_none());
+        bytes.push(57);
+        assert!(Dec::new(&bytes).is_none());
+        for count in [0u16, 257, u16::MAX] {
+            let mut bytes = WIRE_MAGIC.to_vec();
+            bytes.extend_from_slice(&count.to_le_bytes());
+            assert!(Dec::new(&bytes).is_none());
+            assert_eq!(run(&bytes, true), "EMPTY\n");
+            assert_eq!(run_act(&bytes, true), "EMPTY\n");
+        }
+    }
+
+    #[test]
+    fn header_count_56_preserves_legacy_replay_and_reproducer() {
+        for legacy in [
+            include_bytes!("../../lean/corpus/status-imprecise-join_map_into.bin").as_slice(),
+            include_bytes!("../../lean/corpus/status-imprecise-restrict.bin").as_slice(),
+        ] {
+            let mut bytes = WIRE_MAGIC.to_vec();
+            bytes.extend_from_slice(&56u16.to_le_bytes());
+            bytes.extend_from_slice(legacy);
+            assert_eq!(run(&bytes, false), run(legacy, false));
+            assert_eq!(run_act(&bytes, false), run_act(legacy, false));
+            assert_eq!(emit_repro(&bytes, 256), emit_repro(legacy, 256));
+        }
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_relative_writes() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            0, 0, 0, 0, // Empty maps and zipper roots.
+            0, 0, 1, 1, // Descend the write zipper to [1].
+            60, 2, 0, 1, 0, // [0,1] := 0.
+            60, 2, 0, 2, 1, // [0,2] := 1.
+            60, 2, 0, 1, 2, // [0,1] := 2, replacing 0 (issue #175).
+            60, 0, 9, 60, 0, 10, // Empty path writes the focus, then replaces it.
+            60, 2, 3, // Truncated path must not execute a write.
+        ]);
+        for trace in [run(&bytes, true), run_act(&bytes, false)] {
+            for expected in [
+                "1 set_val_at ret=- W=01",
+                "2 set_val_at ret=- W=01",
+                "3 set_val_at ret=0 W=01",
+                "4 set_val_at ret=- W=01",
+                "5 set_val_at ret=9 W=01",
+                "MAP0 _:-,01:10,0100:-,010001:2,010002:1",
+            ] {
+                assert!(trace.contains(expected), "missing {expected}:\n{trace}");
+            }
+            assert!(!trace.contains("6 set_val_at"), "{trace}");
+        }
+        let repro = emit_repro(&bytes, 256);
+        assert!(repro.contains("wz.set_val_at(&[0u8, 1], 2);"), "{repro}");
+        assert!(repro.contains("wz.set_val_at(&[], 10);"), "{repro}");
+
+        // With 60 selectors, byte 60 remains descend_to (op 0), not a write.
+        let mut old = WIRE_MAGIC.to_vec();
+        old.extend_from_slice(&60u16.to_le_bytes());
+        old.extend_from_slice(&[0, 0, 0, 0, 60, 0, 1, 2]);
+        let trace = run(&old, true);
+        assert!(trace.contains("0 descend_to"), "{trace}");
+        assert!(!trace.contains("set_val_at"), "{trace}");
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_reverse_iteration() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            2, 1, 0, 10, 1, 2, 20, // map0: [0], [2].
+            4, 0, 9, 1, 0, 11, 2, 0, 1, 12, 1, 2, 13, // map1: [], [0], [0,1], [2].
+            0, 0, // Zipper roots.
+            0, 0, 3, 3, 3, 3, // Missing write focus [3,3,3].
+            58, 0, 58, 0, 58, 0, 58, 0, // Step backward, exhaust, wrap.
+            57, 1, // Initialize reverse value iteration at [2].
+            59, 1, 59, 1, 59, 1, 59, 1, // Iterate, exhaust at the valued root, wrap.
+        ]);
+        // ACT's known val_count defect prevents --check at a missing focus.
+        for trace in [run(&bytes, true), run_act(&bytes, false)] {
+            for expected in [
+                "1 to_prev_step ret=1 W=02",
+                "2 to_prev_step ret=1 W=00",
+                "3 to_prev_step ret=0 W=_",
+                "4 to_prev_step ret=1 W=02",
+                "5 descend_last_val ret=1",
+                "6 to_prev_val ret=1",
+                "7 to_prev_val ret=1",
+                "8 to_prev_val ret=0",
+                "9 to_prev_val ret=1",
+            ] {
+                assert!(trace.contains(expected), "missing {expected}:\n{trace}");
+            }
+        }
+        let repro = emit_repro(&bytes, 256);
+        assert!(repro.contains("wz.to_prev_step();"));
+        assert!(repro.contains("rz.to_prev_val();"));
+        assert!(repro.contains("rz.descend_last_val();"));
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_last_value_descent() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            0, // map0 empty.
+            3, 0, 9, 1, 0, 10, 2, 0, 1, 11, // map1: [], [0], [0,1].
+            0, 0, // Zipper roots.
+            57, 1, 57, 1, // Find the last value; succeed again without movement.
+            0, 1, 1, 3, // Descend to missing [0,1,3].
+            57, 1, // Fail without leaving that subtree.
+        ]);
+        let trace = run(&bytes, true);
+        assert!(trace.contains("0 descend_last_val ret=1"), "{trace}");
+        assert!(trace.contains("1 descend_last_val ret=1"), "{trace}");
+        assert!(trace.contains("3 descend_last_val ret=0"), "{trace}");
+        assert!(trace.contains("R=000103 o000103 e0"), "{trace}");
+        assert!(emit_repro(&bytes, 256).contains("rz.descend_last_val();"));
+    }
+
+    #[test]
+    fn trace_and_reproducer_decode_headered_write_operations() {
+        // Clear [0] and its descendant, prune the dangling focus, then write there again.
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            4, 0, 9, 1, 0, 10, 2, 0, 1, 12, 1, 1, 11, // map0 entries.
+            1, 1, 2, 13, // map1 entry.
+            0, 0, // Zipper roots.
+            0, 0, 1, 0, // Descend to [0].
+            56, 0, 56, 1, 27, 14, // Remove, prune, then reuse.
+        ]);
+        let trace = run(&bytes, true);
+        assert!(
+            trace.contains("1 remove_subtrie ret=1 W=00 o00 e1 v- c0 n0"),
+            "{trace}"
+        );
+        assert!(
+            trace.contains("2 remove_subtrie ret=0 W=00 o00 e0 v- c0 n0"),
+            "{trace}"
+        );
+        assert!(trace.contains("MAP0 _:9,00:14,01:11"), "{trace}");
+        assert!(trace.contains("MAP1 _:-,02:13"), "{trace}");
+        let repro = emit_repro(&bytes, 256);
+        assert!(repro.contains("wz.remove_subtrie(false);"));
+        assert!(repro.contains("wz.remove_subtrie(true);"));
+        assert!(repro.contains("wz.set_val(14);"));
+    }
 }

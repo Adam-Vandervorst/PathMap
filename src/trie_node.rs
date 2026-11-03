@@ -132,10 +132,10 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///
     /// Returns `Some(val)` with the value that was removed, otherwise returns `None`
     ///
-    /// If `prune` is `true` this method will prune dangling paths within the node, otherwise
-    /// it will keep the dangling path.
+    /// Dangling paths may be pruned down to `prune_limit` bytes of `key`.
+    /// `usize::MAX` disables pruning.
     /// WARNING: This method may leave the node empty
-    fn node_remove_val(&mut self, key: &[u8], prune: bool) -> Option<V>;
+    fn node_remove_val(&mut self, key: &[u8], prune_limit: usize) -> Option<V>;
 
     /// Creates a dangling path up to `key` if none exists.  Does nothing if the path already exists
     ///
@@ -152,10 +152,11 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///
     /// Does nothing and returns 0 if `key` specifies a non-dagling or non-existent path.
     /// This method will not affect dangling paths other than those specified by `key`.
+    /// The first `min_keep_len` bytes of `key` must not be removed.
     /// This method may leave the node empty.
     /// This method should never be called with a zero-length key.  If the `key` arg is longer than the
     /// keys contained within the node, this method should return `false`
-    fn node_remove_dangling(&mut self, key: &[u8]) -> usize;
+    fn node_remove_dangling(&mut self, key: &[u8], min_keep_len: usize) -> usize;
 
     /// Sets the downstream branch from the specified `key`.  Does not affect the value at the `key`
     ///
@@ -171,16 +172,18 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// Returns `true` if one or more downstream branches were removed from the node; returns `false` if
     /// the node did not contain any downstream branches from the specified key
     ///
+    /// `prune_limit` is the minimum retained prefix length within this node. `usize::MAX` disables pruning.
     /// WARNING: This method may leave the node empty.  If eager pruning of branches is desired then the
     /// node should subsequently be checked to see if it is empty
-    fn node_remove_all_branches(&mut self, key: &[u8], prune: bool) -> bool;
+    fn node_remove_all_branches(&mut self, key: &[u8], prune_limit: usize) -> bool;
 
     /// Uses a 256-bit mask to filter down children and values from the specified `key`.  Does not affect
     /// the value at the `key`
     ///
+    /// `prune_limit` is the minimum retained prefix length within this node. `usize::MAX` disables pruning.
     /// WARNING: This method may leave the node empty.  If eager pruning of branches is desired then the
     /// node should subsequently be checked to see if it is empty
-    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune: bool);
+    fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune_limit: usize);
 
     /// Returns `true` if the node contains no children nor values, otherwise false
     fn node_is_empty(&self) -> bool;
@@ -357,7 +360,8 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     /// WARNING: This method may leave the node empty
     ///
     /// This method should never be called with `key.len() == 0`
-    fn take_node_at_key(&mut self, key: &[u8], prune: bool) -> Option<TrieNodeODRc<V, A>>;
+    /// `prune_limit` is the minimum retained prefix length within this node. `usize::MAX` disables pruning.
+    fn take_node_at_key(&mut self, key: &[u8], prune_limit: usize) -> Option<TrieNodeODRc<V, A>>;
 
     /// Allows for the implementation of the Lattice trait on different node implementations, and
     /// the logic to promote nodes to other node types
@@ -1707,11 +1711,11 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn node_remove_dangling(&mut self, key: &[u8]) -> usize {
+        pub fn node_remove_dangling(&mut self, key: &[u8], min_keep_len: usize) -> usize {
             match self {
-                Self::DenseByteNode(node) => node.node_remove_dangling(key),
-                Self::LineListNode(node) => node.node_remove_dangling(key),
-                Self::CellByteNode(node) => node.node_remove_dangling(key),
+                Self::DenseByteNode(node) => node.node_remove_dangling(key, min_keep_len),
+                Self::LineListNode(node) => node.node_remove_dangling(key, min_keep_len),
+                Self::CellByteNode(node) => node.node_remove_dangling(key, min_keep_len),
             }
         }
 
@@ -1749,11 +1753,11 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn node_remove_val(&mut self, key: &[u8], prune: bool) -> Option<V> {
+        pub fn node_remove_val(&mut self, key: &[u8], prune_limit: usize) -> Option<V> {
             match self {
-                Self::DenseByteNode(node) => node.node_remove_val(key, prune),
-                Self::LineListNode(node) => node.node_remove_val(key, prune),
-                Self::CellByteNode(node) => node.node_remove_val(key, prune),
+                Self::DenseByteNode(node) => node.node_remove_val(key, prune_limit),
+                Self::LineListNode(node) => node.node_remove_val(key, prune_limit),
+                Self::CellByteNode(node) => node.node_remove_val(key, prune_limit),
             }
         }
 
@@ -1765,26 +1769,26 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn node_remove_all_branches(&mut self, key: &[u8], prune: bool) -> bool {
+        pub fn node_remove_all_branches(&mut self, key: &[u8], prune_limit: usize) -> bool {
             match self {
-                Self::DenseByteNode(node) => node.node_remove_all_branches(key, prune),
-                Self::LineListNode(node) => node.node_remove_all_branches(key, prune),
-                Self::CellByteNode(node) => node.node_remove_all_branches(key, prune),
+                Self::DenseByteNode(node) => node.node_remove_all_branches(key, prune_limit),
+                Self::LineListNode(node) => node.node_remove_all_branches(key, prune_limit),
+                Self::CellByteNode(node) => node.node_remove_all_branches(key, prune_limit),
             }
         }
 
-        pub fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune: bool) {
+        pub fn node_remove_unmasked_branches(&mut self, key: &[u8], mask: ByteMask, prune_limit: usize) {
             match self {
-                Self::DenseByteNode(node) => node.node_remove_unmasked_branches(key, mask, prune),
-                Self::LineListNode(node) => node.node_remove_unmasked_branches(key, mask, prune),
-                Self::CellByteNode(node) => node.node_remove_unmasked_branches(key, mask, prune),
+                Self::DenseByteNode(node) => node.node_remove_unmasked_branches(key, mask, prune_limit),
+                Self::LineListNode(node) => node.node_remove_unmasked_branches(key, mask, prune_limit),
+                Self::CellByteNode(node) => node.node_remove_unmasked_branches(key, mask, prune_limit),
             }
         }
-        pub fn take_node_at_key(&mut self, key: &[u8], prune: bool) -> Option<TrieNodeODRc<V, A>> {
+        pub fn take_node_at_key(&mut self, key: &[u8], prune_limit: usize) -> Option<TrieNodeODRc<V, A>> {
             match self {
-                Self::DenseByteNode(node) => node.take_node_at_key(key, prune),
-                Self::LineListNode(node) => node.take_node_at_key(key, prune),
-                Self::CellByteNode(node) => node.take_node_at_key(key, prune),
+                Self::DenseByteNode(node) => node.take_node_at_key(key, prune_limit),
+                Self::LineListNode(node) => node.take_node_at_key(key, prune_limit),
+                Self::CellByteNode(node) => node.take_node_at_key(key, prune_limit),
             }
         }
         pub fn join_into_dyn(&mut self, other: TrieNodeODRc<V, A>) -> (AlgebraicStatus, Result<(), TrieNodeODRc<V, A>>) where V: Lattice {
@@ -2659,11 +2663,35 @@ pub(crate) fn node_along_path_mut<'a, 'k, V: Clone + Send + Sync, A: Allocator>(
     (key, node)
 }
 
+/// Applies a node operation at a path, replacing the node if it needs to be upgraded.
+#[inline]
+pub(crate) fn with_node_at_path_mut<V, A, NodeF, RetryF, R>(root: &mut TrieNodeODRc<V, A>, path: &[u8], node_f: NodeF, retry_f: RetryF) -> R
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    NodeF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> Result<R, TrieNodeODRc<V, A>>,
+    RetryF: FnOnce(&mut TaggedNodeRefMut<'_, V, A>, &[u8]) -> R,
+{
+    debug_assert!(!path.is_empty());
+    let (remaining_key, node) = node_along_path_mut(root, path, true);
+    match node_f(&mut node.make_mut(), remaining_key) {
+        Ok(result) => result,
+        Err(replacement_node) => {
+            *node = replacement_node;
+            retry_f(&mut node.make_mut(), remaining_key)
+        }
+    }
+}
+
 /// Ensures the node is a CellByteNode
 ///
 /// Returns `true` if the node was upgraded and `false` if it already was a CellByteNode
-pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>) -> bool {
-    if !node.as_tagged().is_cell_node() {
+pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut TrieNodeODRc<V, A>, alloc: A) -> bool {
+    if node.is_empty() {
+        //The empty sentinel can't be made mutable; there is nothing in it to keep
+        *node = TrieNodeODRc::new_in(crate::dense_byte_node::CellByteNode::new_in(alloc.clone()), alloc);
+        true
+    } else if !node.as_tagged().is_cell_node() {
         let replacement = node.make_mut().convert_to_cell_node();
         *node = replacement;
         true

@@ -568,6 +568,29 @@ impl core::ops::BitAndAssign for ByteMask {
     }
 }
 
+impl core::ops::BitXor for ByteMask {
+    type Output = ByteMask;
+    #[inline]
+    fn bitxor(self, rhs: Self) -> ByteMask {
+        self.xor(&rhs)
+    }
+}
+
+impl core::ops::BitXorAssign for ByteMask {
+    #[inline]
+    fn bitxor_assign(&mut self, rhs: Self) {
+        *self = self.xor(&rhs)
+    }
+}
+
+impl core::ops::Not for ByteMask {
+    type Output = ByteMask;
+    #[inline]
+    fn not(self) -> ByteMask {
+        BitMask::not(&self)
+    }
+}
+
 impl Lattice for ByteMask {
     #[inline]
     fn pjoin(&self, other: &Self) -> AlgebraicResult<Self> {
@@ -651,6 +674,15 @@ pub trait BitMask {
     fn not(&self) -> Self where Self: Sized;
 }
 
+#[inline] const fn u64_4_raw_set_bit(mask : &mut [u64;4], k : u8) {
+        let idx = (k / 64) as usize;
+        mask[idx] |= 1 << (k % 64);
+}
+#[inline] const fn u64_4_raw_clear_bit(mask : &mut [u64;4], k : u8) {
+        let idx = (k / 64) as usize;
+        mask[idx] &= !(1 << (k % 64));
+}
+
 impl BitMask for [u64; 4] {
     #[inline]
     fn count_bits(&self) -> usize {
@@ -669,13 +701,11 @@ impl BitMask for [u64; 4] {
     }
     #[inline]
     fn set_bit(&mut self, k: u8) {
-        let idx = (k / 64) as usize;
-        self[idx] |= 1 << (k % 64);
+        u64_4_raw_set_bit(self, k);
     }
     #[inline]
     fn clear_bit(&mut self, k: u8) {
-        let idx = (k / 64) as usize;
-        self[idx] &= !(1 << (k % 64));
+        u64_4_raw_clear_bit(self, k);
     }
     #[inline]
     fn toggle_bit(&mut self, k: u8) {
