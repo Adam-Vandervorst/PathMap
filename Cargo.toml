@@ -143,5 +143,5 @@ harness = false
 required-features = ["arena_compact", "serialization"]
 
 [workspace]
-members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "validation/differential", "validation/algebra_sharing"]
+members = ["pathmap-derive", "examples/sampling", "examples/arena_compact_tests", "differential", "validation/algebra_sharing"]
 resolver = "2"
