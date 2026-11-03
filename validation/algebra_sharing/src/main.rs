@@ -9,15 +9,16 @@
 //! record IDs and fragment contents provide variation. A pseudorandom program
 //! then joins, meets, subtracts, and restricts those maps, often reusing earlier
 //! results. After every step, an independent flat path-set model checks the
-//! result's logical contents, and a sharing observer compares locations within
-//! the result. A symbolic model also follows sharing opportunities through later
-//! steps, so a gap introduced earlier remains visible in subsequent results.
+//! result's logical contents, and a sharing observer compares the live inputs
+//! and result as one sharing graph. A symbolic model also follows sharing
+//! opportunities through later steps, so an earlier gap remains visible.
 //!
 //! The observer measures two kinds of opportunity:
 //!
-//! * **Ordinary sharing:** one input fragment `S` occurs under many parents and
-//!   survives unchanged. Even if an op rebuilds those parents, their result
-//!   locations should still share one `S`.
+//! * **Ordinary sharing:** an existing input node `S` survives unchanged. Its
+//!   result locations should still reference `S`, sharing with the live input
+//!   and all its other owners, even when only one location survives. Rebuilding
+//!   a parent does not require copying its surviving children.
 //! * **Result-sharing:** the same shared pair `(S, T)` is combined at many
 //!   locations. Those locations could share one computed result. The current
 //!   implementation does not generally produce this sharing, so this category
@@ -29,8 +30,10 @@
 //! recomputed instead of reused.
 //!
 //! An obligation requires known shared inputs and surviving or repeated work;
-//! equal contents built independently do not qualify. Sharing comparisons use
-//! live zippers within one map, without carrying physical IDs between steps.
+//! equal contents built independently do not require interning. If either input
+//! offers a reusable node, retaining either is valid, provided the surviving
+//! group stays shared. Physical IDs are compared only while all owning maps are
+//! alive and immutable; no physical IDs are carried between steps.
 //! Fixed tests supplement the sweep with 100 parents, varying fanout,
 //! projection, boolean values, empty and root-valued operands, and an unvalued
 //! path.
@@ -82,8 +85,9 @@
 //!   each case; default `8`. A smaller number keeps an initial program prefix.
 //! * `PATHMAP_SHARING_SPOTS`: decimal cap on graft locations per case; default
 //!   is no cap. More spots can create higher sharing multiplicity; some cases
-//!   generate 100. Values below `2` act as `2`. Reducing the cap retains the
-//!   first graft locations, although a focused operation may choose a different
+//!   generate 100. Single occurrences are included; values below `1` act as `1`.
+//!   Reducing the cap retains the first graft locations, although a focused
+//!   operation may choose a different
 //!   location from that smaller set.
 //! * `PATHMAP_SHARING_ENFORCE_ORDINARY`: defaults to `0`, so ordinary-sharing
 //!   losses are counted and reported across all seeds. Set to `1` to stop at
@@ -114,9 +118,12 @@
 //!   one node. `Checked` counts such group observations; `Split` is the subset
 //!   that occupied multiple physical nodes. The same group can be observed at
 //!   several steps, so these are not counts of distinct bugs or lost bytes.
-//! * `Ordinary (surviving)` checks groups physically shared in an input whose
-//!   contents survived unchanged at multiple locations in the output. Its
-//!   `Checked - Split` difference is the number of checks that kept sharing.
+//! * `Ordinary (surviving)` checks unchanged input nodes together with their
+//!   surviving output locations. Each group includes a live input anchor, so
+//!   one output location can already lose sharing. A fresh copy shared by all
+//!   output locations also counts as a split from that anchor. When both inputs
+//!   supply equal nodes, either common anchor is acceptable. `Checked - Split`
+//!   counts groups that retained an existing node throughout the result.
 //! * `Result (computed)` checks groups where the same pair of physically shared
 //!   inputs underwent the same operation at multiple locations. A split means
 //!   those locations did not reuse one computed result.
@@ -324,14 +331,15 @@ fn append_fragment(keys: &mut Keys, at: &[u8], fragment: &Keys) {
 
 fn fragment(rng: &mut Rng, field: u8) -> State {
     let mut keys = Keys::new();
-    // The fixed field marker is encoding glue; later bytes carry variance.
+    // Vary the root fanout as well as deeper contents. A shared fragment can
+    // meet an operation directly in a byte-node slot or below compressed keys.
     let branch_count = match rng.below(16) {
         0 => 1,
         1 => 16,
         _ => 3 + rng.below(6),
     };
     for branch in 0..branch_count {
-        let mut path = vec![field, branch as u8, 0xf0];
+        let mut path = vec![branch as u8, field, 0xf0];
         let length = if rng.below(32) == 0 {
             16 + rng.below(16)
         } else {
@@ -383,11 +391,16 @@ fn record_spots(rng: &mut Rng) -> Vec<Vec<u8>> {
     let count = if rng.below(8) == 0 {
         100
     } else {
-        4 + rng.below(9)
+        1 + rng.below(12)
     };
-    let tag = rng.below(4) as u8;
     (0..count)
-        .map(|i| vec![0xa0, tag, (i >> 8) as u8, i as u8, 0x00, 0xb0])
+        .map(|i| {
+            let mut path = vec![i as u8];
+            for _ in 0..rng.below(6) {
+                path.push(rng.below(256) as u8);
+            }
+            path
+        })
         .collect()
 }
 
@@ -409,7 +422,9 @@ fn grafted(fragment: &State, spots: &[Vec<u8>], rng: &mut Rng, flavor: u8) -> St
             map.insert(&sibling, ());
             keys.insert(sibling);
         }
-        if flavor == 1 && i % 5 == 0 {
+        // Keep the map root unvalued: graft/take routes intentionally exclude
+        // source root values. Root-valued algebra is calibrated separately.
+        if flavor == 1 && i % 5 == 0 && spot.len() > 1 {
             let parent = spot[..spot.len() - 1].to_vec();
             map.insert(&parent, ());
             keys.insert(parent);
@@ -529,22 +544,6 @@ fn boundary_paths(map: &PathMap<()>) -> Vec<Vec<u8>> {
     paths
 }
 
-/// Physical sharing groups observed in one map. Paths are retained, never IDs.
-fn shared_groups(map: &PathMap<()>) -> Vec<Vec<Vec<u8>>> {
-    let mut groups: Vec<Vec<Vec<u8>>> = Vec::new();
-    for path in boundary_paths(map) {
-        if let Some(group) = groups
-            .iter_mut()
-            .find(|group| same_node(map, &group[0], &path))
-        {
-            group.push(path);
-        } else {
-            groups.push(vec![path]);
-        }
-    }
-    groups.into_iter().filter(|group| group.len() > 1).collect()
-}
-
 fn subtree(keys: &Keys, prefix: &[u8]) -> Keys {
     keys.iter()
         .filter_map(|key| key.strip_prefix(prefix).map(|suffix| suffix.to_vec()))
@@ -582,16 +581,17 @@ impl Tokens {
         self.next
     }
 
-    fn seed_map(&mut self, state: &mut State) {
-        for path in boundary_paths(&state.map) {
-            let prior = state
-                .tokens
-                .iter()
-                .find(|(other, _)| same_node(&state.map, other, &path))
-                .map(|(_, token)| *token);
-            state
-                .tokens
-                .insert(path, prior.unwrap_or_else(|| self.fresh()));
+    fn seed(&mut self, states: &mut [State]) {
+        // Seed one sharing graph for the live family, not independent graphs
+        // for each map. Addresses are used only while all owners are borrowed.
+        let witnesses: Vec<_> = states.iter().map(|state| state.map.clone()).collect();
+        let mut known = BTreeMap::new();
+        for (state, witness) in states.iter_mut().zip(&witnesses) {
+            for path in boundary_paths(witness) {
+                let id = witness.read_zipper_at_path(&path).shared_node_id().unwrap();
+                let token = *known.entry(id).or_insert_with(|| self.fresh());
+                state.tokens.insert(path, token);
+            }
         }
     }
 
@@ -718,40 +718,73 @@ fn check_ideal(output: &State, tokens: &Tokens, step: usize, counts: &mut Counts
     }
 }
 
+/// Observe a sharing group across all live inputs and the result. The input
+/// occurrences are anchors, not just a source of paths to compare in the result.
+/// IDs are scoped to this observation: every owning map remains alive and
+/// immutable, and no address is retained in State, Counts, or replay artifacts.
 fn check_ordinary(
-    input: &State,
+    inputs: &[&State],
     output: &State,
     seed: u64,
     trace: &str,
     enforce: bool,
     counts: &mut Counts,
 ) -> Option<String> {
-    for group in shared_groups(&input.map) {
-        let surviving: Vec<_> = group
-            .into_iter()
-            .filter(|path| {
-                let before = subtree(&input.keys, path);
-                !before.is_empty() && before == subtree(&output.keys, path)
-            })
-            .collect();
-        if surviving.len() < 2 {
-            continue;
+    // Keep roots observable even when they have only one handle. These observer
+    // handles are created after the operation, so they cannot change its behavior.
+    let witnesses: Vec<_> = inputs.iter().map(|input| input.map.clone()).collect();
+    let _output_witness = output.map.clone();
+    let mut anchors: BTreeMap<Vec<u8>, BTreeSet<u64>> = BTreeMap::new();
+    let mut groups: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+    for (input, witness) in inputs.iter().zip(&witnesses) {
+        for path in boundary_paths(witness) {
+            let before = subtree(&input.keys, &path);
+            if before.is_empty() || before != subtree(&output.keys, &path) {
+                continue;
+            }
+            let id = witness.read_zipper_at_path(&path).shared_node_id().unwrap();
+            anchors.entry(path.clone()).or_default().insert(id);
+            groups.entry(id).or_default().insert(path);
         }
-        counts.ordinary_groups += 1;
+    }
+
+    // If both operands offer equal but independently allocated subtries, either
+    // can be reused. Repeated occurrences must agree on one available anchor;
+    // accepting a different equal allocation at each path would hide a split.
+    // Deduplicate alternative input classes and order diagnostics by paths,
+    // never by allocator addresses.
+    let groups: BTreeSet<_> = groups.into_values().collect();
+    for paths in groups {
+        let surviving: Vec<_> = paths.into_iter().collect();
+        let mut available = anchors[&surviving[0]].clone();
+        for path in &surviving[1..] {
+            available.retain(|id| anchors[path].contains(id));
+        }
         let actual = partition(&output.map, &surviving);
-        if actual.len() > 1 {
+        let keeps_anchor = actual.iter().any(|group| {
+            output
+                .map
+                .read_zipper_at_path(&group[0])
+                .shared_node_id()
+                .is_some_and(|id| available.contains(&id))
+        });
+        // An unchanged output is another occurrence of its input's node. Even
+        // one output location can split from that live input anchor.
+        let physical_groups = actual.len() + usize::from(!keeps_anchor);
+        counts.ordinary_groups += 1;
+        if physical_groups > 1 {
             counts.ordinary_split += 1;
             if counts.ordinary_examples.len() < DISPLAY_LIMIT {
                 counts.ordinary_examples.push(Example::new(
                     seed,
                     trace,
                     &surviving[0],
-                    actual.len(),
+                    physical_groups,
                 ));
             }
             if enforce {
                 return Some(format!(
-                    "ordinary sharing lost: seed={seed}, {trace}, surviving={surviving:?}, physical_groups={actual:?}"
+                    "ordinary sharing lost: seed={seed}, {trace}, surviving={surviving:?}, node_groups={physical_groups}, output_partition={actual:?}, input_anchor_retained={keeps_anchor}"
                 ));
             }
         }
@@ -832,7 +865,7 @@ fn run_case(
     let mut spots = record_spots(&mut shape_rng);
     let s = fragment(&mut shape_rng, 0x31);
     let t = fragment(&mut shape_rng, 0x32);
-    spots.truncate(spot_limit.max(2));
+    spots.truncate(spot_limit.max(1));
     let mut program_rng = Rng(seed ^ 0x51ed_1dea_17ab_1e55);
     let maps = [
         grafted(&s, &spots, &mut Rng(seed ^ 0x1000), 0),
@@ -849,17 +882,15 @@ fn run_case(
             "construction: seed={seed}, map={i}"
         );
     }
-    for state in &mut pool {
-        tokens.seed_map(state);
-    }
+    tokens.seed(&mut pool);
     assert!(
-        !shared_groups(&pool[0].map).is_empty(),
-        "grafting failed to establish sharing: seed={seed}"
+        !boundary_paths(&pool[0].map).is_empty(),
+        "grafting failed to establish sharing with the source fragment: seed={seed}"
     );
 
     let mut trace = Vec::new();
-    // The first step guarantees a substantial result-sharing opportunity.
-    // Later steps draw from all prior results and force operation combinations.
+    // The first step combines distinct fragments; repeated locations expose
+    // result-sharing opportunities. Later steps reuse inputs and prior results.
     for step in 0..steps {
         let (op, ai, bi) = if step == 0 {
             (Op::Join, 0, 1)
@@ -936,25 +967,25 @@ fn run_case(
             s.keys,
             t.keys
         );
-        let failure = check_ordinary(left, &output, seed, &context, enforce_ordinary, counts)
-            .or_else(|| {
-                (ai != bi)
-                    .then(|| {
-                        check_ordinary(right, &output, seed, &context, enforce_ordinary, counts)
-                    })
-                    .flatten()
-            })
-            .or_else(|| {
-                check_result(
-                    left,
-                    right,
-                    &output,
-                    seed,
-                    &context,
-                    enforce_results,
-                    counts,
-                )
-            });
+        let failure = check_ordinary(
+            &[left, right],
+            &output,
+            seed,
+            &context,
+            enforce_ordinary,
+            counts,
+        )
+        .or_else(|| {
+            check_result(
+                left,
+                right,
+                &output,
+                seed,
+                &context,
+                enforce_results,
+                counts,
+            )
+        });
         if let Some(failure) = failure {
             return Some(Failure {
                 details: format!(
@@ -998,20 +1029,43 @@ fn projection_model(keys: &Keys, width: usize, meet: bool) -> Keys {
 #[test]
 fn observer_separates_shared_and_independently_built_fragments() {
     let mut rng = Rng(0xbee5);
-    let spots = record_spots(&mut rng);
     let source = fragment(&mut rng, 0x43);
-    let shared = grafted(&source, &spots, &mut rng, 0);
-    assert!(same_node(&shared.map, &spots[0], &spots[1]));
-
-    let mut rebuilt = PathMap::new();
-    for spot in &spots[..2] {
-        for suffix in &source.keys {
-            let mut path = spot.clone();
-            path.extend_from_slice(suffix);
-            rebuilt.insert(&path, ());
+    for count in [1, 2, 8] {
+        let spots: Vec<_> = (0..count).map(|i| vec![0xa0, i, 0xb0]).collect();
+        let input = grafted(&source, &spots, &mut rng, 0);
+        let independent = from_keys(source.keys.clone());
+        let alternative = grafted(&independent, &spots, &mut rng, 0);
+        let mut preserved = grafted(&source, &spots, &mut rng, 0);
+        let mut rebuilt = grafted(&independent, &spots, &mut rng, 0);
+        // Change the parent so root identity cannot answer the observation.
+        // The surviving child must retain sharing with an input anchor.
+        for state in [&mut preserved, &mut rebuilt] {
+            state.map.insert([0xf0, 0xff], ());
+            state.keys.insert(vec![0xf0, 0xff]);
+            assert_eq!(actual_keys(&state.map), state.keys);
         }
+        assert_eq!(preserved.keys, rebuilt.keys);
+        if count > 1 {
+            // Even a fresh copy shared perfectly within the output must not
+            // masquerade as preservation of the input's existing sharing.
+            assert!(same_node(&rebuilt.map, &spots[0], &spots[1]));
+        }
+        let observe = |inputs: &[&State], output: &State| {
+            let mut counts = Counts::default();
+            let failure =
+                check_ordinary(inputs, output, 0, "observer calibration", true, &mut counts);
+            assert!(counts.ordinary_groups > 0);
+            failure
+        };
+        assert!(observe(&[&input], &preserved).is_none());
+        assert!(observe(&[&input], &rebuilt).is_some());
+        let split = from_keys(preserved.keys.clone());
+        assert!(observe(&[&input], &split).is_some());
+        // Equal, independently allocated operands are alternatives. Reusing
+        // either one satisfies preservation; they need not become interned.
+        assert!(observe(&[&input, &alternative], &preserved).is_none());
+        assert!(observe(&[&input, &alternative], &rebuilt).is_none());
     }
-    assert!(!same_node(&rebuilt, &spots[0], &spots[1]));
 }
 
 #[test]
@@ -1039,7 +1093,7 @@ fn hundred_parent_edits_retain_one_shared_child() {
     let mut counts = Counts::default();
     assert!(
         check_ordinary(
-            &input,
+            &[&input],
             &output,
             0x5421,
             "100 parent edits",
@@ -1076,7 +1130,7 @@ fn parent_edits_preserve_shared_children_across_fanouts() {
         let mut counts = Counts::default();
         assert!(
             check_ordinary(
-                &input,
+                &[&input],
                 &output,
                 branches as u64,
                 "fanout parent edits",
@@ -1271,7 +1325,7 @@ fn focused_projections_keep_other_shared_occurrences() {
         let mut counts = Counts::default();
         assert!(
             check_ordinary(
-                &input,
+                &[&input],
                 &output,
                 0x3210_5544,
                 "focused projection",
@@ -1339,8 +1393,8 @@ fn seeded_algebra_sharing_sweep() {
             }
             let mut shape_rng = Rng(seed ^ 0x9e37_79b9_7f4a_7c15);
             let available_spots = record_spots(&mut shape_rng).len();
-            let mut minimal_spots = spot_limit.min(available_spots).max(2);
-            for candidate in 2..=minimal_spots {
+            let mut minimal_spots = spot_limit.min(available_spots).max(1);
+            for candidate in 1..=minimal_spots {
                 if run_case(
                     seed,
                     minimal_steps,
@@ -1387,7 +1441,7 @@ fn seeded_algebra_sharing_sweep() {
             let artifact = dir.join(format!("seed-{seed}-{mode}.txt"));
             let details = &failure.details;
             let body = format!(
-                "generator_version=4\nseed={seed}\nsteps={minimal_steps}\nspots={minimal_spots}\nmode={mode}\nreplay=PATHMAP_SHARING_START={seed} PATHMAP_SHARING_CASES=1 PATHMAP_SHARING_STEPS={minimal_steps} PATHMAP_SHARING_SPOTS={minimal_spots} {replay_enforcement} cargo run -p algebra-sharing-validation\n\n{details}\n"
+                "generator_version=5\nseed={seed}\nsteps={minimal_steps}\nspots={minimal_spots}\nmode={mode}\nreplay=PATHMAP_SHARING_START={seed} PATHMAP_SHARING_CASES=1 PATHMAP_SHARING_STEPS={minimal_steps} PATHMAP_SHARING_SPOTS={minimal_spots} {replay_enforcement} cargo run -p algebra-sharing-validation\n\n{details}\n"
             );
             std::fs::write(&artifact, body).expect("write sharing failure artifact");
             eprintln!("\nSHARING SWEEP — STRICT MODE: STOPPED");
@@ -1398,8 +1452,9 @@ fn seeded_algebra_sharing_sweep() {
                 end - start
             );
             let step_unit = if minimal_steps == 1 { "step" } else { "steps" };
+            let spot_unit = if minimal_spots == 1 { "spot" } else { "spots" };
             eprintln!(
-                "  Minimized to {minimal_steps} {step_unit} and {minimal_spots} graft spots."
+                "  Minimized to {minimal_steps} {step_unit} and {minimal_spots} graft {spot_unit}."
             );
             eprintln!("  Operation sequence:");
             for step in &failure.trace {
@@ -1446,7 +1501,10 @@ fn seeded_algebra_sharing_sweep() {
         counts.focused
     );
     eprintln!(
-        "\n  Split = missed sharing (ordinary: unnecessary make-unique; result: result not reused)."
+        "\n  Split = missed sharing (ordinary: input node not retained or occurrences split; result: result not reused)."
+    );
+    eprintln!(
+        "  Ordinary groups include a live input anchor, even for one surviving output location."
     );
     eprintln!("  Counts below are group checks after operations, not start/end inventories.");
     eprintln!("\n  Sharing opportunities     Checked   Split");
