@@ -97,8 +97,7 @@ value in `b`.
 The empty prefix counts here, so a root value in `b` validates everything and
 the result is `a` unchanged (root value included).  Otherwise the result never
 has a root value, because a node-level `prestrict` has no slot for one.  This is
-the documented behaviour of `PathMap::restrict`, and it is *not* what
-`ZipperWriting::restrict` does — see `Zip.restrict`. -/
+the documented behaviour of `PathMap::restrict` and `ZipperWriting::restrict`. -/
 def restrict (a b : PathMap V) : PathMap V :=
   if (b.valAt []).isSome then a else PathMap.restrictBelowRoot a b
 
