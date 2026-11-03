@@ -14,6 +14,10 @@ divergence shows up as a textual diff.
 The input is consumed one byte at a time; decoding stops (and the program ends)
 as soon as the input runs out.
 
+Versioned inputs start with the eight bytes `PMFUZZ\x01\x00` and a
+little-endian u16 selector count (1..=256). Headerless inputs use 56 selectors.
+Both forms then decode the same map/zipper header and operations:
+
 ```
 header:
   n         := u8 % 8            -- entries seeded into map0 (the write target)
@@ -23,7 +27,7 @@ header:
   r0        := u8 % 4 ; r0 × pathbyte    -- write zipper root
   r1        := u8 % 4 ; r1 × pathbyte    -- read  zipper root
 body:
-  repeated: op := u8 % 56 ; operands per op (see `Op.decode`)
+  repeated: op := u8 % selectors ; operands per op (see `step`)
 ```
 
 Every **path byte** is masked to `b % 4`, so the generated tries share prefixes
@@ -66,8 +70,6 @@ agree exactly or every input with a skip diverges.
 * `skip:empty-focus` — the focus has nothing below it, where the op's behaviour
   is a function of node materialisation rather than trie state.
 * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
-* `skip:off-root-prune` — a prune on a write zipper not rooted at the map root,
-  where the depth pruned is a function of internal node layout.
 * `skip:quarantined` — the op is disabled outright (op 54).
 
 Each is recorded in FINDINGS.md and commented at its site. -/
@@ -77,7 +79,6 @@ def skipAtRoot : String := "skip:at-root"
 def skipK0 : String := "skip:k0"
 def skipEmptyFocus : String := "skip:empty-focus"
 def skipEmptyPath : String := "skip:empty-path"
-def skipOffRootPrune : String := "skip:off-root-prune"
 def skipQuarantined : String := "skip:quarantined"
 
 /-! ## Rendering -/
@@ -118,6 +119,7 @@ def dumpAt (t : PathMap V) (root : Path) : String :=
 structure Dec where
   bytes : ByteArray
   pos : Nat
+  opCount : Nat := 56
 
 /-- Read one byte; `none` once the input is exhausted, which ends the program. -/
 def Dec.u8 (d : Dec) : Option (UInt8 × Dec) :=
@@ -189,40 +191,24 @@ def emit (s : St) (name : String) (ret : String) : St :=
 def showBool (b : Bool) : String := if b then "1" else "0"
 
 
-/-- Is the *explicit* `prune_path` / `prune_ascend` well-defined for this state?
-
-Only for a write zipper rooted at the map root.  Pruning happens in two places:
-`node_remove_*` prunes within the internal node holding the focus, and
-`prune_path_internal` prunes the trie above it but stops at the zipper's origin.
-With a non-empty zipper root the two disagree and the depth pruned becomes a
-function of node layout rather than of the logical trie — a 40-byte dangling
-chain under a zipper rooted at depth 5 prunes to the map root, a 100-byte one
-stops at the zipper root.
-
-The `prune` *flag* on the other operations is worse: it is passed straight to
-`node_remove_val` / `node_remove_all_branches`, which prune within the node even
-when they find nothing to remove and report `None`.  So `remove_val(true)` can
-delete a dangling location while returning `None`, and whether it does depends on
-where the node boundary falls.  The harness therefore always passes
-`prune = false` to those operations (see `noPrune`) and gates the explicit prune
-operations on this predicate. -/
-def pruneable (s : St) : Bool := s.wz.root.isEmpty
-
-/-- The `prune` flag the harness passes to operations that take one.
-
-Always `false`: the flag's effect is a function of internal node layout rather
-than of the logical trie, so there is nothing for a model to agree with.  See
-`pruneable` and lean/FINDINGS.md finding 7. -/
-def noPrune : Bool := false
-
 /-! ## The operation table
 
-`op % 47` selects the operation.  Ops `0`–`26` act on a target zipper chosen by
-a following `u8 % 2` byte (`0` = write zipper, `1` = read zipper); ops `27`–`46`
-are write-zipper operations. -/
+`op % selector_count` selects the operation (56 for headerless inputs). Ops `0`–`26`
+act on a target zipper chosen by a following `u8 % 2` byte (`0` = write zipper,
+`1` = read zipper); ops `27`–`46` and `56` are write-zipper operations. -/
 
-/-- Number of distinct operations.  Must match `NOPS` in `differential/src/harness.rs`. -/
-def nops : Nat := 56
+/-- Input header marker. Must match `WIRE_MAGIC` in the Rust harness. -/
+def wireMagic : List UInt8 := [80, 77, 70, 85, 90, 90, 1, 0]
+
+def Dec.init (bytes : ByteArray) : Option Dec := do
+  if bytes.data.toList.take wireMagic.length == wireMagic then
+    let d : Dec := { bytes, pos := wireMagic.length }
+    let (lo, d) ← d.u8
+    let (hi, d) ← d.u8
+    let count := lo.toNat + 256 * hi.toNat
+    if count == 0 || count > 256 then none
+    else some { d with opCount := count }
+  else some { bytes, pos := 0 }
 
 /-- A full `k`-path iteration: `descend_first_k_path` followed by
 `to_next_k_path` until it runs out (capped at 32 stops).  Returns the locations
@@ -254,7 +240,7 @@ def getTarget (s : St) (t : Nat) : Zip V := if t == 0 then s.wz else s.rz
 which ends the program. -/
 def step (s : St) (d : Dec) : Option (St × Dec) := do
   let (opRaw, d) ← d.u8
-  let op := opRaw.toNat % nops
+  let op := opRaw.toNat % d.opCount
   match op with
   | 0 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
             let (_, s) := onTarget s t (fun z => ((), z.descendTo p))
@@ -358,30 +344,29 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit s "make_map_val_count" (toString (z.makeMap.valCount [])), d)
   | 26 => do let (t, d) ← d.mod 2
              let z := getTarget s t
-             some (emit s "dump" (dumpAt z.trie z.focus), d)
+             let result := match z.forkReadZipper with
+               | some fork => dumpAt fork.trie fork.root
+               | none => "_:-"
+             some (emit s "dump" result, d)
   | 27 => do let (v, d) ← d.u8
              let (old, z) := s.wz.setVal (UInt64.ofNat v.toNat)
              some (emit { s with wz := z } "set_val" (showVal old), d)
-  | 28 => do let (_pr, d) ← d.bool
-             let (old, z) := s.wz.removeVal noPrune
+  | 28 => do let (pr, d) ← d.bool
+             let (old, z) := s.wz.removeVal pr
              some (emit { s with wz := z } "remove_val" (showVal old), d)
   | 29 => do let (r, z) := s.wz.createPath
              some (emit { s with wz := z } "create_path" (showBool r), d)
-  | 30 => do if pruneable s then
-               let (n, z) := s.wz.prunePath
-               some (emit { s with wz := z } "prune_path" (toString n), d)
-             else some (emit s "prune_path" skipOffRootPrune, d)
-  | 31 => do if pruneable s then
-               let (n, z) := s.wz.pruneAscend
-               some (emit { s with wz := z } "prune_ascend" (toString n), d)
-             else some (emit s "prune_ascend" skipOffRootPrune, d)
-  | 32 => do let (_pr, d) ← d.bool
+  | 30 => do let (n, z) := s.wz.prunePath
+             some (emit { s with wz := z } "prune_path" (toString n), d)
+  | 31 => do let (n, z) := s.wz.pruneAscend
+             some (emit { s with wz := z } "prune_ascend" (toString n), d)
+  | 32 => do let (pr, d) ← d.bool
              let leaky := s.wz.focusNodeIsEmpty
-             let (r, z) := s.wz.removeBranches noPrune
+             let (r, z) := s.wz.removeBranches pr
              some (emit { s with wz := z } "remove_branches"
                (if leaky then "?" else showBool r), d)
-  | 33 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (_pr, d) ← d.bool
-             let z := s.wz.removeUnmaskedBranches (ByteMask.ofList m) noPrune
+  | 33 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (pr, d) ← d.bool
+             let z := s.wz.removeUnmaskedBranches (ByteMask.ofList m) pr
              some (emit { s with wz := z } "remove_unmasked_branches" (hexPath (ByteMask.ofList m)), d)
   | 34 => do if s.act then some (emit s "graft" skipAct, d) else
              do
@@ -402,15 +387,15 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                let (st, z) := s.wz.joinMapInto ops s.rz.makeMap
                some (emit { s with wz := z } "join_map_into"
                  (if leaky then "?" else toString st), d)
-  | 38 => do let (_pr, d) ← d.bool
+  | 38 => do let (pr, d) ← d.bool
              if s.act then some (emit s "meet_into" skipAct, d)
              else
-               let (st, z) := s.wz.meetInto ops s.rz noPrune
+               let (st, z) := s.wz.meetInto ops s.rz pr
                some (emit { s with wz := z } "meet_into" (toString st), d)
-  | 39 => do let (_pr, d) ← d.bool
+  | 39 => do let (pr, d) ← d.bool
              if s.act then some (emit s "subtract_into" skipAct, d)
              else
-               let (st, z) := s.wz.subtractInto ops s.rz noPrune
+               let (st, z) := s.wz.subtractInto ops s.rz pr
                some (emit { s with wz := z } "subtract_into" (toString st), d)
   | 40 => do if s.act then some (emit s "restrict" skipAct, d) else
              do
@@ -432,7 +417,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              else
                let (r, z) := s.wz.restricting s.rz
                some (emit { s with wz := z } "restricting" (showBool r), d)
-  | 42 => do let (k, d) ← d.mod 4; let (_pr, d) ← d.bool
+  | 42 => do let (k, d) ← d.mod 4; let (pr, d) ← d.bool
              -- `join_k_path_into(0)` should be the identity but destroys the
              -- subtrie in pathmap 0.3.1; see `Zip.joinKPathInto`.
              if k == 0 then some (emit s "join_k_path_into" skipK0, d)
@@ -442,7 +427,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                -- representations, so `true` gets reported for a collapse that
                -- produced nothing.  Compared only when something survived.
                -- See FINDINGS.md #8.
-               let (r, z) := s.wz.joinKPathInto ops k noPrune
+               let (r, z) := s.wz.joinKPathInto ops k pr
                some (emit { s with wz := z } "join_k_path_into"
                  (if z.focusNodeIsEmpty then "?" else showBool r), d)
   | 43 => do let (p, d) ← d.path
@@ -456,9 +441,9 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 44 => do let (n, d) ← d.mod 6
              let (r, z) := s.wz.removePrefix n
              some (emit { s with wz := z } "remove_prefix" (showBool r), d)
-  | 45 => do let (_pr, d) ← d.bool
+  | 45 => do let (pr, d) ← d.bool
              let leaky := s.wz.focusNodeIsEmpty && s.wz.val.isNone
-             let (m, z) := s.wz.takeMap noPrune
+             let (m, z) := s.wz.takeMap pr
              if leaky then
                some (emit { s with wz := (z.graftMap (m.getD PathMap.empty)) }
                  "take_map_restore" "?", d)
@@ -466,7 +451,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              match m with
              | some mm => some (emit { s with wz := z.graftMap mm } "take_map_restore" "1", d)
              | none => some (emit { s with wz := z } "take_map_restore" "0", d)
-  | 46 => do let (k, d) ← d.mod 4; let (_pr, d) ← d.bool
+  | 46 => do let (k, d) ← d.mod 4; let (pr, d) ← d.bool
              -- `meet_k_path_into` is not implementable for these arguments; see
              -- `Zip.meetKPathUnspecified`, whose two disjuncts are split out here
              -- so the skip names which one fired.  The Rust side matches.
@@ -474,7 +459,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              else if s.wz.focusNodeIsEmpty then
                some (emit s "meet_k_path_into" skipEmptyFocus, d)
              else
-               let (r, z) := s.wz.meetKPathInto ops k noPrune
+               let (r, z) := s.wz.meetKPathInto ops k pr
                some (emit { s with wz := z } "meet_k_path_into" (showBool r), d)
   | 47 => do let (t, d) ← d.mod 2
              -- The blind-zipper addition: `descend_until` reporting the bytes it
@@ -543,6 +528,22 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                let b := { s.rz with path := s.rz.path ++ p }
                let (st, z) := s.wz.meet2 ops s.rz b
                some (emit { s with wz := z } "meet_2" (toString st), d)
+  | 56 => do let (pr, d) ← d.bool
+             let (removed, z) := s.wz.removeSubtrie pr
+             some (emit { s with wz := z } "remove_subtrie" (showBool removed), d)
+  | 57 => do let (_, d) ← d.mod 2
+             let (r, z) := s.rz.descendLastVal
+             some (emit { s with rz := z } "descend_last_val" (showBool r), d)
+  | 58 => do let (t, d) ← d.mod 2
+             let (r, s) := onTarget s t (fun z => z.toPrevStep)
+             some (emit s "to_prev_step" (showBool r), d)
+  | 59 => do let (_, d) ← d.mod 2
+             let (r, z) := s.rz.toPrevVal
+             some (emit { s with rz := z } "to_prev_val" (showBool r), d)
+  | 60 => do let (p, d) ← d.path
+             let (v, d) ← d.u8
+             let (old, z) := s.wz.setValAt p (UInt64.ofNat v.toNat)
+             some (emit { s with wz := z } "set_val_at" (showVal old), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/
@@ -586,7 +587,7 @@ def header (d : Dec) (act : Bool) : Option (St × Dec) := do
 
 /-- Decode and run a fuzzer input, returning the trace lines. -/
 def run (bytes : ByteArray) (maxSteps : Nat := 256) (act : Bool := false) : List String :=
-  match header { bytes, pos := 0 } act with
+  match Dec.init bytes >>= (fun d => header d act) with
   | none => ["EMPTY"]
   | some (s0, d) =>
       let s := loop maxSteps s0 d

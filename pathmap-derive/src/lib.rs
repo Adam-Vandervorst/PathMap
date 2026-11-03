@@ -474,7 +474,7 @@ fn derive_poly_zipper_with_traits(
     //         {
     //             type ReadZipperT<'a> = <#first_inner_type as pathmap::zipper::ZipperForking<V>>::ReadZipperT<'a> where Self: 'a;
 
-    //             fn fork_read_zipper<'a>(&'a self) -> Self::ReadZipperT<'a> {
+    //             fn fork_read_zipper<'a>(&'a self) -> Option<Self::ReadZipperT<'a>> {
     //                 match self {
     //                     #(#variant_arms => inner.fork_read_zipper(),)*
     //                 }

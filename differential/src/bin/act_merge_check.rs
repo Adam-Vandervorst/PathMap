@@ -1,6 +1,8 @@
 //! Checks `ArenaCompactTree::merge_zipper_into_file` against its specification.
 //!
-//!     cargo run -p differential --bin act_merge_check
+//! ```sh
+//! cargo run -p differential --bin act_merge_check
+//! ```
 //!
 //! ACT has no write zipper, but it can be *merged into*: given an ACT on disk
 //! and a zipper over some other trie, `merge_zipper_into_file` writes a new ACT
@@ -8,8 +10,10 @@
 //! join in which the zipper's value wins on a collision -- in the model's terms,
 //! `Trie.join` with the source preferred:
 //!
-//!     paths(merge(base, src)) = paths(base) ∪ paths(src)
-//!     val(merge(base, src), p) = val(src, p)  when src has one, else val(base, p)
+//! ```text
+//! paths(merge(base, src)) = paths(base) ∪ paths(src)
+//! val(merge(base, src), p) = val(src, p)  when src has one, else val(base, p)
+//! ```
 //!
 //! Both halves are checked here, over randomly generated prefix-sharing tries of
 //! the same shape the differential harness produces.

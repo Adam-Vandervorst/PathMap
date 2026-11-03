@@ -306,6 +306,38 @@ fn binary_zipper_step_iter(bencher: Bencher, n: u64) {
     });
 }
 
+#[divan::bench(args = [50, 100, 200, 400, 800, 1600])]
+fn binary_zipper_prev_iter(bencher: Bencher, n: u64) {
+
+    let keys = make_keys(n as usize, 1);
+    let map: PathMap<usize> = keys.iter().enumerate().map(|(n, s)| (s, n)).collect();
+
+    //Benchmark iterating the values backwards
+    bencher.bench_local(|| {
+        let mut count = 0;
+        let mut zipper = map.read_zipper();
+        while zipper.to_prev_val() {
+            count += 1;
+        }
+        assert_eq!(count, n);
+    });
+}
+
+#[divan::bench(args = [50, 100, 200, 400, 800, 1600])]
+fn binary_zipper_prev_step_iter(bencher: Bencher, n: u64) {
+    let keys = make_keys(n as usize, 1);
+    let map: PathMap<usize> = keys.iter().enumerate().map(|(i, key)| (key, i)).collect();
+
+    bencher.bench_local(|| {
+        let mut steps = 0usize;
+        let mut zipper = map.read_zipper();
+        while zipper.to_prev_step() {
+            steps += 1;
+        }
+        black_box(steps);
+    });
+}
+
 #[divan::bench(sample_size = 1, args = [50, 100, 200, 400, 800, 1600])]
 fn binary_join(bencher: Bencher, n: u64) {
 
