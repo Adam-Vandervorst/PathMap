@@ -3,7 +3,7 @@
 WIRE_MAGIC = b"PMFUZZ\x01\x00"
 LEGACY_NOPS = 56
 # Keep in sync with NOPS in differential/src/harness.rs.
-NOPS = 60
+NOPS = 61
 HEADER_SIZE = len(WIRE_MAGIC) + 2
 
 

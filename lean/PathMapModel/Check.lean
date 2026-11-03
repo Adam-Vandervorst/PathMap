@@ -228,6 +228,7 @@ wraps from the root, and stays within a zipper rooted below the map root. -/
 #guard ((zipAt fSide [] [3,3]).descendLastVal).2.path == [3,3]
 #guard allZips.all (fun z => probes.all (descendToExistingLands z))
 #guard allZips.all (fun z => setValThenVal ops z 42)
+#guard allZips.all (fun z => probes.all (fun p => setValAtAgrees ops z p 42))
 #guard allZips.all (takeThenGraft ops)
 #guard allZips.all (joinEmptyIdentity ops)
 #guard allZips.all (joinSelfIdentity ops)

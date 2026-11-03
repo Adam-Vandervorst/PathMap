@@ -2626,6 +2626,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             key_buf[..key.len()].copy_from_slice(key);
             key_buf[key.len()..key.len()+path.len()].copy_from_slice(path);
             let full_key = &key_buf[..key.len()+path.len()];
+            // No child sits at the focus, but one further along `full_key` may already hold part
+            // of the path. The node ops expect a key that doesn't pass through a child, so step in.
+            if let Some((consumed, child_node)) = focus_node.node_get_child_mut(full_key) && consumed < full_key.len() {
+                return with_node_at_path_mut(child_node, &full_key[consumed..], node_f, retry_f)
+            }
             drop(focus_node);
             self.in_zipper_mut_static_result(
                 |focus_node, _| node_f(focus_node, full_key),
@@ -2641,13 +2646,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 #[cfg(feature = "all_dense_nodes")]
                 { TrieNodeODRc::new_in(crate::dense_byte_node::DenseByteNode::new_in(self.alloc.clone()), self.alloc.clone()) }
             });
-            let result = match node_f(&mut child.make_mut(), path) {
-                Ok(result) => result,
-                Err(replacement_node) => {
-                    child = replacement_node;
-                    retry_f(&mut child.make_mut(), path)
-                },
-            };
+            let result = with_node_at_path_mut(&mut child, path, node_f, retry_f);
             drop(focus_node);
             self.in_zipper_mut_static_result(
                 |node, key| node.node_set_branch(key, child),
@@ -7014,6 +7013,113 @@ mod tests {
             assert_eq!(map.val_at(&full_path), Some(&7));
             assert_eq!(map.set_val_at(&full_path, 8), Some(7));
             assert_eq!(map.val_at(&full_path), Some(&8));
+        }
+    }
+
+    #[test]
+    fn set_val_at_through_child_below_focus() {
+        // https://github.com/Adam-Vandervorst/PathMap/issues/175
+        let mut map = PathMap::<()>::new();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(b"x");
+            assert_eq!(wz.set_val_at(b"ab", ()), None);
+            assert_eq!(wz.set_val_at(b"ac", ()), None);
+            assert_eq!(wz.set_val_at(b"ab", ()), Some(()));
+        }
+        assert_eq!(map.val_count(), 2);
+        assert_eq!(map.val_at(b"xab"), Some(&()));
+        assert_eq!(map.val_at(b"xac"), Some(&()));
+
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to([1u8, 2]);
+            assert_eq!(wz.set_val_at([3u8, 2], 0), None);
+            assert_eq!(wz.set_val_at([3u8, 0, 3], 1), None);
+            assert_eq!(wz.set_val_at([3u8, 2], 2), Some(0));
+            assert_eq!(wz.set_val_at([2u8], 3), None);
+        }
+        assert_eq!(map.val_count(), 3);
+        assert_eq!(map.val_at([1u8, 2, 3, 2]), Some(&2));
+        assert_eq!(map.val_at([1u8, 2, 3, 0, 3]), Some(&1));
+        assert_eq!(map.val_at([1u8, 2, 2]), Some(&3));
+    }
+
+    #[test]
+    fn set_val_at_through_child_below_long_focus() {
+        // As above, but the last path is long enough that the focus and path don't fit one node key
+        let focus = [0u8; 40];
+        let long_path = b"ab12345678";
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(&focus);
+            assert_eq!(wz.set_val_at(b"ab", 0), None);
+            assert_eq!(wz.set_val_at(b"ac", 1), None);
+            assert_eq!(wz.set_val_at(long_path, 2), None);
+            assert_eq!(wz.set_val_at(long_path, 3), Some(2));
+        }
+        assert_eq!(map.val_count(), 3);
+        for (path, val) in [(&b"ab"[..], 0), (b"ac", 1), (long_path, 3)] {
+            let mut full_path = focus.to_vec();
+            full_path.extend_from_slice(path);
+            assert_eq!(map.val_at(&full_path), Some(&val));
+        }
+    }
+
+    #[test]
+    fn set_val_at_through_shared_child_keeps_clone_unchanged() {
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(b"x");
+            wz.set_val_at(b"ab", 0);
+            wz.set_val_at(b"ac", 1);
+        }
+        let snapshot = map.clone();
+        {
+            let mut wz = map.write_zipper();
+            wz.descend_to(b"x");
+            assert_eq!(wz.set_val_at(b"ab", 2), Some(0));
+            assert_eq!(wz.set_val_at(b"ad", 3), None);
+            assert_eq!(wz.path(), b"x");
+        }
+        assert_eq!(map.val_count(), 3);
+        assert_eq!(map.val_at(b"xab"), Some(&2));
+        assert_eq!(map.val_at(b"xac"), Some(&1));
+        assert_eq!(map.val_at(b"xad"), Some(&3));
+        assert_eq!(snapshot.val_count(), 2);
+        assert_eq!(snapshot.val_at(b"xab"), Some(&0));
+        assert_eq!(snapshot.val_at(b"xac"), Some(&1));
+        assert_eq!(snapshot.val_at(b"xad"), None);
+    }
+
+    #[test]
+    fn set_val_at_through_child_at_node_key_length_boundary() {
+        let focus = [0u8; 40];
+        for combined_len in [MAX_NODE_KEY_BYTES, MAX_NODE_KEY_BYTES + 1] {
+            let mut path = b"ab".to_vec();
+            path.resize(combined_len - focus.len(), b'1');
+            let mut map = PathMap::<u64>::new();
+            {
+                let mut wz = map.write_zipper();
+                wz.descend_to(&focus);
+                assert_eq!(wz.set_val_at(b"ab", 0), None);
+                assert_eq!(wz.set_val_at(b"ac", 1), None);
+                assert_eq!(wz.set_val_at(&path, 2), None);
+                assert_eq!(wz.set_val_at(&path, 3), Some(2));
+                assert_eq!(wz.path(), focus);
+                assert_eq!(wz.val_at(b"ab"), Some(&0));
+                assert_eq!(wz.val_at(b"ac"), Some(&1));
+                assert_eq!(wz.val_at(&path), Some(&3));
+            }
+            assert_eq!(map.val_count(), 3);
+            for (suffix, val) in [(&b"ab"[..], 0), (b"ac", 1), (&path, 3)] {
+                let mut full_path = focus.to_vec();
+                full_path.extend_from_slice(suffix);
+                assert_eq!(map.val_at(&full_path), Some(&val));
+            }
         }
     }
 
