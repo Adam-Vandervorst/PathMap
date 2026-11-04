@@ -744,12 +744,8 @@ impl<V: Clone + Lattice + Send + Sync + Unpin, A: Allocator> Lattice for PathMap
         let (other_root_node, other_root_val) = other.into_root();
 
         let root_node_status = if let Some(other_root) = other_root_node {
-            let (status, result) = self.get_or_init_root_mut().make_mut().join_into_dyn(other_root);
-            match result {
-                Ok(()) => {},
-                Err(replacement) => { *self.get_or_init_root_mut() = replacement; }
-            }
-            status
+            //Through `TrieNodeODRc::join_into`, for its x ∨ x = x shortcut
+            self.get_or_init_root_mut().join_into(other_root)
         } else {
             if self.is_empty() {
                 AlgebraicStatus::None
