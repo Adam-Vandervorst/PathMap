@@ -147,8 +147,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         if self.mask.test_bit(k) {
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
             match cf.rec_mut() {
-                Some(existing_node) => {
-                    existing_node.join_into(node)
+                Some(existing_node) => match existing_node.join_into(node) {
+                    //Only two empty nodes join to nothing: the path stays dangling and nothing changes.
+                    // `None` would tell the caller this whole node is empty
+                    AlgebraicStatus::None => AlgebraicStatus::Identity,
+                    status => status,
                 },
                 None => {
                     cf.set_rec(node);
