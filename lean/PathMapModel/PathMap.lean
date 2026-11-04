@@ -207,7 +207,7 @@ def childMask (t : PathMap V) (p : Path) : ByteMask :=
 /-- `Zipper::child_count`. -/
 def childCount (t : PathMap V) (p : Path) : Nat := (t.childMask p).length
 
-/-- `ZipperMoving::val_count`: values at and below `p`. -/
+/-- `CatamorphismCached::val_count`: values at and below `p`. -/
 def valCount (t : PathMap V) (p : Path) : Nat :=
   (t.vals.filter (fun kv => p ≼ kv.1)).length
 

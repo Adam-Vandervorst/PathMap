@@ -1,6 +1,6 @@
 use std::io::Read;
 use pathmap::PathMap;
-use pathmap::zipper::{Zipper, ZipperValues, ZipperMoving, ZipperPath, ZipperWriting, ZipperCreation};
+use pathmap::zipper::{Zipper, ZipperValues, ZipperMoving, ZipperPath, ZipperWriting, ZipperCreation, CatamorphismCached};
 use num::BigInt;
 use divan::{Divan, Bencher, black_box};
 

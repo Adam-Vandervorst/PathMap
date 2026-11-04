@@ -29,6 +29,7 @@ pub use crate::poly_zipper::{PolyZipper, PolyZipperExplicit};
 pub use crate::dependent_zipper::DependentProductZipperG;
 use crate::zipper_tracking::*;
 
+pub use crate::morphisms::CatamorphismCached; //re-exported so `use pathmap::zipper::*` gives the caller access to `val_count`, etc
 
 /// The most fundamantal interface for a zipper, compatible with all zipper types
 pub trait Zipper {
@@ -201,12 +202,6 @@ pub trait ZipperMoving: Zipper {
             self.ascend_byte();
         }
     }
-
-    /// Returns the total number of values contained at and below the zipper's focus, including the focus itself
-    ///
-    /// WARNING: This is not a cheap method. It may have an order-N cost
-    //GOAT! This doesn't belong here.  Should be a function that uses a non-side-effect catamorphism
-    fn val_count(&self) -> usize;
 
     /// Moves the zipper deeper into the trie, to the `key` specified relative to the current zipper focus
     fn descend_to<K: AsRef<[u8]>>(&mut self, k: K);
@@ -1384,6 +1379,12 @@ pub trait ZipperConcrete {
 
 /// Provides more direct control over a [ZipperMoving] zipper's path buffer
 pub trait ZipperPathBuffer: ZipperMoving {
+    /// Internal method to get the relative path buffer, beyond its current logical length.
+    ///
+    /// Panics if `len` exceeds that buffer's capacity.  The returned bytes beyond [`ZipperPath::path`]
+    /// are only valid when the caller knows they were initialized by earlier zipper movement.
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8];
+
     /// Internal method to get the path, beyond its length.  Panics if `len` > the path's capacity, or
     /// if the zipper is relative and doesn't have an `origin_path`
     ///
@@ -1470,7 +1471,6 @@ macro_rules! zipper_impl_lens {
         fn at_root(&$s) -> bool { $e.at_root() }
         #[inline] fn focus_byte(&$s) -> Option<u8> { $e.focus_byte() }
         fn reset(&mut $s) { $e.reset() }
-        fn val_count(&$s) -> usize { $e.val_count() }
         fn descend_to<K: AsRef<[u8]>>(&mut $s, k: K) { $e.descend_to(k) }
         fn descend_to_check<K: AsRef<[u8]>>(&mut $s, k: K) -> bool { $e.descend_to_check(k) }
         fn descend_to_existing<K: AsRef<[u8]>>(&mut $s, k: K) -> usize { $e.descend_to_existing(k) }
@@ -1520,6 +1520,7 @@ macro_rules! zipper_impl_lens {
         #[inline] fn is_shared(&$s) -> bool { $e.is_shared() }
     };
     (ZipperPathBuffer $s: ident => $e:expr) => {
+        unsafe fn path_assert_len(&$s, len: usize) -> &[u8] { unsafe{ $e.path_assert_len(len) } }
         unsafe fn origin_path_assert_len(&$s, len: usize) -> &[u8] { unsafe{ $e.origin_path_assert_len(len) } }
         fn prepare_buffers(&mut $s) { $e.prepare_buffers() }
         fn reserve_buffers(&mut $s, path_len: usize, stack_depth: usize) { $e.reserve_buffers(path_len, stack_depth) }
@@ -2334,20 +2335,6 @@ pub(crate) mod read_zipper_core {
             self.prefix_buf.truncate(self.origin_path.len());
         }
 
-        fn val_count(&self) -> usize {
-            timed_span!(ValueCount, COUNTERS);
-            let root_val = self.is_val() as usize;
-            if self.node_key().len() == 0 {
-                val_count_below_root(*self.focus_node) + root_val
-            } else {
-                let focus = self.get_focus();
-                if focus.0.is_none() {
-                    root_val
-                } else {
-                    val_count_below_root(focus.0.as_tagged()) + root_val
-                }
-            }
-        }
         fn descend_to<K: AsRef<[u8]>>(&mut self, k: K) {
             timed_span!(DescendTo, COUNTERS);
             let k = k.as_ref();
@@ -2796,6 +2783,16 @@ pub(crate) mod read_zipper_core {
     }
 
     impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ReadZipperCore<'trie, '_, V, A> {
+        unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+            let start = self.origin_path.len();
+            if self.prefix_buf.capacity() > 0 {
+                assert!(len <= self.prefix_buf.capacity() - start);
+                unsafe{ core::slice::from_raw_parts(self.prefix_buf.as_ptr().add(start), len) }
+            } else {
+                assert_eq!(len, 0);
+                &[]
+            }
+        }
         unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
             if self.prefix_buf.capacity() > 0 {
                 assert!(len <= self.prefix_buf.capacity());
@@ -5156,7 +5153,7 @@ pub(crate) mod zipper_moving_tests {
     pub const ZIPPER_BYTES_ITER_TEST3_PATH: &[u8] = &[3, 193, 4, 193, 5, 2, 193];
 
     pub fn zipper_byte_iter_test3<Z: ZipperMoving + ZipperPath>(mut zipper: Z) {
-        assert_eq!(zipper.path(), &[]);
+        assert!(zipper.path().is_empty());
         assert_eq!(zipper.descend_first_byte(), Some(6));
         assert_eq!(zipper.path(), &[6]);
         assert_eq!(zipper.descend_first_byte(), Some(193));
@@ -5955,7 +5952,7 @@ pub(crate) mod zipper_iteration_tests {
         assert_eq!(zipper.path(), &[1]);
         assert_eq!(&observed[..], zipper.path());
         assert_eq!(zipper.to_next_k_path_observed(1, &mut observed), false);
-        assert_eq!(zipper.path(), &[]);
+        assert!(zipper.path().is_empty());
         assert_eq!(&observed[..], zipper.path());
     }
 
@@ -5976,7 +5973,7 @@ pub(crate) mod zipper_iteration_tests {
         assert_eq!(zipper.path(), K_PATH_TESTA_KEYS[1]);
         assert_eq!(&observed[..], zipper.path());
         assert_eq!(zipper.to_next_k_path_observed(k, &mut observed), false);
-        assert_eq!(zipper.path(), []);
+        assert!(zipper.path().is_empty());
         assert_eq!(&observed[..], zipper.path());
     }
 }
@@ -5985,6 +5982,20 @@ pub(crate) mod zipper_iteration_tests {
 mod tests {
     use crate::{alloc::global_alloc, PathMap};
     use super::*;
+
+    crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!(
+        read_zipper,
+        |keys: &[&[u8]]| keys.iter().enumerate().map(|(idx, path)| (*path, idx as u64)).collect::<PathMap<u64>>(),
+        |map: &mut PathMap<u64>| map.read_zipper(),
+        CatamorphismCached
+    );
+
+    crate::morphisms::cached_catamorphism_tests::cached_catamorphism_tests!(
+        read_zipper,
+        |keys: &[&[u8]]| keys.iter().enumerate().map(|(idx, path)| (*path, idx as u64)).collect::<PathMap<u64>>(),
+        |map: &mut PathMap<u64>| map.read_zipper(),
+        CatamorphismCachedIterative
+    );
 
     /// Drives a [TruncatingObserver] with the supplied movements, returning what reached the
     /// downstream observer along with the observer's final overshoot
@@ -6120,7 +6131,7 @@ mod tests {
         assert_eq!(moved, false);
         assert_eq!(pz.path(), b"");
         assert_eq!(observed, b"");
-    }
+}
 
     super::zipper_moving_tests::zipper_moving_tests!(read_zipper,
         |keys: &[&[u8]]| {
@@ -6686,7 +6697,7 @@ mod tests {
             assert_eq!(rz.origin_path(), root, "root {root:?}");
             assert_eq!(rz.val(), None);
             assert!(rz.at_root());
-            assert_eq!(rz.path(), &[]);
+            assert!(rz.path().is_empty());
             //The zipper must still be usable afterwards
             rz.reset();
             assert!(!rz.path_exists());

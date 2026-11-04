@@ -71,12 +71,6 @@ impl<A: Zipper + ZipperMoving, B: Zipper + ZipperMoving> ZipperMoving for DiffZi
             println!("DiffZipper: reset")
         }
     }
-    fn val_count(&self) -> usize {
-        let a = self.a.val_count();
-        let b = self.b.val_count();
-        assert_eq!(a, b);
-        a
-    }
     fn descend_to<P: AsRef<[u8]>>(&mut self, path: P) {
         let path = path.as_ref();
         self.a.descend_to(path);
@@ -230,6 +224,12 @@ impl<A: Zipper + ZipperAbsolutePath, B: Zipper + ZipperAbsolutePath> ZipperAbsol
 
 impl<A: Zipper + ZipperPathBuffer, B: Zipper + ZipperPathBuffer> ZipperPathBuffer for DiffZipper<A, B>
 {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] {
+        let a = unsafe{ self.a.path_assert_len(len) };
+        let b = unsafe{ self.b.path_assert_len(len) };
+        assert_eq!(a, b);
+        a
+    }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] {
         let a = unsafe{ self.a.origin_path_assert_len(len) };
         let b = unsafe{ self.b.origin_path_assert_len(len) };

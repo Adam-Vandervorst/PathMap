@@ -147,7 +147,7 @@ pub fn show_byte_opt(b: Option<u8>) -> String {
 /// leave it, so a mismatch is tagged `ESCAPED-ROOT` — the model can never
 /// produce that tag, which lets `differential.py` recognise the escape bug
 /// instead of reporting it as an unexplained state divergence.
-pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath>(
+pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath + CatamorphismCached<u64>>(
     z: &Z,
     expected_root: &[u8],
 ) -> String {
@@ -239,7 +239,7 @@ pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
 /// Keeping this behind a trait means there is still exactly one operation table,
 /// so the two front ends cannot drift apart.
 pub trait ReadSource:
-    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration
+    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration + CatamorphismCached<u64>
 {
     /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk).
     fn dump_fork(&self) -> String;
@@ -364,7 +364,7 @@ macro_rules! tgt {
 /// trait documentation or forced by the meaning of the accessors.
 pub fn check_zipper<Z>(z: &Z, label: &str, expected_root: &[u8])
 where
-    Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath,
+    Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath + CatamorphismCached<u64>,
 {
     // `at_root` is defined as "the path back to the root is empty".
     assert_eq!(
@@ -1099,8 +1099,7 @@ mod input_format_tests {
             57, 1, // Initialize reverse value iteration at [2].
             59, 1, 59, 1, 59, 1, 59, 1, // Iterate, exhaust at the valued root, wrap.
         ]);
-        // ACT's known val_count defect prevents --check at a missing focus.
-        for trace in [run(&bytes, true), run_act(&bytes, false)] {
+        for trace in [run(&bytes, true), run_act(&bytes, true)] {
             for expected in [
                 "1 to_prev_step ret=1 W=02",
                 "2 to_prev_step ret=1 W=00",
