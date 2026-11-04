@@ -2491,7 +2491,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             let min_keep_len = self.key.origin_path.len().saturating_sub(self.key.node_key_start());
             let node_pruned_bytes = self.focus_stack.top_mut().unwrap().node_remove_dangling(key, min_keep_len);
             let trie_pruned_bytes = if node_pruned_bytes > 0 {
-                self.prune_path_internal(false)
+                let pruned = self.prune_path_internal(false);
+                //Removing the dangling path can restructure the node, so that the focus key now runs
+                // through a child node the stack has not descended into
+                self.descend_to_internal();
+                pruned
             } else { 0 };
             node_pruned_bytes.max(trie_pruned_bytes)
         } else {
@@ -6954,6 +6958,61 @@ mod tests {
         assert_eq!(keys(&m), ["cax", "cbx", "cdx", "d"]);
     }
 
+    /// `prune_path` that restructures the focus's parent node, so that the focus key runs through a
+    /// child node; the next write must go into that node, not beside it in the parent
+    #[test]
+    fn write_after_prune_path_restructures_parent() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[0u8, 1, 0, 1, 0, 0][..], &[0, 1, 0, 1], &[], &[0, 1, 0, 0], &[1, 0, 0, 1, 0, 0]] {
+            map.set_val_at(p, 1);
+        }
+        {
+            let mut wz = map.write_zipper_at_path(&[0u8]);
+            wz.remove_val(false);
+            wz.descend_to_byte(1);
+            wz.descend_to_byte(1);
+            wz.ascend_byte();
+            wz.descend_to_byte(0);
+            wz.graft_masked_branches(&PathMap::new().read_zipper(), ByteMask::from_iter([0u8, 1, 2]), true);
+            wz.prune_path();
+            //The node stack must reach the deepest node along the focus key
+            let key = wz.z.key.node_key();
+            if let Some((consumed, child)) = wz.z.focus_stack.top().unwrap().node_get_child(key) {
+                assert!(consumed == key.len() || child.is_empty(), "focus key {key:?} runs through an undescended child");
+            }
+            wz.set_val(3);
+        }
+        crate::trie_node::assert_valid_trie(map.root());
+        let got: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(got, vec![(vec![], 1), (vec![0, 1, 0], 3), (vec![1, 0, 0, 1, 0, 0], 1)]);
+    }
+
+    /// `graft_masked_branches` at a focus that `prune_path` just removed, below a zipper root that
+    /// survives as a dangling path.  The focus key then runs through that empty node; the
+    /// branches must land at the focus, not in the node above it
+    #[test]
+    fn graft_masked_branches_after_prune_path_below_root() {
+        let mut src = PathMap::<u64>::new();
+        for b in [0u8, 1, 3] { src.set_val_at(&[b], b as u64 + 1); }
+        let mut other = PathMap::<u64>::new();
+        other.set_val_at(&[0u8], 0);
+        other.set_val_at(&[0u8; 39], 0);
+        other.set_val_at(&[0u8; 7], 0);
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut z = map.write_zipper_at_path(&[0u8, 0]);
+            z.descend_to(&[0u8, 0]);
+            z.graft_masked_branches(&other.read_zipper(), ByteMask::from_iter([0u8]), false);
+            z.graft_masked_branches(&PathMap::new().read_zipper(), ByteMask::from_iter([0u8, 1, 3]), true);
+            assert_eq!(z.prune_path(), 2);
+            assert!(!z.path_exists());
+            z.graft_masked_branches(&src.read_zipper(), ByteMask::from_iter([0u8, 1, 3]), false);
+        }
+        let got: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(got, vec![(vec![0, 0, 0, 0, 0], 1), (vec![0, 0, 0, 0, 1], 2), (vec![0, 0, 0, 0, 3], 4)]);
+    }
+
+
     /// Joining child slots whose onward nodes are empty, as left by dropped head writers
     #[test]
     fn join_k_path_into_empty_child_nodes() {
@@ -8249,3 +8308,4 @@ mod tests {
         assert!(map.into_write_zipper(b"missing").fork_read_zipper().is_none());
     }
 }
+
