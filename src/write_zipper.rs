@@ -2355,11 +2355,13 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [WriteZipper::restricting]
     pub fn restricting<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> bool {
+        //Either side with nothing below its focus leaves `self` alone, whether or not an empty
+        // node happens to be materialised there
         let src = read_zipper.get_focus();
-        if src.is_none() {
+        if src.try_as_tagged().map_or(true, |node| node.node_is_empty()) {
             return false
         }
-        match self.get_focus().try_as_tagged() {
+        match self.get_focus().try_as_tagged().filter(|node| !node.node_is_empty()) {
             Some(self_node) => {
                 match src.as_tagged().prestrict_dyn(self_node) {
                     AlgebraicResult::Element(restricted) => self.graft_internal(Some(restricted)),
@@ -2428,9 +2430,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         #[cfg(feature = "graft_root_vals")]
         let root_val = self.remove_val(prune);
 
-        let root_node = self.take_focus(prune);
+        //An empty node left at the focus (e.g. by `create_path` or `remove_val`) is nothing to take
+        let root_node = self.take_focus(prune).filter(|node| !node.as_tagged().node_is_empty());
 
-        self.get_focus().into_option();
         if root_node.is_some() || root_val.is_some() {
             Some(PathMap::new_with_root_in(root_node, root_val, self.alloc.clone()))
         } else {
@@ -8306,6 +8308,47 @@ mod tests {
         map.insert(b"ab", 7);
         assert!(map.write_zipper_at_path(b"missing").fork_read_zipper().is_none());
         assert!(map.into_write_zipper(b"missing").fork_read_zipper().is_none());
+    }
+
+    /// `take_map` of a focus holding only a value returns a map with that value at its root, and the
+    /// map must take writes below the root.  The empty node left at the focus used to come along,
+    /// and the first write panicked on it ("make_unique on an empty sentinel node")
+    #[test]
+    fn take_map_of_value_only_focus_then_write() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([1u8, 0], 1);
+        let mut taken = map.write_zipper_at_path(&[1u8, 0]).take_map(false).unwrap();
+        taken.set_val_at([5u8], 2);
+        assert_eq!(taken.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), vec![(vec![], 1), (vec![5], 2)]);
+    }
+
+    /// Nothing below the focus and no value at it is nothing to take, whether or not an empty node
+    /// is materialised there
+    #[test]
+    fn take_map_of_empty_focus_is_none() {
+        let mut map = PathMap::<u64>::new();
+        map.create_path([1u8, 0]);
+        assert!(map.write_zipper_at_path(&[1u8, 0]).take_map(false).is_none());
+
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([1u8, 0], 1);
+        let mut wz = map.write_zipper_at_path(&[1u8, 0]);
+        wz.remove_val(false);
+        assert!(wz.take_map(false).is_none());
+    }
+
+    /// `restricting` by a source with nothing below its focus leaves the destination alone, as it
+    /// does for a source focus that does not exist
+    #[test]
+    fn restricting_by_dangling_source_focus_is_no_op() {
+        let mut src = PathMap::<u64>::new();
+        src.create_path([7u8]);
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([1u8], 1);
+        map.set_val_at([2u8], 2);
+        let changed = map.write_zipper().restricting(&src.read_zipper_at_path(&[7u8]));
+        assert!(!changed);
+        assert_eq!(map.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), vec![(vec![1], 1), (vec![2], 2)]);
     }
 }
 
