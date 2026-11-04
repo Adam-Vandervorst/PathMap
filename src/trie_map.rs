@@ -1592,6 +1592,35 @@ mod tests {
         assert_eq!(map.val_at(b"foo/bar"), Some(&300));
         assert_eq!(map.val_at(b"missing"), None);
     }
+
+    /// Joining a byte node with a list node whose only contents are dangling paths the byte node
+    /// also has.  Each list slot joins to nothing, which must not make the whole join empty
+    #[test]
+    fn map_join_with_dangling_only_list_node() {
+        let mut a = PathMap::<()>::new();
+        a.create_path([0u8]);
+        a.create_path([1u8]);
+        a.set_val_at([2u8], ());
+        let mut b = PathMap::<()>::new();
+        b.create_path([0u8]);
+        b.create_path([1u8]);
+        assert!(a.join(&b).contains([2u8]));
+    }
+
+    /// `b` is a clone of `a` plus one value, so the two share nodes.  A join may not lose that
+    /// value in either operand order.  Found by the algebraic fuzzer's `join-commutative` law.
+    #[test]
+    fn map_join_keeps_value_across_shared_structure() {
+        let mut a = PathMap::<u64>::new();
+        for p in [&[0u8, 0, 0, 0, 0][..], &[1, 0, 1], &[1, 0, 3]] {
+            a.create_path(p);
+        }
+        let mut b = a.clone();
+        b.set_val_at([1u8, 0, 0, 0], 1);
+
+        assert_eq!(a.join(&b).val_at([1u8, 0, 0, 0]), Some(&1));
+        assert_eq!(b.join(&a).val_at([1u8, 0, 0, 0]), Some(&1));
+    }
 }
 
 //GOAT, Consider refactor of zipper traits.  `WriteZipper` -> `PathWriter`.  Zipper is split into the zipper

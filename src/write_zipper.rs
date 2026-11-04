@@ -2357,11 +2357,13 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     }
     /// See [WriteZipper::restricting]
     pub fn restricting<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z) -> bool {
+        //Either side with nothing below its focus leaves `self` alone, whether or not an empty
+        // node happens to be materialised there
         let src = read_zipper.get_focus();
-        if src.is_none() {
+        if src.try_as_tagged().map_or(true, |node| node.node_is_empty()) {
             return false
         }
-        match self.get_focus().try_as_tagged() {
+        match self.get_focus().try_as_tagged().filter(|node| !node.node_is_empty()) {
             Some(self_node) => {
                 match src.as_tagged().prestrict_dyn(self_node) {
                     AlgebraicResult::Element(restricted) => self.graft_internal(Some(restricted)),
@@ -2430,9 +2432,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         #[cfg(feature = "graft_root_vals")]
         let root_val = self.remove_val(prune);
 
-        let root_node = self.take_focus(prune);
+        //An empty node left at the focus (e.g. by `create_path` or `remove_val`) is nothing to take
+        let root_node = self.take_focus(prune).filter(|node| !node.as_tagged().node_is_empty());
 
-        self.get_focus().into_option();
         if root_node.is_some() || root_val.is_some() {
             Some(PathMap::new_with_root_in(root_node, root_val, self.alloc.clone()))
         } else {
@@ -2493,7 +2495,11 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             let min_keep_len = self.key.origin_path.len().saturating_sub(self.key.node_key_start());
             let node_pruned_bytes = self.focus_stack.top_mut().unwrap().node_remove_dangling(key, min_keep_len);
             let trie_pruned_bytes = if node_pruned_bytes > 0 {
-                self.prune_path_internal(false)
+                let pruned = self.prune_path_internal(false);
+                //Removing the dangling path can restructure the node, so that the focus key now runs
+                // through a child node the stack has not descended into
+                self.descend_to_internal();
+                pruned
             } else { 0 };
             node_pruned_bytes.max(trie_pruned_bytes)
         } else {
@@ -6956,6 +6962,61 @@ mod tests {
         assert_eq!(keys(&m), ["cax", "cbx", "cdx", "d"]);
     }
 
+    /// `prune_path` that restructures the focus's parent node, so that the focus key runs through a
+    /// child node; the next write must go into that node, not beside it in the parent
+    #[test]
+    fn write_after_prune_path_restructures_parent() {
+        let mut map = PathMap::<u64>::new();
+        for p in [&[0u8, 1, 0, 1, 0, 0][..], &[0, 1, 0, 1], &[], &[0, 1, 0, 0], &[1, 0, 0, 1, 0, 0]] {
+            map.set_val_at(p, 1);
+        }
+        {
+            let mut wz = map.write_zipper_at_path(&[0u8]);
+            wz.remove_val(false);
+            wz.descend_to_byte(1);
+            wz.descend_to_byte(1);
+            wz.ascend_byte();
+            wz.descend_to_byte(0);
+            wz.graft_masked_branches(&PathMap::new().read_zipper(), ByteMask::from_iter([0u8, 1, 2]), true);
+            wz.prune_path();
+            //The node stack must reach the deepest node along the focus key
+            let key = wz.z.key.node_key();
+            if let Some((consumed, child)) = wz.z.focus_stack.top().unwrap().node_get_child(key) {
+                assert!(consumed == key.len() || child.is_empty(), "focus key {key:?} runs through an undescended child");
+            }
+            wz.set_val(3);
+        }
+        crate::trie_node::assert_valid_trie(map.root());
+        let got: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(got, vec![(vec![], 1), (vec![0, 1, 0], 3), (vec![1, 0, 0, 1, 0, 0], 1)]);
+    }
+
+    /// `graft_masked_branches` at a focus that `prune_path` just removed, below a zipper root that
+    /// survives as a dangling path.  The focus key then runs through that empty node; the
+    /// branches must land at the focus, not in the node above it
+    #[test]
+    fn graft_masked_branches_after_prune_path_below_root() {
+        let mut src = PathMap::<u64>::new();
+        for b in [0u8, 1, 3] { src.set_val_at(&[b], b as u64 + 1); }
+        let mut other = PathMap::<u64>::new();
+        other.set_val_at(&[0u8], 0);
+        other.set_val_at(&[0u8; 39], 0);
+        other.set_val_at(&[0u8; 7], 0);
+        let mut map = PathMap::<u64>::new();
+        {
+            let mut z = map.write_zipper_at_path(&[0u8, 0]);
+            z.descend_to(&[0u8, 0]);
+            z.graft_masked_branches(&other.read_zipper(), ByteMask::from_iter([0u8]), false);
+            z.graft_masked_branches(&PathMap::new().read_zipper(), ByteMask::from_iter([0u8, 1, 3]), true);
+            assert_eq!(z.prune_path(), 2);
+            assert!(!z.path_exists());
+            z.graft_masked_branches(&src.read_zipper(), ByteMask::from_iter([0u8, 1, 3]), false);
+        }
+        let got: Vec<(Vec<u8>, u64)> = map.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        assert_eq!(got, vec![(vec![0, 0, 0, 0, 0], 1), (vec![0, 0, 0, 0, 1], 2), (vec![0, 0, 0, 0, 3], 4)]);
+    }
+
+
     /// Joining child slots whose onward nodes are empty, as left by dropped head writers
     #[test]
     fn join_k_path_into_empty_child_nodes() {
@@ -8264,4 +8325,46 @@ mod tests {
         assert_eq!(dst.val_at(b""), Some(&ByteMask::from_iter([2u8])));
         assert_eq!(dst.val_at(b""), src.meet(&dst).val_at(b""));
     }
+
+    /// `take_map` of a focus holding only a value returns a map with that value at its root, and the
+    /// map must take writes below the root.  The empty node left at the focus used to come along,
+    /// and the first write panicked on it ("make_unique on an empty sentinel node")
+    #[test]
+    fn take_map_of_value_only_focus_then_write() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([1u8, 0], 1);
+        let mut taken = map.write_zipper_at_path(&[1u8, 0]).take_map(false).unwrap();
+        taken.set_val_at([5u8], 2);
+        assert_eq!(taken.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), vec![(vec![], 1), (vec![5], 2)]);
+    }
+
+    /// Nothing below the focus and no value at it is nothing to take, whether or not an empty node
+    /// is materialised there
+    #[test]
+    fn take_map_of_empty_focus_is_none() {
+        let mut map = PathMap::<u64>::new();
+        map.create_path([1u8, 0]);
+        assert!(map.write_zipper_at_path(&[1u8, 0]).take_map(false).is_none());
+
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([1u8, 0], 1);
+        let mut wz = map.write_zipper_at_path(&[1u8, 0]);
+        wz.remove_val(false);
+        assert!(wz.take_map(false).is_none());
+    }
+
+    /// `restricting` by a source with nothing below its focus leaves the destination alone, as it
+    /// does for a source focus that does not exist
+    #[test]
+    fn restricting_by_dangling_source_focus_is_no_op() {
+        let mut src = PathMap::<u64>::new();
+        src.create_path([7u8]);
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([1u8], 1);
+        map.set_val_at([2u8], 2);
+        let changed = map.write_zipper().restricting(&src.read_zipper_at_path(&[7u8]));
+        assert!(!changed);
+        assert_eq!(map.iter().map(|(k, v)| (k, *v)).collect::<Vec<_>>(), vec![(vec![1], 1), (vec![2], 2)]);
+    }
 }
+
