@@ -1735,89 +1735,94 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
             _ => {
                 let src_focus = src.get_focus();
-                //A source with nothing below its focus empties the masked branches; that is the
-                // merge below with an empty byte node as the source
-                let src_tagged = src_focus.try_as_tagged().filter(|node| !node.node_is_empty());
-                if src_tagged.is_none() && (remove_unset || child_mask & self.child_mask() == ByteMask::EMPTY) {
-                    if remove_unset {
-                        self.remove_branches(false);
-                    }
-                    return
+                self.graft_masked_from_node(src_focus.try_as_tagged(), child_mask, remove_unset);
+            }
+        }
+    }
+
+    /// The byte-node merge behind [Self::graft_masked_branches] (more than two masked branches)
+    /// and [Self::graft_child_maps]: each masked branch of the focus becomes `src`'s branch, and a
+    /// masked branch `src` lacks is emptied but kept as a dangling path, as by `graft` of nothing
+    fn graft_masked_from_node(&mut self, src: Option<TaggedNodeRef<'_, V, A>>, child_mask: ByteMask, remove_unset: bool) {
+        //A source with nothing below its focus empties the masked branches; that is the merge
+        // below with an empty byte node as the source
+        let src = src.filter(|node| !node.node_is_empty());
+        if src.is_none() && (remove_unset || child_mask & self.child_mask() == ByteMask::EMPTY) {
+            if remove_unset {
+                self.remove_branches(false);
+            }
+            return
+        }
+        //An empty node holds no allocation, so it can live on the stack
+        let empty_src = crate::dense_byte_node::DenseByteNode::<V, A>::new_in(self.alloc.clone());
+        let src_tagged = match src {
+            Some(src) => src,
+            None => empty_src.as_tagged(),
+        };
+        // Split the focus if we're in the middle of another node.  A focus that
+        // is a dangling stub (an empty child node, which `get_child_mut` declines
+        // to hand out) has no node to merge into even after the split, so the
+        // branches are merged into a fresh node that is grafted in afterwards.
+        // This used to unwrap the missing node.
+        // A focus that does not exist is not split either, since the split would
+        // create it: the fresh node is grafted only if the merge produced something.
+        let mut fresh_node: Option<TrieNodeODRc<V, A>> = None;
+        let self_focus_node = match self.try_borrow_focus_mut() {
+            Some(node) => node,
+            None => {
+                if self.path_exists() {
+                    self.split_at_focus();
                 }
-                let empty_src;
-                let src_tagged = match src_tagged {
-                    Some(src_tagged) => src_tagged,
-                    None => {
-                        empty_src = TrieNodeODRc::new_in(crate::dense_byte_node::DenseByteNode::<V, A>::new_in(self.alloc.clone()), self.alloc.clone());
-                        empty_src.as_tagged()
-                    }
-                };
-                // Split the focus if we're in the middle of another node.  A focus that
-                // is a dangling stub (an empty child node, which `get_child_mut` declines
-                // to hand out) has no node to merge into even after the split, so the
-                // branches are merged into a fresh node that is grafted in afterwards.
-                // This used to unwrap the missing node.
-                // A focus that does not exist is not split either, since the split would
-                // create it: the fresh node is grafted only if the merge produced something.
-                let mut fresh_node: Option<TrieNodeODRc<V, A>> = None;
-                let self_focus_node = match self.try_borrow_focus_mut() {
+                match self.try_borrow_focus_mut() {
                     Some(node) => node,
                     None => {
-                        if self.path_exists() {
-                            self.split_at_focus();
-                        }
-                        match self.try_borrow_focus_mut() {
-                            Some(node) => node,
-                            None => {
-                                let alloc = self.alloc.clone();
-                                fresh_node.insert(TrieNodeODRc::new_in(
-                                    crate::dense_byte_node::DenseByteNode::<V, A>::new_in(alloc.clone()), alloc))
-                            }
-                        }
-                    }
-                };
-                match src_tagged {
-                    TaggedNodeRef::DenseByteNode(src_node) => {
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::CellByteNode(src_node) => {
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::LineListNode(src_node) => {
-                        let mut src_node = src_node.clone();
-                        let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
-                        let src_dense = src_dense.as_tagged().as_dense().unwrap();
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::TinyRefNode(src_node) => {
-                        let mut src_node = src_node.into_full().unwrap();
-                        let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
-                        let src_dense = src_dense.as_tagged().as_dense().unwrap();
-                        if remove_unset {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
-                        } else {
-                            Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
-                        }
-                    },
-                    TaggedNodeRef::EmptyNode => unreachable!(),
-                }
-                if let Some(node) = fresh_node {
-                    if !node.as_tagged().node_is_empty() {
-                        self.graft_internal(Some(node));
+                        let alloc = self.alloc.clone();
+                        fresh_node.insert(TrieNodeODRc::new_in(
+                            crate::dense_byte_node::DenseByteNode::<V, A>::new_in(alloc.clone()), alloc))
                     }
                 }
+            }
+        };
+        match src_tagged {
+            TaggedNodeRef::DenseByteNode(src_node) => {
+                if remove_unset {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
+                } else {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
+                }
+            },
+            TaggedNodeRef::CellByteNode(src_node) => {
+                if remove_unset {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, true>(self_focus_node, src_node, child_mask);
+                } else {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::CellCoFree<V, A>, false>(self_focus_node, src_node, child_mask);
+                }
+            },
+            TaggedNodeRef::LineListNode(src_node) => {
+                let mut src_node = src_node.clone();
+                let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
+                let src_dense = src_dense.as_tagged().as_dense().unwrap();
+                if remove_unset {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
+                } else {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
+                }
+            },
+            TaggedNodeRef::TinyRefNode(src_node) => {
+                let mut src_node = src_node.into_full().unwrap();
+                let src_dense = src_node.convert_to_dense::<crate::dense_byte_node::OrdinaryCoFree<V, A>>(3);
+                let src_dense = src_dense.as_tagged().as_dense().unwrap();
+                if remove_unset {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, true>(self_focus_node, src_dense, child_mask);
+                } else {
+                    Self::merge_branches_into_focus::<crate::dense_byte_node::OrdinaryCoFree<V, A>, false>(self_focus_node, src_dense, child_mask);
+                }
+            },
+            TaggedNodeRef::EmptyNode => unreachable!(),
+        }
+        if let Some(node) = fresh_node {
+            if !node.as_tagged().node_is_empty() {
+                self.graft_internal(Some(node));
             }
         }
     }
@@ -1829,12 +1834,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     pub fn graft_child_maps<I: IntoIterator<Item=PathMap<V, A>>>(&mut self, child_mask: ByteMask, maps: I, remove_unset: bool) {
         let map_count = child_mask.count_bits();
 
-        // If we're replacing all children, and we have enough children to justify a ByteNode,
-        // then we want to build a new node with the children from the maps
-        if map_count > 2 && remove_unset {
-            //GOAT, we could add a fast-path for `map_count > 2 && !remove_unset`, but for now
-            // we'll let the slow-path handle it, since it requires logic to upgrade the focus_node to ByteNode
-
+        // With enough children to justify a ByteNode, gather the maps into one
+        if map_count > 2 {
             let mut new_node = crate::dense_byte_node::DenseByteNode::with_capacity_in(map_count, self.alloc.clone());
             let mut maps_iter = maps.into_iter();
             for child_byte in child_mask.iter() {
@@ -1847,6 +1848,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     new_node.set_val(child_byte, val);
                 }
             }
+            if !remove_unset {
+                //Each branch is *replaced* by its map, exactly as `graft_masked_branches` replaces
+                // it with the source's, so merge the gathered node in the same way
+                return self.graft_masked_from_node(Some(new_node.as_tagged()), child_mask, false)
+            }
+            //Replacing all children: the gathered node is the new focus
             let new_node_odrc = TrieNodeODRc::new_in(new_node, self.alloc.clone());
             if new_node_odrc.as_tagged().node_is_empty() {
                 // Every map was empty.  Grafting the empty node would create the focus out of nothing
