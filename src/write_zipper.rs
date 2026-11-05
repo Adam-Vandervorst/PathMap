@@ -2192,7 +2192,9 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                 let new_status = match self_val.pmeet(src_val) {
                     AlgebraicResult::Element(new_val) => {self.set_val(new_val); AlgebraicStatus::Element },
                     AlgebraicResult::None => {self.remove_val(prune); AlgebraicStatus::None },
-                    AlgebraicResult::Identity(_) => { AlgebraicStatus::Identity }
+                    AlgebraicResult::Identity(mask) if mask & SELF_IDENT > 0 => { AlgebraicStatus::Identity },
+                    //The meet is the source's value
+                    AlgebraicResult::Identity(_) => { self.set_val(src_val.clone()); AlgebraicStatus::Element },
                 };
                 (new_status, false)
             },
@@ -8508,6 +8510,20 @@ mod tests {
         map.insert(b"ab", 7);
         assert!(map.write_zipper_at_path(b"missing").fork_read_zipper().is_none());
         assert!(map.into_write_zipper(b"missing").fork_read_zipper().is_none());
+    }
+
+    /// `meet_into` must store the meet of the focus values even when it equals the source's value
+    /// (`pmeet` reports that as `Identity(COUNTER_IDENT)`)
+    #[test]
+    fn write_zipper_meet_into_focus_value_from_source() {
+        let mut dst = PathMap::<ByteMask>::new();
+        dst.set_val_at(b"", ByteMask::from_iter([1u8, 2]));
+        let mut src = PathMap::<ByteMask>::new();
+        src.set_val_at(b"", ByteMask::from_iter([2u8]));
+        let status = dst.write_zipper().meet_into(&src.read_zipper(), false);
+        assert_eq!(status, AlgebraicStatus::Element);
+        assert_eq!(dst.val_at(b""), Some(&ByteMask::from_iter([2u8])));
+        assert_eq!(dst.val_at(b""), src.meet(&dst).val_at(b""));
     }
 
     /// `take_map` of a focus holding only a value returns a map with that value at its root, and the
