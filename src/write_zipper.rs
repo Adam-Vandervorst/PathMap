@@ -7375,6 +7375,34 @@ mod tests {
     }
 
     #[test]
+    fn graft_masked_branches_covered_mask_with_dangling_children() {
+        let mut src = PathMap::<u64>::new();
+        src.create_path([0]);
+        src.set_val_at([80, 4], 5);
+        src.create_path([200]);
+
+        let mut dst = PathMap::from_iter([
+            (vec![0], 9), (vec![0, 7], 9), (vec![80], 1),
+            (vec![80, 1], 1), (vec![255], 3),
+        ]);
+        dst.write_zipper().graft_masked_branches(
+            &src.read_zipper(), ByteMask::from_iter([0, 80, 200]), false,
+        );
+
+        // All masked locations exist in the source, but only one has content.
+        // Emptying an existing destination branch preserves its location;
+        // grafting a dangling child at an absent branch must not create it.
+        assert!(dst.path_exists_at([0]));
+        assert_eq!(dst.val_at([0]), None);
+        assert!(!dst.path_exists_at([0, 7]));
+        assert_eq!(dst.val_at([80]), None);
+        assert!(!dst.path_exists_at([80, 1]));
+        assert_eq!(dst.val_at([80, 4]), Some(&5));
+        assert!(!dst.path_exists_at([200]));
+        assert_eq!(dst.val_at([255]), Some(&3));
+    }
+
+    #[test]
     fn write_zipper_graft_masked_branches_test4() {
         // Upper bound 0: remove_unset=true with an empty mask.
         let src: PathMap<i32> = PathMap::new();

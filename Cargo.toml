@@ -131,10 +131,6 @@ name = "graft_masked_branches"
 harness = false
 
 [[bench]]
-name = "graft_nothing"
-harness = false
-
-[[bench]]
 name = "byte_mask"
 harness = false
 

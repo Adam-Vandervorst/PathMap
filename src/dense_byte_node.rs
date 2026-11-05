@@ -1589,6 +1589,24 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
 where
     ByteNode<CfDst, A>: TrieNodeDowncast<V, A>,
 {
+    // A fully covered mask needs no per-branch source-membership checks.  This
+    // only establishes that the locations exist: dangling children must still
+    // be checked by the merge and emptied in the destination.
+    if REMOVE_UNSET || child_mask & src_node.mask == child_mask {
+        merge_branches_into_byte_node_impl::<_, _, _, _, REMOVE_UNSET, true>(dst_node, src_node, child_mask)
+    } else {
+        merge_branches_into_byte_node_impl::<_, _, _, _, REMOVE_UNSET, false>(dst_node, src_node, child_mask)
+    }
+}
+
+fn merge_branches_into_byte_node_impl<V: Clone + Send + Sync, A: Allocator, CfDst: CoFree<V=V, A=A>, CfSrc: CoFree<V=V, A=A>, const REMOVE_UNSET: bool, const SOURCE_COVERS_MASK: bool>(
+    dst_node: &ByteNode<CfDst, A>,
+    src_node: &ByteNode<CfSrc, A>,
+    child_mask: ByteMask
+) -> TrieNodeODRc<V, A>
+where
+    ByteNode<CfDst, A>: TrieNodeDowncast<V, A>,
+{
     let old_mask = dst_node.mask;
     let combined_mask = if REMOVE_UNSET { child_mask } else { child_mask | old_mask };
     let mut new_values = ValuesVec::with_capacity_in(combined_mask.count_bits(), dst_node.alloc.clone());
@@ -1629,8 +1647,13 @@ where
             prev_end = range_end as usize + 1;
             continue
         }
-        for child_byte in (src_range_mask | (old_mask & range_mask)).iter() {
-            if src_range_mask.test_bit(child_byte) {
+        let range_children = if SOURCE_COVERS_MASK {
+            src_range_mask
+        } else {
+            src_range_mask | (old_mask & range_mask)
+        };
+        for child_byte in range_children.iter() {
+            if SOURCE_COVERS_MASK || src_range_mask.test_bit(child_byte) {
                 let cf = unsafe { src_node.values.get_unchecked(src_ix) };
                 src_ix += 1;
                 // A dangling source branch is nothing to graft, like an absent one
