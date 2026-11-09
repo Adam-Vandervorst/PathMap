@@ -112,9 +112,10 @@ def main (args : List String) : IO UInt32 := do
   -- source for the zipper fuzzer.
   let runner? : Option (ByteArray → List String) :=
     if name == "map" then some (MapFuzz.run · 256)
+    else if name == "util" then some (UtilFuzz.run · 256)
     else (Source.byName name).map (fun src => (Fuzz.run · 256 src))
   let some runner := runner?
-    | IO.eprintln s!"unknown --source {name}; known: map {String.intercalate " " (Source.all.map (·.name))}"
+    | IO.eprintln s!"unknown --source {name}; known: map util {String.intercalate " " (Source.all.map (·.name))}"
       return 2
   if args.contains "--server" then
     serve runner

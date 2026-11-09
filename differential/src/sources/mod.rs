@@ -59,6 +59,8 @@ pub const SOURCES: &[(&str, Runner)] = &[
     ("diff-product", product::run_diff),
     // Not a read source: the map-level fuzzer, a different op table.
     ("map", crate::mapfuzz::run),
+    // Not a read source either: the value-level fuzzer (ByteMask, lattices, ...).
+    ("util", crate::utilfuzz::run),
 ];
 
 pub fn runner(name: &str) -> Option<Runner> {
@@ -67,10 +69,10 @@ pub fn runner(name: &str) -> Option<Runner> {
 
 /// Implement [`ReadSource`] for a zipper that has the native read zipper's whole
 /// trait surface (subtries, forking, read-only values and iteration), under the
-/// given skip token.  Every merge operation reads it as a source.  The impl
-/// site needs `pathmap::zipper::*` in scope (for the trait methods), and the
-/// zipper must be `Clone` (`meet_2`'s second source is a moved clone, as for
-/// the native zipper; `fork_read_zipper` returns an `Option`).
+/// given skip token, and that is `Clone` (a clone moved below the focus feeds
+/// `graft_child_maps` and the second source of `meet_2`, as the native impl
+/// does).  Every merge operation reads it as a source.  The impl
+/// site needs `pathmap::zipper::*` in scope (for the trait methods).
 ///
 /// `full_read_source!(skip, merge_at)` adds a per-focus veto: `merge_at(&self)`
 /// returning `false` makes every merge skip (`Source.mergeAt` in the model).

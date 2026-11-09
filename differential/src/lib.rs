@@ -28,6 +28,7 @@ pub mod repro;
 pub mod server;
 pub mod sources;
 pub mod mapfuzz;
+pub mod utilfuzz;
 
 pub use act::*;
 pub use harness::*;

@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 
-from input_format import MAP_NOPS, NOPS, input_header, versioned_input
+from input_format import MAP_NOPS, NOPS, UTIL_NOPS, input_header, versioned_input
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORACLE = os.environ.get("PATHMAP_ORACLE") or os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
@@ -953,7 +953,7 @@ def main():
     if args.files:
         sources.append(FileInputs(args.files))
     if args.random:
-        selectors = args.selectors or (MAP_NOPS if args.source == "map" else NOPS)
+        selectors = args.selectors or {"map": MAP_NOPS, "util": UTIL_NOPS}.get(args.source, NOPS)
         sources.append(RandomInputs(args.seed, args.random, args.maxlen, selectors))
     if args.convex:
         sources.append(ConvexInputs(args.seed, args.convex))
