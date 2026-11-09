@@ -85,6 +85,13 @@ structure Source where
   map0 at the end of the program, for a source whose teardown changes map0.
   Default: unchanged. -/
   finalMap0 : Nat → Path → PathMap UInt64 → PathMap UInt64 := fun _ _ m => m
+  /-- `mergeAt m0 m1 r0 r1 focus`: with `caps.merge`, whether the source can
+  serve a merge with its focus at the absolute path `focus`; `false` renders
+  as `skip:<name>` (the Rust side's `full_read_source!` guard).  For a source
+  whose merges are broken at some foci by a known crate bug, so the bug does
+  not corrupt map0 for the rest of the run. -/
+  mergeAt : PathMap UInt64 → PathMap UInt64 → Path → Path → Path → Bool :=
+    fun _ _ _ _ _ => true
 
 /-- The skip token for an operation this source cannot serve. -/
 def Source.skip (s : Source) : String := "skip:" ++ s.name

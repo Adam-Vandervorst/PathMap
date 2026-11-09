@@ -208,12 +208,46 @@ KNOWN = [
      "factor stacked after an empty one only on a later call (D2); reproducers "
      "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
      "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
-    # Source-specific entries first (keyed on the `crate/<source>` label), so a
+    # Source-specific entries first (keyed on `src:<source>`), so a
     # generic op-name entry below cannot claim them.
-    (["crate/empty", "to_next_val"],
+    (["src:prefix", "READ-SIDE", "DANGLING-KEPT", " e0 v- c0 n"],
+     "PrefixZipper::val_count() at a focus that has left the prefix reports "
+     "the source's whole value count instead of 0 "
+     "[prefix: val_count_off_prefix, lean/findings/prefix.md]"),
+    (["src:prefix", "make_map_val_count ret=0"],
+     "PrefixZipper::make_map() at a focus that has left the prefix returns the "
+     "whole source trie instead of an empty map "
+     "[prefix: make_map_off_prefix, lean/findings/prefix.md]"),
+    # join_map_into reads the read zipper's make_map(); the read focus not
+    # existing (` e0 v- c0 n0` in the R= fingerprint) is the off-prefix case.
+    (["src:prefix", "join_map_into", "R=", " e0 v- c0 n0 f"],
+     "PrefixZipper::make_map() at a focus that has left the prefix returns the "
+     "whole source trie, which join_map_into() then joins "
+     "[prefix: make_map_off_prefix, lean/findings/prefix.md]"),
+    (["src:prefix", "join_map_into", "CONTENT-DROPPED"],
+     "PrefixZipper::make_map() from inside the prefix drops the (dangling) rest "
+     "of the prefix when the source's trie is empty, so join_map_into() adds "
+     "nothing [prefix: make_map_drops_empty_stem, lean/findings/prefix.md]"),
+    (["src:prefix", "join_map_into ret=Element", "join_map_into ret=None"],
+     "PrefixZipper::make_map() from inside the prefix drops the (dangling) rest "
+     "of the prefix when the source's trie is empty, so join_map_into() adds "
+     "nothing [prefix: make_map_drops_empty_stem, lean/findings/prefix.md]"),
+    (["src:prefix", "descend_until", "READ-SIDE"],
+     "PrefixZipper::descend_until() crosses the seam: after consuming the "
+     "prefix it keeps descending into the source past the source's root value "
+     "[prefix: descend_until_crosses_seam_value, lean/findings/prefix.md]"),
+    (["src:prefix", "sibling_byte", "READ-SIDE"],
+     "PrefixZipper::to_next/prev_sibling_byte() return None one byte off the "
+     "prefix, where the prefix byte is a sibling "
+     "[prefix: sibling_off_prefix, lean/findings/prefix.md]"),
+    (["src:prefix", "_step", "READ-SIDE"],
+     "PrefixZipper::to_next/prev_sibling_byte() return None one byte off the "
+     "prefix, where the prefix byte is a sibling, so to_next/prev_step stop "
+     "[prefix: sibling_off_prefix, lean/findings/prefix.md]"),
+    (["src:empty", "to_next_val", "READ-SIDE"],
      "EmptyZipper::to_next_val() returns false without rewinding to the root "
      "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
-    (["crate/empty", "to_next_get_val"],
+    (["src:empty", "to_next_get_val", "READ-SIDE"],
      "EmptyZipper::to_next_get_val() returns None without rewinding to the root "
      "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
     # Tested first: this one is keyed on a shape, and an ACT val_count-only
@@ -349,6 +383,10 @@ KNOWN = [
      "an algebraic op keeps a dangling child the spec drops: an empty child "
      "node meets/subtracts to itself rather than disappearing "
      "[meet_keeps_dangling]"),
+    (["DANGLING-FOCUS-KEPT", "meet_2"],
+     "meet_2() of sources holding only dangling paths creates the destination "
+     "focus and copies the dangling paths [meet_keeps_dangling, "
+     "lean/findings/prefix.md]"),
     (["DANGLING-FOCUS-KEPT"],
      "meet_into() keeps an empty materialized focus that the spec removes "
      "[meet_keeps_dangling]"),
@@ -462,7 +500,7 @@ def divergence_shape(a, b):
             return "VALUE-ONLY"
         return None
     if (keys == {"e"} and len(diff) == 1 and len(ta) > 2
-            and ta[1] == "meet_into" and "ret=None" in ta
+            and ta[1] in ("meet_into", "meet_2") and "ret=None" in ta
             and diff[0] == ("e0", "e1")):
         return "DANGLING-FOCUS-KEPT"
     if (keys == {"ret", "e", "c"} and len(diff) == 3
@@ -807,8 +845,7 @@ def main():
     args.act = args.source == "act"
 
     trace_bin = find_trace_bin(args.act)
-    # Named for the source, so a KNOWN entry can be keyed on one source's line.
-    other_label = "crate" if args.source in ("native", "act") else "crate/" + args.source
+    other_label = "crate"
 
     # Inputs are produced by an `InputSource`, in whichever worker picks the
     # index up -- see the class docs.  Nothing is written to disk and no blob is

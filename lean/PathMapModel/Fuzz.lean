@@ -169,6 +169,13 @@ structure St where
   /-- map1 as seeded, for the trailer's `MAP1` line (`rz.trie` is the view,
   which for a virtual source is not map1). -/
   map1 : PathMap V
+  /-- `src.mergeAt` applied to the header (`Source.mergeAt`). -/
+  mergeAt : Path → Bool := fun _ => true
+
+/-- Can the read zipper serve as a merge source right now?  The capability,
+and the source's per-focus veto (`Source.mergeAt`); both render as
+`src.skip`. -/
+def St.canMerge (s : St) : Bool := s.src.caps.merge && s.mergeAt s.rz.focus
 
 /-- The per-step fingerprint of one zipper. -/
 def fingerprint (z : Zip V) (valCount : Bool := true) : String :=
@@ -406,16 +413,16 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 33 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (pr, d) ← d.bool
              let z := s.wz.removeUnmaskedBranches (ByteMask.ofList m) pr
              some (emit { s with wz := z } "remove_unmasked_branches" (hexPath (ByteMask.ofList m)), d)
-  | 34 => do if !s.src.caps.merge then some (emit s "graft" s.src.skip, d) else
+  | 34 => do if !s.canMerge then some (emit s "graft" s.src.skip, d) else
              do
                let z := s.wz.graft s.rz
                some (emit { s with wz := z } "graft" "-", d)
   | 35 => do let (p, d) ← d.path
-             if !s.src.caps.merge then some (emit s "graft_src_at" s.src.skip, d)
+             if !s.canMerge then some (emit s "graft_src_at" s.src.skip, d)
              else
                let z := s.wz.graftSrcAt s.rz p
                some (emit { s with wz := z } "graft_src_at" (hexPath p), d)
-  | 36 => do if !s.src.caps.merge then some (emit s "join_into" s.src.skip, d) else
+  | 36 => do if !s.canMerge then some (emit s "join_into" s.src.skip, d) else
              do
                let (st, z) := s.wz.joinInto ops s.rz
                some (emit { s with wz := z } "join_into" (toString st), d)
@@ -426,16 +433,16 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                some (emit { s with wz := z } "join_map_into"
                  (if false && leaky then "?" else toString st), d)
   | 38 => do let (pr, d) ← d.bool
-             if !s.src.caps.merge then some (emit s "meet_into" s.src.skip, d)
+             if !s.canMerge then some (emit s "meet_into" s.src.skip, d)
              else
                let (st, z) := s.wz.meetInto ops s.rz pr
                some (emit { s with wz := z } "meet_into" (toString st), d)
   | 39 => do let (pr, d) ← d.bool
-             if !s.src.caps.merge then some (emit s "subtract_into" s.src.skip, d)
+             if !s.canMerge then some (emit s "subtract_into" s.src.skip, d)
              else
                let (st, z) := s.wz.subtractInto ops s.rz pr
                some (emit { s with wz := z } "subtract_into" (toString st), d)
-  | 40 => do if !s.src.caps.merge then some (emit s "restrict" s.src.skip, d) else
+  | 40 => do if !s.canMerge then some (emit s "restrict" s.src.skip, d) else
              do
                let leaky := s.wz.focusNodeIsEmpty
                let (st, z) := s.wz.restrict ops s.rz
@@ -451,7 +458,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              -- indistinguishable while both reasons rendered as a bare `skip`.
   | 41 => do if false then
                some (emit s "restricting" skipEmptyFocus, d)
-             else if !s.src.caps.merge then some (emit s "restricting" s.src.skip, d)
+             else if !s.canMerge then some (emit s "restricting" s.src.skip, d)
              else
                let (r, z) := s.wz.restricting s.rz
                some (emit { s with wz := z } "restricting" (showBool r), d)
@@ -525,7 +532,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              some (emit { s with rz := z } "to_next_get_val"
                (showBool moved ++ ":" ++ showVal v ++ ":1"), d)
   | 53 => do let (n, d) ← d.mod 4; let (m, d) ← d.pathN n; let (ru, d) ← d.bool
-             if !s.src.caps.merge then some (emit s "graft_masked_branches" s.src.skip, d) else
+             if !s.canMerge then some (emit s "graft_masked_branches" s.src.skip, d) else
              do
                let z := s.wz.graftMaskedBranches s.rz (ByteMask.ofList m) ru
                some (emit { s with wz := z } "graft_masked_branches"
@@ -537,7 +544,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              -- broken three ways (FINDINGS.md #15) and the node representations
              -- it leaves behind degrade the `AlgebraicStatus` that *later*
              -- operations report, which would contaminate the whole run.
-             if !s.src.caps.merge then some (emit s "graft_child_maps" s.src.skip, d) else
+             if !s.canMerge then some (emit s "graft_child_maps" s.src.skip, d) else
              do
                let mask := ByteMask.ofList m
                let maps := mask.map (fun b => ([b], s.rz.trie.subtrie (s.rz.focus ++ [b])))
@@ -546,7 +553,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                  (hexPath mask ++ ":" ++ showBool ru), d)
   | 55 => do let (p, d) ← d.path
              -- `meet_2` takes two sources; the second is the first moved to `p`.
-             if !s.src.caps.merge then some (emit s "meet_2" s.src.skip, d) else
+             if !s.canMerge then some (emit s "meet_2" s.src.skip, d) else
              do
                let b := { s.rz with path := s.rz.path ++ p }
                let (st, z) := s.wz.meet2 ops s.rz b
@@ -638,7 +645,8 @@ def header (d : Dec) (src : Source) : Option (St × Dec) := do
   let (vt, vr) := src.view m0 m1 r0 r1
   some ({ wz := { trie := m0, root := r0, path := [] }
           rz := { trie := vt, root := vr, path := [] }
-          out := [], step := 0, src := src, map1 := m1 }, d)
+          out := [], step := 0, src := src, map1 := m1
+          mergeAt := src.mergeAt m0 m1 r0 r1 }, d)
 
 /-! ## Entry point -/
 

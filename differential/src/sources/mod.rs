@@ -30,6 +30,7 @@ pub mod dependent;
 pub mod head;
 pub mod owned;
 pub mod empty;
+pub mod prefix;
 
 /// A runner: decode and execute one input, return the trace.
 pub type Runner = fn(&[u8], bool) -> String;
@@ -48,6 +49,7 @@ pub const SOURCES: &[(&str, Runner)] = &[
     ("head", head::run),
     ("owned", owned::run),
     ("empty", empty::run),
+    ("prefix", prefix::run),
     // Not a read source: the map-level fuzzer, a different op table.
     ("map", crate::mapfuzz::run),
 ];
@@ -59,10 +61,18 @@ pub fn runner(name: &str) -> Option<Runner> {
 /// Implement [`ReadSource`] for a zipper that has the native read zipper's whole
 /// trait surface (subtries, forking, read-only values and iteration), under the
 /// given skip token.  Every merge operation reads it as a source.  The impl
-/// site needs `pathmap::zipper::*` in scope (for the trait methods).
+/// site needs `pathmap::zipper::*` in scope (for the trait methods), and the
+/// zipper must be `Clone` (`meet_2`'s second source is a moved clone, as for
+/// the native zipper; `fork_read_zipper` returns an `Option`).
+///
+/// `full_read_source!(skip, merge_at)` adds a per-focus veto: `merge_at(&self)`
+/// returning `false` makes every merge skip (`Source.mergeAt` in the model).
 #[macro_export]
 macro_rules! full_read_source {
     ($skip:expr) => {
+        $crate::full_read_source!($skip, |_| true);
+    };
+    ($skip:expr, $merge_at:expr) => {
         const SKIP: &'static str = $skip;
         fn dump_fork(&self) -> Option<String> {
             Some($crate::harness::dump_fork(self))
@@ -81,18 +91,24 @@ macro_rules! full_read_source {
             Some((got.is_some(), got, agree))
         }
         fn do_graft<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W) -> bool {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return false; }
             wz.graft(self);
             true
         }
         fn do_graft_masked<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W, m: ::pathmap::utils::ByteMask, ru: bool) -> bool {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return false; }
             wz.graft_masked_branches(self, m, ru);
             true
         }
         fn do_graft_child_maps<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W, m: ::pathmap::utils::ByteMask, ru: bool) -> bool {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return false; }
             let maps: Vec<::pathmap::PathMap<u64>> = m
                 .iter()
                 .map(|b| {
-                    let mut c = self.fork_read_zipper();
+                    let mut c = self.clone();
                     c.descend_to_byte(b);
                     c.make_map()
                 })
@@ -101,30 +117,45 @@ macro_rules! full_read_source {
             true
         }
         fn do_meet_2<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W, path: &[u8]) -> Option<::pathmap::ring::AlgebraicStatus> {
-            let mut b = self.fork_read_zipper();
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return None; }
+            let mut b = self.clone();
             b.descend_to(path);
             Some(wz.meet_2(self, &b))
         }
         fn do_graft_src_at<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W, p: &[u8]) -> bool {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return false; }
             wz.graft_src_at(self, p);
             true
         }
         fn do_join_into<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W) -> Option<::pathmap::ring::AlgebraicStatus> {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return None; }
             Some(wz.join_into(self))
         }
+        // Gated on `make_map` only, not `merge_at` (`Caps.makeMap` in the model).
         fn do_join_map_into<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W) -> Option<::pathmap::ring::AlgebraicStatus> {
             Some(wz.join_map_into(self.make_map()))
         }
         fn do_meet_into<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W, prune: bool) -> Option<::pathmap::ring::AlgebraicStatus> {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return None; }
             Some(wz.meet_into(self, prune))
         }
         fn do_subtract_into<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W, prune: bool) -> Option<::pathmap::ring::AlgebraicStatus> {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return None; }
             Some(wz.subtract_into(self, prune))
         }
         fn do_restrict<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W) -> Option<::pathmap::ring::AlgebraicStatus> {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return None; }
             Some(wz.restrict(self))
         }
         fn do_restricting<W: ::pathmap::zipper::ZipperWriting<u64>>(&self, wz: &mut W) -> Option<bool> {
+            let merge_at: fn(&Self) -> bool = $merge_at;
+            if !merge_at(self) { return None; }
             Some(wz.restricting(self))
         }
     };
