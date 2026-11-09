@@ -90,16 +90,24 @@ def kids : PTree V → List (Path × PTree V)
 theorem ind {motive : PTree V → Prop}
     (h : ∀ v kids, (∀ e c, (e, c) ∈ kids → motive c) → motive (node v kids)) :
     ∀ t, motive t
-  | node v kids => h v kids (fun e c hm => ind h c)
+  | node v kids => h v kids (fun e c _hm => ind h c)
 termination_by t => sizeOf t
 decreasing_by
-  have := List.sizeOf_lt_of_mem hm
+  have := List.sizeOf_lt_of_mem _hm
   simp only [Prod.mk.sizeOf_spec] at this
   simp only [node.sizeOf_spec]
   omega
 
-/-- The locations strictly inside an edge: its proper, non-empty prefixes. -/
-def mids (e : Path) : List Path := (List.range (e.length - 1)).map fun i => e.take (i + 1)
+/-- Put byte `b` in front of an entry's path. -/
+def pre (b : UInt8) (pv : Path × Option V) : Path × Option V := (b :: pv.1, pv.2)
+
+/-- The locations an edge contributes, below its parent: one valueless location
+for every byte strictly inside the edge, then the child's own locations `L`
+under the whole edge. -/
+def blockEnts : Path → List (Path × Option V) → List (Path × Option V)
+  | [], L => L
+  | [b], L => L.map (pre b)
+  | b :: c :: x, L => ([b], none) :: (blockEnts (c :: x) L).map (pre b)
 
 mutual
 /-- Every location of the tree, pre-order, each with its value: the node, then
@@ -109,9 +117,7 @@ def ents : PTree V → List (Path × Option V)
 
 def entsKids : List (Path × PTree V) → List (Path × Option V)
   | [] => []
-  | (e, c) :: rest =>
-      ((mids e).map fun p => (p, (none : Option V))) ++
-        ((ents c).map fun pv => (e ++ pv.1, pv.2)) ++ entsKids rest
+  | (e, c) :: rest => blockEnts e (ents c) ++ entsKids rest
 end
 
 /-- The trie a tree denotes.  A well-formed `PathMap` when the tree's edges are
@@ -144,6 +150,14 @@ inductive LineForm : PTree V → Prop
       (heads kids).Pairwise (· < ·) →
       (∀ k ∈ kids, k.1 ≠ [] ∧ k.2.isFeat = true) → (∀ k ∈ kids, LineForm k.2) →
       LineForm (node v kids)
+
+/-- What both canonical forms ask of every node: non-empty edges with strictly
+ascending first bytes.  Enough for `flatten` to be sorted (`sorted_ents`). -/
+inductive Ordered : PTree V → Prop
+  | node (v : Option V) (kids : List (Path × PTree V)) :
+      (heads kids).Pairwise (· < ·) →
+      (∀ k ∈ kids, k.1 ≠ []) → (∀ k ∈ kids, Ordered k.2) →
+      Ordered (node v kids)
 
 /-- No leaf without a value: what an anamorphism can build by pushing alone. -/
 inductive NoDangling : PTree V → Prop
@@ -309,10 +323,58 @@ end PathMap
 
 /-! ## Anamorphisms
 
-The generic anamorphism lives in `MapFuzz/Morph.lean` (`Morph.ana`, with the
-`TrieBuilder` calls `push`/`push_byte`/`graft_at_byte` as `AnaKid`s).  Its
-closure for a tree just pushes every edge; `PTree.unfoldVals` is what it
-collects, stated here so the theorem needs nothing from the fuzzer. -/
+`PathMap::new_from_ana(w, alg)` runs `alg(w, &mut val, builder, path)` at the
+root, then, depth-first in push order, at `path ++ sub` for every child
+`(sub, w')` pushed into the builder (`push_byte`, `push`, `set_child_mask`).
+`graft_at_byte(b, rz)` instead places the subtrie strictly *below* `rz`'s focus
+at `path ++ [b]` and does not recurse.  The result holds exactly the values
+set, the grafted content (dangling paths included), and their prefixes: a
+location that got neither a value nor anything below it does not exist.  (The
+fuzzer's closures are in `MapFuzz/Morph.lean`.) -/
+
+/-- What the closure put in the `TrieBuilder`. -/
+inductive AnaKid (V W : Type) where
+  /-- `push(sub, w)` / `push_byte` / `set_child_mask`: recurse at `path ++ sub`. -/
+  | w (sub : Path) (w : W)
+  /-- `graft_at_byte(b, rz)`: `node` is the subtrie at `rz`'s focus; only what is
+  strictly below its root is placed, at `path ++ [b]`. -/
+  | graft (b : UInt8) (node : PathMap V)
+
+/-- The first byte of the branch a kid starts (its `TrieBuilder` child-mask bit). -/
+def AnaKid.byte {V W : Type} : AnaKid V W → UInt8
+  | .w sub _ => sub.headD 0
+  | .graft b _ => b
+
+/-- Values, grafted locations and calls (pre-order) of an anamorphism.  A call
+is its path and the first bytes of what it pushed: after the closure,
+`TrieBuilder::len` is their number and `child_mask` their set. -/
+def anaGo {V W : Type} (alg : W → Path → Option V × List (AnaKid V W)) :
+    Nat → W → Path → List (Path × V) × List Path × List (Path × List UInt8)
+  | 0, _, _ => ([], [], [])
+  | n + 1, w, path =>
+      let (v, kids) := alg w path
+      let vals0 : List (Path × V) := match v with | some x => [(path, x)] | none => []
+      kids.foldl (fun (acc : List (Path × V) × List Path × List (Path × List UInt8)) k =>
+        match k with
+        | .w sub w' =>
+            let (vs, ps, cs) := anaGo alg n w' (path ++ sub)
+            (acc.1 ++ vs, acc.2.1 ++ ps, acc.2.2 ++ cs)
+        | .graft b node =>
+            (acc.1 ++ node.vals.filterMap (fun (q, x) =>
+                if q.isEmpty then none else some (path ++ [b] ++ q, x)),
+             acc.2.1 ++ node.paths.filterMap (fun q =>
+                if q.isEmpty then none else some (path ++ [b] ++ q)),
+             acc.2.2)) (vals0, [], [(path, kids.map AnaKid.byte)])
+
+/-- `PathMap::new_from_ana(w, alg)`: the map and the calls of `alg` (see `anaGo`). -/
+def ana {V W : Type} (alg : W → Path → Option V × List (AnaKid V W)) (w : W) (fuel : Nat) :
+    PathMap V × List (Path × List UInt8) :=
+  let (vs, ps, cs) := anaGo alg fuel w []
+  (PathMap.mk' vs ps, cs)
+
+/-- The closure that deserializes a tree: set the node's value, push every edge. -/
+def PTree.unfold {V : Type} (t : PTree V) (_path : Path) : Option V × List (AnaKid V (PTree V)) :=
+  (t.val, t.kids.map fun k => .w k.1 k.2)
 
 namespace PTree
 
@@ -345,4 +407,810 @@ private def ex2 : PathMap Nat := PathMap.mk' [([1, 2, 3, 4], 1), ([1, 2, 3, 5, 6
 #guard rd (PathMap.toLines (PathMap.mk' [([], 7)] [[3, 3]] : PathMap Nat)) == "(7,33(-))"
 
 end PTree
+end PathMapModel
+
+/-! # Proofs
+
+Everything is stated through lookups: a `PathMap` is determined by
+`entries.lookup` once its entries are sorted (`eq_of_sorted_of_lookup`), and
+`ents` of a tree is looked up edge by edge (`lookup_entsKids`, `edgeLook`). -/
+
+namespace PathMapModel
+
+/-! ## Paths, masks, and what a  answers -/
+
+theorem Path.stripPrefix_eq_some : ∀ (p q s : Path), Path.stripPrefix p q = some s ↔ q = p ++ s
+  | [], q, s => by simp [Path.stripPrefix]
+  | a :: as, [], s => by simp [Path.stripPrefix]
+  | a :: as, b :: bs, s => by
+      by_cases h : a = b
+      · subst h; simp [Path.stripPrefix, Path.stripPrefix_eq_some as bs s]
+      · simp [Path.stripPrefix, h, Ne.symm h]
+
+theorem ByteMask.mem_ofList (bs : List UInt8) (b : UInt8) : b ∈ ByteMask.ofList bs ↔ b ∈ bs := by
+  unfold ByteMask.ofList
+  rw [List.mem_filterMap]
+  constructor
+  · rintro ⟨i, _, hi⟩
+    simp only at hi
+    split at hi
+    · rename_i hc; cases hi; simpa using hc
+    · cases hi
+  · intro hb
+    refine ⟨b.toNat, List.mem_range.mpr (by have := UInt8.toNat_lt b; omega), ?_⟩
+    simp [UInt8.ofNat_toNat, hb]
+
+theorem ByteMask.sorted_ofList (bs : List UInt8) : (ByteMask.ofList bs).Pairwise (· < ·) := by
+  unfold ByteMask.ofList
+  rw [List.pairwise_filterMap]
+  refine List.Pairwise.imp_of_mem ?_ List.pairwise_lt_range
+  intro i j hi hj hij x hx y hy
+  have hi' := List.mem_range.mp hi
+  have hj' := List.mem_range.mp hj
+  simp only at hx hy
+  split at hx <;> split at hy <;> cases hx <;> cases hy
+  rw [UInt8.lt_iff_toNat_lt]
+  simp
+  omega
+
+/-- Two strictly ascending byte lists with the same members are equal. -/
+theorem eq_of_sorted_of_mem :
+    ∀ {l₁ l₂ : List UInt8}, l₁.Pairwise (· < ·) → l₂.Pairwise (· < ·) →
+      (∀ b, b ∈ l₁ ↔ b ∈ l₂) → l₁ = l₂
+  | [], [], _, _, _ => rfl
+  | [], b :: _, _, _, h => absurd ((h b).mpr (List.mem_cons_self ..)) (by simp)
+  | b :: _, [], _, _, h => absurd ((h b).mp (List.mem_cons_self ..)) (by simp)
+  | a :: as, b :: bs, h₁, h₂, h => by
+      rw [List.pairwise_cons] at h₁ h₂
+      have hab : a = b := by
+        rcases (h a).mp (List.mem_cons_self ..) with _ | ⟨_, ha⟩
+        · rfl
+        · rcases (h b).mpr (List.mem_cons_self ..) with _ | ⟨_, hb⟩
+          · rfl
+          · have := h₂.1 a ha; have := h₁.1 b hb
+            rw [UInt8.lt_iff_toNat_lt] at *; omega
+      subst hab
+      congr 1
+      refine eq_of_sorted_of_mem h₁.2 h₂.2 (fun x => ?_)
+      constructor
+      · intro hx
+        rcases (h x).mp (List.mem_cons_of_mem _ hx) with _ | ⟨_, hx'⟩
+        · exact absurd (h₁.1 a hx) (by rw [UInt8.lt_iff_toNat_lt]; omega)
+        · exact hx'
+      · intro hx
+        rcases (h x).mpr (List.mem_cons_of_mem _ hx) with _ | ⟨_, hx'⟩
+        · exact absurd (h₂.1 a hx) (by rw [UInt8.lt_iff_toNat_lt]; omega)
+        · exact hx'
+
+namespace PathMap
+variable {V : Type}
+
+theorem mem_paths (T : PathMap V) (p : Path) : p ∈ T.paths ↔ (T.entries.lookup p).isSome := by
+  rw [List.lookup_isSome_iff, paths, List.mem_map]
+  constructor
+  · rintro ⟨kv, hm, rfl⟩; exact ⟨kv, hm, by simp⟩
+  · rintro ⟨kv, hm, h⟩; exact ⟨kv, hm, (eq_of_beq h).symm⟩
+
+theorem valAt_eq (T : PathMap V) (p : Path) : T.valAt p = (T.entries.lookup p).bind id := by
+  simp only [valAt, entryAt]
+  cases T.entries.lookup p with
+  | none => rfl
+  | some o => cases o <;> rfl
+
+theorem mem_childMask (T : PathMap V) (q : Path) (b : UInt8) :
+    b ∈ T.childMask q ↔ (T.entries.lookup (q ++ [b])).isSome := by
+  rw [childMask, ByteMask.mem_ofList, List.mem_filterMap, ← mem_paths]
+  constructor
+  · rintro ⟨r, hr, hs⟩
+    split at hs
+    · rename_i s h
+      have := (Path.stripPrefix_eq_some q r [s]).mp h
+      cases hs; subst this; exact hr
+    · cases hs
+  · intro h
+    refine ⟨q ++ [b], h, ?_⟩
+    rw [(Path.stripPrefix_eq_some q (q ++ [b]) [b]).mpr rfl]
+
+theorem sorted_childMask (T : PathMap V) (q : Path) : (T.childMask q).Pairwise (· < ·) :=
+  ByteMask.sorted_ofList _
+
+/-- An existing location's entry is its value. -/
+theorem lookup_eq_valAt {T : PathMap V} {p : Path} (h : (T.entries.lookup p).isSome) :
+    T.entries.lookup p = some (T.valAt p) := by
+  rw [valAt_eq]; cases hl : T.entries.lookup p with
+  | none => simp [hl] at h
+  | some o => rfl
+
+theorem WF.prefix {T : PathMap V} (hT : T.WF) {p : Path} (r : Path)
+    (h : (T.entries.lookup (p ++ r)).isSome) : (T.entries.lookup p).isSome := by
+  rw [← mem_paths] at h ⊢; exact hT.2.1 p r h
+
+theorem WF.root {T : PathMap V} (hT : T.WF) : (T.entries.lookup []).isSome := by
+  rw [← mem_paths]; exact hT.2.2
+
+end PathMap
+
+/-! ## Looking up a tree -/
+
+namespace PTree
+variable {V : Type}
+
+/-! ### Lookups -/
+
+theorem lookup_nil_key (L : List (Path × Option V)) (b : UInt8) :
+    (L.map (pre b)).lookup [] = none := by
+  induction L with
+  | nil => rfl
+  | cons hd tl ih => simp [pre, List.lookup_cons, ih]
+
+theorem lookup_map_pre (L : List (Path × Option V)) (b b' : UInt8) (p : Path) :
+    (L.map (pre b)).lookup (b' :: p) = if b' = b then L.lookup p else none := by
+  induction L with
+  | nil => simp
+  | cons hd tl ih =>
+    obtain ⟨k, x⟩ := hd
+    simp only [List.map_cons, pre, List.lookup_cons] at ih ⊢
+    by_cases hb : b' = b
+    · subst hb
+      by_cases hpk : p = k
+      · subst hpk; simp
+      · have h1 : (b' :: p == b' :: k) = false := by simp [hpk]
+        have h2 : (p == k) = false := by simp [hpk]
+        simp only [h1, h2, ite_true] at ih ⊢
+        exact ih
+    · have : (b' :: p == b :: k) = false := by simp [hb]
+      simp [this, ih, hb]
+
+/-- Looking up a path through the rest `x` of an edge, given `g`, the lookup
+below the edge's end.  `[]` is the location the rest starts at. -/
+def edgeLook (g : Path → Option (Option V)) : Path → Path → Option (Option V)
+  | [], p => g p
+  | _ :: _, [] => some none
+  | c :: x, c' :: p => if c' = c then edgeLook g x p else none
+
+theorem lookup_blockEnts (L : List (Path × Option V)) (b : UInt8) :
+    ∀ (x : Path) (b' : UInt8) (p : Path),
+      (blockEnts (b :: x) L).lookup (b' :: p) = if b' = b then edgeLook (fun q => L.lookup q) x p else none
+  | [], b', p => by simp [blockEnts, lookup_map_pre, edgeLook]
+  | c :: x, b', p => by
+      rw [blockEnts, List.lookup_cons]
+      by_cases hb : b' = b
+      · subst hb
+        cases p with
+        | nil => simp [edgeLook]
+        | cons c' p =>
+          have : (b' :: c' :: p == [b']) = false := by simp
+          simp only [this, lookup_map_pre, lookup_blockEnts L c x c' p, edgeLook]
+      · have : (b' :: p == [b]) = false := by simp [hb]
+        simp [this, lookup_map_pre, hb]
+
+theorem edgeLook_append (g : Path → Option (Option V)) :
+    ∀ (x r : Path), edgeLook g x (x ++ r) = g r
+  | [], r => rfl
+  | c :: x, r => by simp [edgeLook, edgeLook_append g x r]
+
+/-- `edgeLook` asks `g` only about suffixes no longer than the path. -/
+theorem edgeLook_congr {g g' : Path → Option (Option V)} :
+    ∀ (x p : Path), (∀ s : Path, s.length ≤ p.length → g s = g' s) →
+      edgeLook g x p = edgeLook g' x p
+  | [], p, h => h p (Nat.le_refl _)
+  | _ :: _, [], _ => rfl
+  | c :: x, c' :: p, h => by
+      simp only [edgeLook]
+      rw [edgeLook_congr x p (fun s hs => h s (by simp; omega))]
+
+theorem edgeLook_nil_isSome (g : Path → Option (Option V)) (hg : (g []).isSome) :
+    ∀ x : Path, (edgeLook g x []).isSome
+  | [] => hg
+  | _ :: _ => rfl
+
+
+theorem lookup_ents_nil (v : Option V) (kids : List (Path × PTree V)) :
+    (ents (node v kids)).lookup [] = some v := by
+  simp [ents]
+
+theorem lookup_ents_cons (v : Option V) (kids : List (Path × PTree V)) (b : UInt8) (p : Path) :
+    (ents (node v kids)).lookup (b :: p) = (entsKids kids).lookup (b :: p) := by
+  simp [ents, List.lookup_cons]
+
+/-- The child whose edge starts with `b`. -/
+def kidAt (kids : List (Path × PTree V)) (b : UInt8) : Option (Path × PTree V) :=
+  kids.find? (fun k => k.1.headD 0 == b)
+
+theorem kidAt_eq_none {kids : List (Path × PTree V)} {b : UInt8} (h : b ∉ heads kids) :
+    kidAt kids b = none := by
+  unfold kidAt
+  rw [List.find?_eq_none]
+  intro k hk hb
+  exact h (List.mem_map.mpr ⟨k, hk, by simpa using hb⟩)
+
+/-- Looking up below a node: through the edge that starts with the first byte. -/
+theorem lookup_entsKids :
+    ∀ (kids : List (Path × PTree V)), (∀ k ∈ kids, k.1 ≠ []) → (heads kids).Nodup →
+      ∀ (b : UInt8) (p : Path),
+        (entsKids kids).lookup (b :: p) =
+          (kidAt kids b).bind (fun k => edgeLook (fun q => (ents k.2).lookup q) k.1.tail p)
+  | [], _, _, b, p => by simp [entsKids, kidAt]
+  | (e, c) :: rest, hne, hnd, b, p => by
+      obtain ⟨b0, x, rfl⟩ : ∃ b0 x, e = b0 :: x := by
+        cases e with
+        | nil => exact absurd rfl (hne _ (List.mem_cons_self ..))
+        | cons b0 x => exact ⟨b0, x, rfl⟩
+      have hnd' : b0 ∉ heads rest ∧ (heads rest).Nodup := by
+        simpa [heads] using hnd
+      rw [entsKids, List.lookup_append, lookup_blockEnts,
+        lookup_entsKids rest (fun k hk => hne k (List.mem_cons_of_mem _ hk)) hnd'.2]
+      by_cases hb : b = b0
+      · subst hb
+        rw [kidAt_eq_none hnd'.1]
+        simp [kidAt]
+      · have : (b0 == b) = false := by simp [Ne.symm hb]
+        simp [hb, kidAt, this]
+
+end PTree
+/-! ## Sortedness, and extensionality -/
+
+theorem Path.lt_cons_same (b : UInt8) (x y : Path) : Path.lt (b :: x) (b :: y) = Path.lt x y := by
+  rw [Path.lt_cons]; have : ¬ (b < b) := by rw [UInt8.lt_iff_toNat_lt]; omega
+  simp [this]
+
+theorem Path.lt_of_head_lt {a b : UInt8} (h : a < b) (x y : Path) : Path.lt (a :: x) (b :: y) = true := by
+  rw [Path.lt_cons]; simp [h]
+
+namespace PTree
+variable {V : Type}
+
+/-- Sorted strictly by path. -/
+def Sorted (l : List (Path × Option V)) : Prop := l.Pairwise (fun a b => Path.lt a.1 b.1 = true)
+
+theorem mem_blockEnts (L : List (Path × Option V)) (b : UInt8) :
+    ∀ (x : Path), ∀ kv ∈ blockEnts (b :: x) L, ∃ r, kv.1 = b :: r
+  | [], kv, h => by
+      simp only [blockEnts, List.mem_map] at h
+      obtain ⟨u, _, rfl⟩ := h; exact ⟨u.1, rfl⟩
+  | c :: x, kv, h => by
+      simp only [blockEnts, List.mem_cons, List.mem_map] at h
+      rcases h with rfl | ⟨u, _, rfl⟩
+      · exact ⟨[], rfl⟩
+      · exact ⟨u.1, rfl⟩
+
+theorem sorted_map_pre {L : List (Path × Option V)} (h : Sorted L) (b : UInt8) :
+    Sorted (L.map (pre b)) := by
+  unfold Sorted at *
+  rw [List.pairwise_map]
+  exact h.imp (fun hab => by simp only [pre, Path.lt_cons_same]; exact hab)
+
+theorem sorted_blockEnts {L : List (Path × Option V)} (h : Sorted L) (b : UInt8) :
+    ∀ x : Path, Sorted (blockEnts (b :: x) L)
+  | [] => sorted_map_pre h b
+  | c :: x => by
+      rw [blockEnts]
+      unfold Sorted
+      rw [List.pairwise_cons]
+      refine ⟨?_, sorted_map_pre (sorted_blockEnts h c x) b⟩
+      intro kv hkv
+      simp only [List.mem_map] at hkv
+      obtain ⟨u, hu, rfl⟩ := hkv
+      obtain ⟨r, hr⟩ := mem_blockEnts L c x u hu
+      simp only [pre, hr, Path.lt_cons_same]; rfl
+
+theorem mem_entsKids :
+    ∀ (kids : List (Path × PTree V)), (∀ k ∈ kids, k.1 ≠ []) →
+      ∀ kv ∈ entsKids kids, ∃ k ∈ kids, ∃ r, kv.1 = k.1.headD 0 :: r
+  | [], _, kv, h => by simp [entsKids] at h
+  | (e, c) :: rest, hne, kv, h => by
+      rw [entsKids, List.mem_append] at h
+      rcases h with h | h
+      · obtain ⟨b, x, rfl⟩ : ∃ b x, e = b :: x := by
+          cases e with
+          | nil => exact absurd rfl (hne _ (List.mem_cons_self ..))
+          | cons b x => exact ⟨b, x, rfl⟩
+        obtain ⟨r, hr⟩ := mem_blockEnts _ b x kv h
+        exact ⟨(b :: x, c), List.mem_cons_self .., r, hr⟩
+      · obtain ⟨k, hk, r, hr⟩ := mem_entsKids rest (fun k hk => hne k (List.mem_cons_of_mem _ hk)) kv h
+        exact ⟨k, List.mem_cons_of_mem _ hk, r, hr⟩
+
+theorem sorted_entsKids :
+    ∀ (kids : List (Path × PTree V)), (heads kids).Pairwise (· < ·) → (∀ k ∈ kids, k.1 ≠ []) →
+      (∀ k ∈ kids, Sorted (ents k.2)) → Sorted (entsKids kids)
+  | [], _, _, _ => List.Pairwise.nil
+  | (e, c) :: rest, hp, hne, hs => by
+      obtain ⟨b, x, rfl⟩ : ∃ b x, e = b :: x := by
+        cases e with
+        | nil => exact absurd rfl (hne _ (List.mem_cons_self ..))
+        | cons b x => exact ⟨b, x, rfl⟩
+      simp only [heads, List.map_cons, List.pairwise_cons] at hp
+      rw [entsKids]
+      unfold Sorted
+      rw [List.pairwise_append]
+      refine ⟨sorted_blockEnts (hs _ (List.mem_cons_self ..)) b x,
+        sorted_entsKids rest hp.2 (fun k hk => hne k (List.mem_cons_of_mem _ hk))
+          (fun k hk => hs k (List.mem_cons_of_mem _ hk)), ?_⟩
+      intro u hu w hw
+      obtain ⟨r, hr⟩ := mem_blockEnts _ b x u hu
+      obtain ⟨k, hk, r', hr'⟩ :=
+        mem_entsKids rest (fun k hk => hne k (List.mem_cons_of_mem _ hk)) w hw
+      rw [hr, hr']
+      exact Path.lt_of_head_lt (hp.1 _ (List.mem_map.mpr ⟨k, hk, rfl⟩)) r r'
+
+theorem sorted_ents : ∀ t : PTree V, Ordered t → Sorted (ents t) := by
+  refine PTree.ind (fun v kids ih ho => ?_)
+  cases ho with
+  | node _ _ hp hne hk =>
+    rw [ents]
+    unfold Sorted
+    rw [List.pairwise_cons]
+    refine ⟨fun kv hkv => ?_, sorted_entsKids kids hp hne (fun k hk' => ih k.1 k.2 hk' (hk k hk'))⟩
+    obtain ⟨_, _, r, hr⟩ := mem_entsKids kids hne kv hkv
+    rw [hr]; rfl
+
+end PTree
+namespace PTree
+variable {V : Type}
+
+theorem lookup_eq_none_of_all_lt {l : List (Path × Option V)} {k : Path}
+    (h : ∀ kv ∈ l, Path.lt k kv.1 = true) : l.lookup k = none := by
+  induction l with
+  | nil => rfl
+  | cons kv l ih =>
+    obtain ⟨k', x⟩ := kv
+    have h1 := h _ (List.mem_cons_self ..)
+    have : (k == k') = false := by
+      cases hk : k == k'
+      · rfl
+      · have : k = k' := eq_of_beq hk
+        subst this; simp at h1
+    rw [List.lookup_cons, this]
+    exact ih (fun kv hkv => h kv (List.mem_cons_of_mem _ hkv))
+
+/-- **A sorted entry list is determined by its lookups.** (`Canon.lean`'s
+`eq_of_sortedKeys_of_lookup`, for `Pairwise`.) -/
+theorem eq_of_sorted_of_lookup :
+    ∀ {l₁ l₂ : List (Path × Option V)}, Sorted l₁ → Sorted l₂ →
+      (∀ k, l₁.lookup k = l₂.lookup k) → l₁ = l₂
+  | [], [], _, _, _ => rfl
+  | [], (k, _) :: _, _, _, h => by have := h k; simp at this
+  | (k, _) :: _, [], _, _, h => by have := h k; simp at this
+  | (k₁, v₁) :: r₁, (k₂, v₂) :: r₂, h₁, h₂, h => by
+      unfold Sorted at h₁ h₂
+      rw [List.pairwise_cons] at h₁ h₂
+      have below : ∀ {k k' : Path} {r : List (Path × Option V)},
+          (∀ kv ∈ r, Path.lt k' kv.1 = true) → Path.lt k k' = true → ∀ kv ∈ r, Path.lt k kv.1 = true :=
+        fun hr hlt kv hkv => Path.lt_trans hlt (hr kv hkv)
+      have hkey : k₁ = k₂ := by
+        rcases Path.lt_total k₁ k₂ with hlt | heq | hgt
+        · have := h k₁
+          rw [List.lookup_cons, List.lookup_cons] at this
+          simp only [beq_self_eq_true] at this
+          have hne : (k₁ == k₂) = false := by
+            cases hb : k₁ == k₂
+            · rfl
+            · have := eq_of_beq hb; subst this; simp at hlt
+          rw [hne, lookup_eq_none_of_all_lt (below h₂.1 hlt)] at this
+          cases this
+        · exact heq
+        · have := h k₂
+          rw [List.lookup_cons, List.lookup_cons] at this
+          simp only [beq_self_eq_true] at this
+          have hne : (k₂ == k₁) = false := by
+            cases hb : k₂ == k₁
+            · rfl
+            · have := eq_of_beq hb; subst this; simp at hgt
+          rw [hne, lookup_eq_none_of_all_lt (below h₁.1 hgt)] at this
+          cases this
+      subst hkey
+      have hv : v₁ = v₂ := by have := h k₁; simpa [List.lookup_cons] using this
+      subst hv
+      congr 1
+      refine eq_of_sorted_of_lookup h₁.2 h₂.2 (fun k => ?_)
+      by_cases hk : k = k₁
+      · subst hk
+        have e1 : ∀ kv ∈ r₁, Path.lt k kv.1 = true := h₁.1
+        have e2 : ∀ kv ∈ r₂, Path.lt k kv.1 = true := h₂.1
+        rw [lookup_eq_none_of_all_lt e1, lookup_eq_none_of_all_lt e2]
+      · have := h k
+        have hb : (k == k₁) = false := by simp [hk]
+        simpa [List.lookup_cons, hb] using this
+
+end PTree
+
+namespace PathMap
+variable {V : Type}
+
+theorem le_foldl_max : ∀ (l : List Nat) (a : Nat), a ≤ l.foldl max a
+  | [], _ => Nat.le_refl _
+  | x :: l, a => Nat.le_trans (Nat.le_max_left a x) (le_foldl_max l (max a x))
+
+theorem mem_le_foldl_max : ∀ (l : List Nat) (a x : Nat), x ∈ l → x ≤ l.foldl max a
+  | [], _, _, h => by simp at h
+  | y :: l, a, x, h => by
+      rcases List.mem_cons.mp h with rfl | h
+      · exact Nat.le_trans (Nat.le_max_right a x) (le_foldl_max l _)
+      · exact mem_le_foldl_max l _ x h
+
+/-- Every location is shallower than the fuel, by two. -/
+theorem lt_fuel {T : PathMap V} {r : Path} (h : r ∈ T.paths) : r.length + 2 ≤ T.fuel := by
+  unfold fuel
+  have := mem_le_foldl_max (T.paths.map List.length) 0 r.length (List.mem_map.mpr ⟨r, h, rfl⟩)
+  omega
+
+end PathMap
+/-! ## (a), byte level: serialize, then flatten -/
+namespace PTree
+variable {V : Type}
+
+theorem zipWith_map_self {α β γ : Type} (g : α → β → γ) (f : α → β) :
+    ∀ l : List α, List.zipWith g l (l.map f) = l.map (fun a => g a (f a))
+  | [] => rfl
+  | a :: l => by simp [zipWith_map_self g f l]
+
+theorem find?_beq (b : UInt8) :
+    ∀ m : List UInt8, m.find? (fun a => a == b) = if b ∈ m then some b else none
+  | [] => by simp
+  | a :: m => by
+      by_cases h : a = b
+      · subst h; simp
+      · have : (a == b) = false := by simp [h]
+        simp [this, find?_beq b m, Ne.symm h]
+
+/-- The kids a fold builds: one per mask byte, the edge starting with it. -/
+theorem kidAt_map {f : UInt8 → Path × PTree V} (hf : ∀ a, (f a).1.headD 0 = a) (b : UInt8)
+    (m : List UInt8) : kidAt (m.map f) b = if b ∈ m then some (f b) else none := by
+  unfold kidAt
+  rw [List.find?_map]
+  have : ((fun k : Path × PTree V => k.1.headD 0 == b) ∘ f) = fun a => a == b := by
+    funext a; simp only [Function.comp, hf a]
+  rw [this, find?_beq]
+  split <;> rfl
+
+theorem heads_map {f : UInt8 → Path × PTree V} (hf : ∀ a, (f a).1.headD 0 = a) (m : List UInt8) :
+    heads (m.map f) = m := by
+  induction m with
+  | nil => rfl
+  | cons a m ih => simp only [heads, List.map_cons] at ih ⊢; rw [hf a, ih]
+
+theorem nodup_of_sorted {l : List UInt8} (h : l.Pairwise (· < ·)) : l.Nodup :=
+  h.imp (fun hab heq => by subst heq; rw [UInt8.lt_iff_toNat_lt] at hab; omega)
+
+end PTree
+
+namespace PathMap
+open PTree
+variable {V : Type}
+
+theorem cata_succ {W : Type} (T : PathMap V) (alg : Option V → ByteMask → List W → W) (d : W)
+    (n : Nat) (q : Path) :
+    T.cata alg d (n + 1) q =
+      alg (T.valAt q) (T.childMask q) ((T.childMask q).map fun b => T.cata alg d n (q ++ [b])) := rfl
+
+/-- The byte tree of `T` at `q` holds exactly what `T` holds below `q`. -/
+theorem lookup_cata_bytes {T : PathMap V} (hT : T.WF) (d : PTree V) :
+    ∀ (p q : Path) (n : Nat), (T.entries.lookup q).isSome →
+      (∀ r, (T.entries.lookup r).isSome → r.length < q.length + n) →
+      (ents (T.cata algB d n q)).lookup p = T.entries.lookup (q ++ p) := by
+  intro p
+  induction p with
+  | nil =>
+    intro q n hq hb
+    cases n with
+    | zero => exact absurd (hb q hq) (by omega)
+    | succ n =>
+      rw [cata_succ, algB, lookup_ents_nil, List.append_nil, lookup_eq_valAt hq]
+  | cons b p ih =>
+    intro q n hq hb
+    cases n with
+    | zero => exact absurd (hb q hq) (by omega)
+    | succ n =>
+      have hm := T.sorted_childMask q
+      rw [cata_succ, algB, zipWith_map_self, lookup_ents_cons,
+        lookup_entsKids _ (by simp) (by rw [heads_map (by simp)]; exact nodup_of_sorted hm),
+        kidAt_map (by simp)]
+      by_cases hbm : b ∈ T.childMask q
+      · have hq' := (T.mem_childMask q b).mp hbm
+        simp only [hbm, if_true, Option.bind_some, List.tail_cons, edgeLook]
+        rw [ih (q ++ [b]) n hq' (fun r hr => by have := hb r hr; simp; omega)]
+        simp
+      · simp only [hbm, if_false, Option.bind_none]
+        symm
+        cases h : T.entries.lookup (q ++ b :: p) with
+        | none => rfl
+        | some _ =>
+          have : (T.entries.lookup (q ++ [b] ++ p)).isSome := by simp [h]
+          exact absurd ((T.mem_childMask q b).mpr (hT.prefix p this)) hbm
+
+end PathMap
+namespace PTree
+variable {V : Type}
+
+theorem ByteForm.ordered : ∀ {t : PTree V}, ByteForm t → Ordered t := by
+  intro t
+  induction t using PTree.ind with
+  | h v kids ih =>
+    intro hb
+    cases hb with
+    | node _ _ hp hl hk =>
+      exact .node v kids hp (fun k hk' => by
+          intro h; have := hl k hk'; rw [h] at this; cases this)
+        (fun k hk' => ih k.1 k.2 hk' (hk k hk'))
+
+end PTree
+
+namespace PathMap
+open PTree
+variable {V : Type}
+
+theorem byteForm_cata (T : PathMap V) {d : PTree V} (hd : ByteForm d) :
+    ∀ (n : Nat) (q : Path), ByteForm (T.cata algB d n q)
+  | 0, _ => hd
+  | n + 1, q => by
+      rw [cata_succ, algB, zipWith_map_self]
+      refine .node _ _ (by rw [heads_map (by simp)]; exact T.sorted_childMask q) (by simp) ?_
+      intro k hk
+      obtain ⟨b, _, rfl⟩ := List.mem_map.mp hk
+      exact byteForm_cata T hd n (q ++ [b])
+
+/-- `toBytes` builds a byte-form tree. -/
+theorem byteForm_toBytes (T : PathMap V) : ByteForm (toBytes T) :=
+  byteForm_cata T (.node none [] (by simp [heads]) (by simp) (by simp)) _ _
+
+theorem bound_fuel (T : PathMap V) :
+    ∀ r, (T.entries.lookup r).isSome → r.length < ([] : Path).length + T.fuel := by
+  intro r hr
+  have := lt_fuel ((T.mem_paths r).mpr hr)
+  simp; omega
+
+/-- **(a), byte level.**  Serializing a well-formed trie into its byte tree
+and flattening the tree gives the trie back. -/
+theorem flatten_toBytes {T : PathMap V} (hT : T.WF) : (toBytes T).flatten = T := by
+  have h := eq_of_sorted_of_lookup (sorted_ents _ (byteForm_toBytes T).ordered) hT.1
+    (fun k => by
+      rw [toBytes, cataStep, lookup_cata_bytes hT _ k [] _ hT.root (bound_fuel T)]
+      rfl)
+  cases T; simp only [flatten] at h ⊢; rw [h]
+
+end PathMap
+/-! ## (a), line level -/
+namespace PathMap
+open PTree
+variable {V : Type}
+
+theorem follow_succ (T : PathMap V) (n : Nat) (q : Path) :
+    T.follow (n + 1) q =
+      if isFeature T q then q else
+      match T.childMask q with
+      | [b] => follow T n (q ++ [b])
+      | _ => q := rfl
+
+/-- `follow` extends its start. -/
+theorem follow_shape (T : PathMap V) : ∀ (n : Nat) (r : Path), ∃ x, T.follow n r = r ++ x
+  | 0, r => ⟨[], by simp [follow]⟩
+  | n + 1, r => by
+      rw [follow_succ]
+      split
+      · exact ⟨[], by simp⟩
+      · split
+        · rename_i c _
+          obtain ⟨x, hx⟩ := follow_shape T n (r ++ [c])
+          exact ⟨c :: x, by simp [hx]⟩
+        · exact ⟨[], by simp⟩
+
+theorem valAt_none_of_not_feature {T : PathMap V} {q : Path} (h : ¬ isFeature T q = true) :
+    T.valAt q = none := by
+  unfold isFeature at h
+  cases hv : T.valAt q with
+  | none => rfl
+  | some _ => simp [hv] at h
+
+/-- `follow` reaches an existing location. -/
+theorem follow_exists (T : PathMap V) :
+    ∀ (n : Nat) (r : Path), (T.entries.lookup r).isSome → (T.entries.lookup (T.follow n r)).isSome
+  | 0, r, h => h
+  | n + 1, r, h => by
+      rw [follow_succ]
+      split
+      · exact h
+      · split
+        · rename_i c hm
+          exact follow_exists T n _ ((T.mem_childMask r c).mp (by rw [hm]; simp))
+        · exact h
+
+/-- **Lookups along a line.**  Below `r`, the trie is the chain `follow` walks
+over (valueless, one child each) and then whatever is below its end. -/
+theorem lookup_follow {T : PathMap V} (hT : T.WF) :
+    ∀ (n : Nat) (r x : Path), (T.entries.lookup r).isSome → T.follow n r = r ++ x →
+      ∀ p, T.entries.lookup (r ++ p) = edgeLook (fun s => T.entries.lookup (r ++ x ++ s)) x p
+  | 0, r, x, _, hx, p => by
+      simp only [follow] at hx
+      have : x = [] := by simpa using hx
+      subst this; simp [edgeLook]
+  | n + 1, r, x, hr, hx, p => by
+      rw [follow_succ] at hx
+      split at hx
+      · have : x = [] := by simpa using hx
+        subst this; simp [edgeLook]
+      · rename_i hnf
+        split at hx
+        · rename_i c hm
+          obtain ⟨x', hx'⟩ := follow_shape T n (r ++ [c])
+          have hxe : x = c :: x' := by rw [hx'] at hx; simpa using hx.symm
+          subst hxe
+          have hrc : (T.entries.lookup (r ++ [c])).isSome :=
+            (T.mem_childMask r c).mp (by rw [hm]; simp)
+          cases p with
+          | nil =>
+            rw [List.append_nil, lookup_eq_valAt hr, valAt_none_of_not_feature hnf]; rfl
+          | cons c' p =>
+            simp only [edgeLook]
+            by_cases hc : c' = c
+            · subst hc
+              have := lookup_follow hT n (r ++ [c']) x' hrc hx' p
+              simp only [List.append_assoc, List.cons_append, List.nil_append] at this ⊢
+              rw [if_pos trivial, this]
+            · rw [if_neg hc]
+              cases hl : T.entries.lookup (r ++ c' :: p) with
+              | none => rfl
+              | some _ =>
+                have : (T.entries.lookup (r ++ [c'] ++ p)).isSome := by simp [hl]
+                have hm' := (T.mem_childMask r c').mpr (hT.prefix p this)
+                rw [hm] at hm'; simp at hm'; exact absurd hm' hc
+        · have : x = [] := by simpa using hx
+          subst this; simp [edgeLook]
+
+end PathMap
+namespace PathMap
+open PTree
+variable {V : Type}
+
+theorem cataJ_succ {W : Type} (T : PathMap V) (alg : Path → Option V → ByteMask → List W → W)
+    (d : W) (n : Nat) (q sub : Path) :
+    T.cataJ alg d (n + 1) q sub =
+      alg sub (T.valAt q) (T.childMask q) ((T.childMask q).map fun b =>
+        T.cataJ alg d n (T.follow T.fuel (q ++ [b])) ((T.follow T.fuel (q ++ [b])).drop (q.length + 1))) := rfl
+
+theorem cataJ_fst (T : PathMap V) (d : Path × PTree V) (n : Nat) (q sub : Path) :
+    (T.cataJ algL d (n + 1) q sub).1 = sub := rfl
+
+/-- The kids `algL` builds. -/
+theorem cataJ_lines (T : PathMap V) (d : Path × PTree V) (n : Nat) (q sub : Path) :
+    T.cataJ algL d (n + 1) q sub =
+      (sub, .node (T.valAt q) ((T.childMask q).map fun b =>
+        let w := T.cataJ algL d n (T.follow T.fuel (q ++ [b]))
+          ((T.follow T.fuel (q ++ [b])).drop (q.length + 1))
+        (b :: w.1, w.2))) := by
+  rw [cataJ_succ, algL, zipWith_map_self]
+
+/-- The line tree of `T` at `q` holds exactly what `T` holds below `q`. -/
+theorem lookup_cataJ_lines {T : PathMap V} (hT : T.WF) (d : Path × PTree V) :
+    ∀ (N : Nat) (p : Path), p.length ≤ N → ∀ (q sub : Path) (n : Nat), (T.entries.lookup q).isSome →
+      (∀ r, (T.entries.lookup r).isSome → r.length < q.length + n) →
+      (ents (T.cataJ algL d n q sub).2).lookup p = T.entries.lookup (q ++ p) := by
+  intro N
+  induction N with
+  | zero =>
+    intro p hp q sub n hq hb
+    have : p = [] := List.eq_nil_of_length_eq_zero (by omega)
+    subst this
+    cases n with
+    | zero => exact absurd (hb q hq) (by omega)
+    | succ n => rw [cataJ_lines, lookup_ents_nil, List.append_nil, lookup_eq_valAt hq]
+  | succ N ih =>
+    intro p hp q sub n hq hb
+    cases n with
+    | zero => exact absurd (hb q hq) (by omega)
+    | succ n =>
+    cases p with
+    | nil => rw [cataJ_lines, lookup_ents_nil, List.append_nil, lookup_eq_valAt hq]
+    | cons b p =>
+      have hm := T.sorted_childMask q
+      rw [cataJ_lines, lookup_ents_cons,
+        lookup_entsKids _ (by simp) (by rw [heads_map (by simp)]; exact nodup_of_sorted hm),
+        kidAt_map (by simp)]
+      by_cases hbm : b ∈ T.childMask q
+      · have hq' := (T.mem_childMask q b).mp hbm
+        obtain ⟨x, hx⟩ := follow_shape T T.fuel (q ++ [b])
+        have hf := follow_exists T T.fuel _ hq'
+        rw [hx] at hf
+        have hlen : (q ++ [b] ++ x).length = q.length + 1 + x.length := by simp; omega
+        cases n with
+        | zero => exact absurd (hb _ hf) (by omega)
+        | succ n =>
+        simp only [hbm, if_true, Option.bind_some, List.tail_cons, hx, cataJ_fst]
+        have hdrop : (q ++ [b] ++ x).drop (q.length + 1) = x := by
+          have : q ++ [b] ++ x = (q ++ [b]) ++ x := rfl
+          rw [this, List.drop_append_of_le_length (by simp)]; simp
+        rw [hdrop]
+        have hfol := lookup_follow hT T.fuel (q ++ [b]) x hq' hx p
+        simp only [List.append_assoc, List.cons_append, List.nil_append] at hfol ⊢
+        rw [hfol]
+        apply edgeLook_congr
+        intro s hs
+        have := ih s (by simp at hp; omega) (q ++ [b] ++ x) x (n + 1) hf
+          (fun r hr => by have := hb r hr; omega)
+        simpa using this
+      · simp only [hbm, if_false, Option.bind_none]
+        symm
+        cases h : T.entries.lookup (q ++ b :: p) with
+        | none => rfl
+        | some _ =>
+          have : (T.entries.lookup (q ++ [b] ++ p)).isSome := by simp [h]
+          exact absurd ((T.mem_childMask q b).mpr (hT.prefix p this)) hbm
+
+end PathMap
+namespace PathMap
+open PTree
+variable {V : Type}
+
+theorem fuel_succ (T : PathMap V) : ∃ k, T.fuel = k + 2 := ⟨_, rfl⟩
+
+/-- The jumping fold starts at the first feature from the root, whichever case. -/
+theorem cataJump_eq {W : Type} (T : PathMap V) (alg : Path → Option V → ByteMask → List W → W) (d : W) :
+    T.cataJump alg d = T.cataJ alg d T.fuel (T.follow T.fuel []) (T.follow T.fuel []) := by
+  unfold cataJump
+  split
+  · rename_i h
+    obtain ⟨k, hk⟩ := fuel_succ T
+    have : T.follow T.fuel [] = [] := by rw [hk, follow_succ, if_pos h]
+    rw [this]
+  · rfl
+
+theorem toLines_eq (T : PathMap V) :
+    T.toLines = rootLine (T.follow T.fuel [],
+      (T.cataJ algL ([], .node none []) T.fuel (T.follow T.fuel []) (T.follow T.fuel [])).2) := by
+  unfold toLines
+  rw [cataJump_eq]
+  congr 1
+
+theorem lookup_rootLine (t : PTree V) (p : Path) :
+    ∀ f : Path, (ents (rootLine (f, t))).lookup p = edgeLook (fun s => (ents t).lookup s) f p
+  | [] => rfl
+  | c :: x => by
+      simp only [rootLine, List.isEmpty_cons, Bool.false_eq_true, if_false]
+      cases p with
+      | nil => rfl
+      | cons b p =>
+        rw [lookup_ents_cons, lookup_entsKids _ (by simp) (by simp [heads])]
+        simp only [kidAt, List.find?_cons, List.find?_nil, edgeLook, List.headD_cons]
+        by_cases h : b = c
+        · subst h; simp
+        · have : (c == b) = false := by simp [Ne.symm h]
+          simp [this, h]
+
+theorem ordered_rootLine {t : PTree V} (h : Ordered t) : ∀ f : Path, Ordered (rootLine (f, t))
+  | [] => h
+  | c :: x => by
+      simp only [rootLine, List.isEmpty_cons, Bool.false_eq_true, if_false]
+      exact .node _ _ (by simp [heads]) (by simp) (by simp [h])
+
+theorem ordered_cataJ (T : PathMap V) {d : Path × PTree V} (hd : Ordered d.2) :
+    ∀ (n : Nat) (q sub : Path), Ordered (T.cataJ algL d n q sub).2
+  | 0, _, _ => hd
+  | n + 1, q, sub => by
+      rw [cataJ_lines]
+      refine .node _ _ (by rw [heads_map (by simp)]; exact T.sorted_childMask q) (by simp) ?_
+      intro k hk
+      obtain ⟨b, _, rfl⟩ := List.mem_map.mp hk
+      exact ordered_cataJ T hd n _ _
+
+/-- **(a), line level.**  Serializing a well-formed trie into its line tree and
+flattening the tree gives the trie back. -/
+theorem flatten_toLines {T : PathMap V} (hT : T.WF) : (toLines T).flatten = T := by
+  obtain ⟨f, hf⟩ := follow_shape T T.fuel []
+  simp only [List.nil_append] at hf
+  have hfe := follow_exists T T.fuel [] hT.root
+  rw [hf] at hfe
+  have hord : Ordered T.toLines := by
+    rw [toLines_eq]
+    exact ordered_rootLine (ordered_cataJ T (.node none [] (by simp [heads]) (by simp) (by simp)) _ _ _) _
+  have h := eq_of_sorted_of_lookup (sorted_ents _ hord) hT.1 (fun k => by
+    rw [toLines_eq, hf, lookup_rootLine]
+    have := lookup_follow hT T.fuel [] f hT.root (by simpa using hf) k
+    simp only [List.nil_append] at this
+    rw [this]
+    apply edgeLook_congr
+    intro s _
+    exact lookup_cataJ_lines hT _ s.length s (Nat.le_refl _) f f T.fuel hfe
+      (fun r hr => by have := lt_fuel ((T.mem_paths r).mpr hr); omega))
+  cases T; simp only [flatten] at h ⊢; rw [h]
+
+end PathMap
 end PathMapModel

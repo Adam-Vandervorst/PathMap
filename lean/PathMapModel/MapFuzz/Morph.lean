@@ -182,47 +182,10 @@ def mapVals (f : V → V) (T : PathMap V) : PathMap V :=
 
 def sameTrie (a b : PathMap V) : Bool := a.entries == b.entries
 
-/-! ## Anamorphisms -/
+/-! ## Anamorphisms
 
-/-- What the closure put in the `TrieBuilder`. -/
-inductive AnaKid (W : Type) where
-  /-- `push(sub, w)` / `push_byte` / `set_child_mask`: recurse at `path ++ sub`. -/
-  | w (sub : Path) (w : W)
-  /-- `graft_at_byte(b, rz)`: `node` is the subtrie at `rz`'s focus; only what is
-  strictly below its root is placed, at `path ++ [b]`. -/
-  | graft (b : UInt8) (node : PathMap V)
-
-/-- The first byte of the branch a kid starts (its `TrieBuilder` child-mask bit). -/
-def AnaKid.byte {W : Type} : AnaKid W → UInt8
-  | .w sub _ => sub.headD 0
-  | .graft b _ => b
-
-/-- Values, grafted locations and calls (pre-order) of an anamorphism.  A call
-is its path and the first bytes of what it pushed: after the closure,
-`TrieBuilder::len` is their number and `child_mask` their set. -/
-def anaGo {W : Type} (alg : W → Path → Option V × List (AnaKid W)) :
-    Nat → W → Path → List (Path × V) × List Path × List (Path × List UInt8)
-  | 0, _, _ => ([], [], [])
-  | n + 1, w, path =>
-      let (v, kids) := alg w path
-      let vals0 : List (Path × V) := match v with | some x => [(path, x)] | none => []
-      kids.foldl (fun (acc : List (Path × V) × List Path × List (Path × List UInt8)) k =>
-        match k with
-        | .w sub w' =>
-            let (vs, ps, cs) := anaGo alg n w' (path ++ sub)
-            (acc.1 ++ vs, acc.2.1 ++ ps, acc.2.2 ++ cs)
-        | .graft b node =>
-            (acc.1 ++ node.vals.filterMap (fun (q, x) =>
-                if q.isEmpty then none else some (path ++ [b] ++ q, x)),
-             acc.2.1 ++ node.paths.filterMap (fun q =>
-                if q.isEmpty then none else some (path ++ [b] ++ q)),
-             acc.2.2)) (vals0, [], [(path, kids.map AnaKid.byte)])
-
-/-- `PathMap::new_from_ana(w, alg)`: the map and the calls of `alg` (see `anaGo`). -/
-def ana {W : Type} (alg : W → Path → Option V × List (AnaKid W)) (w : W) (fuel : Nat) :
-    PathMap V × List (Path × List UInt8) :=
-  let (vs, ps, cs) := anaGo alg fuel w []
-  (PathMap.mk' vs ps, cs)
+`AnaKid`, `anaGo` and `ana` are in `PrefixTree.lean`, generic in the value type.
+-/
 
 /-- Op 55's closure.  `W` is a path in `src`.  The value at `w` is kept unless
 `(v + depth) % 4 = (s >> 2) % 4`, and is increased by `s >> 6`.  If
@@ -230,7 +193,7 @@ def ana {W : Type} (alg : W → Path → Option V × List (AnaKid W)) (w : W) (f
 otherwise child `b` is, by `((s >> 4) % 4 + b + depth) % 4`: 0 `push_byte`,
 1 `push` of `b` and the single-child chain after it, 2 `graft_at_byte` of
 `src` at `w ++ [b]` (`push_byte` when that has nothing below), 3 dropped. -/
-def copyAlg (src : PathMap V) (s : Nat) (w : Path) (path : Path) : Option V × List (AnaKid Path) :=
+def copyAlg (src : PathMap V) (s : Nat) (w : Path) (path : Path) : Option V × List (AnaKid V Path) :=
   let depth := path.length
   let v := match src.valAt w with
     | some x => if (x.toNat + depth) % 4 != (s / 4) % 4 then some (x + UInt64.ofNat (s / 64)) else none
@@ -251,7 +214,7 @@ at each byte of `bytes` (if it has anything below its root), higher levels
 `push_byte` each byte with one level less; with `setVals` every call sets the
 value `|path|`. -/
 def repAlg (node : PathMap V) (has : Bool) (bytes : List UInt8) (setVals : Bool) (lvl : Nat)
-    (path : Path) : Option V × List (AnaKid Nat) :=
+    (path : Path) : Option V × List (AnaKid V Nat) :=
   (if setVals then some (UInt64.ofNat path.length) else none,
    if lvl == 0 then (if has then bytes.map (fun x => .graft x node) else [])
    else bytes.map (fun x => .w [x] (lvl - 1)))
@@ -278,7 +241,7 @@ def grafts (g : Nat) (path e : Path) : Bool :=
 /-- The deserializing closure: set the node's value, push or graft each edge.
 `src` is the view; a graft at `path ++ e` takes its node there. -/
 def treeAlg (src : PathMap V) (g : Nat) (t : PTree V) (path : Path) :
-    Option V × List (AnaKid (PTree V)) :=
+    Option V × List (AnaKid V (PTree V)) :=
   (t.val, t.kids.map fun (e, c) =>
     -- Only where the source has something below: `graft_at_byte` panics on a
     -- leaf (finding PT1 in `lean/findings/ptree.md`).
