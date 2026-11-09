@@ -275,7 +275,7 @@ def convexProgram (op : UInt8) : ByteArray := ByteArray.mk <|
 #guard [62, 64].all (fun op =>
   (Fuzz.run (convexProgram op)).contains "MAP0 _:10,00:11,0001:12")
 #guard [61, 62, 63, 64].all (fun op =>
-  (Fuzz.run (convexProgram op) 256 true).contains "MAP0 _:10,00:11,0001:12")
+  (Fuzz.run (convexProgram op) 256 Source.act).contains "MAP0 _:10,00:11,0001:12")
 #guard ((Fuzz.run (ByteArray.mk
   (Fuzz.wireMagic ++ [61, 0, 0, 0, 0, 0, 61, 0, 1, 2]).toArray)).head!).startsWith
   "0 descend_to ret=02"
@@ -292,9 +292,9 @@ def pathSetProgram (op : UInt8) : ByteArray := ByteArray.mk <|
 #guard [67, 72].all (fun op => (Fuzz.run (pathSetProgram op)).contains "MAP0 _:10,00:11")
 #guard [68, 69, 73, 74].all (fun op => (Fuzz.run (pathSetProgram op)).contains "MAP0 _:-,00:1")
 #guard [67, 68, 72, 73].all (fun op =>
-  (Fuzz.run (pathSetProgram op) 256 true).contains "MAP0 _:10,00:11,0001:12,0002:13")
+  (Fuzz.run (pathSetProgram op) 256 Source.act).contains "MAP0 _:10,00:11,0001:12,0002:13")
 #guard [65, 66, 69, 70, 71, 74].all (fun op =>
-  Fuzz.run (pathSetProgram op) 256 true == Fuzz.run (pathSetProgram op))
+  Fuzz.run (pathSetProgram op) 256 Source.act == Fuzz.run (pathSetProgram op))
 #guard ((Fuzz.run (ByteArray.mk
   (Fuzz.wireMagic ++ [65, 0, 0, 0, 0, 0, 65, 0, 1, 2]).toArray)).head!).startsWith
   "0 descend_to ret=02"

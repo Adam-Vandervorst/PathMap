@@ -16,6 +16,8 @@
 //! [`algebraic`] is a third fuzzer with a different question.  It has no
 //! oracle: it evaluates one algebraic expression every way the crate offers and
 //! requires the answers to match.  `bin/alg_fuzz.rs` drives it.
+//! * [`sources`] holds the other read sources and write targets, selected by
+//!   `pathmap_trace --source NAME`.
 
 pub mod act;
 pub mod algebraic;
@@ -23,6 +25,7 @@ pub mod harness;
 pub mod pruned;
 pub mod repro;
 pub mod server;
+pub mod sources;
 
 pub use act::*;
 pub use harness::*;

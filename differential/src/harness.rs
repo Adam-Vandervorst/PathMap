@@ -129,10 +129,10 @@ pub fn show_val(v: Option<&u64>) -> String {
 ///
 /// Only the default `ReadSource` impls return `None`, and only the ACT zipper
 /// uses them, so the reason is always ACT mode.  See `SKIP_REASONS`.
-pub fn show_status_opt(s: Option<AlgebraicStatus>) -> String {
+pub fn show_status_opt<R: ReadSource>(s: Option<AlgebraicStatus>) -> String {
     match s {
         Some(s) => show_status(s).to_string(),
-        None => SKIP_ACT.to_string(),
+        None => R::SKIP.to_string(),
     }
 }
 
@@ -258,15 +258,21 @@ pub fn fork_values<Z: ZipperForking<u64>>(z: &Z) -> Vec<String> {
 pub trait ReadSource:
     Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration
 {
-    /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk).
-    fn dump_fork(&self) -> String;
+    /// The skip token emitted when this source cannot serve an operation (a
+    /// method below returned `None`/`false`).  `skip:<source name>`; the Lean
+    /// model's `Source.skip` must produce the same string.
+    const SKIP: &'static str = SKIP_ACT;
+    /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk),
+    /// or `None` if the source does not implement `ZipperForking`.
+    fn dump_fork(&self) -> Option<String>;
     /// `make_map().val_count()`, or `None` if subtries cannot be materialised.
     fn make_map_val_count(&self) -> Option<usize>;
 
     /// `ZipperReadOnlyValues::get_val` / `get_val_at`, paired with whether they
     /// agree with `val` / `val_at`.  The two differ only in the lifetime of the
     /// reference returned, so a disagreement is a defect.
-    fn get_val_probe(&self, path: &[u8]) -> (Option<u64>, Option<u64>, bool);
+    /// `None` when the source does not implement `ZipperReadOnlyValues`.
+    fn get_val_probe(&self, path: &[u8]) -> Option<(Option<u64>, Option<u64>, bool)>;
 
     /// `ZipperReadOnlyIteration::to_next_get_val`: advance and hand back the
     /// value, with whether it agrees with `to_next_val` followed by `val`.
@@ -340,16 +346,18 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
         })
     }
 
-    fn dump_fork(&self) -> String {
-        dump_fork(self)
+
+    const SKIP: &'static str = "skip:native";
+    fn dump_fork(&self) -> Option<String> {
+        Some(dump_fork(self))
     }
     fn make_map_val_count(&self) -> Option<usize> {
         Some(self.make_map().val_count())
     }
-    fn get_val_probe(&self, path: &[u8]) -> (Option<u64>, Option<u64>, bool) {
+    fn get_val_probe(&self, path: &[u8]) -> Option<(Option<u64>, Option<u64>, bool)> {
         let (g, ga) = (self.get_val().copied(), self.get_val_at(path).copied());
         let agree = g == self.val().copied() && ga == self.val_at(path).copied();
-        (g, ga, agree)
+        Some((g, ga, agree))
     }
     fn to_next_get_val_probe(&mut self) -> Option<(bool, Option<u64>, bool)> {
         let got = self.to_next_get_val().copied();
@@ -407,6 +415,22 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     fn do_restricting<W: ZipperWriting<u64>>(&self, wz: &mut W) -> Option<bool> {
         Some(wz.restricting(self))
     }
+}
+
+/// The write side of the harness: any write zipper over a `PathMap<u64>`.
+///
+/// `WriteZipperUntracked` (the default), `WriteZipperTracked` (from a
+/// `ZipperHead`) and `WriteZipperOwned` all qualify, and the Lean model does not
+/// distinguish them: they are three implementations of one specification.
+pub trait WriteTarget:
+    ZipperWriting<u64> + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64>
+    + ZipperAbsolutePath + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+{
+}
+impl<T> WriteTarget for T where
+    T: ZipperWriting<u64> + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64>
+        + ZipperAbsolutePath + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+{
 }
 
 /// Bind `$z` to the write zipper (`t == 0`) or the read zipper, then run `$e`.
@@ -542,7 +566,8 @@ pub fn run(bytes: &[u8], check: bool) -> String {
         // is prepared.  Use the owned-path constructor so that known bug does
         // not abort every run.
         let mut rz = map1.read_zipper_at_path(&root1);
-        run_ops(&mut d, &mut out, &mut map0, &root0, &mut rz, &root1, check);
+        let mut wz = map0.write_zipper_at_path(&root0);
+        run_ops(&mut d, &mut out, &mut wz, &root0, &mut rz, &root1, check);
     }
     let _ = writeln!(out, "MAP0 {}", dump(&mut map0.read_zipper()));
     let _ = writeln!(out, "MAP1 {}", dump(&mut map1.read_zipper()));
@@ -570,17 +595,16 @@ pub fn drop_dangling_below<W: ZipperWriting<u64>>(wz: &mut W) {
     }
 }
 
-pub fn run_ops<R: ReadSource>(
+pub fn run_ops<W: WriteTarget, R: ReadSource>(
     d: &mut Dec,
     out: &mut String,
-    map0: &mut PathMap<u64>,
+    wz: &mut W,
     root0: &[u8],
     rz: &mut R,
     root1: &[u8],
     check: bool,
 ) {
     {
-        let mut wz = map0.write_zipper_at_path(root0);
         let mut step = 0usize;
         // Run pruning at every zipper root so layout-dependent defects remain
         // visible to the differential comparison.
@@ -603,60 +627,60 @@ pub fn run_ops<R: ReadSource>(
                 0 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    tgt!(t, wz, *rz, z, z.descend_to(&p));
+                    tgt!(t, *wz, *rz, z, z.descend_to(&p));
                     ("descend_to", hex_path(&p))
                 }
                 1 => {
                     let t = get!(d.modn(2));
                     let b = get!(d.path_byte());
-                    tgt!(t, wz, *rz, z, z.descend_to_byte(b));
+                    tgt!(t, *wz, *rz, z, z.descend_to_byte(b));
                     ("descend_to_byte", format!("{b:02x}"))
                 }
                 2 => {
                     let t = get!(d.modn(2));
                     let n = get!(d.modn(8));
-                    let r = tgt!(t, wz, *rz, z, z.ascend(n));
+                    let r = tgt!(t, *wz, *rz, z, z.ascend(n));
                     ("ascend", format!("{r}"))
                 }
                 3 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.ascend_byte());
+                    let r = tgt!(t, *wz, *rz, z, z.ascend_byte());
                     ("ascend_byte", show_bool(r).to_string())
                 }
                 4 => {
                     let t = get!(d.modn(2));
-                    tgt!(t, wz, *rz, z, z.reset());
+                    tgt!(t, *wz, *rz, z, z.reset());
                     ("reset", "-".to_string())
                 }
                 5 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.descend_first_byte());
+                    let r = tgt!(t, *wz, *rz, z, z.descend_first_byte());
                     ("descend_first_byte", show_byte_opt(r))
                 }
                 6 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.descend_last_byte());
+                    let r = tgt!(t, *wz, *rz, z, z.descend_last_byte());
                     ("descend_last_byte", show_byte_opt(r))
                 }
                 7 => {
                     let t = get!(d.modn(2));
                     let i = get!(d.modn(6));
-                    let r = tgt!(t, wz, *rz, z, z.descend_indexed_byte(i));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_indexed_byte(i));
                     ("descend_indexed_byte", show_byte_opt(r))
                 }
                 8 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.descend_until());
+                    let r = tgt!(t, *wz, *rz, z, z.descend_until());
                     ("descend_until", show_bool(r).to_string())
                 }
                 9 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.ascend_until());
+                    let r = tgt!(t, *wz, *rz, z, z.ascend_until());
                     ("ascend_until", format!("{r}"))
                 }
                 10 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.ascend_until_branch());
+                    let r = tgt!(t, *wz, *rz, z, z.ascend_until_branch());
                     ("ascend_until_branch", format!("{r}"))
                 }
                 11 => {
@@ -666,7 +690,7 @@ pub fn run_ops<R: ReadSource>(
                     if false {
                         ("to_next_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
+                        let r = tgt!(t, *wz, *rz, z, z.to_next_sibling_byte());
                         ("to_next_sibling_byte", show_byte_opt(r))
                     }
                 }
@@ -675,13 +699,13 @@ pub fn run_ops<R: ReadSource>(
                     if false {
                         ("to_prev_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
+                        let r = tgt!(t, *wz, *rz, z, z.to_prev_sibling_byte());
                         ("to_prev_sibling_byte", show_byte_opt(r))
                     }
                 }
                 13 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.to_next_step());
+                    let r = tgt!(t, *wz, *rz, z, z.to_next_step());
                     ("to_next_step", show_bool(r).to_string())
                 }
                 14 => {
@@ -722,43 +746,43 @@ pub fn run_ops<R: ReadSource>(
                 18 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let n = tgt!(t, wz, *rz, z, z.move_to_path(&p));
+                    let n = tgt!(t, *wz, *rz, z, z.move_to_path(&p));
                     ("move_to_path", format!("{n}"))
                 }
                 19 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let n = tgt!(t, wz, *rz, z, z.descend_to_existing(&p));
+                    let n = tgt!(t, *wz, *rz, z, z.descend_to_existing(&p));
                     ("descend_to_existing", format!("{n}"))
                 }
                 20 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let n = tgt!(t, wz, *rz, z, z.descend_to_val(&p));
+                    let n = tgt!(t, *wz, *rz, z, z.descend_to_val(&p));
                     ("descend_to_val", format!("{n}"))
                 }
                 21 => {
                     let t = get!(d.modn(2));
                     let b = get!(d.path_byte());
-                    let r = tgt!(t, wz, *rz, z, z.descend_to_existing_byte(b));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_to_existing_byte(b));
                     ("descend_to_existing_byte", show_bool(r).to_string())
                 }
                 22 => {
                     let t = get!(d.modn(2));
                     let n = get!(d.modn(8));
-                    let r = tgt!(t, wz, *rz, z, z.descend_until_max_bytes(n));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_until_max_bytes(n));
                     ("descend_until_max_bytes", show_bool(r).to_string())
                 }
                 23 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let r = tgt!(t, wz, *rz, z, z.descend_to_check(&p));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_to_check(&p));
                     ("descend_to_check", show_bool(r).to_string())
                 }
                 24 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let v = tgt!(t, wz, *rz, z, show_val(z.val_at(&p)));
+                    let v = tgt!(t, *wz, *rz, z, show_val(z.val_at(&p)));
                     ("val_at", v)
                 }
                 25 => {
@@ -770,17 +794,17 @@ pub fn run_ops<R: ReadSource>(
                     };
                     match n {
                         Some(n) => ("make_map_val_count", format!("{n}")),
-                        None => ("make_map_val_count", SKIP_ACT.to_string()),
+                        None => ("make_map_val_count", R::SKIP.to_string()),
                     }
                 }
                 26 => {
                     let t = get!(d.modn(2));
                     let s = if t == 0 {
-                        dump_fork(&wz)
+                        Some(dump_fork(&*wz))
                     } else {
                         (*rz).dump_fork()
                     };
-                    ("dump", s)
+                    ("dump", s.unwrap_or_else(|| R::SKIP.to_string()))
                 }
                 27 => {
                     let v = get!(d.u8()) as u64;
@@ -795,7 +819,7 @@ pub fn run_ops<R: ReadSource>(
                 31 => ("prune_ascend", format!("{}", wz.prune_ascend())),
                 32 => {
                     let pr = get!(d.boolean());
-                    let leaky = focus_node_empty(&wz);
+                    let leaky = focus_node_empty(&*wz);
                     let r = wz.remove_branches(pr);
                     let s = if false && leaky { "?".to_string() } else { show_bool(r).to_string() };
                     ("remove_branches", s)
@@ -812,52 +836,52 @@ pub fn run_ops<R: ReadSource>(
                     ("remove_unmasked_branches", hex_path(&canon))
                 }
                 34 => {
-                    let s = if (*rz).do_graft(&mut wz) { "-" } else { SKIP_ACT };
+                    let s = if (*rz).do_graft(&mut *wz) { "-" } else { R::SKIP };
                     ("graft", s.to_string())
                 }
                 35 => {
                     let p = get!(d.path(6));
-                    let s = if (*rz).do_graft_src_at(&mut wz, &p) {
+                    let s = if (*rz).do_graft_src_at(&mut *wz, &p) {
                         hex_path(&p)
                     } else {
-                        SKIP_ACT.to_string()
+                        R::SKIP.to_string()
                     };
                     ("graft_src_at", s)
                 }
-                36 => ("join_into", show_status_opt((*rz).do_join_into(&mut wz))),
+                36 => ("join_into", show_status_opt::<R>((*rz).do_join_into(&mut *wz))),
                 37 => {
-                    let leaky = focus_node_empty(&wz);
-                    let st = (*rz).do_join_map_into(&mut wz);
+                    let leaky = focus_node_empty(&*wz);
+                    let st = (*rz).do_join_map_into(&mut *wz);
                     let s = if false && leaky && st.is_some() {
                         "?".to_string()
                     } else {
-                        show_status_opt(st)
+                        show_status_opt::<R>(st)
                     };
                     ("join_map_into", s)
                 }
                 38 => {
                     let pr = get!(d.boolean());
-                    let before = fork_values(&wz);
-                    let mut st = (*rz).do_meet_into(&mut wz, pr);
+                    let before = fork_values(&*wz);
+                    let mut st = (*rz).do_meet_into(&mut *wz, pr);
                     // A meet that leaves the values alone may report `Element` as well as
                     // `Identity`: it is allowed to drop dangling paths, which is a change
-                    if st == Some(AlgebraicStatus::Element) && fork_values(&wz) == before {
+                    if st == Some(AlgebraicStatus::Element) && fork_values(&*wz) == before {
                         st = Some(AlgebraicStatus::Identity);
                     }
-                    if st.is_some() && !pr { drop_dangling_below(&mut wz); }
-                    ("meet_into", show_status_opt(st))
+                    if st.is_some() && !pr { drop_dangling_below(&mut *wz); }
+                    ("meet_into", show_status_opt::<R>(st))
                 }
                 39 => {
                     let pr = get!(d.boolean());
-                    ("subtract_into", show_status_opt((*rz).do_subtract_into(&mut wz, pr)))
+                    ("subtract_into", show_status_opt::<R>((*rz).do_subtract_into(&mut *wz, pr)))
                 }
                 40 => {
-                    let leaky = focus_node_empty(&wz);
-                    let st = (*rz).do_restrict(&mut wz);
+                    let leaky = focus_node_empty(&*wz);
+                    let st = (*rz).do_restrict(&mut *wz);
                     let s = if false && leaky && st.is_some() {
                         "?".to_string()
                     } else {
-                        show_status_opt(st)
+                        show_status_opt::<R>(st)
                     };
                     ("restrict", s)
                 }
@@ -867,9 +891,9 @@ pub fn run_ops<R: ReadSource>(
                     if false {
                         ("restricting", SKIP_EMPTY_FOCUS.to_string())
                     } else {
-                        match (*rz).do_restricting(&mut wz) {
+                        match (*rz).do_restricting(&mut *wz) {
                             Some(b) => ("restricting", show_bool(b).to_string()),
-                            None => ("restricting", SKIP_ACT.to_string()),
+                            None => ("restricting", R::SKIP.to_string()),
                         }
                     }
                 }
@@ -895,7 +919,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 45 => {
                     let pr = get!(d.boolean());
-                    let leaky = focus_node_empty(&wz) && wz.val().is_none();
+                    let leaky = focus_node_empty(&*wz) && wz.val().is_none();
                     let r = match wz.take_map(pr) {
                         Some(m) => {
                             wz.graft_map(m);
@@ -909,7 +933,7 @@ pub fn run_ops<R: ReadSource>(
                     let k = get!(d.modn(4));
                     let pr = get!(d.boolean());
                     let r = wz.meet_k_path_into(k, pr);
-                    if !pr { drop_dangling_below(&mut wz); }
+                    if !pr { drop_dangling_below(&mut *wz); }
                     ("meet_k_path_into", show_bool(r).to_string())
                 }
                 48 => {
@@ -949,21 +973,24 @@ pub fn run_ops<R: ReadSource>(
                     let p = get!(d.path(6));
                     // `get_val`/`get_val_at` must agree with `val`/`val_at`; they
                     // differ only in the lifetime of the reference returned.
-                    let (g, ga, agree) = if t == 0 {
+                    let probe = if t == 0 {
                         let (g, ga) = (wz.val().copied(), wz.val_at(&p).copied());
-                        (g, ga, true) // a write zipper has no ZipperReadOnlyValues
+                        Some((g, ga, true)) // a write zipper has no ZipperReadOnlyValues
                     } else {
                         rz.get_val_probe(&p)
                     };
-                    (
-                        "get_val_agrees",
-                        format!(
-                            "{}:{}:{}",
-                            show_val(g.as_ref()),
-                            show_val(ga.as_ref()),
-                            show_bool(agree)
+                    match probe {
+                        Some((g, ga, agree)) => (
+                            "get_val_agrees",
+                            format!(
+                                "{}:{}:{}",
+                                show_val(g.as_ref()),
+                                show_val(ga.as_ref()),
+                                show_bool(agree)
+                            ),
                         ),
-                    )
+                        None => ("get_val_agrees", R::SKIP.to_string()),
+                    }
                 }
                 52 => match rz.to_next_get_val_probe() {
                     Some((moved, v, agree)) => (
@@ -975,7 +1002,7 @@ pub fn run_ops<R: ReadSource>(
                             show_bool(agree)
                         ),
                     ),
-                    None => ("to_next_get_val", SKIP_ACT.to_string()),
+                    None => ("to_next_get_val", R::SKIP.to_string()),
                 },
                 53 => {
                     let n = get!(d.modn(4));
@@ -985,10 +1012,10 @@ pub fn run_ops<R: ReadSource>(
                     let mut canon: Vec<u8> = m.clone();
                     canon.sort_unstable();
                     canon.dedup();
-                    let s = if (*rz).do_graft_masked(&mut wz, mask, ru) {
+                    let s = if (*rz).do_graft_masked(&mut *wz, mask, ru) {
                         format!("{}:{}", hex_path(&canon), show_bool(ru))
                     } else {
-                        SKIP_ACT.to_string()
+                        R::SKIP.to_string()
                     };
                     ("graft_masked_branches", s)
                 }
@@ -1005,15 +1032,15 @@ pub fn run_ops<R: ReadSource>(
                     // leaves behind degrade the AlgebraicStatus that *later*
                     // operations report, contaminating the rest of the run.
                     let _ = SKIP_QUARANTINED;
-                    let s = if (*rz).do_graft_child_maps(&mut wz, mask, ru) { format!("{}:{}", hex_path(&canon), show_bool(ru)) } else { SKIP_ACT.to_string() };
+                    let s = if (*rz).do_graft_child_maps(&mut *wz, mask, ru) { format!("{}:{}", hex_path(&canon), show_bool(ru)) } else { R::SKIP.to_string() };
                     ("graft_child_maps", s)
                 }
                 55 => {
                     let p = get!(d.path(6));
                     // `meet_2` has no prune flag: it may leave dangling paths, like `prune = false`
-                    let st = (*rz).do_meet_2(&mut wz, &p);
-                    if st.is_some() { drop_dangling_below(&mut wz); }
-                    ("meet_2", show_status_opt(st))
+                    let st = (*rz).do_meet_2(&mut *wz, &p);
+                    if st.is_some() { drop_dangling_below(&mut *wz); }
+                    ("meet_2", show_status_opt::<R>(st))
                 }
                 56 => {
                     let pr = get!(d.boolean());
@@ -1025,7 +1052,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 58 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.to_prev_step());
+                    let r = tgt!(t, *wz, *rz, z, z.to_prev_step());
                     ("to_prev_step", show_bool(r).to_string())
                 }
                 59 => {
@@ -1053,7 +1080,7 @@ pub fn run_ops<R: ReadSource>(
                         wz.graft_map(canonical);
                         "-"
                     } else {
-                        SKIP_ACT
+                        R::SKIP
                     };
                     (name, ret.to_string())
                 }
@@ -1085,7 +1112,7 @@ pub fn run_ops<R: ReadSource>(
                         // points carry 1 in this homogeneous u64 interpreter.
                         wz.graft_map(result.iter().map(|(p, v)| (p, *v)).collect());
                         "-"
-                    } else { SKIP_ACT };
+                    } else { R::SKIP };
                     (PATH_SET_NAMES[op - 65], ret.to_string())
                 }
                 47 => {
@@ -1095,7 +1122,7 @@ pub fn run_ops<R: ReadSource>(
                     // zipper's only account of where it went, so it is compared
                     // byte for byte.
                     let mut obs: Vec<u8> = Vec::new();
-                    let r = tgt!(t, wz, *rz, z, z.descend_until_observed(&mut obs));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_until_observed(&mut obs));
                     (
                         "descend_until_observed",
                         format!("{}:{}", show_bool(r), hex_path(&obs)),
@@ -1104,17 +1131,20 @@ pub fn run_ops<R: ReadSource>(
                 _ => ("nop", "-".to_string()),
             };
             if check {
-                check_zipper(&wz, "write zipper", root0);
+                check_zipper(&*wz, "write zipper", root0);
                 check_zipper(rz, "read zipper", root1);
             }
             let _ = writeln!(out, 
                 "{step} {name} ret={ret} W={} R={}",
-                fingerprint(&wz, root0),
+                fingerprint(&*wz, root0),
                 fingerprint(rz, root1)
             );
             step += 1;
         }
     }
+    // The read source walked from its own root after the program: `reset` and a
+    // full depth-first traversal, through the source itself.
+    let _ = writeln!(out, "SRC {}", dump(rz));
 
 }
 

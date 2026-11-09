@@ -267,6 +267,11 @@ KNOWN = [
     (["src/trie_node.rs", "make_unique"],
      "copy-on-write cannot make a shared dangling path unique (finding 16) "
      "[shared_dangling_cow]"),
+    (["remove_val", "e0 v- c0 n0", "e1 v- c0 n0"],
+     "remove_val(prune=true) keeps the path when an empty graft_masked_branches "
+     "left an empty node at the focus; reproducer "
+     "lean/corpus/remove_val-prune-after-empty-graft-masked.bin "
+     "[remove_val_prune_empty_node]"),
     # ArenaCompactTree read source (differential.py --act).
     (["descend_last_path"],
      "ACTZipper::descend_last_path() runs one byte past the end of the trie "
@@ -678,7 +683,10 @@ def main():
     ap.add_argument("--maxlen", type=int, default=300)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--act", action="store_true",
-                    help="use an ArenaCompactTree as the read source")
+                    help="use an ArenaCompactTree as the read source (= --source act)")
+    ap.add_argument("--source", default="native",
+                    help="read source / write target, see differential/src/sources "
+                         "(native, act, tracker, ...)")
     ap.add_argument("-j", "--jobs", type=int, default=1,
                     help="run this many worker processes in parallel "
                          "(each owns its own pair of children)")
@@ -688,6 +696,9 @@ def main():
                     help="stop after this many new divergences (0 = never stop)")
     args = ap.parse_args()
     TIMEOUT = args.timeout
+    if args.act:
+        args.source = "act"
+    args.act = args.source == "act"
 
     trace_bin = find_trace_bin(args.act)
     other_label = "crate"
@@ -708,8 +719,10 @@ def main():
     source = ChainInputs(sources)
     n_inputs = len(source)
 
-    oracle_argv = [ORACLE] + (["--act"] if args.act else [])
+    oracle_argv = [ORACLE, "--source", args.source]
     other_argv = [trace_bin]
+    if args.source not in ("native", "act"):
+        other_argv += ["--source", args.source]
     faildir = []          # created on first failure only
 
     def save(idx):

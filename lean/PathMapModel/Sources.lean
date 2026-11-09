@@ -1,0 +1,19 @@
+import PathMapModel.Source
+import PathMapModel.Sources.Tracker
+
+/-!
+# The source registry
+
+Every read source, by the name `pathmap-oracle --source NAME` takes.  The list
+must match `SOURCES` in `differential/src/sources/mod.rs`.
+-/
+
+namespace PathMapModel
+
+def Source.all : List Source :=
+  [ Source.native, Source.act, Source.tracker ]
+
+def Source.byName (n : String) : Option Source :=
+  Source.all.find? (·.name == n)
+
+end PathMapModel
