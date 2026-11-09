@@ -433,7 +433,8 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
             0 => (self.to_next_get_val().copied(), false),
             1 => (self.to_next_get_value().copied(), false),
             2 => (self.to_next_get_value_observed(&mut obs).copied(), true),
-            _ => (self.to_next_get_val_observed(&mut obs).copied(), true),
+            // Through the `&mut Z` forwarding impl.
+            _ => (ZipperReadOnlyIteration::to_next_get_val_observed(&mut &mut *self, &mut obs).copied(), true),
         };
         // `to_next_get_val` is specified as `to_next_val` followed by reading the
         // value, so `Some` must mean it moved and must equal what `val` reports.
@@ -615,8 +616,13 @@ pub fn witness_next_val<'a, Z: ZipperReadOnlyConditionalIteration<'a, u64> + Zip
 #[macro_export]
 macro_rules! witness_iter_source {
     () => {
+        // The observed form goes through the `&mut Z` forwarding impl.
         fn witness_iter_probe(&mut self, observed: bool) -> Option<(bool, Option<u64>, bool)> {
-            Some($crate::harness::witness_next_val(self, observed))
+            if observed {
+                Some($crate::harness::witness_next_val(&mut &mut *self, true))
+            } else {
+                Some($crate::harness::witness_next_val(self, false))
+            }
         }
     };
 }
@@ -675,7 +681,8 @@ where
     }
 }
 
-/// Opt a [`ReadSource`] impl into op 75 (`trie_ref_probe`).  The zipper must
+/// Opt a [`ReadSource`] impl into op 75 (`trie_ref_probe`) and op 78
+/// (`focus_probe`).  The zipper must
 /// implement `ZipperReadOnlySubtries` and `ZipperInfallibleSubtries`; the Lean
 /// source must set `Caps.trieRef := true`.
 #[macro_export]

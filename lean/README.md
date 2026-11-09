@@ -468,6 +468,7 @@ skips diverges:
 | `skip:empty-path` | `insert_prefix("")` — should be the identity, destroys the subtrie. |
 | `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native read zipper leaves its own root there. |
 | `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
+| `skip:k-path-borrowed` | op 80 `k_path_overrun` at the root of a `--source head` read zipper, which may come from `read_zipper_at_borrowed_path`: a cold `to_next_k_path` there underflows `path_len()` (known `to_next_k_path_borrowed`) and corrupts later iteration (findings/ops.md). |
 | `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
 
 Naming these turned up an ordering bug the bare token had hidden: for

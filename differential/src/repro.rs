@@ -137,7 +137,9 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             5 => { let t = g!(d.modn(2)); format!("{}.descend_first_byte();", z!(t)) }
             6 => { let t = g!(d.modn(2)); format!("{}.descend_last_byte();", z!(t)) }
             7 => { let t = g!(d.modn(2)); let i = g!(d.modn(6));
-                   format!("{}.descend_indexed_byte({i});", z!(t)) }
+                   // Odd steps use the deprecated alias, as `run_ops` does.
+                   if step % 2 == 0 { format!("{}.descend_indexed_byte({i});", z!(t)) }
+                   else { format!("#[allow(deprecated)] {}.descend_indexed_branch({i});", z!(t)) } }
             8 => { let t = g!(d.modn(2)); format!("{}.descend_until();", z!(t)) }
             9 => { let t = g!(d.modn(2)); format!("{}.ascend_until();", z!(t)) }
             10 => { let t = g!(d.modn(2)); format!("{}.ascend_until_branch();", z!(t)) }
@@ -158,7 +160,8 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             19 => { let t = g!(d.modn(2)); let p = g!(d.path(6));
                     format!("{}.descend_to_existing({});", z!(t), rs_bytes(&p)) }
             20 => { let t = g!(d.modn(2)); let p = g!(d.path(6));
-                    format!("{}.descend_to_val({});", z!(t), rs_bytes(&p)) }
+                    if step % 2 == 0 { format!("{}.descend_to_val({});", z!(t), rs_bytes(&p)) }
+                    else { format!("#[allow(deprecated)] {}.descend_to_value({});", z!(t), rs_bytes(&p)) } }
             21 => { let t = g!(d.modn(2)); let b = g!(d.path_byte());
                     format!("{}.descend_to_existing_byte({b});", z!(t)) }
             22 => { let t = g!(d.modn(2)); let n = g!(d.modn(8));

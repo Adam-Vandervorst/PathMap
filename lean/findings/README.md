@@ -15,6 +15,7 @@ is and is not covered. This page is the index.
 | [head-owned.md](head-owned.md) | tracked / owned zippers, `ZipperHead` creation, `TrieRef*` | `head`, `owned`, zipper op 60 `trie_ref_probe` |
 | [map-core.md](map-core.md) | the `PathMap` surface, whole-map lattice ops | `map` ops 0–28 |
 | [map-serial.md](map-serial.md) | `.paths` and `write_trie` serialization, ACT files, merge, stream | `map` ops 30–48 |
+| [ops.md](ops.md) | functions no zipper op called: `drop_head`, `join_into_take`, `get_focus_at`/`try_borrow_focus`, witness iteration, k-path overrun, `into_path(_iter)`, deprecated aliases | zipper ops 76-81, checks folded into 7, 20, 51, 52, 75 |
 | [map-morph.md](map-morph.md) | catamorphisms, anamorphisms, `ZipperHead` sessions and conflicts | `map` ops 50–60 |
 | [ctors.md](ctors.md) | alternative constructors (`PathTracker::new`, `EmptyZipper::new`, `ProductZipper::new_with_primary`, ...), and the round-2 list of uncalled functions | `tracker`, `empty-new`, `product`, `diff-product`, `owned`, `map` ops 1, 17, 18, 48, 55, 60 |
 
@@ -59,6 +60,8 @@ Plus the `tracker` source (`PathTracker`), written as the template.
 | 31 | `into_read_zipper` on an `_unchecked` writer panics in release (H3) | map-morph |
 | 32 | a writer dropped without cleanup leaves a stump that a later `remove` below prunes (H4) | map-morph |
 | 33 | a reader at a leaf head root leaves an empty node that blocks pruning (H5, family of 1) | map-morph |
+| 34 | `WriteZipperCore::try_borrow_focus` is `Some` at a missing focus below a dangling path (O1) | ops |
+| 35 | `PrefixZipper::get_focus_at`/`try_borrow_focus` ignore the prefix (O2, same defect as 17) | ops |
 
 Also a doc/code mismatch: `path_indices().len()` is `focus_factor() + 1` at a
 joint (dependent D4, product P6). There is also a debug-only assertion in
@@ -78,6 +81,10 @@ Collected from the workstream files; each says which reading the model takes.
 * `EmptyZipper`: a zipper at a missing path, or over an empty map?
 * Does the prefix stem exist over an empty source?
 * Which lock a `ZipperHead` `Conflict` reports.
+* Does `into_path_iter` stop at the end of the focus's subtrie, and include a
+  leaf focus?  Modelled no / no: it continues the zipper's traversal (ops).
+* May `get_focus_at` return an (empty) node at a childless location?
+  Modelled yes (ops).
 
 ## Running
 
