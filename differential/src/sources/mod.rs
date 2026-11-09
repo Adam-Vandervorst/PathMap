@@ -31,6 +31,7 @@ pub mod head;
 pub mod owned;
 pub mod empty;
 pub mod prefix;
+pub mod product;
 
 /// A runner: decode and execute one input, return the trace.
 pub type Runner = fn(&[u8], bool) -> String;
@@ -50,6 +51,10 @@ pub const SOURCES: &[(&str, Runner)] = &[
     ("owned", owned::run),
     ("empty", empty::run),
     ("prefix", prefix::run),
+    ("product", product::run),
+    ("productg", product::run_g),
+    ("product-full", product::run_full),
+    ("productg-full", product::run_g_full),
     // Not a read source: the map-level fuzzer, a different op table.
     ("map", crate::mapfuzz::run),
 ];

@@ -171,6 +171,13 @@ structure St where
   map1 : PathMap V
   /-- `src.mergeAt` applied to the header (`Source.mergeAt`). -/
   mergeAt : Path → Bool := fun _ => true
+  /-- The source's per-step report (`Source.info`, applied to the header's maps
+  and roots), appended to the read zipper's fingerprint. -/
+  info : Option (Path → String) := none
+  /-- The source's `val_at` skip (`Source.valAtSkip`, applied likewise). -/
+  valAtSkip : Path → Path → Option String := fun _ _ => none
+  /-- The source's whole-input skip (`Source.inputSkip`), if it applies. -/
+  inputSkip : Option String := none
 
 /-- Can the read zipper serve as a merge source right now?  The capability,
 and the source's per-focus veto (`Source.mergeAt`); both render as
@@ -190,7 +197,8 @@ def fingerprint (z : Zip V) (valCount : Bool := true) : String :=
 def emit (s : St) (name : String) (ret : String) : St :=
   { s with
     out := (toString s.step ++ " " ++ name ++ " ret=" ++ ret ++
-            " W=" ++ fingerprint s.wz ++ " R=" ++ fingerprint s.rz s.src.caps.valCount) :: s.out
+            " W=" ++ fingerprint s.wz ++ " R=" ++ fingerprint s.rz s.src.caps.valCount ++
+            (match s.info with | some f => " " ++ f s.rz.path | none => "")) :: s.out
     step := s.step + 1 }
 
 def showBool (b : Bool) : String := if b then "1" else "0"
@@ -380,7 +388,9 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              some (emit s "descend_to_check" (showBool r), d)
   | 24 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
              let z := getTarget s t
-             some (emit s "val_at" (showVal (z.valAt p)), d)
+             match (if t == 1 then s.valAtSkip z.path p else none) with
+             | some why => some (emit s "val_at" why, d)
+             | none => some (emit s "val_at" (showVal (z.valAt p)), d)
   | 25 => do let (t, d) ← d.mod 2
              if !s.src.caps.makeMap && t == 1 then some (emit s "make_map_val_count" s.src.skip, d)
              else
@@ -518,6 +528,10 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              -- `val`/`val_at` only in the lifetime of the reference they return,
              -- so they must give the same answer.  `agree` is `1` in the model by
              -- construction; a `0` from the crate is the whole point of the op.
+             -- A source's `val_at` skip comes first, as on the Rust side.
+             match (if t == 1 then s.valAtSkip s.rz.path p else none) with
+             | some why => some (emit s "get_val_agrees" why, d)
+             | none =>
              if !s.src.caps.getVal && t == 1 then some (emit s "get_val_agrees" s.src.skip, d) else
              let z := getTarget s t
              some (emit s "get_val_agrees"
@@ -646,7 +660,12 @@ def header (d : Dec) (src : Source) : Option (St × Dec) := do
   some ({ wz := { trie := m0, root := r0, path := [] }
           rz := { trie := vt, root := vr, path := [] }
           out := [], step := 0, src := src, map1 := m1
-          mergeAt := src.mergeAt m0 m1 r0 r1 }, d)
+          mergeAt := src.mergeAt m0 m1 r0 r1
+          info := src.info.map (fun f => f m0 m1 r0 r1)
+          valAtSkip := match src.valAtSkip with
+            | some f => f m0 m1 r0 r1
+            | none => fun _ _ => none
+          inputSkip := src.inputSkip.bind (fun f => f m0 m1 r0 r1) }, d)
 
 /-! ## Entry point -/
 
@@ -655,6 +674,9 @@ def run (bytes : ByteArray) (maxSteps : Nat := 256) (src : Source := Source.nati
   match Dec.init bytes >>= (fun d => header d src) with
   | none => ["EMPTY"]
   | some (s0, d) =>
+    match s0.inputSkip with
+    | some why => [why]
+    | none =>
       let s := loop maxSteps s0 d
       let render : Render := { fingerprint := (fingerprint ·), dumpAt, hexPath, showVal }
       let final :=

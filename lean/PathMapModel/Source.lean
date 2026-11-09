@@ -92,6 +92,20 @@ structure Source where
   not corrupt map0 for the rest of the run. -/
   mergeAt : PathMap UInt64 → PathMap UInt64 → Path → Path → Path → Bool :=
     fun _ _ _ _ _ => true
+  /-- An optional per-step report on the read zipper, appended to its
+  fingerprint: `info m0 m1 r0 r1` gives, for the focus (the path relative to
+  the root), the string the Rust side's `ReadSource::source_info` prints.
+  `none` (every source but the product zippers) adds nothing. -/
+  info : Option (PathMap UInt64 → PathMap UInt64 → Path → Path → Path → String) := none
+  /-- A named skip for `val_at` (op 24) and `get_val_agrees` (op 51) on the read
+  side: `valAtSkip m0 m1 r0 r1 focus q` is the skip token when the source
+  declines `val_at q` at the focus (relative path), mirroring
+  `ReadSource::val_at_skip`.  `none`: never. -/
+  valAtSkip : Option (PathMap UInt64 → PathMap UInt64 → Path → Path → Path → Path → Option String) := none
+  /-- A named skip for a whole input: `inputSkip m0 m1 r0 r1` is the token the
+  trace then consists of, alone (the Rust runner returns the same line).
+  `none`: never. -/
+  inputSkip : Option (PathMap UInt64 → PathMap UInt64 → Path → Path → Option String) := none
 
 /-- The skip token for an operation this source cannot serve. -/
 def Source.skip (s : Source) : String := "skip:" ++ s.name

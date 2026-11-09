@@ -272,6 +272,41 @@ KNOWN = [
     (["join_into"],
      "join_into() drops the source subtrie when the destination map is empty "
      "[join_into_empty_dst]"),
+    # ProductZipper (differential/src/sources/product.rs), lean/findings/product.md.
+    # `\n` ends the source name, so `src:product` does not match productg.
+    (["src:product\n", "descend_to_check ret=1 "],
+     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
+     "[product_descend_to_check_empty]"),
+    (["src:product-full\n", "descend_to_check ret=1 "],
+     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
+     "[product_descend_to_check_empty]"),
+    # product-full / productg-full: the same zippers without the product skips,
+    # to reproduce what the skips hold back (lean/corpus/product-*.bin).
+    (["src:product-full\n", "src/zipper.rs:3353"],
+     "ProductZipper::val_at() panics (focus_parent unwrap) with the focus "
+     "inside the first node of a secondary factor [product_val_at_joint_panic]"),
+    (["src:product-full\n", "val_at ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:productg-full\n", "val_at ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:product-full\n", "get_val_agrees ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:productg-full\n", "get_val_agrees ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    # Everything else these two sources add over product/productg comes from
+    # inputs product/productg skip whole: a factor with no children at its root.
+    (["src:product-full\n"],
+     "a factor with no children at its root (childless primary root, empty "
+     "map0 snapshot) is not entered / not transparent, or only after some "
+     "moves and until reset [product_empty_factor]"),
+    (["src:productg-full\n"],
+     "a factor with no children at its root (childless primary root, empty "
+     "map0 snapshot) is not entered / not transparent, or only after some "
+     "moves and until reset [product_empty_factor]"),
     # OverlayZipper (differential/src/sources/overlay.rs).  Before the generic
     # `ascend_until` entry below, which would otherwise swallow them.  See
     # lean/findings/overlay-exp.md.

@@ -313,6 +313,16 @@ pub trait ReadSource:
     /// mirrors.  Opt in with `trie_ref_source!()` inside the impl.
     fn trie_ref_probe(&self, _mode: usize, _p: &[u8], _q: &[u8]) -> Option<String> { None }
 
+    /// An optional per-step report, appended to the read zipper's fingerprint
+    /// (the model's `Source.info`).  The product zippers report
+    /// `ZipperProduct` through it; every other source prints nothing.
+    fn source_info(&self) -> Option<String> { None }
+
+    /// A named skip for `val_at` (op 24) and `get_val_agrees` (op 51) on the
+    /// read side: the token when the source declines `val_at(path)` at the
+    /// current focus (the model's `Source.valAtSkip`).  `None`: answer it.
+    fn val_at_skip(&self, _path: &[u8]) -> Option<&'static str> { None }
+
     fn do_graft<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> bool { false }
     fn do_graft_masked<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
     /// Currently unused: op 54 is quarantined (lean/FINDINGS.md #15).  Kept so
@@ -944,7 +954,10 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                 24 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let v = tgt!(t, *wz, *rz, z, show_val(z.val_at(&p)));
+                    let v = match (t == 1).then(|| rz.val_at_skip(&p)).flatten() {
+                        Some(why) => why.to_string(),
+                        None => tgt!(t, *wz, *rz, z, show_val(z.val_at(&p))),
+                    };
                     ("val_at", v)
                 }
                 25 => {
@@ -1135,7 +1148,10 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                     let p = get!(d.path(6));
                     // `get_val`/`get_val_at` must agree with `val`/`val_at`; they
                     // differ only in the lifetime of the reference returned.
-                    let probe = if t == 0 {
+                    let skip = (t == 1).then(|| rz.val_at_skip(&p)).flatten();
+                    let probe = if skip.is_some() {
+                        None
+                    } else if t == 0 {
                         let (g, ga) = (wz.val().copied(), wz.val_at(&p).copied());
                         Some((g, ga, true)) // a write zipper has no ZipperReadOnlyValues
                     } else {
@@ -1151,7 +1167,7 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                                 show_bool(agree)
                             ),
                         ),
-                        None => ("get_val_agrees", R::SKIP.to_string()),
+                        None => ("get_val_agrees", skip.unwrap_or(R::SKIP).to_string()),
                     }
                 }
                 52 => match rz.to_next_get_val_probe() {
@@ -1312,9 +1328,10 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                 check_zipper(rz, "read zipper", root1, R::VAL_COUNT);
             }
             let _ = writeln!(out, 
-                "{step} {name} ret={ret} W={} R={}",
+                "{step} {name} ret={ret} W={} R={}{}",
                 fingerprint(&*wz, root0),
-                fingerprint_with(rz, root1, R::VAL_COUNT)
+                fingerprint_with(rz, root1, R::VAL_COUNT),
+                rz.source_info().map(|i| format!(" {i}")).unwrap_or_default()
             );
             step += 1;
         }
