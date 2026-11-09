@@ -1,5 +1,7 @@
 //! Map fuzzer, ops 50–59: catamorphisms, anamorphisms.  Mirrors `MapFuzz/Morph.lean`,
-//! which documents the operands, the closures and the visiting rules.
+//! which documents the operands, the closures and the visiting rules.  Ops 57/58
+//! serialize a trie into a prefix tree with a catamorphism and deserialize it back
+//! with an anamorphism; `lean/PathMapModel/PrefixTree.lean` proves the round trip.
 //!
 //! Every closure returns a *faithful* string encoding of what it was shown
 //! (path, jump length, value, child mask, the children's results, and for the
@@ -176,6 +178,178 @@ impl CataRun for Hash {
     }
 }
 
+/// One node of a rendered prefix tree: `(<val>,<edge hex><child>,...)`
+/// (`PTree.render` in `PrefixTree.lean`).
+fn tree_node<I: Iterator<Item = Vec<u8>>>(v: Option<&u64>, edges: I, ch: &[String]) -> String {
+    let mut out = format!("({}", show_val(v));
+    for (e, c) in edges.zip(ch.iter()) {
+        out.push(',');
+        out.push_str(&hex_path(&e));
+        out.push_str(c);
+    }
+    out.push(')');
+    out
+}
+
+/// A jumping fold's node: the bytes it jumped over, and its rendering with
+/// each child's edge = mask byte ++ the child's jumped bytes.
+fn line_node(sub: &[u8], v: Option<&u64>, m: &ByteMask, ch: &[(Vec<u8>, String)]) -> (Vec<u8>, String) {
+    let edges = m.iter().zip(ch.iter()).map(|(b, c)| [&[b][..], &c.0[..]].concat());
+    let strs: Vec<String> = ch.iter().map(|c| c.1.clone()).collect();
+    (sub.to_vec(), tree_node(v, edges, &strs))
+}
+
+/// `PathMap.rootLine`: a non-empty jump at the root is a leading edge.
+fn root_line(r: (Vec<u8>, String)) -> String {
+    if r.0.is_empty() { r.1 } else { format!("(-,{}{})", hex_path(&r.0), r.1) }
+}
+
+/// Op 57: a byte tree from a stepping fold.  `fl % 4`: side-effect,
+/// side-effect fallible (never failing), cached, cached fallible (never failing).
+struct TreeBytes {
+    fl: u8,
+}
+
+impl CataRun for TreeBytes {
+    fn run<C: Catamorphism<u64>>(self, c: C) -> String {
+        let bytes = |m: &ByteMask| m.iter().map(|b| vec![b]).collect::<Vec<_>>().into_iter();
+        match self.fl % 4 {
+            0 => c.into_cata_side_effect(|m, ch: &mut [String], v, _path| tree_node(v, bytes(m), ch)),
+            1 => c
+                .into_cata_side_effect_fallible(|m, ch: &mut [String], v, _path| Ok::<_, ()>(tree_node(v, bytes(m), ch)))
+                .unwrap_or_else(|_| "Err".to_string()),
+            2 => c.into_cata_cached(|m, ch: &mut [String], v| tree_node(v, bytes(m), ch)),
+            _ => c
+                .into_cata_cached_fallible(|m, ch: &mut [String], v| Ok::<_, ()>(tree_node(v, bytes(m), ch)))
+                .unwrap_or_else(|_| "Err".to_string()),
+        }
+    }
+}
+
+/// Op 58: a line tree from a jumping fold, flavours as in [TreeBytes].  The
+/// side-effecting closure reads its jumped bytes off the end of its path.
+struct TreeLines {
+    fl: u8,
+}
+
+impl CataRun for TreeLines {
+    fn run<C: Catamorphism<u64>>(self, c: C) -> String {
+        let r = match self.fl % 4 {
+            0 => c.into_cata_jumping_side_effect(|m, ch: &mut [(Vec<u8>, String)], j, v, path| {
+                line_node(&path[path.len() - j..], v, m, ch)
+            }),
+            1 => match c.into_cata_jumping_side_effect_fallible(|m, ch: &mut [(Vec<u8>, String)], j, v, path| {
+                Ok::<_, ()>(line_node(&path[path.len() - j..], v, m, ch))
+            }) {
+                Ok(r) => r,
+                Err(_) => return "Err".to_string(),
+            },
+            2 => c.into_cata_jumping_cached(|m, ch: &mut [(Vec<u8>, String)], v, sub| line_node(sub, v, m, ch)),
+            _ => match c.into_cata_jumping_cached_fallible(|m, ch: &mut [(Vec<u8>, String)], v, sub| {
+                Ok::<_, ()>(line_node(sub, v, m, ch))
+            }) {
+                Ok(r) => r,
+                Err(_) => return "Err".to_string(),
+            },
+        };
+        root_line(r)
+    }
+}
+
+/// A parsed prefix tree (`PTree`).
+#[derive(Clone, Default)]
+struct PTree {
+    v: Option<u64>,
+    kids: Vec<(Vec<u8>, PTree)>,
+}
+
+/// Parse a rendering made by [tree_node]; `None` on anything else.
+fn parse_tree(s: &[u8], i: &mut usize) -> Option<PTree> {
+    if s.get(*i) != Some(&b'(') {
+        return None;
+    }
+    *i += 1;
+    let start = *i;
+    while *i < s.len() && s[*i] != b',' && s[*i] != b')' {
+        *i += 1;
+    }
+    let vs = std::str::from_utf8(&s[start..*i]).ok()?;
+    let v = if vs == "-" { None } else { Some(vs.parse().ok()?) };
+    let mut kids = vec![];
+    while s.get(*i) == Some(&b',') {
+        *i += 1;
+        let start = *i;
+        while *i < s.len() && s[*i] != b'(' {
+            *i += 1;
+        }
+        let hex = std::str::from_utf8(&s[start..*i]).ok()?;
+        if hex.len() % 2 != 0 || hex.is_empty() {
+            return None;
+        }
+        let e: Vec<u8> = (0..hex.len() / 2).map(|k| u8::from_str_radix(&hex[2 * k..2 * k + 2], 16)).collect::<Result<_, _>>().ok()?;
+        kids.push((e, parse_tree(s, i)?));
+    }
+    if s.get(*i) != Some(&b')') {
+        return None;
+    }
+    *i += 1;
+    Some(PTree { v, kids })
+}
+
+/// Whether the deserializer grafts edge `e` at `path` from the source instead
+/// of pushing it (`grafts` in `Morph.lean`): one-byte edges only, with `g` odd;
+/// the caller also asks for something below the source location.
+fn grafts(g: u8, path: &[u8], e: &[u8]) -> bool {
+    e.len() == 1 && g % 2 == 1 && ((g >> 1) as usize + path.len() + e[0] as usize) % 3 == 0
+}
+
+/// Ops 57/58, second half: deserialize `tree` with `new_from_ana(_in)`, pushing
+/// each edge (`push_byte` for one byte, unless `g & 8` asks for `push`), or
+/// grafting it from `src` at `root ++ path ++ e` (see [grafts]).  Returns the
+/// map and the number of closure calls.
+fn deserialize(tree: PTree, src: &PathMap<u64>, root: &[u8], g: u8, use_in: bool) -> (PathMap<u64>, usize) {
+    let mut calls = 0usize;
+    let alg = |w: PTree, val: &mut Option<u64>, b: &mut TrieBuilder<u64, PTree, GlobalAlloc>, path: &[u8]| {
+        calls += 1;
+        *val = w.v;
+        for (e, c) in w.kids {
+            let at = [root, path, &e[..]].concat();
+            let rz = src.read_zipper_at_path(&at);
+            // Only where the source has something below: `graft_at_byte`
+            // panics on a leaf (finding PT1 in lean/findings/ptree.md).
+            if grafts(g, path, &e) && rz.child_count() > 0 {
+                b.graft_at_byte(e[0], &rz);
+            } else if e.len() == 1 && (g >> 3) & 1 == 0 {
+                b.push_byte(e[0], c);
+            } else {
+                b.push(&e, c);
+            }
+        }
+    };
+    let m = if use_in { PathMap::new_from_ana_in(tree, alg, global_alloc()) } else { PathMap::new_from_ana(tree, alg) };
+    (m, calls)
+}
+
+/// Every location below a zipper's root with its value, depth-first, uncapped.
+fn walk<Z: ZipperMoving + ZipperPath + ZipperValues<u64>>(mut z: Z) -> Vec<(Vec<u8>, Option<u64>)> {
+    z.reset();
+    let mut out = vec![(z.path().to_vec(), z.val().copied())];
+    while z.to_next_step() {
+        out.push((z.path().to_vec(), z.val().copied()));
+    }
+    out
+}
+
+/// The trie a csrc presents, as a map and the root inside it.
+fn source_map(st: &MapState, c: &CSrc) -> (PathMap<u64>, Vec<u8>) {
+    let mut t = st.maps[c.i].clone();
+    if !c.q.is_empty() {
+        t.create_path(&c.q);
+    }
+    let root = if c.kind == 0 { vec![] } else { c.p.clone() };
+    (t, root)
+}
+
 /// Skip token: `ana_replicate` would build a map larger than `REP_CAP` locations.
 pub const SKIP_TOO_BIG: &str = "skip:too-big";
 /// `repCap` in `MapFuzz/Morph.lean`.
@@ -310,6 +484,21 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             drop(rz);
             st.maps[dst] = m;
             ("ana_replicate", format!("calls={calls}"))
+        }
+        57 | 58 => {
+            let (c, fl, dst, g, use_in) = (csrc(d)?, d.u8()?, map_ix(d)?, d.u8()?, d.boolean()?);
+            let name = if op == 57 { "tree_bytes" } else { "tree_lines" };
+            let s = if op == 57 { dispatch(st, &c, TreeBytes { fl }) } else { dispatch(st, &c, TreeLines { fl }) };
+            let Some(tree) = parse_tree(s.as_bytes(), &mut 0) else {
+                return Some((name, format!("{s} unparsed")));
+            };
+            let (src, root) = source_map(st, &c);
+            let (m, calls) = deserialize(tree, &src, &root, g, use_in);
+            // Compare with the source view, crate against crate: the model
+            // predicts `same=1` exactly when nothing dangling was lost.
+            let same = walk(m.read_zipper()) == walk(src.read_zipper_at_path(&root));
+            st.maps[dst] = m;
+            (name, format!("{s} calls={calls} same={}", show_bool(same)))
         }
         _ => ("nop", "-".to_string()),
     })
