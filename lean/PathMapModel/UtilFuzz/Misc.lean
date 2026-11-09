@@ -394,6 +394,124 @@ def vizOp (op : Nat) (d : Dec) : Option ((String × String) × Dec) := do
       else mermaidValues c ms (withRoot := !rv)
     some ((name, if rv && op != 85 then ret ++ ";skip:viz-mermaid-root-value" else ret), d)
 
+/-! ## `random` (ops 88–92; cargo feature `random`, enabled in the differential crate)
+
+The module's distributions draw from a caller-supplied RNG, so their exact
+output is the RNG's business.  What they promise, and what the ops check:
+
+* `RandomTrie { size, pd, vd }` samples `size` (path, value) pairs, `pd` then
+  `vd`, and `set_val_at`s them in order: with scripted `pd` / `vd` (cycling
+  lists, `Replay` in `misc.rs`) the answer is exactly that fold.
+* `FairTrieValue` returns one of the map's `(path, value)` pairs.  A root value
+  is a value of the map, but the sampler counts it without ever visiting it and
+  panics (finding `fair_trie_value_root_value`): maps with a root value render
+  `skip:fair-value-root-value`.
+* `DescendFirstTrieValue` with `unbiased_descend_first_policy` descends from
+  the root to the **first** value on its way: a value no proper prefix of whose
+  path holds a value.  The policy at a location with children is a choice over
+  exactly its child bytes (`elements`, ascending).
+* `FairTriePath` returns a location of the trie (the root or a prefix of a
+  value's path) with the value there, if any.
+* `DescendTriePath` with `unbiased_descend_last_policy` descends to a **leaf**
+  (a location without children) and returns its value.  The policy at `q`:
+  `db` = "q has children", `dx` over the child bytes, `dy` = the value at `q`.
+
+Each answer is exact when the property leaves one candidate, else `in=1` (the
+sample is a candidate; the crate side checks membership); `det=1`: two samples
+from equally seeded `StdRng`s agree.
+
+## `counters` (ops 93–94; cargo feature `counters`, enabled in the differential crate)
+
+* `cow_counters` / `reset_cow_counters`: writes to a map whose nodes nobody
+  else holds never clone (`cow_clones = 0`); after `clone()`, a write below the
+  root clones at least one node (when the map had any node to share, i.e.
+  something below its root); once the clone is dropped, writes are unshared
+  again; always `cow_clones <= make_unique_calls`.  (The counters are global:
+  other threads writing maps at the same time would disturb them; the trace
+  runs one input at a time.)
+* `Counters::new()` is all zero; `Counters::count_ocupancy` on a map with
+  nodes counts at least one node and at least `nodes - 1` child items (every
+  node but the root is some node's child item).  The per-depth histograms are
+  node-layout statistics with no model, and the `print_*` functions write to
+  stdout, which is the trace channel; they are not called.  `count_ocupancy`
+  panics on a map without a root node (finding `count_ocupancy_no_root_node`):
+  `skip:counters-no-root-node`.
+-/
+
+def showSample (p : Path) (v : Option Nat) : String :=
+  hexPath p ++ ":" ++ (match v with | some v => toString v | none => "-")
+
+/-- The root and every prefix of a value's path, in byte order. -/
+def LMap.locations (m : LMap) : List Path :=
+  dedupAdj ((m.flatMap fun (p, _) => (List.range (p.length + 1)).map p.take).mergeSort fun a b => !lexLt b a)
+
+def LMap.sorted (m : LMap) : LMap := m.mergeSort fun a b => !lexLt b.1 a.1
+
+def readPolicyPath (d : Dec) : Option (Path × Dec) := do
+  let (q, d) ← d.path 5
+  some (q.map fun b => vizAlpha.getD b.toNat 0, d)
+
+def randomOp (op : Nat) (d : Dec) : Option ((String × String) × Dec) :=
+  if op == 88 then do
+    let (np, d) ← d.mod 6
+    let (paths, d) ← Ints.many (fun d => d.path 5) (np + 1) d
+    let (nv, d) ← d.mod 4
+    let (vals, d) ← Ints.many Dec.u8 (nv + 1) d
+    let (size, d) ← d.mod 16
+    let (_seed, d) ← d.u8
+    let m := (List.range size).foldl (fun (m : LMap) i =>
+      m.set (paths.getD (i % paths.length) []) (vals.getD (i % vals.length) 0).toNat) []
+    some (("random_trie", "[" ++ ",".intercalate (m.sorted.map fun (p, v) => showSample p (some v)) ++ "]"), d)
+  else if op == 89 then do
+    let (m, d) ← readSmallMap d
+    let (_seed, d) ← d.u8
+    if (m.val? []).isSome then some (("fair_trie_value", "skip:fair-value-root-value"), d)
+    else
+      let ans := match m with | [(p, v)] => showSample p (some v) | _ => "in=1"
+      some (("fair_trie_value", ans ++ ",det=1"), d)
+  else if op == 90 then do
+    let (m, d) ← readSmallMap d
+    let (_seed, d) ← d.u8
+    let (q, d) ← readPolicyPath d
+    let firsts := m.filter fun (p, _) => (List.range p.length).all fun k => (m.val? (p.take k)).isNone
+    let ans := match firsts with | [(p, v)] => showSample p (some v) | _ => "in=1"
+    let cs := m.children q
+    let pol := if cs.isEmpty then "-" else hexPath cs
+    some (("descend_first_value", ans ++ ",det=1;pol=" ++ pol), d)
+  else if op == 91 then do
+    let (m, d) ← readSmallMap d
+    let (_seed, d) ← d.u8
+    let ans := match m.locations with | [p] => showSample p (m.val? p) | _ => "in=1"
+    some (("fair_trie_path", ans ++ ",det=1"), d)
+  else do
+    let (m, d) ← readSmallMap d
+    let (_seed, d) ← d.u8
+    let (q, d) ← readPolicyPath d
+    let leaves := m.locations.filter fun l => (m.children l).isEmpty
+    let ans := match leaves with | [p] => showSample p (m.val? p) | _ => "in=1"
+    let cs := m.children q
+    some (("descend_last_path", ans ++ ",det=1;db=" ++ showBool (!cs.isEmpty) ++ ",dx=" ++ hexPath cs ++
+      ",dy=" ++ (match m.val? q with | some v => toString v | none => "-")), d)
+
+def countersOp (op : Nat) (d : Dec) : Option ((String × String) × Dec) :=
+  if op == 93 then do
+    let (_rv, d) ← d.u8
+    let (n, d) ← d.mod 8
+    let (writes, d) ← Ints.many (fun d => do
+      let (p, d) ← d.path 5
+      let (_v, d) ← d.u8
+      pure (p, d)) (n + 1) d
+    let (_p, d) ← d.path 5
+    let (_b, d) ← d.pathByte
+    let (_v, d) ← d.u8
+    let hasNode := writes.any (!·.isEmpty)
+    some (("cow_counters", "unshared=0,shared=" ++ showBool hasNode ++ ",after_drop=0,le=1"), d)
+  else do
+    let (m, d) ← readSmallMap d
+    let ret := if m.all (·.1.isEmpty) then "new=0,0;skip:counters-no-root-node"
+      else "new=0,0;nodes>0=1,items>=nodes-1=1"
+    some (("count_ocupancy", ret), d)
+
 end Misc
 
 open Misc in
@@ -419,6 +537,8 @@ def stepMisc (op : Nat) (d : Dec) : Option ((String × String) × Dec) :=
     let (_at, d) ← d.mod (ps.length + 1)
     some (("sort_long", both (List.replicate (65535 + δ) 0xa5 :: ps) mib true), d)
   else if op ≤ 87 then vizOp op d
+  else if op ≤ 92 then randomOp op d
+  else if op ≤ 94 then countersOp op d
   else
     some (("nop", "-"), d)
 

@@ -7,3 +7,6 @@ description = "The Rust side of the differential fuzzing harness for pathmap's z
 
 [dependencies]
 pathmap = { path = "..", features = ["arena_compact", "zipper_alg", "viz", "random", "counters"] }
+# Seeded RNGs for the `random` module ops (util fuzzer, ops 88-92); the same
+# rand 0.9 that pathmap uses.
+rand = "0.9"

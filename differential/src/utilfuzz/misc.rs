@@ -486,6 +486,217 @@ fn viz_op(op: usize, d: &mut Dec) -> Option<(&'static str, String)> {
     Some((name, ret))
 }
 
+// ------------------------------------------------------------- random (88–92)
+
+/// A scripted `Distribution`: returns `items` in turn (cycling), ignoring the
+/// RNG, so `RandomTrie`'s answer is exactly determined by the script.  Clones
+/// share the cursor.
+#[derive(Clone)]
+struct Replay<T: Clone> {
+    items: std::rc::Rc<Vec<T>>,
+    next: std::rc::Rc<std::cell::Cell<usize>>,
+}
+impl<T: Clone> Replay<T> {
+    fn new(items: Vec<T>) -> Self {
+        Self { items: std::rc::Rc::new(items), next: Default::default() }
+    }
+}
+impl<T: Clone> rand::distr::Distribution<T> for Replay<T> {
+    fn sample<R: rand::Rng + ?Sized>(&self, _rng: &mut R) -> T {
+        let i = self.next.get();
+        self.next.set(i + 1);
+        self.items[i % self.items.len()].clone()
+    }
+}
+
+fn rng(seed: u8) -> rand::rngs::StdRng {
+    use rand::SeedableRng;
+    rand::rngs::StdRng::seed_from_u64(seed as u64)
+}
+
+fn show_sample(p: &[u8], v: Option<&u64>) -> String {
+    format!("{}:{}", hex_path(p), show_val(v))
+}
+
+/// The map's values as `(path, value)`, in iteration order.
+fn entries(m: &PathMap<u64>) -> Vec<(Vec<u8>, u64)> {
+    m.iter().map(|(p, v)| (p, *v)).collect()
+}
+
+/// Every location (the root and each prefix of a value's path).
+fn locations(m: &PathMap<u64>) -> Vec<Vec<u8>> {
+    let mut v = vec![vec![]];
+    for (p, _) in entries(m) {
+        for k in 1..=p.len() {
+            v.push(p[..k].to_vec());
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn random_op(op: usize, d: &mut Dec) -> Option<(&'static str, String)> {
+    use pathmap::random::*;
+    use rand::distr::Distribution;
+    match op {
+        88 => {
+            let np = 1 + d.modn(6)?;
+            let mut paths = Vec::with_capacity(np);
+            for _ in 0..np {
+                paths.push(d.path(5)?);
+            }
+            let nv = 1 + d.modn(4)?;
+            let mut vals = Vec::with_capacity(nv);
+            for _ in 0..nv {
+                vals.push(d.u8()? as u64);
+            }
+            let size = d.modn(16)?;
+            let seed = d.u8()?;
+            let rt = RandomTrie { size, pd: Replay::new(paths), vd: Replay::new(vals), ph: std::marker::PhantomData };
+            let m = rt.sample(&mut rng(seed));
+            let v: Vec<String> = entries(&m).iter().map(|(p, v)| show_sample(p, Some(v))).collect();
+            Some(("random_trie", format!("[{}]", v.join(","))))
+        }
+        89 => {
+            let m = read_small_map(d)?;
+            let seed = d.u8()?;
+            // `FairTrieValue` counts a root value but never visits it: it panics
+            // (`unreachable!`) when it draws the last index
+            // (`fair_trie_value_root_value`).  Skipped, same token in `Misc.lean`.
+            if m.val_at([]).is_some() {
+                return Some(("fair_trie_value", "skip:fair-value-root-value".to_string()));
+            }
+            let dist = FairTrieValue { source: m.clone() };
+            let (p, v) = dist.sample(&mut rng(seed));
+            let det = dist.sample(&mut rng(seed)) == (p.clone(), v);
+            let es = entries(&m);
+            let ans = if es.len() == 1 { show_sample(&p, Some(&v)) } else { format!("in={}", show_bool(es.contains(&(p, v)))) };
+            Some(("fair_trie_value", format!("{ans},det={}", show_bool(det))))
+        }
+        90 => {
+            let m = read_small_map(d)?;
+            let seed = d.u8()?;
+            let q = d.path(5)?;
+            let q: Vec<u8> = q.into_iter().map(|b| VIZ_ALPHA[b as usize]).collect();
+            let dist = DescendFirstTrieValue { source: m.clone(), policy: unbiased_descend_first_policy };
+            let (p, v) = dist.sample(&mut rng(seed));
+            let det = dist.sample(&mut rng(seed)) == (p.clone(), v);
+            // The first values on the way down: no proper prefix holds a value.
+            let es = entries(&m);
+            let firsts: Vec<&(Vec<u8>, u64)> = es.iter()
+                .filter(|(p, _)| (0..p.len()).all(|k| m.val_at(&p[..k]).is_none()))
+                .collect();
+            let ans = if firsts.len() == 1 { show_sample(&p, Some(&v)) } else { format!("in={}", show_bool(firsts.contains(&&(p, v)))) };
+            // The policy itself, where it is defined (a location with children).
+            let rz = m.read_zipper_at_path(&q);
+            let pol = if rz.child_count() > 0 { hex_path(&unbiased_descend_first_policy(&rz).elements) } else { "-".to_string() };
+            Some(("descend_first_value", format!("{ans},det={};pol={pol}", show_bool(det))))
+        }
+        91 => {
+            let m = read_small_map(d)?;
+            let seed = d.u8()?;
+            let dist = FairTriePath { source: m.clone() };
+            let (p, v) = dist.sample(&mut rng(seed));
+            let det = dist.sample(&mut rng(seed)) == (p.clone(), v);
+            let locs = locations(&m);
+            let ans = if locs.len() == 1 {
+                show_sample(&p, v.as_ref())
+            } else {
+                format!("in={}", show_bool(locs.contains(&p) && m.val_at(&p).copied() == v))
+            };
+            Some(("fair_trie_path", format!("{ans},det={}", show_bool(det))))
+        }
+        92 => {
+            let m = read_small_map(d)?;
+            let seed = d.u8()?;
+            let q = d.path(5)?;
+            let q: Vec<u8> = q.into_iter().map(|b| VIZ_ALPHA[b as usize]).collect();
+            let dist = DescendTriePath { source: m.clone(), policy: unbiased_descend_last_policy, ph: std::marker::PhantomData };
+            let (p, v) = dist.sample(&mut rng(seed));
+            let det = dist.sample(&mut rng(seed)) == (p.clone(), v);
+            let leaves: Vec<Vec<u8>> = locations(&m).into_iter()
+                .filter(|l| m.read_zipper_at_path(l).child_count() == 0)
+                .collect();
+            let ans = if leaves.len() == 1 {
+                show_sample(&p, Some(&v))
+            } else {
+                format!("in={}", show_bool(leaves.contains(&p) && m.val_at(&p) == Some(&v)))
+            };
+            let rz = m.read_zipper_at_path(&q);
+            let pol = unbiased_descend_last_policy(&rz);
+            Some(("descend_last_path", format!(
+                "{ans},det={};db={},dx={},dy={}",
+                show_bool(det),
+                show_bool(pol.db.element),
+                hex_path(&pol.dx.elements),
+                show_val(pol.dy.d.element.as_ref()),
+            )))
+        }
+        _ => None,
+    }
+}
+
+// ----------------------------------------------------------- counters (93–94)
+
+fn counters_op(op: usize, d: &mut Dec) -> Option<(&'static str, String)> {
+    use pathmap::counters::*;
+    match op {
+        93 => {
+            // Build an unshared map, share it, write through the share, unshare, write.
+            let rv = d.u8()?;
+            let n = 1 + d.modn(8)?;
+            let mut writes = Vec::with_capacity(n);
+            for _ in 0..n {
+                writes.push((d.path(5)?, d.u8()? as u64));
+            }
+            let mut p = d.path(5)?;
+            p.push(d.path_byte()?); // non-empty: a root value lives outside the nodes
+            let v = d.u8()? as u64;
+            reset_cow_counters();
+            let mut m = PathMap::new();
+            if rv % 2 == 1 {
+                m.set_val_at([], rv as u64);
+            }
+            for (q, x) in &writes {
+                m.set_val_at(q, *x);
+            }
+            let a = cow_counters();
+            let shared = m.clone();
+            reset_cow_counters();
+            m.set_val_at(&p, v);
+            let b = cow_counters();
+            drop(shared);
+            reset_cow_counters();
+            m.set_val_at(&p, v.wrapping_add(1));
+            let c = cow_counters();
+            let ok = |x: CowCounters| x.cow_clones <= x.make_unique_calls;
+            Some(("cow_counters", format!(
+                "unshared={},shared={},after_drop={},le={}",
+                a.cow_clones, show_bool(b.cow_clones >= 1), c.cow_clones,
+                show_bool(ok(a) && ok(b) && ok(c)),
+            )))
+        }
+        94 => {
+            let m = read_small_map(d)?;
+            let z = Counters::new();
+            let fresh = format!("new={},{}", z.total_nodes(), z.total_child_items());
+            // `count_ocupancy` panics on a map without a root node
+            // (`count_ocupancy_no_root_node`): skipped, same token in `Misc.lean`.
+            if m.read_zipper().child_count() == 0 {
+                return Some(("count_ocupancy", format!("{fresh};skip:counters-no-root-node")));
+            }
+            let c = Counters::count_ocupancy(&m);
+            Some(("count_ocupancy", format!(
+                "{fresh};nodes>0={},items>=nodes-1={}",
+                show_bool(c.total_nodes() > 0),
+                show_bool(c.total_child_items() + 1 >= c.total_nodes()),
+            )))
+        }
+        _ => None,
+    }
+}
+
 pub fn step(op: usize, d: &mut Dec) -> StepResult {
     let r = match op {
         80 | 81 => {
@@ -523,6 +734,8 @@ pub fn step(op: usize, d: &mut Dec) -> StepResult {
             ("sort_long", both(&serialize(&list), MIB, true))
         }
         85..=87 => viz_op(op, d)?,
+        88..=92 => random_op(op, d)?,
+        93..=94 => counters_op(op, d)?,
         _ => ("nop", "-".to_string()),
     };
     Some(r)
