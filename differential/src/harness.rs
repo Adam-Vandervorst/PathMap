@@ -73,6 +73,11 @@ impl<'a> Dec<'a> {
         };
         Some(Self { bytes, pos, op_count })
     }
+    /// A decoder with no header handling, for streams whose caller picks the
+    /// operation itself (the pruned fuzzer).
+    pub fn legacy(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0, op_count: LEGACY_NOPS }
+    }
     pub fn op(&mut self) -> Option<usize> {
         self.modn(self.op_count)
     }
@@ -186,18 +191,14 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 ///   implement the trait the op needs.
 /// * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root,
 ///   where the native read zipper escapes its own root.
-/// * `skip:k0` — a degenerate `k = 0` on `join`/`meet_k_path_into`.
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
-/// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 /// * `skip:quarantined` — the op is disabled outright (op 54).
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
 pub const SKIP_ACT: &str = "skip:act";
 pub const SKIP_AT_ROOT: &str = "skip:at-root";
-pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
-pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
 pub const SKIP_QUARANTINED: &str = "skip:quarantined";
 
 /// Does the focus have no descendants at all?
@@ -235,6 +236,11 @@ pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
         Some(mut fork) => dump(&mut fork),
         None => "_:-".to_string(),
     }
+}
+
+/// The values at and below the focus, from [dump_fork], without the dangling locations
+pub fn fork_values<Z: ZipperForking<u64>>(z: &Z) -> Vec<String> {
+    dump_fork(z).split(',').filter(|e| !e.ends_with(":-")).map(str::to_string).collect()
 }
 
 /// The read side of the harness: whatever the write zipper is reading *from*.
@@ -547,6 +553,23 @@ pub fn run(bytes: &[u8], check: bool) -> String {
 
 /// Run the operation table.  This is the single shared body: the two front ends
 /// differ only in what they hand in as `rz`.
+/// Drops every dangling path below the focus, keeping the values and the focus
+/// itself.  A meet with `prune = false` may leave some dangling paths, and which
+/// ones is unspecified (see `PathMap.meet` in the model), so they are dropped
+/// before anything can observe them.
+pub fn drop_dangling_below<W: ZipperWriting<u64>>(wz: &mut W) {
+    if let Some(m) = wz.take_map(false) {
+        let mut fresh = PathMap::<u64>::new();
+        if let Some(v) = m.val_at::<&[u8]>(&[]) {
+            fresh.set_val_at::<&[u8]>(&[], *v);
+        }
+        for (k, v) in m.iter() {
+            fresh.set_val_at(&k, *v);
+        }
+        wz.graft_map(fresh);
+    }
+}
+
 pub fn run_ops<R: ReadSource>(
     d: &mut Dec,
     out: &mut String,
@@ -640,7 +663,7 @@ pub fn run_ops<R: ReadSource>(
                     let t = get!(d.modn(2));
                     // Skipped at the zipper root: the native ReadZipper escapes
                     // its own root there. See `Zip.toNextSiblingByte`.
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
+                    if false {
                         ("to_next_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
                         let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
@@ -649,7 +672,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 12 => {
                     let t = get!(d.modn(2));
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
+                    if false {
                         ("to_prev_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
                         let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
@@ -774,7 +797,7 @@ pub fn run_ops<R: ReadSource>(
                     let pr = get!(d.boolean());
                     let leaky = focus_node_empty(&wz);
                     let r = wz.remove_branches(pr);
-                    let s = if leaky { "?".to_string() } else { show_bool(r).to_string() };
+                    let s = if false && leaky { "?".to_string() } else { show_bool(r).to_string() };
                     ("remove_branches", s)
                 }
                 33 => {
@@ -805,7 +828,7 @@ pub fn run_ops<R: ReadSource>(
                 37 => {
                     let leaky = focus_node_empty(&wz);
                     let st = (*rz).do_join_map_into(&mut wz);
-                    let s = if leaky && st.is_some() {
+                    let s = if false && leaky && st.is_some() {
                         "?".to_string()
                     } else {
                         show_status_opt(st)
@@ -814,7 +837,15 @@ pub fn run_ops<R: ReadSource>(
                 }
                 38 => {
                     let pr = get!(d.boolean());
-                    ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, pr)))
+                    let before = fork_values(&wz);
+                    let mut st = (*rz).do_meet_into(&mut wz, pr);
+                    // A meet that leaves the values alone may report `Element` as well as
+                    // `Identity`: it is allowed to drop dangling paths, which is a change
+                    if st == Some(AlgebraicStatus::Element) && fork_values(&wz) == before {
+                        st = Some(AlgebraicStatus::Identity);
+                    }
+                    if st.is_some() && !pr { drop_dangling_below(&mut wz); }
+                    ("meet_into", show_status_opt(st))
                 }
                 39 => {
                     let pr = get!(d.boolean());
@@ -823,7 +854,7 @@ pub fn run_ops<R: ReadSource>(
                 40 => {
                     let leaky = focus_node_empty(&wz);
                     let st = (*rz).do_restrict(&mut wz);
-                    let s = if leaky && st.is_some() {
+                    let s = if false && leaky && st.is_some() {
                         "?".to_string()
                     } else {
                         show_status_opt(st)
@@ -833,7 +864,7 @@ pub fn run_ops<R: ReadSource>(
                 41 => {
                     // Skipped when either side has nothing below its focus; see
                     // Fuzz.lean and lean/FINDINGS.md #8.
-                    if focus_node_empty(&wz) || focus_node_empty(rz) {
+                    if false {
                         ("restricting", SKIP_EMPTY_FOCUS.to_string())
                     } else {
                         match (*rz).do_restricting(&mut wz) {
@@ -845,28 +876,18 @@ pub fn run_ops<R: ReadSource>(
                 42 => {
                     let k = get!(d.modn(4));
                     let pr = get!(d.boolean());
-                    // `join_k_path_into(0)` destroys the subtrie in pathmap 0.3.1.
-                    if k == 0 {
-                        ("join_k_path_into", SKIP_K0.to_string())
+                    // The bool leaks node materialisation; see FINDINGS.md #8.
+                    let r = wz.join_k_path_into(k, pr);
+                    let s = if false {
+                        "?".to_string()
                     } else {
-                        // The bool leaks node materialisation; see FINDINGS.md #8.
-                        let r = wz.join_k_path_into(k, pr);
-                        let s = if focus_node_empty(&wz) {
-                            "?".to_string()
-                        } else {
-                            show_bool(r).to_string()
-                        };
-                        ("join_k_path_into", s)
-                    }
+                        show_bool(r).to_string()
+                    };
+                    ("join_k_path_into", s)
                 }
                 43 => {
                     let p = get!(d.path(6));
-                    // `insert_prefix("")` destroys the subtrie in pathmap 0.3.1.
-                    if p.is_empty() {
-                        ("insert_prefix", SKIP_EMPTY_PATH.to_string())
-                    } else {
-                        ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
-                    }
+                    ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
                 }
                 44 => {
                     let n = get!(d.modn(6));
@@ -882,24 +903,14 @@ pub fn run_ops<R: ReadSource>(
                         }
                         None => "0",
                     };
-                    ("take_map_restore", if leaky { "?".to_string() } else { r.to_string() })
+                    ("take_map_restore", if false && leaky { "?".to_string() } else { r.to_string() })
                 }
                 46 => {
                     let k = get!(d.modn(4));
                     let pr = get!(d.boolean());
-                    // `meet_k_path_into` spins forever when the focus has no
-                    // children, and escapes the focus subtree when k == 0.
-                    // See `Zip.meetKPathUnspecified`.
-                    if k == 0 {
-                        ("meet_k_path_into", SKIP_K0.to_string())
-                    } else if wz.child_count() == 0 {
-                        ("meet_k_path_into", SKIP_EMPTY_FOCUS.to_string())
-                    } else {
-                        (
-                            "meet_k_path_into",
-                            show_bool(wz.meet_k_path_into(k, pr)).to_string(),
-                        )
-                    }
+                    let r = wz.meet_k_path_into(k, pr);
+                    if !pr { drop_dangling_below(&mut wz); }
+                    ("meet_k_path_into", show_bool(r).to_string())
                 }
                 48 => {
                     let v = get!(d.u8()) as u64;
@@ -993,12 +1004,16 @@ pub fn run_ops<R: ReadSource>(
                     // (lean/FINDINGS.md #15) and the node representations it
                     // leaves behind degrade the AlgebraicStatus that *later*
                     // operations report, contaminating the rest of the run.
-                    let _ = (mask, ru, &canon);
-                    ("graft_child_maps", SKIP_QUARANTINED.to_string())
+                    let _ = SKIP_QUARANTINED;
+                    let s = if (*rz).do_graft_child_maps(&mut wz, mask, ru) { format!("{}:{}", hex_path(&canon), show_bool(ru)) } else { SKIP_ACT.to_string() };
+                    ("graft_child_maps", s)
                 }
                 55 => {
                     let p = get!(d.path(6));
-                    ("meet_2", show_status_opt((*rz).do_meet_2(&mut wz, &p)))
+                    // `meet_2` has no prune flag: it may leave dangling paths, like `prune = false`
+                    let st = (*rz).do_meet_2(&mut wz, &p);
+                    if st.is_some() { drop_dangling_below(&mut wz); }
+                    ("meet_2", show_status_opt(st))
                 }
                 56 => {
                     let pr = get!(d.boolean());

@@ -275,7 +275,9 @@ It also short-circuits: when the map has no root node, the node status is
 returned directly and the value status computed above is discarded — even though
 the value has already been written. -/
 def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
-  let (valStatus, valWasNone, z1) :=
+  -- `merge` is called with both "was none" flags set, as the crate does, so the
+  -- second component is carried only for symmetry with the other operations.
+  let (valStatus, _valWasNone, z1) :=
     match z.val, m.valAt [] with
     | some sv, some mv =>
         let r := ops.pjoin sv mv
@@ -288,19 +290,26 @@ def joinMapInto (m : PathMap V) : AlgStatus × Zip V :=
     | none, none => (AlgStatus.none, true, z)
   let srcB := (m.removeVal []).2
   if srcB.isEmptyMap then
-    -- Short-circuit, and note the asymmetry with `join_into`: this branch tests
+    -- Note the asymmetry with `join_into`: this branch tests
     -- `self.get_focus().is_none()` (does a node exist at all?), not
     -- `node_is_empty()`.  So a *bare* focus reports `Identity` here, where
     -- `join_into` on the same state reports `None`.
-    (match z1.entry with
-     | .bare | .valued _ => AlgStatus.identity
-     | .absent => AlgStatus.none, z1)
+    --
+    -- The node status is *merged* with the value status rather than returned on
+    -- its own.  It used to be returned directly -- an early `return` that
+    -- discarded a value the operation had already written -- which is
+    -- issue #139, fixed by PR #142 (`276fca0`).  Both exits of the crate's
+    -- `join_map_into` now end in the same `merge`.
+    (AlgStatus.merge
+      (match z1.entry with
+       | .bare | .valued _ => AlgStatus.identity
+       | .absent => AlgStatus.none) valStatus true true, z1)
   else
     let selfB := z1.focusNode
     let r := PathMap.join ops selfB srcB
     let nodeStatus := if PathMap.beqT ops r selfB then AlgStatus.identity else AlgStatus.element
     let z2 := if nodeStatus == .identity then z1 else z1.withTrie (z1.trie.graftBelow z1.focus r)
-    (AlgStatus.merge nodeStatus valStatus true valWasNone, z2)
+    (AlgStatus.merge nodeStatus valStatus true true, z2)
 
 /-- `ZipperWriting::join_into_take`: like `join_into`, but the source subtrie is
 removed from the source zipper's trie. Returns the updated destination *and*
@@ -337,18 +346,23 @@ def meetIntoWithoutPrune (src : Zip V) : AlgStatus × Zip V :=
     let z2 := z1.withTrie (z1.trie.removeBelow z1.focus)
     (AlgStatus.merge .none valStatus false valWasNone, z2)
   else
+    -- `r` has no dangling paths.  With `prune = false` the crate may keep some, and
+    -- which ones is unspecified, so the harness drops them before comparing; the
+    -- status is decided by the values alone.
     let r := PathMap.meet ops selfB srcB
-    let st := nodeStatus ops selfB r
-    let z2 :=
-      if st == .identity then z1
-      else
-        let zg := z1.withTrie (z1.trie.graftBelow z1.focus r)
-        zg
+    let st := nodeStatus ops (PathMap.mk' selfB.vals []) r
+    let z2 := z1.withTrie (z1.trie.graftBelow z1.focus r)
     (AlgStatus.merge st valStatus false valWasNone, z2)
 
-/-- A true flag is exactly an explicit prune after the meet. -/
+/-- A true flag is exactly an explicit prune after the meet.
+
+A meet may drop dangling paths, which is a change, so where the values at and
+below the focus come out unchanged both `Element` and `Identity` are allowed.
+The harness compares that case as `Identity`, on both sides. -/
 def meetInto (src : Zip V) (prune : Bool) : AlgStatus × Zip V :=
   let (st, z') := z.meetIntoWithoutPrune ops src
+  let st := if st == .element &&
+      PathMap.beqT ops (PathMap.mk' z.makeMap.vals []) (PathMap.mk' z'.makeMap.vals []) then .identity else st
   (st, if prune then (z'.prunePath).2 else z')
 
 /-- `ZipperWriting::subtract_into`: remove the source's subtrie from the focus's.
@@ -444,18 +458,13 @@ def joinKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
   let res := !r.isEmptyMap
   (res, if prune && !res then (z1.prunePath).2 else z1)
 
-/-- `meet_k_path_into` is **not implementable** for these arguments: its
-provisional implementation drives `descend_first_k_path` through the
-`ZipperIteration` *default* loop, which spins forever when the focus has no
-children, and which escapes the focus's subtree entirely when `k = 0`.
-Verified against `pathmap` 0.3.1: `meet_k_path_into(1, false)` on a leaf hangs. -/
-def meetKPathUnspecified (k : Nat) : Bool := k == 0 || z.childCount == 0
-
 /-- `ZipperWriting::meet_k_path_into`: strip the leading `k` bytes from every
 path below the focus and meet the results.
 
-Values at depth exactly `k` become the focus value. Only meaningful when
-`meetKPathUnspecified` is `false`. -/
+Values at depth exactly `k` become the focus value. The meet replaces the whole
+subtrie, focus value included, so an empty meet leaves no focus value and no
+branches (`remove_subtrie`). With `k = 0` the only subtrie is the focus's own,
+so it is the identity; a focus with no children meets nothing and is emptied. -/
 def meetKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
   let kps := (z.trie.subtrie z.focus).kPaths k
   let result : Option (PathMap V) :=
@@ -464,10 +473,11 @@ def meetKPathInto (k : Nat) (prune : Bool) : Bool × Zip V :=
       match acc with
       | none => some m
       | some a => some (PathMap.meet ops a m)) none
+  -- No dangling paths, even from a single k-path that met nothing; see `PathMap.meet`
   let (b, z') :=
-    match result with
-    | some m => if m.isEmptyMap then (false, (z.removeBranches false).2) else (true, z.graftMap m)
-    | none => (false, (z.removeBranches false).2)
+    match result.map (fun m => PathMap.mk' m.vals []) with
+    | some m => if m.isEmptyMap then (false, (z.removeSubtrie false).2) else (true, z.graftMap m)
+    | none => (false, (z.removeSubtrie false).2)
   (b, if prune then (z'.prunePath).2 else z')
 
 end Zip

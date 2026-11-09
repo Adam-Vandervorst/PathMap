@@ -338,8 +338,9 @@ def join (a b : PathMap V) : PathMap V :=
   mk' (keys.filterMap fun k => (joinVal ops (a.valAt k) (b.valAt k)).map (k, ·))
       (a.paths ++ b.paths)
 
-/-- Meet (intersection).  A location survives only if it lies on the way to a
-surviving value, so dangling paths never survive a meet. -/
+/-- Meet (intersection) of the values, with no dangling paths.  This is the result
+`prune = true` must produce.  With `prune = false` the crate may also keep some
+dangling paths, unspecified which; values are the same either way. -/
 def meet (a b : PathMap V) : PathMap V :=
   let keys := Path.sortDedup (a.vals.map (·.1))
   mk' (keys.filterMap fun k => (meetVal ops (a.valAt k) (b.valAt k)).map (k, ·)) []
