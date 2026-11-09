@@ -192,7 +192,11 @@ def fingerprint (z : Zip V) (valCount : Bool := true) : String :=
   -- `?` for a read source that does not implement `val_count` (`Caps.valCount`).
   " n" ++ (if valCount then toString z.valCount else "?") ++
   -- `focus_byte` is unspecified at the root, so it is only compared below it.
-  " f" ++ (if z.atRoot then "?" else showByteOpt z.focusByte)
+  " f" ++ (if z.atRoot then "?" else showByteOpt z.focusByte) ++
+  -- `is_val`, `child_mask` and `depth`: separate methods in the crate, which
+  -- virtual zippers implement separately from `val`, `child_count`, `path`.
+  " i" ++ (if z.isVal then "1" else "0") ++ " m" ++ hexPath z.childMask ++
+  " d" ++ toString z.path.length
 
 def emit (s : St) (name : String) (ret : String) : St :=
   { s with

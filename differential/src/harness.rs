@@ -178,7 +178,7 @@ pub fn fingerprint_with<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + Zippe
     val_count: bool,
 ) -> String {
     format!(
-        "{}{} o{} e{} v{} c{} n{} f{}",
+        "{}{} o{} e{} v{} c{} n{} f{} i{} m{} d{}",
         if z.root_prefix_path() == expected_root { "" } else { "ESCAPED-ROOT " },
         hex_path(z.path()),
         hex_path(z.origin_path()),
@@ -187,7 +187,12 @@ pub fn fingerprint_with<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + Zippe
         z.child_count(),
         if val_count { z.val_count().to_string() } else { "?".to_string() },
         // `focus_byte` is unspecified at the root, so it is only compared below it.
-        if z.at_root() { "?".to_string() } else { show_byte_opt(z.focus_byte()) }
+        if z.at_root() { "?".to_string() } else { show_byte_opt(z.focus_byte()) },
+        // `is_val`, `child_mask` and `depth` are separate methods from `val`,
+        // `child_count` and `path`, and virtual zippers implement them separately.
+        show_bool(z.is_val()),
+        hex_path(&z.child_mask().iter().collect::<Vec<u8>>()),
+        z.depth()
     )
 }
 

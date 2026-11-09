@@ -531,6 +531,13 @@ def divergence_shape(a, b):
     defect out of the known buckets, so each shape below is deliberately narrow.
     """
     ta, tb = a.split(), b.split()
+    # `i`/`m`/`d` (is_val, child_mask, depth) restate `v`/`c`/the path; leave
+    # them out of the shape unless they are all that differs (then the shape
+    # is None and the divergence is new).
+    restated = lambda t: re.match(r"[imd][0-9a-f_]*$", t) is not None and not t.startswith("ret")
+    if any(x != y for x, y in zip(ta, tb) if not restated(x)):
+        ta = [t for t in ta if not restated(t)]
+        tb = [t for t in tb if not restated(t)]
     if len(ta) != len(tb):
         return None
     if any(t.startswith("n=") for t in ta):
