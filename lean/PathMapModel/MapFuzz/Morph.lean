@@ -58,7 +58,7 @@ instead places the subtrie strictly *below* `rz`'s focus at `path ++ [b]` and
 does not recurse (the value at `rz`'s focus is not part of that node).  The
 result holds exactly: the values set, the grafted content (dangling paths
 included), and their prefixes.  A location that got neither a value nor
-anything below it does not exist.  `ana` below is that rule for any closure;
+anything below it does not exist.  `ana` (in `PrefixTree.lean`) is that rule for any closure;
 `copyAlg` and `repAlg` are the two closures the fuzzer runs.
 
 ## Ops
