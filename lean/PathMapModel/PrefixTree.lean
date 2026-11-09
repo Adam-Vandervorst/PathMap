@@ -125,9 +125,11 @@ non-empty with strictly ascending first bytes (`wf_flatten`), which both
 canonical forms ask. -/
 def flatten (t : PTree V) : PathMap V := ⟨t.ents⟩
 
+/-- An entry's value, with its path. -/
+def valued (pv : Path × Option V) : Option (Path × V) := pv.2.map (pv.1, ·)
+
 /-- The valued locations, pre-order. -/
-def valsOf (t : PTree V) : List (Path × V) :=
-  t.ents.filterMap fun pv => pv.2.map (pv.1, ·)
+def valsOf (t : PTree V) : List (Path × V) := t.ents.filterMap valued
 
 /-- A node that a jumping fold stops at: a value, or not exactly one child. -/
 def isFeat : PTree V → Bool
@@ -1564,6 +1566,188 @@ theorem toLines_flatten {P : PTree V} (h : LineForm P) : toLines P.flatten = P :
       (by have := height_kid (v := (none : Option V)) (List.mem_singleton_self (b :: x, c)); simp only at this; omega)
       (by simpa using hlc)]
     rfl
+
+end PathMap
+/-! ## (d): deserialize with an anamorphism -/
+namespace PTree
+variable {V : Type}
+
+/-- Put `e` in front of a valued location. -/
+def preV (e : Path) (pv : Path × V) : Path × V := (e ++ pv.1, pv.2)
+
+theorem filterMap_pre (b : UInt8) : ∀ L : List (Path × Option V),
+    (L.map (pre b)).filterMap valued = (L.filterMap valued).map (preV [b])
+  | [] => rfl
+  | (p, o) :: L => by
+      cases o <;> simp [valued, pre, preV, List.filterMap_cons, filterMap_pre b L]
+
+theorem filterMap_blockEnts (L : List (Path × Option V)) :
+    ∀ e : Path, (blockEnts e L).filterMap valued = (L.filterMap valued).map (preV e)
+  | [] => by
+      simp only [blockEnts]
+      conv => lhs; rw [← List.map_id (L.filterMap valued)]
+      congr 1
+  | [b] => filterMap_pre b L
+  | b :: c :: x => by
+      rw [blockEnts, List.filterMap_cons, show valued ([b], (none : Option V)) = none from rfl]
+      simp only
+      rw [filterMap_pre, filterMap_blockEnts L (c :: x), List.map_map]
+      congr 1
+
+theorem valsOf_node (v : Option V) (kids : List (Path × PTree V)) :
+    valsOf (node v kids) =
+      (match v with | some x => [([], x)] | none => []) ++
+        kids.flatMap (fun k => (valsOf k.2).map (preV k.1)) := by
+  have hk : ∀ ks : List (Path × PTree V), (entsKids ks).filterMap valued =
+      ks.flatMap (fun k => (valsOf k.2).map (preV k.1)) := by
+    intro ks
+    induction ks with
+    | nil => simp [entsKids]
+    | cons k ks ih =>
+      obtain ⟨e, c⟩ := k
+      rw [entsKids, List.filterMap_append, filterMap_blockEnts, ih]
+      simp [valsOf]
+  unfold valsOf
+  rw [ents, List.filterMap_cons, hk kids]
+  cases v <;> simp [valued, valsOf]
+
+
+
+theorem foldl_acc {α β γ δ : Type} (f : List α × List β × γ → δ → List α × List β × γ) (g : δ → List α) :
+    ∀ (ks : List δ), (∀ k ∈ ks, ∀ acc, (f acc k).1 = acc.1 ++ g k ∧ (f acc k).2.1 = acc.2.1) →
+      ∀ acc, (ks.foldl f acc).1 = acc.1 ++ ks.flatMap g ∧ (ks.foldl f acc).2.1 = acc.2.1
+  | [], _, acc => by simp
+  | k :: ks, h, acc => by
+      rw [List.foldl_cons]
+      obtain ⟨h1, h2⟩ := foldl_acc f g ks (fun k hk => h k (List.mem_cons_of_mem _ hk)) (f acc k)
+      obtain ⟨h3, h4⟩ := h k (List.mem_cons_self ..) acc
+      rw [h1, h2, h3, h4]; simp
+
+theorem anaGo_unfold : ∀ (t : PTree V) (n : Nat) (path : Path), t.height ≤ n →
+    (anaGo PTree.unfold n t path).1 = t.valsOf.map (preV path) ∧
+      (anaGo PTree.unfold n t path).2.1 = [] := by
+  refine PTree.ind (fun v kids ih => ?_)
+  intro n path hn
+  obtain ⟨n, rfl⟩ : ∃ m, n = m + 1 := ⟨n - 1, by have := PathMap.height_pos (node v kids); omega⟩
+  rw [anaGo]
+  simp only [PTree.unfold, val, PTree.kids]
+  rw [List.foldl_map]
+  have key := foldl_acc (β := Path) (γ := List (Path × List UInt8)) (g := fun k : Path × PTree V => (valsOf k.2).map (preV (path ++ k.1)))
+  have hyp : ∀ k ∈ kids, ∀ (acc : List (Path × V) × List Path × List (Path × List UInt8)),
+      (acc.1 ++ (anaGo PTree.unfold n k.2 (path ++ k.1)).1 = acc.1 ++ (valsOf k.2).map (preV (path ++ k.1))) ∧
+      (acc.2.1 ++ (anaGo PTree.unfold n k.2 (path ++ k.1)).2.1 = acc.2.1) := by
+    intro k hk acc
+    obtain ⟨h1, h2⟩ := ih k.1 k.2 hk n (path ++ k.1)
+      (by have := height_kid (v := v) hk; omega)
+    rw [h1, h2]; simp
+  constructor
+  · rw [(key _ kids (fun k hk acc => hyp k hk acc) _).1, valsOf_node]
+    have hp : ∀ e : Path, (preV e : Path × V → Path × V) = fun pv => (e ++ pv.1, pv.2) := fun _ => rfl
+    cases v <;> simp [hp, List.map_flatMap, List.map_map, Function.comp_def]
+  · rw [(key _ kids (fun k hk acc => hyp k hk acc) _).2]
+
+/-- **(d).**  The anamorphism that pushes every edge of a tree (`push_byte` for a
+one-byte edge, `push` for a longer one: the model does not tell them apart)
+builds exactly the tree's values and their prefixes.  So it is `flatten t`
+minus the dangling locations, which no push can create (see `NoDangling`). -/
+theorem ana_unfold (t : PTree V) (n : Nat) (h : t.height ≤ n) :
+    (ana PTree.unfold t n).1 = PathMap.mk' t.valsOf [] := by
+  unfold ana
+  obtain ⟨h1, h2⟩ := anaGo_unfold t n [] h
+  rcases hg : anaGo PTree.unfold n t [] with ⟨vs, ps, cs⟩
+  rw [hg] at h1 h2
+  simp only at h1 h2 ⊢
+  rw [h1, h2]
+  congr 1
+  conv => rhs; rw [← List.map_id t.valsOf]
+  congr 1
+
+end PTree
+/-! ## (c): every catamorphism flavour builds the same tree -/
+namespace PathMap
+open PTree
+variable {V : Type}
+
+theorem foldl_fst {α β γ δ : Type} (F : List α × β × γ → δ → List α × β × γ) (g : δ → α) :
+    ∀ (bs : List δ), (∀ b ∈ bs, ∀ acc, (F acc b).1 = acc.1 ++ [g b]) →
+      ∀ acc, (bs.foldl F acc).1 = acc.1 ++ bs.map g
+  | [], _, acc => by simp
+  | b :: bs, h, acc => by
+      rw [List.foldl_cons, foldl_fst F g bs (fun b hb => h b (List.mem_cons_of_mem _ hb)),
+        h b (List.mem_cons_self ..)]
+      simp
+
+section
+variable {W E : Type}
+
+/-- The side-effecting stepping fold, whose closure ignores the call number,
+the path and the `Err`, returns the cached fold's result. -/
+theorem sideCata_fst (T : PathMap V) (alg : Option V → ByteMask → List W → W)
+    (err : Nat → Path → Option Nat → Option V → ByteMask → E) (d : W) :
+    ∀ (n : Nat) (q : Path) (i : Nat),
+      (T.sideCata (fun _ _ _ v m ws => alg v m ws) err d n q i).1 = T.cata alg d n q
+  | 0, _, _ => rfl
+  | n + 1, q, i => by
+      rw [sideCata, cata_succ]
+      simp only
+      rw [foldl_fst _ (fun b => T.cata alg d n (q ++ [b])) _ (fun b _ acc => by
+        simp only
+        rw [← sideCata_fst T alg err d n (q ++ [b]) acc.2.1])]
+      simp
+
+/-- The same for jumping folds: the closure reads its jumped bytes off the end
+of its path, as op 58's does (`path[path.len() - jump..]`). -/
+theorem sideJ_fst (T : PathMap V) (alg : Path → Option V → ByteMask → List W → W)
+    (err : Nat → Path → Option Nat → Option V → ByteMask → E) (d : W) :
+    ∀ (n : Nat) (q : Path) (jump i : Nat),
+      (T.sideJ (fun _ q j v m ws => alg (q.drop (q.length - j.getD 0)) v m ws) err d n q jump i).1 =
+        T.cataJ alg d n q (q.drop (q.length - jump))
+  | 0, _, _, _ => rfl
+  | n + 1, q, jump, i => by
+      rw [sideJ, cataJ_succ]
+      simp only [Option.getD_some]
+      rw [foldl_fst _ (fun b => T.cataJ alg d n (T.follow T.fuel (q ++ [b]))
+          ((T.follow T.fuel (q ++ [b])).drop (q.length + 1))) _ (fun b _ acc => by
+        simp only
+        rw [sideJ_fst T alg err d n]
+        obtain ⟨x, hx⟩ := follow_shape T T.fuel (q ++ [b])
+        rw [hx]
+        have : (q ++ [b] ++ x).length - ((q ++ [b] ++ x).length - q.length - 1) = q.length + 1 := by
+          simp; omega
+        rw [this])]
+      simp
+
+/-- **(c), side-effecting flavours.**  With a closure that ignores the call
+number, `into_cata_side_effect` (and a `_fallible` run that succeeds) returns
+what `into_cata_cached` does: `cataStep`. -/
+theorem sideFold_step (T : PathMap V) (alg : Option V → ByteMask → List W → W)
+    (err : Nat → Path → Option Nat → Option V → ByteMask → E) (d : W) :
+    (T.sideFold false (fun _ _ _ v m ws => alg v m ws) err d).1 = T.cataStep alg d :=
+  sideCata_fst T alg err d _ _ _
+
+/-- …and `into_cata_jumping_side_effect` what `into_cata_jumping_cached` does. -/
+theorem sideFold_jump (T : PathMap V) (alg : Path → Option V → ByteMask → List W → W)
+    (err : Nat → Path → Option Nat → Option V → ByteMask → E) (d : W) :
+    (T.sideFold true (fun _ q j v m ws => alg (q.drop (q.length - j.getD 0)) v m ws) err d).1 =
+      T.cataJump alg d := by
+  unfold sideFold cataJump
+  simp only [Bool.not_true, Bool.false_eq_true, if_false]
+  split
+  · rw [sideJ_fst]; rfl
+  · rw [sideJ_fst]; simp
+
+end
+
+/-- **(c)** for the trees: every flavour serializes to `toBytes` / `toLines`.
+(The cached flavours are `cataStep` / `cataJump` by definition.) -/
+theorem side_toBytes (T : PathMap V) {E : Type} (err : Nat → Path → Option Nat → Option V → ByteMask → E) :
+    (T.sideFold false (fun _ _ _ v m ws => algB v m ws) err (.node none [])).1 = T.toBytes :=
+  sideFold_step T algB err _
+
+theorem side_toLines (T : PathMap V) {E : Type} (err : Nat → Path → Option Nat → Option V → ByteMask → E) :
+    rootLine (T.sideFold true (fun _ q j v m ws => algL (q.drop (q.length - j.getD 0)) v m ws) err
+      ([], .node none [])).1 = T.toLines := by
+  rw [sideFold_jump]; rfl
 
 end PathMap
 end PathMapModel
