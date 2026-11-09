@@ -51,6 +51,8 @@
 //! headers).  `mem` is 1 MiB.
 
 use super::*;
+use pathmap::PathMap;
+use pathmap::zipper::*;
 use pathmap::paths_serialization::{
     for_each_deserialized_path, serialize_paths_from_funcs, sort_paths, sort_paths_par,
 };
@@ -248,6 +250,242 @@ fn both(input: &[u8], mem: usize, digest: bool) -> String {
     format!("S{}|P{}", run_sort(false, input, mem, digest), run_sort(true, input, mem, digest))
 }
 
+// ---------------------------------------------------------------- viz (85–87)
+
+/// Path bytes of the maps the feature-module ops build: `a`, `b`, and the two
+/// bytes of `é` (`c3 a9`), so labels are valid UTF-8 or not by chance.
+pub const VIZ_ALPHA: [u8; 4] = [0x61, 0x62, 0xc3, 0xa9];
+
+/// A small map: `rv := u8` (root value `rv / 2` when `rv` is odd),
+/// `n := 1 + u8 % 8` entries of `len := u8 % 5` bytes `VIZ_ALPHA[u8 % 4]` and
+/// value `u8`, set in order (a later entry overwrites).
+fn read_small_map(d: &mut Dec) -> Option<PathMap<u64>> {
+    let mut m = PathMap::new();
+    let rv = d.u8()?;
+    if rv % 2 == 1 {
+        m.set_val_at([], (rv / 2) as u64);
+    }
+    let n = 1 + d.modn(8)?;
+    for _ in 0..n {
+        let len = d.modn(5)?;
+        let mut p = Vec::with_capacity(len);
+        for _ in 0..len {
+            p.push(VIZ_ALPHA[d.modn(4)?]);
+        }
+        let v = d.u8()? as u64;
+        m.set_val_at(&p, v);
+    }
+    Some(m)
+}
+
+/// `k := 1 + u8 % 3` independently built small maps.
+fn read_maps(d: &mut Dec) -> Option<Vec<PathMap<u64>>> {
+    let k = 1 + d.modn(3)?;
+    let mut v = Vec::with_capacity(k);
+    for _ in 0..k {
+        v.push(read_small_map(d)?);
+    }
+    Some(v)
+}
+
+/// Escape a rendering onto one trace line: `\n`, `\\`, and every char outside
+/// printable ASCII as `\u{hex}`.
+fn esc(s: &str) -> String {
+    let mut o = String::new();
+    for c in s.chars() {
+        match c {
+            '\n' => o.push_str("\\n"),
+            '\\' => o.push_str("\\\\"),
+            ' '..='~' => o.push(c),
+            _ => { let _ = write!(o, "\\u{{{:x}}}", c as u32); }
+        }
+    }
+    o
+}
+
+/// `f := u8`: `ascii_path` = bit 0, `hide_value_paths` = bits 1–2 both 0,
+/// `minimize_values` = bit 3, `color` = bit 4.
+fn read_config(d: &mut Dec, mode: pathmap::viz::VizMode, logical: bool) -> Option<pathmap::viz::DrawConfig> {
+    let f = d.u8()?;
+    Some(pathmap::viz::DrawConfig {
+        mode,
+        ascii_path: f & 1 == 1,
+        hide_value_paths: (f >> 1) & 3 == 0,
+        minimize_values: (f >> 3) & 1 == 1,
+        logical,
+        color: (f >> 4) & 1 == 1,
+    })
+}
+
+/// `viz_maps` panics on a map without a root node (`viz_no_root_node`): a map
+/// with nothing below its root.  Skipped, same token in `Misc.lean`.
+fn viz_skip(maps: &[PathMap<u64>]) -> bool {
+    maps.iter().any(|m| m.read_zipper().child_count() == 0)
+}
+
+fn viz_render(maps: &[PathMap<u64>], dc: &pathmap::viz::DrawConfig) -> String {
+    let mut out = Vec::new();
+    match pathmap::viz::viz_maps(maps, dc, &mut out) {
+        Ok(()) => String::from_utf8_lossy(&out).into_owned(),
+        Err(e) => format!("err:{:?}", e.kind()),
+    }
+}
+
+/// A mermaid edge label, `{jump:?}` of the rendered label, back to bytes.
+fn mermaid_label(dbg: &str, ascii: bool) -> Option<Vec<u8>> {
+    let s = dbg.strip_prefix('"')?.strip_suffix('"')?;
+    if s.contains('\\') {
+        return None; // never produced for this alphabet
+    }
+    if ascii && !s.starts_with('[') {
+        return Some(s.as_bytes().to_vec());
+    }
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.is_empty() {
+        return Some(vec![]);
+    }
+    inner.split(", ").map(|x| x.parse::<u8>().ok()).collect()
+}
+
+enum Target { Node(String), Val(String) }
+
+/// The graph of a mermaid rendering: map roots in order, labelled out-edges,
+/// value labels.  `None` on a line it does not recognise.
+struct Mermaid {
+    roots: Vec<String>,
+    edges: std::collections::HashMap<String, Vec<(Vec<u8>, Target)>>,
+    vals: std::collections::HashMap<String, String>,
+}
+
+fn parse_mermaid(text: &str, ascii: bool, logical: bool) -> Result<Mermaid, String> {
+    let mut g = Mermaid { roots: vec![], edges: Default::default(), vals: Default::default() };
+    let mut lines = text.lines();
+    if lines.next() != Some("flowchart LR") {
+        return Err("header".into());
+    }
+    for l in lines {
+        if l.starts_with("style ") {
+            continue;
+        }
+        if let Some((id, rest)) = l.split_once("@{ shape: ") {
+            if rest.starts_with("cylinder, label: \"PathMap[") {
+                if logical { g.roots.push(id.to_string()); }
+            } else if let Some(lab) = rest.strip_prefix("rounded, label: \"").and_then(|r| r.strip_suffix("\" }")) {
+                g.vals.insert(id.to_string(), lab.to_string());
+            } else if rest == "circle, label: \".\"}" {
+                if id.starts_with('v') { g.vals.insert(id.to_string(), ".".to_string()); }
+            } else if !rest.starts_with("rect, label: \"") {
+                return Err(l.to_string());
+            }
+            continue;
+        }
+        let (src, label, dst) = if let Some((src, rest)) = l.split_once(" --\"") {
+            let (lab, dst) = rest.rsplit_once("\"--> ").ok_or_else(|| l.to_string())?;
+            (src, mermaid_label(lab, ascii).ok_or_else(|| l.to_string())?, dst)
+        } else if let Some((src, dst)) = l.split_once(" --> ") {
+            (src, vec![], dst)
+        } else {
+            return Err(l.to_string());
+        };
+        if src.starts_with('m') && !logical {
+            g.roots.push(dst.to_string());
+            continue;
+        }
+        let t = if dst.starts_with('v') { Target::Val(dst.to_string()) } else { Target::Node(dst.to_string()) };
+        g.edges.entry(src.to_string()).or_default().push((label, t));
+    }
+    Ok(g)
+}
+
+/// Canonical form of a logical rendering: per map `M{node}`, where a node is
+/// `{edge,…}` sorted by label bytes, an edge `hex(label)` followed by its
+/// target node or `=value`.
+fn mermaid_canon(g: &Mermaid) -> String {
+    fn node(g: &Mermaid, id: &str, depth: usize, out: &mut String) {
+        out.push('{');
+        if depth < 64 {
+            let mut es: Vec<&(Vec<u8>, Target)> = g.edges.get(id).map(|v| v.iter().collect()).unwrap_or_default();
+            es.sort_by(|a, b| a.0.cmp(&b.0));
+            for (i, (lab, t)) in es.into_iter().enumerate() {
+                if i > 0 { out.push(','); }
+                out.push_str(&hex_path(lab));
+                match t {
+                    Target::Val(v) => { out.push('='); out.push_str(g.vals.get(v).map_or("?", |s| s.as_str())); }
+                    Target::Node(n) => node(g, n, depth + 1, out),
+                }
+            }
+        }
+        out.push('}');
+    }
+    let mut out = String::new();
+    for (i, r) in g.roots.iter().enumerate() {
+        if i > 0 { out.push(';'); }
+        out.push('M');
+        node(g, r, 0, &mut out);
+    }
+    out
+}
+
+/// The values a physical rendering shows: per map the sorted `hex(path)=value`
+/// list, the path being the concatenated edge labels from the root node.
+fn mermaid_values(g: &Mermaid) -> String {
+    fn walk(g: &Mermaid, id: &str, path: &mut Vec<u8>, depth: usize, acc: &mut Vec<(Vec<u8>, String)>) {
+        if depth > 64 { return; }
+        for (lab, t) in g.edges.get(id).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let n = path.len();
+            path.extend_from_slice(lab);
+            match t {
+                Target::Val(v) => acc.push((path.clone(), g.vals.get(v).cloned().unwrap_or("?".into()))),
+                Target::Node(c) => walk(g, c, path, depth + 1, acc),
+            }
+            path.truncate(n);
+        }
+    }
+    let mut out = String::new();
+    for (i, r) in g.roots.iter().enumerate() {
+        let mut acc = vec![];
+        walk(g, r, &mut vec![], 0, &mut acc);
+        acc.sort();
+        if i > 0 { out.push(';'); }
+        let v: Vec<String> = acc.iter().map(|(p, v)| format!("{}={v}", hex_path(p))).collect();
+        let _ = write!(out, "M[{}]", v.join(","));
+    }
+    out
+}
+
+fn viz_op(op: usize, d: &mut Dec) -> Option<(&'static str, String)> {
+    use pathmap::viz::VizMode;
+    let maps = read_maps(d)?;
+    let (mode, logical) = match op { 85 => (VizMode::Ascii, true), 86 => (VizMode::Mermaid, true), _ => (VizMode::Mermaid, false) };
+    let dc = read_config(d, mode, logical)?;
+    // A root value is never drawn by the mermaid renderers
+    // (`viz_mermaid_drops_root_value`).  Those ops get their own names and
+    // `;skip:viz-mermaid-root-value`: the model leaves the root value out and
+    // the rest of the graph is still compared (as a KNOWN entry the bug ended
+    // the comparison of ~15% of inputs).
+    let rv = !dc.hide_value_paths && maps.iter().any(|m| m.val_at([]).is_some());
+    let name = match (op, rv) {
+        (85, _) => "viz_ascii",
+        (86, false) => "viz_mermaid",
+        (86, true) => "viz_mermaid_rv",
+        (_, false) => "viz_phys",
+        (_, true) => "viz_phys_rv",
+    };
+    if viz_skip(&maps) {
+        return Some((name, "skip:viz-no-root-node".to_string()));
+    }
+    let text = viz_render(&maps, &dc);
+    let ret = match op {
+        85 => esc(&text),
+        _ => match parse_mermaid(&text, dc.ascii_path, logical) {
+            Err(l) => format!("unparsed:{}", esc(&l)),
+            Ok(g) => if logical { mermaid_canon(&g) } else { mermaid_values(&g) },
+        },
+    };
+    let ret = if rv && op != 85 { ret + ";skip:viz-mermaid-root-value" } else { ret };
+    Some((name, ret))
+}
+
 pub fn step(op: usize, d: &mut Dec) -> StepResult {
     let r = match op {
         80 | 81 => {
@@ -284,6 +522,7 @@ pub fn step(op: usize, d: &mut Dec) -> StepResult {
             list.insert(at, vec![0xa5; 65535 + delta]);
             ("sort_long", both(&serialize(&list), MIB, true))
         }
+        85..=87 => viz_op(op, d)?,
         _ => ("nop", "-".to_string()),
     };
     Some(r)

@@ -202,6 +202,198 @@ def readCut (dataLen : Nat) (d : Dec) : Option (Nat × Dec) := do
     let (k, d) ← d.mod 4; pure (total - 1 - k, d)
   else d.mod 7
 
+/-! ## `viz` (ops 85–87; cargo feature `viz`, enabled in the differential crate)
+
+`viz_maps(maps, config, out)` draws the tries of one or more `PathMap`s, as
+Mermaid markup or as an ASCII tree.  What it draws, for maps whose nodes are
+not shared (the ops build each map from scratch with `set_val_at`, so physical
+sharing never shows):
+
+* **Logical rendering** (`logical: true`): a radix tree.  Its nodes are the
+  root and every location that branches (two or more children) or, unless
+  `hide_value_paths`, holds a value and continues with one child.  Every other
+  location is folded into the edge through it, labelled with the path bytes
+  between the two nodes.  A value at a node is drawn at that node, a value at
+  a leaf as an edge from the nearest node; `hide_value_paths` draws no values,
+  `minimize_values` draws them without their text.  Labels are the bytes as a
+  string when `ascii_path` and they are valid UTF-8, else `[b, b, ...]`.
+* **ASCII** (`VizMode::Ascii`): the exact text (`asciiText`): a
+  `PathMap[i] = v` line, then the edges in byte order of their labels, drawn
+  with `├── ` / `└── ` and indented `│   ` / `    `; maps separated by a
+  blank line; `(empty)` under a root with nothing to draw.  `color` only
+  colours shared-node markers, so it never shows here.
+* **Mermaid, logical**: node ids are hashes of addresses, so the rendering is
+  compared as a graph (`mermaidCanon`): from each map's root, the labelled
+  edges in byte order, to nodes or to values (a node's own value is an edge
+  with the empty label).
+* **Mermaid, physical** (`logical: false`): nodes are the in-memory nodes, so
+  only what the layout must show is compared (`mermaidValues`): the values
+  reached by concatenating edge labels from the root, i.e. every value of the
+  map at its path.
+
+A root value is part of the map, so every rendering shows it.  The mermaid
+renderers do not (finding `viz_mermaid_drops_root_value`): an op on maps with
+a root value is named `viz_mermaid_rv` / `viz_phys_rv`, leaves the root value
+out of its answer and ends with `;skip:viz-mermaid-root-value` (same token in
+`misc.rs`), so the rest of the graph is still compared.
+`viz_maps` panics on a map with nothing below the root (finding
+`viz_no_root_node`): such an op renders `skip:viz-no-root-node` on both sides.
+-/
+
+/-- A logical map: `(path, value)` pairs, paths distinct, root value allowed. -/
+abbrev LMap := List (Path × Nat)
+
+def LMap.set (m : LMap) (p : Path) (v : Nat) : LMap :=
+  if m.any (·.1 == p) then m.map fun e => if e.1 == p then (p, v) else e else m ++ [(p, v)]
+
+def LMap.val? (m : LMap) (p : Path) : Option Nat := (m.find? (·.1 == p)).map (·.2)
+
+/-- The children bytes of location `p`, ascending. -/
+def LMap.children (m : LMap) (p : Path) : List UInt8 :=
+  ((m.filterMap fun (q, _) => if p.isPrefixOf q && q.length > p.length then q[p.length]? else none).eraseDups).mergeSort (· ≤ ·)
+
+/-- An edge of the radix tree: to a node (its own value, its edges) or to a value. -/
+inductive GEdge where
+  | node (label : Path) (val : Option Nat) (kids : List GEdge)
+  | value (label : Path) (v : Nat)
+
+def GEdge.label : GEdge → Path
+  | .node l _ _ => l
+  | .value l _ => l
+
+def isGraphNode (m : LMap) (hide : Bool) (q : Path) : Bool :=
+  let cc := (m.children q).length
+  cc > 1 || ((m.val? q).isSome && cc == 1 && !hide)
+
+/-- The edges out of the node at `p`. -/
+partial def graphEdges (m : LMap) (hide : Bool) (p : Path) : List GEdge :=
+  let rec walk (q : Path) : List GEdge :=
+    if isGraphNode m hide q then
+      [.node (q.drop p.length) (if hide then none else m.val? q) (graphEdges m hide q)]
+    else
+      let here := match m.val? q with
+        | some v => if hide then [] else [GEdge.value (q.drop p.length) v]
+        | none => []
+      here ++ (m.children q).flatMap fun b => walk (q ++ [b])
+  ((m.children p).flatMap fun b => walk (p ++ [b])).mergeSort fun a b => !lexLt b.label a.label
+
+def byteList (p : Path) : String := "[" ++ ", ".intercalate (p.map fun b => toString b.toNat) ++ "]"
+
+def label (ascii : Bool) (p : Path) : String :=
+  if ascii then (String.fromUTF8? ⟨p.toArray⟩).getD (byteList p) else byteList p
+
+structure VizCfg where
+  ascii : Bool
+  hide : Bool
+  minimize : Bool
+
+def valuePart (c : VizCfg) : Option Nat → String
+  | none => ""
+  | some v => if c.minimize then "" else " = " ++ toString v
+
+partial def asciiEdges (c : VizCfg) (prefix_ : String) (es : List GEdge) : List String :=
+  let n := es.length
+  (es.zipIdx).flatMap fun (e, i) =>
+    let last := i + 1 == n
+    let conn := if last then "└── " else "├── "
+    match e with
+    | .value l v => [prefix_ ++ conn ++ label c.ascii l ++ valuePart c (some v)]
+    | .node l v kids =>
+        (prefix_ ++ conn ++ label c.ascii l ++ valuePart c v) ::
+          asciiEdges c (prefix_ ++ (if last then "    " else "│   ")) kids
+
+/-- The exact ASCII rendering of logical maps. -/
+def asciiText (c : VizCfg) (ms : List LMap) : String :=
+  "\n".intercalate <| (ms.zipIdx).map fun (m, i) =>
+    let rv := if c.hide then none else m.val? []
+    let es := graphEdges m c.hide []
+    let lines := ("PathMap[" ++ toString i ++ "]" ++ valuePart c rv) ::
+      (if es.isEmpty && rv.isNone then ["(empty)"] else asciiEdges c "" es)
+    String.join (lines.map (· ++ "\n"))
+
+def valText (c : VizCfg) (v : Nat) : String := if c.minimize then "." else toString v
+
+partial def canonNode (c : VizCfg) (es : List GEdge) : String :=
+  let es := es.mergeSort fun a b => !lexLt b.label a.label
+  "{" ++ ",".intercalate (es.map fun
+    | .value l v => hexPath l ++ "=" ++ valText c v
+    | .node l v kids =>
+        hexPath l ++ canonNode c ((match v with | some v => [GEdge.value [] v] | none => []) ++ kids)) ++ "}"
+
+/-- The graph of the logical Mermaid rendering (see `mermaid_canon`).
+`withRoot := false` leaves root values out (`skip:viz-mermaid-root-value`). -/
+def mermaidCanon (c : VizCfg) (ms : List LMap) (withRoot : Bool := true) : String :=
+  ";".intercalate <| ms.map fun m =>
+    let rv := if c.hide || !withRoot then [] else match m.val? [] with | some v => [GEdge.value [] v] | none => []
+    "M" ++ canonNode c (rv ++ graphEdges m c.hide [])
+
+/-- The values of the physical Mermaid rendering (see `mermaid_values`). -/
+def mermaidValues (c : VizCfg) (ms : List LMap) (withRoot : Bool := true) : String :=
+  ";".intercalate <| ms.map fun m =>
+    let m := if withRoot then m else m.filter (!·.1.isEmpty)
+    let vs := if c.hide then [] else m.mergeSort fun a b => !lexLt b.1 a.1
+    "M[" ++ ",".intercalate (vs.map fun (p, v) => hexPath p ++ "=" ++ valText c v) ++ "]"
+
+/-- Rust's `esc`: `\n`, `\\`, and non-printable-ASCII chars as `\u{hex}`. -/
+def esc (s : String) : String :=
+  String.join <| s.toList.map fun ch =>
+    if ch == '\n' then "\\n" else if ch == '\\' then "\\\\"
+    else if ' ' ≤ ch && ch ≤ '~' then ch.toString
+    else "\\u{" ++ String.mk (Nat.toDigits 16 ch.toNat) ++ "}"
+
+private def vx : LMap := [([], 1), ("ab".toUTF8.toList, 2), ("abc".toUTF8.toList, 3), ("abd".toUTF8.toList, 4), ("b".toUTF8.toList, 5)]
+
+-- The crate's own rendering of this map (probe run, 2026-11-09).
+#guard asciiText ⟨true, false, false⟩ [vx] ==
+  "PathMap[0] = 1\n├── ab = 2\n│   ├── c = 3\n│   └── d = 4\n└── b = 5\n"
+#guard asciiText ⟨false, true, false⟩ [vx] == "PathMap[0]\n└── [97, 98]\n"
+#guard asciiText ⟨true, true, false⟩ [[("ab".toUTF8.toList, 1)]] == "PathMap[0]\n(empty)\n"
+#guard mermaidCanon ⟨true, false, false⟩ [vx] == "M{_=1,6162{_=2,63=3,64=4},62=5}"
+#guard mermaidValues ⟨true, false, true⟩ [vx] == "M[_=.,6162=.,616263=.,616264=.,62=.]"
+#guard label true [0xc3, 0xa9] == "é" && label true [0xc3] == "[195]"
+#guard esc "a\n├é" == "a\\n\\u{251c}\\u{e9}"
+
+def vizAlpha : List UInt8 := [0x61, 0x62, 0xc3, 0xa9]
+
+def readSmallMap (d : Dec) : Option (LMap × Dec) := do
+  let (rv, d) ← d.u8
+  let m : LMap := if rv.toNat % 2 == 1 then [([], rv.toNat / 2)] else []
+  let (n, d) ← d.mod 8
+  let rec go : Nat → LMap → Dec → Option (LMap × Dec)
+    | 0, m, d => some (m, d)
+    | k + 1, m, d => do
+        let (len, d) ← d.mod 5
+        let (p, d) ← Ints.many (fun d => do let (i, d) ← d.mod 4; pure (vizAlpha.getD i 0, d)) len d
+        let (v, d) ← d.u8
+        go k (m.set p v.toNat) d
+  go (n + 1) m d
+
+def readMaps (d : Dec) : Option (List LMap × Dec) := do
+  let (k, d) ← d.mod 3
+  Ints.many readSmallMap (k + 1) d
+
+def readVizCfg (d : Dec) : Option (VizCfg × Dec) := do
+  let (f, d) ← d.u8
+  let f := f.toNat
+  some (⟨f % 2 == 1, f / 2 % 4 == 0, f / 8 % 2 == 1⟩, d)
+
+def vizOp (op : Nat) (d : Dec) : Option ((String × String) × Dec) := do
+  let (ms, d) ← readMaps d
+  let (c, d) ← readVizCfg d
+  let rv := !c.hide && ms.any fun m => (m.val? []).isSome
+  let name :=
+    if op == 85 then "viz_ascii"
+    else if op == 86 then (if rv then "viz_mermaid_rv" else "viz_mermaid")
+    else (if rv then "viz_phys_rv" else "viz_phys")
+  if ms.any fun m => m.all (·.1.isEmpty) then
+    some ((name, "skip:viz-no-root-node"), d)
+  else
+    let ret :=
+      if op == 85 then esc (asciiText c ms)
+      else if op == 86 then mermaidCanon c ms (withRoot := !rv)
+      else mermaidValues c ms (withRoot := !rv)
+    some ((name, if rv && op != 85 then ret ++ ";skip:viz-mermaid-root-value" else ret), d)
+
 end Misc
 
 open Misc in
@@ -226,6 +418,7 @@ def stepMisc (op : Nat) (d : Dec) : Option ((String × String) × Dec) :=
     let (ps, d) ← readList d
     let (_at, d) ← d.mod (ps.length + 1)
     some (("sort_long", both (List.replicate (65535 + δ) 0xa5 :: ps) mib true), d)
+  else if op ≤ 87 then vizOp op d
   else
     some (("nop", "-"), d)
 
