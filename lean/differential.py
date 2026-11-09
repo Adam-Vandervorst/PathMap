@@ -220,7 +220,7 @@ KNOWN = [
     # OverlayZipper (differential/src/sources/overlay.rs).  Before the generic
     # `ascend_until` entry below, which would otherwise swallow them.  See
     # lean/findings/overlay-exp.md.
-    (["src:overlay", "ascend_until"],
+    (["src:overlay", "ascend_until", "READ-SIDE"],
      "OverlayZipper::ascend_until()/ascend_until_branch() stop only where a "
      "*source* branches or has a value: they climb past a branch formed by the "
      "union, and stop at a value the mapping filtered out "
@@ -228,7 +228,9 @@ KNOWN = [
     (["src:overlay-filter", "descend_until"],
      "OverlayZipper::descend_until() stops at a source value that the mapping "
      "filtered out [overlay_descend_until_filtered_value]"),
-    (["ascend_until"],
+    # WRITE-SIDE: this is a write-zipper bug; without the tag it would also
+    # swallow a read source's own ascend_until divergence.
+    (["ascend_until", "WRITE-SIDE"],
      "ascend_until()/ascend_until_branch() corrupt a write zipper rooted at a "
      "node boundary [ascend_until_wz]"),
     (["remove_branches"],
@@ -456,6 +458,16 @@ def classify(msg):
     return None
 
 
+def divergence_side(a, b):
+    """`WRITE-SIDE` when an op line differs only in its write-zipper
+    fingerprint (`W=...`, and possibly `ret=`), `READ-SIDE` when the read
+    zipper's (`R=...`) differs; None for other lines.  Lets a KNOWN entry for a
+    write-zipper bug avoid swallowing a read source's bug in the same op."""
+    if " R=" not in a or " R=" not in b:
+        return None
+    return "READ-SIDE" if a.split(" R=", 1)[1] != b.split(" R=", 1)[1] else "WRITE-SIDE"
+
+
 def compare(blob, oracle, other, other_label, act=False):
     # Both children are handed the input before either is read, so they work at
     # the same time.  Driving them one after the other left each idle while the
@@ -475,6 +487,9 @@ def compare(blob, oracle, other, other_label, act=False):
     for i, (a, b) in enumerate(zip(lean, real)):
         if a != b:
             tags = ["ACT-VALCOUNT-ONLY"] if act and act_valcount_only(a, b) else []
+            side = divergence_side(a, b)
+            if side:
+                tags.append(side)
             shape = divergence_shape(a, b)
             if shape:
                 tags.append(shape)
