@@ -171,18 +171,19 @@ structure St where
   map1 : PathMap V
 
 /-- The per-step fingerprint of one zipper. -/
-def fingerprint (z : Zip V) : String :=
+def fingerprint (z : Zip V) (valCount : Bool := true) : String :=
   hexPath z.path ++ " o" ++ hexPath z.focus ++
   " e" ++ (if z.pathExists then "1" else "0") ++
   " v" ++ showVal z.val ++ " c" ++ toString z.childCount ++
-  " n" ++ toString z.valCount ++
+  -- `?` for a read source that does not implement `val_count` (`Caps.valCount`).
+  " n" ++ (if valCount then toString z.valCount else "?") ++
   -- `focus_byte` is unspecified at the root, so it is only compared below it.
   " f" ++ (if z.atRoot then "?" else showByteOpt z.focusByte)
 
 def emit (s : St) (name : String) (ret : String) : St :=
   { s with
     out := (toString s.step ++ " " ++ name ++ " ret=" ++ ret ++
-            " W=" ++ fingerprint s.wz ++ " R=" ++ fingerprint s.rz) :: s.out
+            " W=" ++ fingerprint s.wz ++ " R=" ++ fingerprint s.rz s.src.caps.valCount) :: s.out
     step := s.step + 1 }
 
 def showBool (b : Bool) : String := if b then "1" else "0"

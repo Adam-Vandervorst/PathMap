@@ -167,6 +167,16 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
     z: &Z,
     expected_root: &[u8],
 ) -> String {
+    fingerprint_with(z, expected_root, true)
+}
+
+/// [`fingerprint`], with `val_count` rendered as `?` when `val_count` is false
+/// (the read source does not implement it; see `ReadSource::VAL_COUNT`).
+pub fn fingerprint_with<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath>(
+    z: &Z,
+    expected_root: &[u8],
+    val_count: bool,
+) -> String {
     format!(
         "{}{} o{} e{} v{} c{} n{} f{}",
         if z.root_prefix_path() == expected_root { "" } else { "ESCAPED-ROOT " },
@@ -175,7 +185,7 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
         show_bool(z.path_exists()),
         show_val(z.val()),
         z.child_count(),
-        z.val_count(),
+        if val_count { z.val_count().to_string() } else { "?".to_string() },
         // `focus_byte` is unspecified at the root, so it is only compared below it.
         if z.at_root() { "?".to_string() } else { show_byte_opt(z.focus_byte()) }
     )
@@ -262,6 +272,10 @@ pub trait ReadSource:
     /// method below returned `None`/`false`).  `skip:<source name>`; the Lean
     /// model's `Source.skip` must produce the same string.
     const SKIP: &'static str = SKIP_ACT;
+    /// Whether `ZipperMoving::val_count` is implemented.  Several virtual
+    /// zippers leave it `todo!()`/`unimplemented!()`; their per-step
+    /// fingerprint then prints `n?` (the model's `Caps.valCount`).
+    const VAL_COUNT: bool = true;
     /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk),
     /// or `None` if the source does not implement `ZipperForking`.
     fn dump_fork(&self) -> Option<String>;
@@ -452,7 +466,7 @@ macro_rules! tgt {
 /// These need no oracle, so `--check` can assert them on every step.
 /// Violations are `pathmap` bugs by construction: each is either stated in the
 /// trait documentation or forced by the meaning of the accessors.
-pub fn check_zipper<Z>(z: &Z, label: &str, expected_root: &[u8])
+pub fn check_zipper<Z>(z: &Z, label: &str, expected_root: &[u8], val_count: bool)
 where
     Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath,
 {
@@ -500,11 +514,11 @@ where
         assert!(z.path_exists(), "{label}: children under a non-existent path");
     }
     // `val_count` counts the focus itself.
-    if z.is_val() {
+    if val_count && z.is_val() {
         assert!(z.val_count() >= 1, "{label}: val_count omits the focus value");
     }
     // Nothing below means nothing to count except the focus.
-    if z.child_count() == 0 {
+    if val_count && z.child_count() == 0 {
         assert_eq!(
             z.val_count(),
             z.is_val() as usize,
@@ -1131,13 +1145,13 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                 _ => ("nop", "-".to_string()),
             };
             if check {
-                check_zipper(&*wz, "write zipper", root0);
-                check_zipper(rz, "read zipper", root1);
+                check_zipper(&*wz, "write zipper", root0, true);
+                check_zipper(rz, "read zipper", root1, R::VAL_COUNT);
             }
             let _ = writeln!(out, 
                 "{step} {name} ret={ret} W={} R={}",
                 fingerprint(&*wz, root0),
-                fingerprint(rz, root1)
+                fingerprint_with(rz, root1, R::VAL_COUNT)
             );
             step += 1;
         }

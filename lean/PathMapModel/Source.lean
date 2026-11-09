@@ -45,6 +45,10 @@ structure Caps where
   68, 72, 73) read the source as a map; only the native read zipper serves
   them. -/
   convex : Bool := false
+  /-- `ZipperMoving::val_count` is implemented (several virtual zippers leave
+  it `todo!()`).  Without it the read side's per-step fingerprint prints
+  `n?`. -/
+  valCount : Bool := true
 
 /-- A read source: its name, what it presents, and what it can serve. -/
 structure Source where
