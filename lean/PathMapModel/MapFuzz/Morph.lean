@@ -304,6 +304,35 @@ def repAlg (node : PathMap V) (has : Bool) (bytes : List UInt8) (setVals : Bool)
 /-- Location bound for `ana_replicate`; `REP_CAP` in morph.rs. -/
 def repCap : Nat := 256
 
+/-! ### Fixtures -/
+
+/-- The `combo/comet/comfort` example from `into_cata_jumping_cached`'s doc
+(`c o m` = `1 2 3`, `b o` = `0 4`, `e t` = `5 6`, `f o r t` = `7 8 9 10`):
+four calls, sub-paths `o`, `t`, `ort`, `com`. -/
+private def combo : PathMap V :=
+  PathMap.mk' [([1, 2, 3, 0, 4], 0), ([1, 2, 3, 5, 6], 0), ([1, 2, 3, 7, 8, 9, 10], 0)] []
+
+#guard cachedFold combo true == "(010203:-:000507(04:0:_)(06:0:_)(08090a:0:_))"
+
+/-- `cata_test9`: the root jumps to `[0]` with jump 1 (the first byte counts,
+the root being no feature), the fork `[0,1]` below it with jump 0. -/
+private def test9 : PathMap V := PathMap.mk' [([0], 0), ([0, 1, 2], 1), ([0, 1, 3], 2)] []
+
+#guard sideResult test9 [] true none ==
+  "(3:00:1:0:01(2:0001:0:-:0203(0:000102:0:1:_)(1:000103:0:2:_))) calls=4"
+-- Stepping visits every location, post-order; `Err` at call 2 stops there.
+#guard sideResult test9 [] false (some 2) == "Err:E2:0001:-:0203:2 calls=3"
+-- A dangling leaf is visited like any leaf.
+#guard sideResult (PathMap.empty.addPath [1]) [] false none == "(1:_:-:01(0:01:-:_)) calls=2"
+-- Predicate 3 (one child, no value) fails a stepping fold but never a jumping one.
+#guard cachedResult test9 false 3 0 == "Err:E"
+#guard cachedResult test9 true 3 0 != "Err:E"
+
+-- `graft_at_byte` places only what is strictly below the source focus (here
+-- the root, so everything but a root value).
+#guard (ana (fun (_ : Nat) _ => (none, [AnaKid.graft 2 test9])) 0 3).1.entries ==
+  (PathMap.mk' [([2, 0], 0), ([2, 0, 1, 2], 1), ([2, 0, 1, 3], 2)] [] : PathMap V).entries
+
 end Morph
 
 open Morph in

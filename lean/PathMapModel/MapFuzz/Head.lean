@@ -290,6 +290,22 @@ def outer : Nest := fun b cleanupOk m d => do
   let (rs, h, d) ← runSteps (some inner) n { m, b, cleanupOk } d
   some (String.intercalate " " rs, h.m, d)
 
+/-! ### Fixtures: the conflict rules -/
+
+private def live : List (Option Slot) :=
+  [some { writer := true, unchecked := false, p := [0] },
+   some { writer := false, unchecked := false, p := [1] },
+   some { writer := false, unchecked := false, p := [1] }, none]
+
+#guard conflict live [0, 1] true == some "C:W@00"   -- below a writer
+#guard conflict live [] false == some "C:W@00"      -- above a writer
+#guard conflict live [] true == some "C:W@00"       -- writers are checked first
+#guard conflict live [1, 2] true == some "C:R2@01"  -- readers block writers
+#guard conflict live [1] false == none              -- readers share
+#guard conflict live [2] true == none
+#guard firstConflict [[1, 2], [1], [1, 0, 3]] [1, 2, 3] == some [1]   -- shortest at or above
+#guard firstConflict [[1, 2], [1, 0, 3]] [1] == some [1, 0, 3]        -- else first below
+
 end Head
 
 open Head in
