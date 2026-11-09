@@ -301,6 +301,25 @@ private def canon (t : PathMap UInt64) : PathMap UInt64 :=
 -- An empty middle factor is entered and left at the same depth.
 #guard info [T [([1], some 0)], T [], T [([4], some 2)]] [1, 4] == "P3:2:1.1"
 
+-- The `val_at` skip, over map1 = {1}, map0 = {2 3}: joints at depth 1 and 3.
+private def vm1 := T [([1], some 0)]
+private def vm0 := T [([2, 3], some 1)]
+-- A joint as the target is fine; crossing one is not.
+#guard valAtSkip false vm0 vm1 [] [] [] [1] == none
+#guard valAtSkip false vm0 vm1 [] [] [] [1, 2] == some skipValAtJoint
+-- At a joint: only `ProductZipper` (`inFactor`) declines.
+#guard valAtSkip true vm0 vm1 [] [] [1] [] == some skipValAtJoint
+#guard valAtSkip false vm0 vm1 [] [] [1] [] == none
+-- Inside a later factor: `ProductZipperG` answers unless the path crosses.
+#guard valAtSkip false vm0 vm1 [] [] [1, 2] [3] == none
+#guard valAtSkip true vm0 vm1 [] [] [1, 2] [3] == some skipValAtJoint
+#guard valAtSkip false vm0 vm1 [] [] [1, 2] [3, 1] == some skipValAtJoint
+-- The empty-factor input skip.
+#guard inputSkip vm0 vm1 [] [] == none
+#guard inputSkip (T []) vm1 [] [] == some skipEmptyFactor
+#guard inputSkip (T [([], some 1)]) vm1 [] [] == some skipEmptyFactor
+#guard inputSkip vm0 (T []) [] [] == some skipEmptyFactor
+
 /-! ### The product against `Composition`, over a battery of shapes -/
 
 /-- Small tries over bytes {1, 2}: empty, root value, internal keys, dangling
