@@ -10,7 +10,8 @@
 //! with which arguments is a textual diff.
 
 use pathmap::alloc::{global_alloc, GlobalAlloc};
-use pathmap::morphisms::{Catamorphism, TrieBuilder};
+#[allow(deprecated)]
+use pathmap::morphisms::{Catamorphism, SplitCata, SplitCataJumping, TrieBuilder};
 use pathmap::utils::{BitMask, ByteMask};
 use pathmap::zipper::*;
 
@@ -253,6 +254,37 @@ impl CataRun for TreeLines {
             },
         };
         root_line(r)
+    }
+}
+
+/// Op 59: the deprecated 3/4-function shims.  `mode % 2 = 0`: `SplitCata`
+/// building the byte tree (`map_f` a valued leaf, `alg_f` a node from its
+/// children, `collapse_f` puts a value into it); `1`: `SplitCataJumping`
+/// counting and summing the values (`jump_f` the identity).
+struct Split {
+    mode: u8,
+}
+
+impl CataRun for Split {
+    #[allow(deprecated)]
+    fn run<C: Catamorphism<u64>>(self, c: C) -> String {
+        if self.mode % 2 == 0 {
+            let alg = |m: &ByteMask, ch: &mut [String], _path: &[u8]| {
+                tree_node(None, m.iter().map(|b| vec![b]).collect::<Vec<_>>().into_iter(), ch)
+            };
+            let map = |v: &u64, _path: &[u8]| format!("({v})");
+            let collapse = |v: &u64, w: String, _path: &[u8]| format!("({v}{}", &w[2..]);
+            c.into_cata_side_effect(SplitCata::new(map, collapse, alg))
+        } else {
+            let alg = |_m: &ByteMask, ch: &mut [(u64, u64)], _path: &[u8]| {
+                ch.iter().fold((0u64, 0u64), |a, w| (a.0 + w.0, a.1.wrapping_add(w.1)))
+            };
+            let map = |v: &u64, _path: &[u8]| (1u64, *v);
+            let collapse = |v: &u64, w: (u64, u64), _path: &[u8]| (w.0 + 1, w.1.wrapping_add(*v));
+            let jump = |_stem: &[u8], w: (u64, u64), _path: &[u8]| w;
+            let (n, sum) = c.into_cata_jumping_side_effect(SplitCataJumping::new(map, collapse, alg, jump));
+            format!("n={n} s={sum}")
+        }
     }
 }
 
@@ -499,6 +531,10 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             let same = walk(m.read_zipper()) == walk(src.read_zipper_at_path(&root));
             st.maps[dst] = m;
             (name, format!("{s} calls={calls} same={}", show_bool(same)))
+        }
+        59 => {
+            let (c, mode) = (csrc(d)?, d.u8()?);
+            ("split_cata", dispatch(st, &c, Split { mode }))
         }
         _ => ("nop", "-".to_string()),
     })

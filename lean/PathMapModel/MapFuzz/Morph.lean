@@ -74,6 +74,7 @@ anything below it does not exist.  `ana` below is that rule for any closure;
 | 56 | `ana_replicate` | `i`, `p`, `dst`, `lv`, `mb` | `m[dst] :=` a `lv`-level tree grafting `m[i]`'s node at `p` (see `repAlg`) |
 | 57 | `tree_bytes` | csrc, `fl`, `dst`, `g`, `in` | the view's byte tree from a stepping fold (`fl % 4`: side-effect, side-effect `_fallible`, cached, cached `_fallible`, the fallible ones never failing); `m[dst] :=` its deserialization (`treeRoundTrip`) |
 | 58 | `tree_lines` | csrc, `fl`, `dst`, `g`, `in` | the same with the line tree and the jumping flavours |
+| 59 | `split_cata` | csrc, `mode` | the deprecated shims: `mode` even, `SplitCata` building the byte tree (`toBytes`); odd, `SplitCataJumping` counting and summing the values |
 
 A *csrc* is `i : map, kind : u8 % 3, p : path(4), f : path(4), q : path(6)`: a
 clone of `m[i]` with `q` created as a (possibly dangling) path, folded as the
@@ -357,6 +358,14 @@ def stepMorph (op : Nat) (s : MSt) (d : Dec) : Option (Res × Dec) :=
       let (T, _) := c.view s
       let (r, m) := treeRoundTrip T (op == 58) g.toNat
       some (((if op == 57 then "tree_bytes" else "tree_lines"), r, s.set dst m), d)
+  | 59 => do
+      let (c, d) ← decCSrc d
+      let (mode, d) ← d.u8
+      let (T, _) := c.view s
+      let r := if mode.toNat % 2 == 0 then renderTree T.toBytes
+        else "n=" ++ toString T.vals.length ++ " s=" ++
+          toString (T.vals.foldl (fun (a : V) (pv : Path × V) => a + pv.2) 0).toNat
+      some (("split_cata", r, s), d)
   | _ => some (("nop", "-", s), d)
 
 end MapFuzz
