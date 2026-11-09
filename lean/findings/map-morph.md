@@ -133,7 +133,10 @@ assert!(exists(&b, &[0]));                    // FAILS: the stump was pruned
 must not prune anything (`prune_path` acts only at an existing dangling tip;
 `README.md`, "Pruning contract"), and does not for a `create_path` dangling
 path.  The writer's root is left as an empty `CellByteNode`, which the prune
-treats differently.
+treats differently.  Inside a session the same happens through a writer's
+`remove_val(true)` / `remove_branches(true)` at a nonexistent focus below a
+stump a nested writer left; skipped as `skip:prune-absent-focus` (a pruning
+remove at a writer focus that does not exist, a no-op in the model).
 
 ### H5. A reader at a head whose root is a leaf leaves an empty node that blocks pruning
 

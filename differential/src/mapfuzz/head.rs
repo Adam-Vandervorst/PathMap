@@ -31,6 +31,11 @@ pub const SKIP_HEAD_ROOT_ABSENT: &str = "skip:head-root-absent";
 /// there, and resets the parent.  See lean/findings/map-morph.md.
 pub const SKIP_CLEANUP_OFF_ROOT: &str = "skip:cleanup-off-root";
 
+/// Skip token: `remove_val` / `remove_branches` with `prune` at a writer focus
+/// that does not exist.  The model makes that a no-op; a stump left by a dropped
+/// writer (H4 in lean/findings/map-morph.md) is pruned from below instead.
+pub const SKIP_PRUNE_ABSENT_FOCUS: &str = "skip:prune-absent-focus";
+
 /// Slots per session; `slotCap` in `Head.lean`.
 const SLOTS: usize = 8;
 
@@ -174,6 +179,7 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize, 
                         w.descend_to(&rel);
                         let prune = v % 2 == 1;
                         match sub {
+                            1 | 2 if prune && !w.path_exists() => SKIP_PRUNE_ABSENT_FOCUS.to_string(),
                             0 => format!("s{}", show_val(w.set_val(v).as_ref())),
                             1 => format!("r{}", show_val(w.remove_val(prune).as_ref())),
                             2 => format!("b{}", show_bool(w.remove_branches(prune))),

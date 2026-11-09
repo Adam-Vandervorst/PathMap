@@ -117,6 +117,7 @@ def skipUncheckedConflict : String := "skip:unchecked-conflict"
 def skipUncheckedIntoRead : String := "skip:unchecked-into-read"
 def skipHeadRootAbsent : String := "skip:head-root-absent"
 def skipCleanupOffRoot : String := "skip:cleanup-off-root"
+def skipPruneAbsentFocus : String := "skip:prune-absent-focus"
 
 /-- The slot a step names: byte `k` picks among the live slots (live writers,
 for a writer-only step) in slot order; with none, slot 0, which the step then
@@ -213,6 +214,12 @@ def runStep (nest : Option Nest) (h : HS) (d : Dec) : Option (String × HS × De
           if !s.writer then some ("-", h, d) else
           let z := wzOf h s rel
           let prune := v.toNat % 2 == 1
+          -- `skip:prune-absent-focus`: a pruning remove at a focus that does not
+          -- exist is a no-op here, but prunes a stump left by a dropped writer
+          -- (H4, lean/findings/map-morph.md).
+          if prune && (sub == 1 || sub == 2) && !z.pathExists then
+            some (skipPruneAbsentFocus, { h with slots := h.slots.set k (some { s with focus := rel }) }, d)
+          else
           let (r, z) := match sub with
             | 0 => let (o, z) := z.setVal v; ("s" ++ showVal o, z)
             | 1 => let (o, z) := z.removeVal prune; ("r" ++ showVal o, z)
