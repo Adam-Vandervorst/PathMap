@@ -661,12 +661,14 @@ both, on `pathmap_trace`, `pathmap-oracle`, `differential.py` and `shrink.py`:
 |---|---|---|
 | `native` | `ReadZipperUntracked` / `WriteZipperUntracked` | the original |
 | `act` | `ACTZipper` | `Source.act` |
-| `tracker` | `PathTracker` | `Sources/Tracker.lean` (the template) |
+| `tracker` | `PathTracker` (`new` or `with_origin`) | `Sources/Tracker.lean` (the template) |
 | `overlay`, `overlay-filter` | `OverlayZipper` (map1 over a map0 snapshot) | `Sources/Overlay.lean` |
 | `diff` | `DiffZipper` over two copies of map1 | `Sources/Diff.lean` |
 | `dependent`, `dependent-lazy` | `DependentProductZipperG` | `Sources/Dependent.lean` |
 | `product`, `productg` (+ `-full`) | `ProductZipper`, `ProductZipperG` | `Sources/Product.lean` |
 | `prefix`, `empty` | `PrefixZipper`, `EmptyZipper` | `Sources/Prefix.lean`, `Sources/Empty.lean` |
+| `empty-new` | `EmptyZipper::new()` inside `PathTracker::with_origin` | `Sources/Empty.lean` |
+| `diff-product` | `DiffZipper` over two `ProductZipper` constructions | `Sources/Product.lean` |
 | `head` | `ReadZipperTracked` / `WriteZipperTracked` from a `ZipperHead` | `Sources/Head.lean` |
 | `owned` | `ReadZipperOwned` / `WriteZipperOwned` | `Sources/Owned.lean` |
 

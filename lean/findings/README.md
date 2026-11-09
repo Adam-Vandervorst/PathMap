@@ -16,6 +16,7 @@ is and is not covered. This page is the index.
 | [map-core.md](map-core.md) | the `PathMap` surface, whole-map lattice ops | `map` ops 0–28 |
 | [map-serial.md](map-serial.md) | `.paths` and `write_trie` serialization, ACT files, merge, stream | `map` ops 30–48 |
 | [map-morph.md](map-morph.md) | catamorphisms, anamorphisms, `ZipperHead` sessions and conflicts | `map` ops 50–60 |
+| [ctors.md](ctors.md) | alternative constructors (`PathTracker::new`, `EmptyZipper::new`, `ProductZipper::new_with_primary`, ...), and the round-2 list of uncalled functions | `tracker`, `empty-new`, `product`, `diff-product`, `owned`, `map` ops 1, 17, 18, 48, 55, 60 |
 
 Plus the `tracker` source (`PathTracker`), written as the template.
 
