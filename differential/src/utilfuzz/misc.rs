@@ -1,5 +1,6 @@
 //! Util fuzzer, ops 80–99: the external path sorters (`sort_paths`,
-//! `sort_paths_par`) and the feature-gated modules.  Mirrors
+//! `sort_paths_par`) and the feature-gated modules `viz`, `random`, `counters`.
+//! Ops 95–99 are unused (`nop`).  Mirrors
 //! `UtilFuzz/Misc.lean`, which states the model.
 //!
 //! ## Sorting (ops 80–84)
@@ -49,6 +50,39 @@
 //! 0 keeps the whole stream; 1 cuts it at `7 + u16le % (data + 1)`; 2 drops
 //! `1 + u8 % 4` bytes of the trailer; 3 keeps `u8 % 7` bytes (inside the
 //! headers).  `mem` is 1 MiB.
+//!
+//! ## Feature-gated modules (ops 85–94)
+//!
+//! **The differential crate enables pathmap's `viz`, `random` and `counters`
+//! features** (`differential/Cargo.toml`).  None changes behaviour elsewhere:
+//! `viz` and `random` add modules only; `counters` adds two relaxed atomic
+//! increments to `make_unique`.  Traces of 6000 native and 4000 map inputs are
+//! byte-identical with and without them, and write benchmarks are within noise
+//! (`lean/findings/u-ints.md`).
+//!
+//! | op | name | operands | answer |
+//! |---|---|---|---|
+//! | 85 | `viz_ascii` | maps, config | `viz_maps` in `VizMode::Ascii`, escaped onto one line (`esc`) |
+//! | 86 | `viz_mermaid[_rv]` | maps, config | logical Mermaid, parsed back to a graph (`mermaid_canon`) |
+//! | 87 | `viz_phys[_rv]` | maps, config | physical Mermaid, parsed back to its values (`mermaid_values`) |
+//! | 88 | `random_trie` | `np := 1 + u8 % 6` × `path(5)`, `nv := 1 + u8 % 4` × `u8`, `size := u8 % 16`, seed | `RandomTrie` with scripted path / value distributions: the map |
+//! | 89 | `fair_trie_value` | small map, seed | `FairTrieValue` sample (exact if one value, else `in=`), `det=` |
+//! | 90 | `descend_first_value` | small map, seed, `q` | `DescendFirstTrieValue` + `unbiased_descend_first_policy` sample; `pol=` the policy's elements at `q` |
+//! | 91 | `fair_trie_path` | small map, seed | `FairTriePath` sample |
+//! | 92 | `descend_last_path` | small map, seed, `q` | `DescendTriePath` + `unbiased_descend_last_policy` sample; the policy's `db`/`dx`/`dy` at `q` |
+//! | 93 | `cow_counters` | `rv`, `n := 1 + u8 % 8` × (`path(5)`, `u8`), `p := path(5) ++ path_byte`, `v` | clone counts: unshared writes, a write through a `clone()`, after dropping it |
+//! | 94 | `count_ocupancy` | small map | `Counters::new()` totals; `count_ocupancy` invariants |
+//!
+//! Maps (`read_maps`): `k := 1 + u8 % 3` small maps.  Small map
+//! (`read_small_map`): `rv := u8` (root value `rv / 2` if `rv` is odd), then
+//! `n := 1 + u8 % 8` entries `len := u8 % 5`, `len` × `VIZ_ALPHA[u8 % 4]`,
+//! value `u8`.  Config (`read_config`): one byte, see there.  Seed: `u8`, for
+//! `StdRng::seed_from_u64`.  `q`: `path(5)` mapped through `VIZ_ALPHA`.
+//!
+//! Named skips (same tokens in `Misc.lean`; each is a crate bug in
+//! `lean/findings/u-ints.md`): `skip:viz-no-root-node`,
+//! `;skip:viz-mermaid-root-value` (the rest of the graph is still compared),
+//! `skip:fair-value-root-value`, `;skip:counters-no-root-node`.
 
 use super::*;
 use pathmap::PathMap;
@@ -304,9 +338,14 @@ fn esc(s: &str) -> String {
 }
 
 /// `f := u8`: `ascii_path` = bit 0, `hide_value_paths` = bits 1–2 both 0,
-/// `minimize_values` = bit 3, `color` = bit 4.
+/// `minimize_values` = bit 3, `color` = bit 4.  For logical Mermaid (op 86),
+/// bits 5–7 all set means `DrawConfig::default()` instead (Mermaid, logical,
+/// colour, nothing else).
 fn read_config(d: &mut Dec, mode: pathmap::viz::VizMode, logical: bool) -> Option<pathmap::viz::DrawConfig> {
     let f = d.u8()?;
+    if matches!(mode, pathmap::viz::VizMode::Mermaid) && logical && f >> 5 == 7 {
+        return Some(pathmap::viz::DrawConfig::default());
+    }
     Some(pathmap::viz::DrawConfig {
         mode,
         ascii_path: f & 1 == 1,

@@ -372,14 +372,19 @@ def readMaps (d : Dec) : Option (List LMap × Dec) := do
   let (k, d) ← d.mod 3
   Ints.many readSmallMap (k + 1) d
 
-def readVizCfg (d : Dec) : Option (VizCfg × Dec) := do
+/-- `DrawConfig::default()`: Mermaid, logical, colour; no ASCII labels, all
+value paths, full values. -/
+def defaultCfg : VizCfg := ⟨false, false, false⟩
+
+def readVizCfg (op : Nat) (d : Dec) : Option (VizCfg × Dec) := do
   let (f, d) ← d.u8
   let f := f.toNat
-  some (⟨f % 2 == 1, f / 2 % 4 == 0, f / 8 % 2 == 1⟩, d)
+  if op == 86 && f / 32 == 7 then some (defaultCfg, d)
+  else some (⟨f % 2 == 1, f / 2 % 4 == 0, f / 8 % 2 == 1⟩, d)
 
 def vizOp (op : Nat) (d : Dec) : Option ((String × String) × Dec) := do
   let (ms, d) ← readMaps d
-  let (c, d) ← readVizCfg d
+  let (c, d) ← readVizCfg op d
   let rv := !c.hide && ms.any fun m => (m.val? []).isSome
   let name :=
     if op == 85 then "viz_ascii"

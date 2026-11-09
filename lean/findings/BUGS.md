@@ -15,6 +15,10 @@ and the reasoning.  Found on `fix/fvc-leftovers` (ad250b9) via
 | 3 | `cleanup_write_zipper` on a `ZipperHead` taken from a write zipper whose focus is below its root resolves the path against the parent's root: panics at `zipper_head.rs:347`, can prune the wrong location, resets the parent | 30 | map-morph |
 | 4 | `into_read_zipper` on an `_unchecked` writer panics (`write_zipper.rs:541`, missing tracker) | 31 | map-morph |
 | 5 | `TrieBuilder::graft_at_byte` panics (`morphisms.rs:1238`) when the zipper's focus is an existing leaf | 37 | ptree |
+| 5a | `viz_maps` panics (`root().unwrap()`) on a map with nothing below the root; `Counters::count_ocupancy` likewise | 48, 52 | u-ints |
+| 5b | `viz_maps` in Mermaid physical mode panics (`todo!` in `color_for_bitmask`) on 4 or more maps | 50 | u-ints |
+| 5c | `FairTrieValue::sample` panics (`unreachable!`) on a map with a root value when it draws the last index (and never returns the root value) | 51 | u-ints |
+| 5d | `gen_int_range` with `step = 0`: divide by zero (`u16` and wider), endless loop (`u8`) | 47 | u-ints |
 
 ## Wrong answers: product zippers (`ProductZipper`, `ProductZipperG`, `DependentProductZipperG`)
 
@@ -72,6 +76,9 @@ that node is there.
 | 32a | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` read `start()`/`end()` of a `RangeInclusive` iterated to its end (empty; std calls the bounds unspecified) and act on bit `end`; `ByteMask::from` of the same range is correctly empty | 40 | u-mask |
 | 32b | `SetLattice` `pmeet` (`HashMap`, `HashSet`, the `set_lattice!` macro) passes each shared key's values to the value `pmeet` swapped when `self` is not the smaller map; with the integers' left-biased meet the answer's value comes from `other` or `self` depending on which map has more keys | 42 | u-lattice |
 | 32c | `AlgebraicResult::merge`: a `None` field next to an `Identity(mask)` field is turned into `Identity(mask)` after checking only argument 0's field, unsound for meet composites (latent; not reachable through the crate's callers) | 43 | u-lattice |
+| 32d | `indices_to_weave::<16, u128>`: the upper 8 byte positions repeat the lower 8 instead of being zero (shift by ≥ 64 on a `usize`) | 45 | u-ints |
+| 32e | `weave_to_indices` with more than `N` bytes per integer ORs them into the wrong positions (no length check, unlike `bob_to_indices`) | 46 | u-ints |
+| 32f | `viz_maps` Mermaid renderings (logical and physical) never draw a map's root value | 49 | u-ints |
 
 ## Imprecise `AlgebraicStatus` (contents correct)
 
@@ -89,12 +96,16 @@ that node is there.
 | 36 | `deserialize_file` asserts `!path_node.is_empty()` on a `write_trie` file containing a dangling path (release drops it, matching the model) | (map-serial 5) | map-serial |
 | 36a | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` `debug_assert!(start <= end)` on an empty `a..=b` (`a > b`); release correctly does nothing, and `from_range` documents `start >= end` as empty | 41 | u-mask |
 
+| 36b | `indices_to_weave::<16, u128>` and over-long `weave_to_indices` panic with shift overflow (release: 32a, 32b) | 45, 46 | u-ints |
 ## Doc mismatches
 
 | | bug | # | file |
 |---|---|---|---|
 | 37a | `Lattice::IDEMPOTENT` is `true` for `bool`, the integers and their containers, whose `pjoin(a, a)` / `pmeet(a, a)` are `Identity(SELF)`, not the promised `Identity(SELF\|COUNTER)` (informational constant) | 44 | u-lattice |
+| 37b | `indices_to_bob`: the doc example and the test comments list the bytes in reverse order (D1) | — | u-ints |
+| 37c | `indices_to_weave`: the doc says the encoding is not padded; the code always writes `N` bytes per integer (D2) | — | u-ints |
 
-36 entries: 35 defects and one doc mismatch, from the 38 numbered index rows
-plus 2 notes, with 4 duplicate pairs merged (4/7, 5/8, 6/9, 17/35).  Bug 24's
-debug assertion is listed with it, not separately.
+52 entries: 48 defects (4 of them debug-only) and 4 doc/code
+mismatches.  Rounds 1-2 gave the 38 numbered index rows plus 2 notes, with 4 duplicate
+pairs merged (4/7, 5/8, 6/9, 17/35); round 3 (the value-level fuzzer) added index rows
+39-52 plus the u-ints doc mismatches.  Bug 24's debug assertion is listed with it.

@@ -12,15 +12,17 @@ is and is not covered. This page is the index.
 | [dependent.md](dependent.md) | `DependentProductZipperG` | `dependent`, `dependent-lazy` |
 | [product.md](product.md) | `ProductZipper`, `ProductZipperG` | `product`, `productg`, `product-full`, `productg-full` |
 | [prefix.md](prefix.md) | `PrefixZipper`, `EmptyZipper` | `prefix`, `empty` |
-| [head-owned.md](head-owned.md) | tracked / owned zippers, `ZipperHead` creation, `TrieRef*` | `head`, `owned`, zipper op 60 `trie_ref_probe` |
+| [head-owned.md](head-owned.md) | tracked / owned zippers, `ZipperHead` creation, `TrieRef*` | `head`, `owned`, zipper op 75 `trie_ref_probe` |
 | [map-core.md](map-core.md) | the `PathMap` surface, whole-map lattice ops | `map` ops 0–28 |
 | [map-serial.md](map-serial.md) | `.paths` and `write_trie` serialization, ACT files, merge, stream | `map` ops 30–48 |
-| [ops.md](ops.md) | functions no zipper op called: `drop_head`, `join_into_take`, `get_focus_at`/`try_borrow_focus`, witness iteration, k-path overrun, `into_path(_iter)`, deprecated aliases | zipper ops 76-81, checks folded into 7, 20, 51, 52, 75 |
+| [ops.md](ops.md) | functions no zipper op called: `drop_head`, `join_into_take`, `get_focus_at`/`try_borrow_focus`, witness iteration, k-path overrun, `into_path(_iter)`, deprecated aliases | zipper ops 76-81, checks folded into 7, 20, 51, 52, 60 |
 | [map-morph.md](map-morph.md) | catamorphisms, anamorphisms, `ZipperHead` sessions and conflicts | `map` ops 50–60 |
 | [ptree.md](ptree.md) | catamorphisms serialize into prefix trees, anamorphisms deserialize them (byte and line level, proved in `PrefixTree.lean`); `SplitCata(Jumping)` | `map` ops 57–59 |
 | [ctors.md](ctors.md) | alternative constructors (`PathTracker::new`, `EmptyZipper::new`, `ProductZipper::new_with_primary`, ...), and the round-2 list of uncalled functions | `tracker`, `empty-new`, `product`, `diff-product`, `owned`, `map` ops 1, 17, 18, 48, 55, 60 |
 | [u-mask.md](u-mask.md) | `ByteMask`, `BitMask` for `ByteMask` and `[u64; 4]`, their `Lattice` impls, iterators, formatters, the rest of `utils/mod.rs` | `util` ops 0–28 |
 | [u-lattice.md](u-lattice.md) | `ring.rs`: the `Lattice`/`DistributiveLattice`/`LatticeRef` impls of the primitive and std types, `AlgebraicResult`, `AlgebraicStatus`, `SetLattice` (`HashMap`, `HashSet`) | `util` ops 30–59 |
+
+| [u-ints.md](u-ints.md) | `utils/ints.rs` (`PathInteger` encodings, `gen_int_range`), `sort_paths` / `sort_paths_par`, the `viz`, `random` and `counters` modules (features enabled in the differential crate) | `util` ops 60–94 |
 
 Plus the `tracker` source (`PathTracker`), written as the template.
 
@@ -77,9 +79,19 @@ wrong answers by component, imprecise status, debug-only): [BUGS.md](BUGS.md).
 | 42 | `SetLattice` (`HashMap`/`HashSet`) `pmeet` calls the value `pmeet` with the operands swapped when `self` is not the smaller map: a non-symmetric value meet (integers, `bool`) answers from the wrong operand (L1) | u-lattice, `skip:setlattice-meet-swap` |
 | 43 | `AlgebraicResult::merge` asks argument 0 whether an annihilated field was absent, so for a meet it can claim a false `Identity` (latent: the crate's own callers never take that path) (L2) | u-lattice |
 | 44 | `Lattice::IDEMPOTENT = true` (never overridden) promises `pjoin`/`pmeet(self)` = `Identity(SELF\|COUNTER)`; `bool`, the integers and their containers answer `Identity(SELF)` (doc mismatch, constant unused) (L3) | u-lattice |
+| 45 | `indices_to_weave::<16, u128>` shifts a `usize` by up to 120 bits: upper 8 bytes repeat the lower 8 (release), panic (debug) (U1) | u-ints |
+| 46 | `weave_to_indices` accepts more than `N` bytes per integer: garbage (release), panic (debug); `bob_to_indices` asserts (U2) | u-ints |
+| 47 | `gen_int_range` with `step = 0` hangs (`u8`) or divides by zero (U3) | u-ints |
+| 48 | `viz_maps` panics on a map with nothing below the root (U4) | u-ints |
+| 49 | `viz_maps` Mermaid (logical and physical) never draws the root value (U5) | u-ints |
+| 50 | `viz_maps` Mermaid physical panics (`todo!`) on 4 or more maps (U6) | u-ints |
+| 51 | `FairTrieValue` never returns a root value and panics (`unreachable!`) when it draws its index (U7) | u-ints |
+| 52 | `Counters::count_ocupancy` panics on a map without a root node (U8) | u-ints |
 
-Also a doc/code mismatch: `path_indices().len()` is `focus_factor() + 1` at a
-joint (dependent D4, product P6). There is also a debug-only assertion in
+Also doc/code mismatches: `path_indices().len()` is `focus_factor() + 1` at a
+joint (dependent D4, product P6); `indices_to_bob`'s doc example lists the
+bytes in reverse, and `indices_to_weave` pads although its doc says it does not
+(u-ints D1, D2). There is also a debug-only assertion in
 `deserialize_file` on a dangling path (map-serial 5).
 
 ## Open semantic questions
@@ -100,6 +112,10 @@ Collected from the workstream files; each says which reading the model takes.
   leaf focus?  Modelled no / no: it continues the zipper's traversal (ops).
 * May `get_focus_at` return an (empty) node at a childless location?
   Modelled yes (ops).
+* Is a weave `N` bytes per integer (the code) or unpadded (the doc)?  Modelled
+  `N` (u-ints).
+* What should the sorters do with a corrupt (not truncated) `.paths` stream?
+  Not fuzzed (u-ints).
 
 ## Running
 

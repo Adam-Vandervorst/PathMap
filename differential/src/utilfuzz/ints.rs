@@ -8,7 +8,7 @@
 //! | op | name | operands | answer |
 //! |---|---|---|---|
 //! | 60–65 | `bob_<ty>` | prefix `path(3)`, `cnt := u8 % 9`, `cnt` × `int` | `indices_to_bob` appended to the prefix: `steps;bytes;bob_to_indices(bytes)` |
-//! | 66–71 | `weave_<ty>` | prefix `path(3)`, `cnt := u8 % 9`, `cnt` × `int(8)` (usize) | `indices_to_weave` appended to the prefix: `bytes;weave_to_indices(bytes)` |
+//! | 66–71 | `weave_<ty>` | prefix `path(3)`, `cnt := u8 % 9`, `cnt` × `int(8)` (usize) | `indices_to_weave` appended to the prefix: `bytes;weave_to_indices(bytes)`; for `u128` only `prefix|<lower 8 byte positions>;skip:weave-u128-shift` |
 //! | 72–77 | `unbob_<ty>` / `unweave_<ty>` | `bool` (1 = weave), then the encoded bytes (below) | the decoded integers |
 //! | 78 | `range_<ty>` | `t := u8 % 6`, small range (below), `alloc := bool`, `v := u8` | the whole map: `[path:val,…];n=<locations>` |
 //! | 79 | `range_big_<ty>` | `t := u8 % 6`, big range (below), `v := u8`, 3 × probe (below) | `c=<val_count>;f=[first 4];p=<val at each probe>` |
