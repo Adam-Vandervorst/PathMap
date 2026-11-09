@@ -198,16 +198,43 @@ class Child:
 # and message.  See lean/FINDINGS.md for the write-up of each, and
 # `cargo run -p differential --bin zipper_bug_repros -- <case>` for a reproducer.
 KNOWN = [
-    # --source dependent-lazy exists to replay two DependentProductZipperG
-    # entry defects (lean/findings/dependent.md D1, D2) that make what the
-    # zipper presents depend on its history; they surface under any op and
-    # would otherwise be credited to whatever generic entry matches first
-    # (CONTENT-DROPPED, in practice).  The campaign source is `dependent`.
-    (["src:dependent-lazy\n"],
-     "DependentProductZipperG enters a root joint only on a descend (D1) / a "
-     "factor stacked after an empty one only on a later call (D2); reproducers "
-     "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
-     "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
+    # ProductZipper (differential/src/sources/product.rs), lean/findings/product.md.
+    # First: every entry is keyed on a product source name, and the generic
+    # op-name entries below would otherwise swallow the -full sources' bugs.
+    # `\n` ends the source name, so `src:product` does not match productg.
+    (["src:product\n", "descend_to_check ret=1 "],
+     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
+     "[product_descend_to_check_empty]"),
+    (["src:product-full\n", "descend_to_check ret=1 "],
+     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
+     "[product_descend_to_check_empty]"),
+    # product-full / productg-full: the same zippers without the product skips,
+    # to reproduce what the skips hold back (lean/corpus/product-*.bin).
+    (["src:product-full\n", "src/zipper.rs:3353"],
+     "ProductZipper::val_at() panics (focus_parent unwrap) with the focus "
+     "inside the first node of a secondary factor [product_val_at_joint_panic]"),
+    (["src:product-full\n", "val_at ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:productg-full\n", "val_at ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:product-full\n", "get_val_agrees ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:productg-full\n", "get_val_agrees ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    # Everything else these two sources add over product/productg comes from
+    # inputs product/productg skip whole: a factor with no children at its root.
+    (["src:product-full\n"],
+     "a factor with no children at its root (childless primary root, empty "
+     "map0 snapshot) is not entered / not transparent, or only after some "
+     "moves and until reset [product_empty_factor]"),
+    (["src:productg-full\n"],
+     "a factor with no children at its root (childless primary root, empty "
+     "map0 snapshot) is not entered / not transparent, or only after some "
+     "moves and until reset [product_empty_factor]"),
     # Source-specific entries first (keyed on `src:<source>`), so a
     # generic op-name entry below cannot claim them.
     (["src:prefix", "READ-SIDE", "DANGLING-KEPT", " e0 v- c0 n"],
@@ -253,6 +280,16 @@ KNOWN = [
     (["src:empty", "to_next_get_val", "READ-SIDE"],
      "EmptyZipper::to_next_get_val() returns None without rewinding to the root "
      "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
+    # --source dependent-lazy exists to replay two DependentProductZipperG
+    # entry defects (lean/findings/dependent.md D1, D2) that make what the
+    # zipper presents depend on its history; they surface under any op and
+    # would otherwise be credited to whatever generic entry matches first
+    # (CONTENT-DROPPED, in practice).  The campaign source is `dependent`.
+    (["src:dependent-lazy\n"],
+     "DependentProductZipperG enters a root joint only on a descend (D1) / a "
+     "factor stacked after an empty one only on a later call (D2); reproducers "
+     "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
+     "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
     # Tested first: this one is keyed on a shape, and an ACT val_count-only
     # difference can land on a line whose op name matches an entry below.
     (["ACT-VALCOUNT-ONLY"],
@@ -272,41 +309,35 @@ KNOWN = [
     (["join_into"],
      "join_into() drops the source subtrie when the destination map is empty "
      "[join_into_empty_dst]"),
-    # ProductZipper (differential/src/sources/product.rs), lean/findings/product.md.
-    # `\n` ends the source name, so `src:product` does not match productg.
-    (["src:product\n", "descend_to_check ret=1 "],
-     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
-     "[product_descend_to_check_empty]"),
-    (["src:product-full\n", "descend_to_check ret=1 "],
-     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
-     "[product_descend_to_check_empty]"),
-    # product-full / productg-full: the same zippers without the product skips,
-    # to reproduce what the skips hold back (lean/corpus/product-*.bin).
-    (["src:product-full\n", "src/zipper.rs:3353"],
-     "ProductZipper::val_at() panics (focus_parent unwrap) with the focus "
-     "inside the first node of a secondary factor [product_val_at_joint_panic]"),
-    (["src:product-full\n", "val_at ret="],
-     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
-     "next factor [product_val_at_crosses_joint]"),
-    (["src:productg-full\n", "val_at ret="],
-     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
-     "next factor [product_val_at_crosses_joint]"),
-    (["src:product-full\n", "get_val_agrees ret="],
-     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
-     "next factor [product_val_at_crosses_joint]"),
-    (["src:productg-full\n", "get_val_agrees ret="],
-     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
-     "next factor [product_val_at_crosses_joint]"),
-    # Everything else these two sources add over product/productg comes from
-    # inputs product/productg skip whole: a factor with no children at its root.
-    (["src:product-full\n"],
-     "a factor with no children at its root (childless primary root, empty "
-     "map0 snapshot) is not entered / not transparent, or only after some "
-     "moves and until reset [product_empty_factor]"),
-    (["src:productg-full\n"],
-     "a factor with no children at its root (childless primary root, empty "
-     "map0 snapshot) is not entered / not transparent, or only after some "
-     "moves and until reset [product_empty_factor]"),
+    # --source dependent-lazy exists to replay two DependentProductZipperG
+    # entry defects (lean/findings/dependent.md D1, D2) that make what the
+    # zipper presents depend on its history; they surface under any op and
+    # would otherwise be credited to whatever generic entry matches first
+    # (CONTENT-DROPPED, in practice).  The campaign source is `dependent`.
+    (["src:dependent-lazy\n"],
+     "DependentProductZipperG enters a root joint only on a descend (D1) / a "
+     "factor stacked after an empty one only on a later call (D2); reproducers "
+     "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
+     "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
+    # Tested first: this one is keyed on a shape, and an ACT val_count-only
+    # difference can land on a line whose op name matches an entry below.
+    (["ACT-VALCOUNT-ONLY"],
+     "ACTZipper::val_count() counts from the zipper root, not the focus "
+     "[act: val_count_ignores_focus]"),
+    (["ESCAPED-ROOT"],
+     "a zipper left its own root: root_prefix_path() changed [root_escape]"),
+    (["to_next_val"],
+     "to_next_val() misses downstream values after a token-maintaining move "
+     "[to_next_val_after_step]"),
+    (["sibling_byte"],
+     "sibling movement fails after a token-maintaining move "
+     "[sibling_after_iteration]"),
+    (["to_next_get_val"],
+     "to_next_get_val() inherits the to_next_val() iteration defect "
+     "[to_next_val_after_step]"),
+    (["join_into"],
+     "join_into() drops the source subtrie when the destination map is empty "
+     "[join_into_empty_dst]"),
     # OverlayZipper (differential/src/sources/overlay.rs).  Before the generic
     # `ascend_until` entry below, which would otherwise swallow them.  See
     # lean/findings/overlay-exp.md.

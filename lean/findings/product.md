@@ -228,3 +228,17 @@ Three optional hooks, each a no-op for every other source:
   from the focus and the path.
 * `Source.inputSkip`: a named skip for a whole input; the trace is that one
   token (the Rust runner returns the same line itself).
+
+## Campaigns (after merging spec/coverage-models 90eb33a)
+
+| source | inputs | new | known (by entry) |
+|---|---|---|---|
+| product | 120k (seeds 31–33) | 0 | descend_to_check ×1081, trie_ref_owned_empty_node ×4133 |
+| productg | 120k (seeds 31–33) | 0 | trie_ref_owned_empty_node ×4157 |
+| product-full | 20k (seed 34) | 0 | empty factor ×1777, val_at panic ×2046, val_at across joint ×104, descend_to_check ×135 |
+| productg-full | 20k (seed 34) | 0 | empty factor ×2056, val_at across joint ×103 |
+
+Earlier runs before the merge: another 80k per zipper (seeds 1, 2, 11), clean.
+No known hit on product/productg differs on the read side (checked with the
+overlay workstream's `known_dump.py`).  `native` and `map` 20k each: no new
+divergence.  About 9% of inputs are `skip:product-empty-factor`.
