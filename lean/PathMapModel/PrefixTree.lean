@@ -3,11 +3,18 @@ import PathMapModel.PathMap
 /-!
 # Prefix trees: what a catamorphism serializes and an anamorphism deserializes
 
-A trie such as `{aa, aaa, ab}` can be written down as a nested prefix tree that
-keeps the trie's shape:
+A trie such as `{aa: 1, aaa: 2, ab: 3}` can be written down as a nested
+prefix tree that keeps the trie's shape.  In the rendering the fuzzer compares
+(`PTree.render`: `(<value>,<edge hex><child>,...)`, `-` for no value):
 
 ```
-(-, a(-, a(✓, a(✓)), b(✓)))
+(-,61(-,61(1,61(2)),62(3)))
+```
+
+and `{abc: 1, abd: 2}` as a byte tree and as a line tree:
+
+```
+(-,61(-,62(-,63(1),64(2))))        (-,6162(-,63(1),64(2)))
 ```
 
 Folding a trie bottom-up with a catamorphism whose closure builds such a tree
@@ -53,19 +60,48 @@ whose shape is not decided by "edges are maximal".
 
 ## Contents
 
-* `flatten`, `PathMap.WF` (the canonical-form invariant of `PathMap`, which
-  `PathMap.mk'` establishes but the model never named).
+* `flatten`, and `PathMap.WF`: the canonical-form invariant of `PathMap`
+  (entries strictly sorted, prefix-closed, root present), which the model
+  never named.  `PTree.wf_mk'`: every `mk'` result is `WF`, so every map the
+  model builds is.
 * `cata` / `cataJump`: the model's stepping and jumping catamorphisms, generic
-  in the closure; `MapFuzz/Morph.lean`'s folds are these, instantiated with the
-  fuzzer's string-encoding closures.  `toBytes` / `toLines` are the same folds
-  with the tree-building closures, so (c) of the brief holds by definition for
-  the cached flavours; `side_eq_cata` shows the numbered post-order
-  (side-effecting) flavours return the same.
-* Theorems: `flatten_toBytes`, `flatten_toLines` (serialize then deserialize
-  is the identity on well-formed tries); `toBytes_flatten`, `toLines_flatten`
-  (deserialize then serialize is the identity on canonical trees); `ana_unfold`
-  (the anamorphism that pushes a tree's edges builds `flatten` minus dangling
-  locations, which no push can create; exactly `flatten` when no leaf dangles).
+  in the closure, and `sideFold`, the numbered post-order (side-effecting)
+  flavours.  `MapFuzz/Morph.lean`'s folds *are* these, instantiated with the
+  fuzzer's string-encoding closures, so every theorem here is about the
+  functions the fuzzer runs.  `toBytes` / `toLines` are `cataStep` /
+  `cataJump` with the tree-building closures `algB` / `algL`.
+* `AnaKid`, `anaGo`, `ana`: the model's `new_from_ana`, and `PTree.unfold`, the
+  closure that pushes a tree's edges.
+
+## Theorems (no `sorry`)
+
+| | byte level | line level |
+|---|---|---|
+| (a) `flatten ∘ serialize = id` on `WF` tries | `PathMap.flatten_toBytes` | `PathMap.flatten_toLines` |
+| (b) `serialize ∘ flatten = id` on canonical trees | `PathMap.toBytes_flatten` (`ByteForm`) | `PathMap.toLines_flatten` (`LineForm`) |
+| (c) side-effecting flavours = cached flavours | `PathMap.side_toBytes` | `PathMap.side_toLines` |
+
+(a) and (b) together: each canonical form is in bijection with well-formed
+tries.  (c): the cached flavours are `toBytes` / `toLines` by definition; the
+side-effecting ones (`into_cata_side_effect`, `into_cata_jumping_side_effect`,
+and their `_fallible` versions when every call succeeds) return the same tree,
+whatever the call numbering (`sideFold_step`, `sideFold_jump` for any closure).
+The jumping side-effecting closure reads its jumped bytes off the end of its
+path, `path[path.len() - jump..]`, as op 58's does.
+
+(d) `PTree.ana_unfold`: the anamorphism that pushes every edge of *any* tree
+builds `mk'` of the tree's values: the values and their prefixes, nothing
+dangling.  `PTree.ana_unfold_flatten`: for a tree with non-empty edges and
+ascending first bytes (`Ordered`, implied by both canonical forms) and no
+valueless leaf (`NoDangling`), that is exactly `flatten t`.  A dangling leaf
+cannot be deserialized by pushing (a closure that sets no value and pushes
+nothing leaves no location); op 57/58's `graft_at_byte` mode is how the fuzzer
+puts dangling content back.
+
+The proofs go through lookups: two sorted entry lists with the same lookups are
+equal (`eq_of_sorted_of_lookup`, ported from `PrunedModel/Canon.lean`), a tree
+is looked up edge by edge (`lookup_entsKids`, `edgeLook`), and `follow` walks a
+line (`lookup_follow`, `follow_line`).
 -/
 
 namespace PathMapModel
@@ -391,6 +427,20 @@ private def rd : PTree Nat → String :=
   render (fun v => match v with | none => "-" | some x => toString x)
     (fun p => String.join (p.map toString))
 
+private def hx : Path → String := fun p => String.join (p.map fun b =>
+  let n := b.toNat; String.ofList [Nat.digitChar (n / 16), Nat.digitChar (n % 16)])
+
+-- The header's examples.
+#guard render (fun v => match v with | none => "-" | some x => toString x) hx
+  (PathMap.toBytes (PathMap.mk' [([0x61, 0x61], 1), ([0x61, 0x61, 0x61], 2), ([0x61, 0x62], 3)] [] : PathMap Nat))
+  == "(-,61(-,61(1,61(2)),62(3)))"
+#guard render (fun v => match v with | none => "-" | some x => toString x) hx
+  (PathMap.toBytes (PathMap.mk' [([0x61, 0x62, 0x63], 1), ([0x61, 0x62, 0x64], 2)] [] : PathMap Nat))
+  == "(-,61(-,62(-,63(1),64(2))))"
+#guard render (fun v => match v with | none => "-" | some x => toString x) hx
+  (PathMap.toLines (PathMap.mk' [([0x61, 0x62, 0x63], 1), ([0x61, 0x62, 0x64], 2)] [] : PathMap Nat))
+  == "(-,6162(-,63(1),64(2)))"
+
 #guard rd (PathMap.toBytes ex) == "(-,1(-,1(1,1(2)),2(3)),2(-))"
 #guard rd (PathMap.toLines ex) == "(-,1(-,1(1,1(2)),2(3)),2(-))"
 #guard (PathMap.toBytes ex).flatten.entries == ex.entries
@@ -407,6 +457,12 @@ private def ex2 : PathMap Nat := PathMap.mk' [([1, 2, 3, 4], 1), ([1, 2, 3, 5, 6
 #guard rd (PathMap.toLines (PathMap.mk' [] [[3, 3, 3]] : PathMap Nat)) == "(-,333(-))"
 #guard rd (PathMap.toLines (PathMap.empty : PathMap Nat)) == "(-)"
 #guard rd (PathMap.toLines (PathMap.mk' [([], 7)] [[3, 3]] : PathMap Nat)) == "(7,33(-))"
+-- Deserializing: with no dangling leaf the anamorphism rebuilds the trie
+-- (`ana_unfold_flatten`); a dangling leaf is lost (`ana_unfold`).
+#guard (ana PTree.unfold (PathMap.toLines ex2) 10).1.entries == ex2.entries
+#guard (ana PTree.unfold (PathMap.toBytes ex2) 10).1.entries == ex2.entries
+#guard (ana PTree.unfold (PathMap.toLines ex) 10).1.entries ==
+  (PathMap.mk' [([1, 1], 1), ([1, 1, 1], 2), ([1, 2], 3)] [] : PathMap Nat).entries
 
 end PTree
 end PathMapModel
@@ -1750,4 +1806,581 @@ theorem side_toLines (T : PathMap V) {E : Type} (err : Nat → Path → Option N
   rw [sideFold_jump]; rfl
 
 end PathMap
+/-! ## `mk'`, for (d)'s corollary
+
+Ported from `PrunedModel/Canon.lean` (not on this branch): canonicalisation moves no lookup. -/
+namespace PTree
+open PathMap (dedupVals insertValSorted normVals)
+variable {V : Type}
+
+theorem lookup_isSome_of_mem_keys {l : List (Path × V)} {p : Path}
+    (h : p ∈ l.map (·.1)) : (l.lookup p).isSome = true := by
+  obtain ⟨kv, hmem, heq⟩ := List.mem_map.mp h
+  exact List.lookup_isSome_iff.mpr ⟨kv, hmem, by simp [heq]⟩
+
+/-- …and conversely, `lookup` only succeeds on a key. -/
+theorem mem_keys_of_lookup_isSome {l : List (Path × V)} {p : Path}
+    (h : (l.lookup p).isSome = true) : p ∈ l.map (·.1) := by
+  obtain ⟨kv, hmem, hb⟩ := List.lookup_isSome_iff.mp h
+  exact List.mem_map.mpr ⟨kv, hmem, (eq_of_beq hb).symm⟩
+
+/-- An unbound key looks up to `none` — the contrapositive of
+`mem_keys_of_lookup_isSome`. -/
+theorem lookup_eq_none_of_not_mem_keys {l : List (Path × V)} {k : Path}
+    (h : k ∉ l.map (·.1)) : l.lookup k = none := by
+  cases hl : l.lookup k with
+  | none => rfl
+  | some v =>
+      exact absurd (mem_keys_of_lookup_isSome (l := l) (p := k) (by rw [hl]; rfl)) h
+
+
+/-- `dedupVals` keeps the first binding for each key, so it moves no lookup.
+Stated with an accumulator, which is what lets the `foldl` be inducted on. -/
+private theorem lookup_dedupAux (k : Path) :
+    ∀ (l acc : List (Path × V)),
+      (l.foldl (fun acc kv => if acc.any (fun x => x.1 == kv.1) then acc else acc ++ [kv]) acc).lookup k
+        = (acc.lookup k).or (l.lookup k)
+  | [], acc => by simp
+  | (key, val) :: rest, acc => by
+      rw [List.foldl_cons, lookup_dedupAux k rest]
+      cases hany : acc.any (fun x => x.1 == key) with
+      | true =>
+          -- `key` is already bound, so the entry is dropped and `acc` answers for it.
+          simp only [if_pos, List.lookup_cons]
+          cases hk : k == key with
+          | false => simp
+          | true =>
+              -- `acc.lookup k` is `some`, so it absorbs whatever comes after.
+              obtain ⟨p, hp, hpk⟩ := List.any_eq_true.mp hany
+              have hsome : (acc.lookup k).isSome = true := by
+                refine List.lookup_isSome_iff.mpr ⟨p, hp, ?_⟩
+                have h1 : k = key := by simpa using hk
+                have h2 : p.1 = key := by simpa using hpk
+                simp [h1, h2]
+              cases hs : acc.lookup k with
+              | none => simp [hs] at hsome
+              | some v => simp
+      | false =>
+          -- `key` is new, so the entry is appended and `lookup` sees it after `acc`.
+          simp only [if_neg, Bool.false_eq_true, not_false_eq_true]
+          cases hk : k == key <;>
+            simp [List.lookup_append, List.lookup_cons, hk]
+
+/-- `dedupVals` preserves every lookup. -/
+theorem lookup_dedupVals (l : List (Path × V)) (k : Path) :
+    (dedupVals l).lookup k = l.lookup k := by
+  rw [PathMap.dedupVals]
+  simpa using lookup_dedupAux k l []
+
+/-- Which keys `insertValSorted` leaves behind: the inserted one, and the old ones. -/
+theorem mem_keys_insertValSorted (kv : Path × V) :
+    ∀ (acc : List (Path × V)) (k : Path),
+      k ∈ (insertValSorted kv acc).map (·.1) ↔ (k = kv.1 ∨ k ∈ acc.map (·.1))
+  | [], k => by simp [insertValSorted]
+  | kv' :: rest, k => by
+      rw [PathMap.insertValSorted]
+      cases h : Path.lt kv.1 kv'.1 with
+      | true => simp
+      | false =>
+          simp only [Bool.false_eq_true, if_false, List.map_cons, List.mem_cons,
+            mem_keys_insertValSorted kv rest k]
+          constructor
+          · intro hm
+            rcases hm with hm | hm | hm
+            · exact Or.inr (Or.inl hm)
+            · exact Or.inl hm
+            · exact Or.inr (Or.inr hm)
+          · intro hm
+            rcases hm with hm | hm | hm
+            · exact Or.inr (Or.inl hm)
+            · exact Or.inl hm
+            · exact Or.inr (Or.inr hm)
+
+/-- `insertValSorted` is a lookup update, as long as the key is not already
+bound.  That hypothesis is what rules out shadowing an existing binding, and it
+is exactly what `dedupVals` establishes before the sort runs. -/
+theorem lookup_insertValSorted :
+    ∀ (kv : Path × V) (acc : List (Path × V)) (k : Path), kv.1 ∉ acc.map (·.1) →
+      (insertValSorted kv acc).lookup k = if k == kv.1 then some kv.2 else acc.lookup k
+  | (key, val), [], k, _ => by
+      cases hk : k == key <;> simp [insertValSorted, List.lookup_cons, hk]
+  | (key, val), (key', val') :: rest, k, hfresh => by
+      have hne : key ≠ key' := by intro h; exact hfresh (by simp [h])
+      have hrest : key ∉ rest.map (·.1) := fun h => hfresh (by simp [h])
+      rw [PathMap.insertValSorted]
+      cases h : Path.lt key key' with
+      | true => cases hk : k == key <;> simp [List.lookup_cons, hk]
+      | false =>
+          simp only [Bool.false_eq_true, if_false, List.lookup_cons,
+            lookup_insertValSorted (key, val) rest k hrest]
+          cases hk : k == key with
+          | false => simp
+          | true =>
+              -- `k` is the inserted key, and `key'` is a different one, so the
+              -- existing head is skipped rather than answering for `k`.
+              have h1 : k = key := by simpa using hk
+              have : (k == key') = false := by simp [h1, hne]
+              simp [this]
+
+
+
+/-- No key bound twice.  Spelled recursively rather than as `List.Nodup ∘ map`,
+because every proof below inducts on the list and this shape is what the
+induction wants.  Implied by `SortedKeys`; see `distinctKeys_of_sortedKeys`. -/
+def DistinctKeys : List (Path × V) → Prop
+  | [] => True
+  | kv :: rest => kv.1 ∉ rest.map (·.1) ∧ DistinctKeys rest
+
+/-- Appending a fresh key to a distinct-keyed list keeps it distinct. -/
+theorem distinctKeys_append_singleton :
+    ∀ (acc : List (Path × V)) (kv : Path × V),
+      DistinctKeys acc → kv.1 ∉ acc.map (·.1) → DistinctKeys (acc ++ [kv])
+  | [], kv, _, _ => ⟨by simp, trivial⟩
+  | kv' :: rest, kv, hacc, hfresh => by
+      refine ⟨?_, distinctKeys_append_singleton rest kv hacc.2 (fun h => hfresh (by simp [h]))⟩
+      intro hm
+      -- the goal arrives with `List.append`, which `map_append` does not match
+      simp only [List.append_eq, List.map_append, List.mem_append,
+        List.map_cons, List.map_nil, List.mem_singleton] at hm
+      rcases hm with hm | hm
+      · exact hacc.1 hm
+      · exact hfresh (by simp [show kv'.1 = kv.1 by simpa using hm])
+
+private theorem distinctKeys_dedupAux :
+    ∀ (l acc : List (Path × V)), DistinctKeys acc →
+      DistinctKeys (l.foldl (fun acc kv => if acc.any (fun x => x.1 == kv.1) then acc else acc ++ [kv]) acc)
+  | [], acc, h => h
+  | kv :: rest, acc, h => by
+      rw [List.foldl_cons]
+      cases hany : acc.any (fun x => x.1 == kv.1) with
+      | true => simpa [hany] using distinctKeys_dedupAux rest acc h
+      | false =>
+          have hfresh : kv.1 ∉ acc.map (·.1) := by
+            intro hm
+            obtain ⟨p, hp, hpe⟩ := List.mem_map.mp hm
+            have : (acc.any (fun x => x.1 == kv.1)) = true :=
+              List.any_eq_true.mpr ⟨p, hp, by simp [hpe]⟩
+            rw [hany] at this; exact Bool.noConfusion this
+          simpa [hany] using
+            distinctKeys_dedupAux rest _ (distinctKeys_append_singleton acc kv h hfresh)
+
+/-- `dedupVals` leaves no key bound twice. -/
+theorem distinctKeys_dedupVals (l : List (Path × V)) : DistinctKeys (dedupVals l) := by
+  rw [PathMap.dedupVals]; exact distinctKeys_dedupAux l [] trivial
+
+/-- The insertion sort moves no lookup either, given distinct keys to start from.
+
+The two hypotheses are what make the *last* insertion win in `insertValSorted`
+agree with the *first* binding won by `lookup`: with distinct keys there is only
+one of each. -/
+private theorem lookup_sortAux (k : Path) :
+    ∀ (ds acc : List (Path × V)), DistinctKeys ds →
+      (∀ x ∈ ds.map (·.1), x ∉ acc.map (·.1)) →
+      (ds.foldl (fun acc kv => insertValSorted kv acc) acc).lookup k
+        = (ds.lookup k).or (acc.lookup k)
+  | [], acc, _, _ => by simp
+  | kv :: rest, acc, hd, hdisj => by
+      have hfresh : kv.1 ∉ acc.map (·.1) := hdisj kv.1 (by simp)
+      have hdisj' : ∀ x ∈ rest.map (·.1), x ∉ (insertValSorted kv acc).map (·.1) := by
+        intro x hx hmem
+        rcases (mem_keys_insertValSorted kv acc x).mp hmem with h | h
+        · exact hd.1 (h ▸ hx)
+        · exact hdisj x (by simp [hx]) h
+      rw [List.foldl_cons, lookup_sortAux k rest _ hd.2 hdisj',
+        lookup_insertValSorted kv acc k hfresh, List.lookup_cons]
+      cases hk : k == kv.1 with
+      | true =>
+          have : rest.lookup k = none :=
+            lookup_eq_none_of_not_mem_keys (by
+              rw [show k = kv.1 by simpa using hk]; exact hd.1)
+          simp [this]
+      | false => simp
+
+/-- **`normVals` preserves every lookup.**  Canonicalisation reorders and
+deduplicates; it does not change what the list holds anywhere. -/
+theorem lookup_normVals (l : List (Path × V)) (k : Path) :
+    (normVals l).lookup k = l.lookup k := by
+  rw [PathMap.normVals, lookup_sortAux k (dedupVals l) [] (distinctKeys_dedupVals l) (by simp)]
+  simp [lookup_dedupVals]
+
+
+/-- `Path.insertSorted` adds the inserted path and keeps the rest. -/
+theorem Path.mem_insertSorted (p : Path) :
+    ∀ (acc : List Path) (x : Path), x ∈ Path.insertSorted p acc ↔ (x = p ∨ x ∈ acc)
+  | [], x => by simp [Path.insertSorted]
+  | q :: qs, x => by
+      rw [Path.insertSorted]
+      cases hpq : p == q with
+      | true =>
+          have hpq' : p = q := by simpa using hpq
+          simp only [if_pos, List.mem_cons]
+          constructor
+          · intro h; exact Or.inr h
+          · intro h
+            rcases h with h | h
+            · exact Or.inl (by rw [h, hpq'])
+            · exact h
+      | false =>
+          cases hlt : Path.lt p q with
+          | true => simp
+          | false =>
+              simp only [Bool.false_eq_true, if_false, List.mem_cons,
+                Path.mem_insertSorted p qs x]
+              constructor
+              · intro h
+                rcases h with h | h | h
+                · exact Or.inr (Or.inl h)
+                · exact Or.inl h
+                · exact Or.inr (Or.inr h)
+              · intro h
+                rcases h with h | h | h
+                · exact Or.inr (Or.inl h)
+                · exact Or.inl h
+                · exact Or.inr (Or.inr h)
+
+private theorem Path.mem_sortAux :
+    ∀ (ps acc : List Path) (x : Path),
+      x ∈ ps.foldl (fun acc p => Path.insertSorted p acc) acc ↔ (x ∈ ps ∨ x ∈ acc)
+  | [], acc, x => by simp
+  | p :: rest, acc, x => by
+      rw [List.foldl_cons, Path.mem_sortAux rest _ x, Path.mem_insertSorted]
+      simp only [List.mem_cons]
+      constructor
+      · intro h
+        rcases h with h | h | h
+        · exact Or.inl (Or.inr h)
+        · exact Or.inl (Or.inl h)
+        · exact Or.inr h
+      · intro h
+        rcases h with (h | h) | h
+        · exact Or.inr (Or.inl h)
+        · exact Or.inl h
+        · exact Or.inr (Or.inr h)
+
+/-- Sorting and deduplicating a path list keeps exactly its members. -/
+theorem Path.mem_sortDedup (ps : List Path) (x : Path) :
+    x ∈ Path.sortDedup ps ↔ x ∈ ps := by
+  rw [Path.sortDedup]
+  simpa using Path.mem_sortAux ps [] x
+
+
+end PTree
+namespace PTree
+open PathMap (normVals)
+variable {V : Type}
+
+theorem sorted_insertSorted (p : Path) :
+    ∀ acc : List Path, acc.Pairwise (fun a b => Path.lt a b = true) →
+      (Path.insertSorted p acc).Pairwise (fun a b => Path.lt a b = true)
+  | [], _ => List.pairwise_singleton _ _
+  | q :: qs, h => by
+      rw [Path.insertSorted]
+      rw [List.pairwise_cons] at h
+      split
+      · exact List.pairwise_cons.mpr h
+      · split
+        · rename_i hlt
+          refine List.pairwise_cons.mpr ⟨?_, List.pairwise_cons.mpr h⟩
+          intro x hx
+          rcases List.mem_cons.mp hx with rfl | hx
+          · exact hlt
+          · exact Path.lt_trans hlt (h.1 x hx)
+        · rename_i hne hlt
+          have hgt : Path.lt q p = true := by
+            rcases Path.lt_total p q with h' | h' | h'
+            · simp [h'] at hlt
+            · subst h'; simp at hne
+            · exact h'
+          refine List.pairwise_cons.mpr ⟨?_, sorted_insertSorted p qs h.2⟩
+          intro x hx
+          rcases (Path.mem_insertSorted p qs x).mp hx with rfl | hx
+          · exact hgt
+          · exact h.1 x hx
+
+theorem sorted_sortDedup (ps : List Path) :
+    (Path.sortDedup ps).Pairwise (fun a b => Path.lt a b = true) := by
+  unfold Path.sortDedup
+  suffices ∀ (l acc : List Path), acc.Pairwise (fun a b => Path.lt a b = true) →
+      (l.foldl (fun acc p => Path.insertSorted p acc) acc).Pairwise (fun a b => Path.lt a b = true) from
+    this ps [] List.Pairwise.nil
+  intro l
+  induction l with
+  | nil => intro acc h; exact h
+  | cons p l ih => intro acc h; exact ih _ (sorted_insertSorted p acc h)
+
+theorem lookup_map_self {β : Type} (f : Path → β) :
+    ∀ (ps : List Path) (k : Path), (ps.map fun p => (p, f p)).lookup k = if k ∈ ps then some (f k) else none
+  | [], k => by simp
+  | p :: ps, k => by
+      rw [List.map_cons, List.lookup_cons, lookup_map_self f ps k]
+      by_cases h : k = p
+      · subst h; simp
+      · have : (k == p) = false := by simp [h]
+        simp [this, h]
+
+theorem mem_prefixes (k p : Path) : k ∈ Path.prefixes p ↔ ∃ s, p = k ++ s := by
+  unfold Path.prefixes
+  rw [List.mem_map]
+  constructor
+  · rintro ⟨n, _, rfl⟩; exact ⟨p.drop n, (List.take_append_drop n p).symm⟩
+  · rintro ⟨s, rfl⟩; exact ⟨k.length, List.mem_range.mpr (by simp; omega), by simp⟩
+
+theorem mem_keys_normVals (vs : List (Path × V)) (k : Path) :
+    k ∈ (normVals vs).map (·.1) ↔ k ∈ vs.map (·.1) := by
+  constructor
+  · intro h
+    exact mem_keys_of_lookup_isSome (by rw [← lookup_normVals]; exact lookup_isSome_of_mem_keys h)
+  · intro h
+    exact mem_keys_of_lookup_isSome (by rw [lookup_normVals]; exact lookup_isSome_of_mem_keys h)
+
+/-- The locations of `mk' vs []`: the root, and every prefix of a key. -/
+theorem mem_mk'_paths (vs : List (Path × V)) (k : Path) :
+    k ∈ Path.sortDedup ((([] : Path) :: (([] : List Path) ++ (normVals vs).map (·.1))).flatMap Path.prefixes) ↔
+      (k = [] ∨ ∃ pv ∈ vs, ∃ s, pv.1 = k ++ s) := by
+  rw [Path.mem_sortDedup, List.mem_flatMap]
+  constructor
+  · rintro ⟨x, hx, hk⟩
+    rw [mem_prefixes] at hk
+    obtain ⟨s, rfl⟩ := hk
+    simp only [List.nil_append, List.mem_cons] at hx
+    rcases hx with hx | hx
+    · left; exact (List.append_eq_nil_iff.mp hx).1
+    · right
+      obtain ⟨pv, hpv, he⟩ := List.mem_map.mp ((mem_keys_normVals vs _).mp hx)
+      exact ⟨pv, hpv, s, he⟩
+  · rintro (rfl | ⟨pv, hpv, s, he⟩)
+    · exact ⟨[], List.mem_cons_self .., (mem_prefixes _ _).mpr ⟨[], rfl⟩⟩
+    · refine ⟨pv.1, ?_, (mem_prefixes _ _).mpr ⟨s, he⟩⟩
+      simp only [List.nil_append, List.mem_cons]
+      exact Or.inr ((mem_keys_normVals vs _).mpr (List.mem_map.mpr ⟨pv, hpv, rfl⟩))
+
+theorem lookup_mk'_of {vs : List (Path × V)} {k : Path} (h : k = [] ∨ ∃ pv ∈ vs, ∃ s, pv.1 = k ++ s) :
+    (PathMap.mk' vs []).entries.lookup k = some (vs.lookup k) := by
+  simp only [PathMap.mk']
+  rw [lookup_map_self, if_pos ((mem_mk'_paths vs k).mpr h), lookup_normVals]
+
+theorem lookup_mk'_of_not {vs : List (Path × V)} {k : Path} (h : ¬ (k = [] ∨ ∃ pv ∈ vs, ∃ s, pv.1 = k ++ s)) :
+    (PathMap.mk' vs []).entries.lookup k = none := by
+  simp only [PathMap.mk']
+  rw [lookup_map_self, if_neg (fun h' => h ((mem_mk'_paths vs k).mp h'))]
+
+theorem sorted_mk' (vs : List (Path × V)) : Sorted (PathMap.mk' vs []).entries := by
+  simp only [PathMap.mk', Sorted]
+  rw [List.pairwise_map]
+  exact sorted_sortDedup _
+
+end PTree
+namespace PTree
+variable {V : Type}
+
+theorem lookup_filterMap_valued : ∀ {l : List (Path × Option V)}, Sorted l → ∀ k,
+    (l.filterMap valued).lookup k = (l.lookup k).bind id
+  | [], _, k => rfl
+  | (p, o) :: l, h, k => by
+      unfold Sorted at h
+      rw [List.pairwise_cons] at h
+      have ih := lookup_filterMap_valued (l := l) h.2 k
+      by_cases hk : k = p
+      · subst hk
+        have hnone : l.lookup k = none := lookup_eq_none_of_all_lt h.1
+        cases o with
+        | none => simp [List.filterMap_cons, valued, ih, hnone]
+        | some x => simp [valued]
+      · have : (k == p) = false := by simp [hk]
+        cases o <;> simp [List.filterMap_cons, valued, List.lookup_cons, this, ih]
+
+theorem mem_blockEnts_cases (L : List (Path × Option V)) :
+    ∀ (e : Path) (kv : Path × Option V), kv ∈ blockEnts e L →
+      (∃ s, s ≠ [] ∧ e = kv.1 ++ s ∧ kv.1 ≠ []) ∨ ∃ u ∈ L, kv = (e ++ u.1, u.2)
+  | [], kv, h => Or.inr ⟨kv, h, by simp⟩
+  | [b], kv, h => by
+      simp only [blockEnts, List.mem_map] at h
+      obtain ⟨u, hu, rfl⟩ := h
+      exact Or.inr ⟨u, hu, rfl⟩
+  | b :: c :: x, kv, h => by
+      simp only [blockEnts, List.mem_cons, List.mem_map] at h
+      rcases h with rfl | ⟨w, hw, rfl⟩
+      · exact Or.inl ⟨c :: x, by simp, by simp, by simp⟩
+      · rcases mem_blockEnts_cases L (c :: x) w hw with ⟨s, hs, he, _⟩ | ⟨u, hu, rfl⟩
+        · exact Or.inl ⟨s, hs, by simp [pre, he], by simp [pre]⟩
+        · exact Or.inr ⟨u, hu, by simp [pre]⟩
+
+theorem mid_mem_blockEnts (L : List (Path × Option V)) :
+    ∀ (e k s : Path), k ≠ [] → s ≠ [] → e = k ++ s → (k, none) ∈ blockEnts e L
+  | [], k, s, hk, _, he => by
+      cases k with
+      | nil => exact absurd rfl hk
+      | cons _ _ => simp at he
+  | [b], k, s, hk, hs, he => by
+      cases k with
+      | nil => exact absurd rfl hk
+      | cons a k => cases k <;> cases s <;> simp_all
+  | b :: c :: x, k, s, hk, hs, he => by
+      rw [blockEnts]
+      cases k with
+      | nil => exact absurd rfl hk
+      | cons a k =>
+        simp only [List.cons_append, List.cons.injEq] at he
+        obtain ⟨rfl, he⟩ := he
+        cases k with
+        | nil => exact List.mem_cons_self ..
+        | cons a' k =>
+          refine List.mem_cons_of_mem _ (List.mem_map.mpr ⟨(a' :: k, none), ?_, rfl⟩)
+          exact mid_mem_blockEnts L (c :: x) (a' :: k) s (by simp) hs he
+
+theorem mem_entsKids_block {kids : List (Path × PTree V)} {k : Path × PTree V} (hk : k ∈ kids)
+    {kv : Path × Option V} (h : kv ∈ blockEnts k.1 (ents k.2)) : kv ∈ entsKids kids := by
+  induction kids with
+  | nil => cases hk
+  | cons k' rest ih =>
+    rw [entsKids, List.mem_append]
+    rcases List.mem_cons.mp hk with rfl | hk
+    · exact Or.inl h
+    · exact Or.inr (ih hk)
+
+theorem entsKids_block {kids : List (Path × PTree V)} {kv : Path × Option V} (h : kv ∈ entsKids kids) :
+    ∃ k ∈ kids, kv ∈ blockEnts k.1 (ents k.2) := by
+  induction kids with
+  | nil => simp [entsKids] at h
+  | cons k rest ih =>
+    rw [entsKids, List.mem_append] at h
+    rcases h with h | h
+    · exact ⟨k, List.mem_cons_self .., h⟩
+    · obtain ⟨k', hk', h'⟩ := ih h; exact ⟨k', List.mem_cons_of_mem _ hk', h'⟩
+
+theorem mem_valsOf_kid {v : Option V} {kids : List (Path × PTree V)} {k : Path × PTree V}
+    (hk : k ∈ kids) {pv : Path × V} (h : pv ∈ valsOf k.2) : preV k.1 pv ∈ valsOf (node v kids) := by
+  rw [valsOf_node]
+  exact List.mem_append_right _ (List.mem_flatMap.mpr ⟨k, hk, List.mem_map.mpr ⟨pv, h, rfl⟩⟩)
+
+theorem exists_valued : ∀ t : PTree V, NoDangling t → ∃ pv, pv ∈ valsOf t := by
+  refine PTree.ind (fun v kids ih hd => ?_)
+  cases hd with
+  | node _ _ hleaf hk =>
+  cases kids with
+  | nil =>
+    obtain ⟨x, rfl⟩ := Option.isSome_iff_exists.mp (hleaf rfl)
+    exact ⟨([], x), by rw [valsOf_node]; simp⟩
+  | cons k rest =>
+    obtain ⟨pv, hpv⟩ := ih k.1 k.2 (List.mem_cons_self ..) (hk k (List.mem_cons_self ..))
+    exact ⟨_, mem_valsOf_kid (List.mem_cons_self ..) hpv⟩
+
+/-- With no dangling leaf, every location but the root leads to a value. -/
+theorem ents_leads : ∀ t : PTree V, NoDangling t →
+    ∀ kv ∈ ents t, kv.1 = [] ∨ ∃ pv ∈ valsOf t, ∃ s, pv.1 = kv.1 ++ s := by
+  refine PTree.ind (fun v kids ih hd => ?_)
+  intro kv hkv
+  rw [ents, List.mem_cons] at hkv
+  rcases hkv with rfl | hkv
+  · exact Or.inl rfl
+  · right
+    have hd' := hd
+    cases hd' with
+    | node _ _ _ hk =>
+    obtain ⟨⟨e, c⟩, hkm, hb⟩ := entsKids_block hkv
+    obtain ⟨pv', hpv'⟩ := exists_valued c (hk _ hkm)
+    rcases mem_blockEnts_cases _ e kv hb with ⟨s, _, he, _⟩ | ⟨u, hu, rfl⟩
+    · exact ⟨_, mem_valsOf_kid hkm hpv', s ++ pv'.1, by simp [preV, he]⟩
+    · rcases ih e c hkm (hk _ hkm) u hu with h0 | ⟨pv, hpv, s, hs⟩
+      · exact ⟨_, mem_valsOf_kid hkm hpv', pv'.1, by simp [preV, h0]⟩
+      · exact ⟨_, mem_valsOf_kid hkm hpv, s, by simp [preV, hs]⟩
+
+/-- The locations of a tree are prefix-closed. -/
+theorem ents_prefix : ∀ t : PTree V,
+    ∀ kv ∈ ents t, ∀ k s, kv.1 = k ++ s → ∃ o, (k, o) ∈ ents t := by
+  refine PTree.ind (fun v kids ih => ?_)
+  intro kv hkv k s hks
+  have root : ∃ o, (([] : Path), o) ∈ ents (node v kids) := ⟨v, by simp [ents]⟩
+  rw [ents, List.mem_cons] at hkv
+  rcases hkv with rfl | hkv
+  · have : k = [] := (List.append_eq_nil_iff.mp hks.symm).1
+    subst this; exact root
+  · obtain ⟨⟨e, c⟩, hkm, hb⟩ := entsKids_block hkv
+    have inK : ∀ kv', kv' ∈ blockEnts e (ents c) → kv' ∈ ents (node v kids) := fun kv' h =>
+      List.mem_cons_of_mem _ (mem_entsKids_block hkm h)
+    have mid : ∀ s', s' ≠ [] → e = k ++ s' → ∃ o, (k, o) ∈ ents (node v kids) := by
+      intro s' hs' he
+      by_cases hk0 : k = []
+      · subst hk0; exact root
+      · exact ⟨none, inK _ (mid_mem_blockEnts _ e k s' hk0 hs' he)⟩
+    rcases mem_blockEnts_cases _ e kv hb with ⟨s', hs', he, _⟩ | ⟨u, hu, rfl⟩
+    · exact mid (s ++ s') (by simp [hs']) (by rw [he, hks]; simp)
+    · simp only at hks
+      rcases List.append_eq_append_iff.mp hks with ⟨a', hk, hu'⟩ | ⟨c', he, hs⟩
+      · obtain ⟨o, ho⟩ := ih e c hkm u hu a' s hu'
+        exact ⟨o, by rw [hk]; exact inK _ (mem_blockEnts_append _ (a', o) ho e)⟩
+      · by_cases hc : c' = []
+        · subst hc
+          simp only [List.append_nil] at he
+          subst he
+          refine ⟨c.val, inK _ ?_⟩
+          have := mem_blockEnts_append (ents c) ([], c.val) (by cases c; simp [ents, val]) e
+          simpa using this
+        · exact mid c' hc he
+
+/-- **(d), corollary.**  With no dangling leaf, flattening a tree is the trie of
+its values (`mk'` of them), so the anamorphism rebuilds `flatten t` exactly. -/
+theorem flatten_eq_mk' {t : PTree V} (ho : Ordered t) (hd : NoDangling t) :
+    t.flatten = PathMap.mk' t.valsOf [] := by
+  have hs := sorted_ents t ho
+  have h := eq_of_sorted_of_lookup hs (sorted_mk' t.valsOf) (fun k => by
+    by_cases hc : k = [] ∨ ∃ pv ∈ t.valsOf, ∃ s, pv.1 = k ++ s
+    · rw [lookup_mk'_of hc, valsOf, lookup_filterMap_valued hs]
+      have hex : ∃ o, (k, o) ∈ ents t := by
+        rcases hc with rfl | ⟨pv, hpv, s, he⟩
+        · obtain ⟨v, kids⟩ := t; exact ⟨v, by simp [ents]⟩
+        · obtain ⟨kv, hkv, hkv'⟩ := List.mem_filterMap.mp hpv
+          obtain ⟨p, o⟩ := kv
+          cases o with
+          | none => simp [valued] at hkv'
+          | some x =>
+            simp [valued] at hkv'
+            subst hkv'
+            exact ents_prefix t _ hkv k s he
+      obtain ⟨o, ho'⟩ := hex
+      cases hl : (ents t).lookup k with
+      | none =>
+        have : ((ents t).lookup k).isSome :=
+          List.lookup_isSome_iff.mpr ⟨(k, o), ho', by simp⟩
+        rw [hl] at this; cases this
+      | some o' => rfl
+    · rw [lookup_mk'_of_not hc]
+      cases hl : (ents t).lookup k with
+      | none => rfl
+      | some o =>
+        exfalso
+        obtain ⟨kv, hkv, hb⟩ := List.lookup_isSome_iff.mp (by rw [hl]; rfl : ((ents t).lookup k).isSome)
+        have hk : k = kv.1 := eq_of_beq hb
+        rcases ents_leads t hd kv hkv with h0 | ⟨pv, hpv, s, he⟩
+        · exact hc (Or.inl (hk.trans h0))
+        · exact hc (Or.inr ⟨pv, hpv, s, by rw [he, hk]⟩))
+  unfold flatten; rw [h]
+
+/-- **(d).**  Deserializing a canonical tree with no dangling leaf by pushing its
+edges rebuilds exactly the trie it denotes. -/
+theorem ana_unfold_flatten {t : PTree V} (ho : Ordered t) (hd : NoDangling t) (n : Nat)
+    (h : t.height ≤ n) : (ana PTree.unfold t n).1 = t.flatten := by
+  rw [ana_unfold t n h, flatten_eq_mk' ho hd]
+
+end PTree
+namespace PTree
+variable {V : Type}
+
+/-- **Every trie the model builds is well-formed**: `mk'` establishes `WF`, so
+(a) applies to every map the fuzzer's model holds. -/
+theorem wf_mk' (vs : List (Path × V)) (ps : List Path) : (PathMap.mk' vs ps).WF := by
+  simp only [PathMap.WF, PathMap.mk', PathMap.paths, List.map_map]
+  have hid : ((fun x : Path × Option V => x.1) ∘ fun p => (p, (PathMap.normVals vs).lookup p)) = id := rfl
+  rw [hid, List.map_id]
+  refine ⟨?_, ?_, ?_⟩
+  · rw [List.pairwise_map]; exact sorted_sortDedup _
+  · intro p r h
+    rw [Path.mem_sortDedup, List.mem_flatMap] at h ⊢
+    obtain ⟨x, hx, hpx⟩ := h
+    obtain ⟨s, rfl⟩ := (mem_prefixes _ _).mp hpx
+    exact ⟨_, hx, (mem_prefixes _ _).mpr ⟨r ++ s, by simp⟩⟩
+  · rw [Path.mem_sortDedup, List.mem_flatMap]
+    exact ⟨[], List.mem_cons_self .., (mem_prefixes _ _).mpr ⟨[], rfl⟩⟩
+
+end PTree
 end PathMapModel
