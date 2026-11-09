@@ -657,8 +657,12 @@ def classify(msg):
     # were written for zipper traces, and their op-name keys can match map ops
     # (`remove_branches_at`, `restrict`, ...).  Only `src:map` entries apply.
     map_src = msg.startswith("src:map\n")
+    # Likewise the util fuzzer (--source util): only `src:util` entries apply.
+    util_src = msg.startswith("src:util\n")
     for keys, note in KNOWN:
         if map_src and "src:map" not in keys:
+            continue
+        if util_src and "src:util" not in keys:
             continue
         if all(k in msg for k in keys):
             return note
