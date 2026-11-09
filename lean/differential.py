@@ -198,6 +198,16 @@ class Child:
 # and message.  See lean/FINDINGS.md for the write-up of each, and
 # `cargo run -p differential --bin zipper_bug_repros -- <case>` for a reproducer.
 KNOWN = [
+    # --source dependent-lazy exists to replay two DependentProductZipperG
+    # entry defects (lean/findings/dependent.md D1, D2) that make what the
+    # zipper presents depend on its history; they surface under any op and
+    # would otherwise be credited to whatever generic entry matches first
+    # (CONTENT-DROPPED, in practice).  The campaign source is `dependent`.
+    (["src:dependent-lazy\n"],
+     "DependentProductZipperG enters a root joint only on a descend (D1) / a "
+     "factor stacked after an empty one only on a later call (D2); reproducers "
+     "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
+     "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
     # Tested first: this one is keyed on a shape, and an ACT val_count-only
     # difference can land on a line whose op name matches an entry below.
     (["ACT-VALCOUNT-ONLY"],

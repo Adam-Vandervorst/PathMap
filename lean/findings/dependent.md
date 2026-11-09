@@ -62,6 +62,10 @@ the crate side.  Standalone: `dependent_repros` → `D1`:
 D1 root joint: (child_count, to_next_val) fresh (0, false), after descend_to([]) (1, true), child_count after reset 0
 ```
 
+`--source dependent-lazy` divergences (D1 and D2 surface under any op) are all
+credited to one KNOWN entry keyed `src:dependent-lazy` `[dependent_lazy_entry]`;
+without it they were credited to the generic CONTENT-DROPPED shape class.
+
 Why a bug: what the zipper presents at one position depends on its history;
 a no-op movement changes `child_count`.  `ProductZipperG` has the same
 `enter_factors`/`reset` structure.
@@ -134,7 +138,7 @@ focus, `len - focus_factor <= 1`), and never failed.
 
 ## Covered / not covered
 
-Answer-checked (`--source dependent`, 128k random inputs over seeds 1–7, one
+Answer-checked (`--source dependent`, 148k random inputs over seeds 1–8, one
 at maxlen 900: 0 unexplained divergences; all known hits are D3): every read,
 movement and iteration op on the product view — `descend_to*`,
 `descend_until(_observed)`, `ascend*`, `ascend_until(_branch)` (`ascend_cond`),
