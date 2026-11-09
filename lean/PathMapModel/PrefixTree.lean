@@ -1213,4 +1213,357 @@ theorem flatten_toLines {T : PathMap V} (hT : T.WF) : (toLines T).flatten = T :=
   cases T; simp only [flatten] at h ⊢; rw [h]
 
 end PathMap
+/-! ## (b): flatten, then serialize -/
+namespace PTree
+variable {V : Type}
+
+theorem kidAt_isSome (kids : List (Path × PTree V)) (b : UInt8) :
+    (kidAt kids b).isSome ↔ b ∈ heads kids := by
+  unfold kidAt heads
+  rw [List.find?_isSome]
+  constructor
+  · rintro ⟨k, hk, h⟩; exact List.mem_map.mpr ⟨k, hk, by simpa using h⟩
+  · intro h; obtain ⟨k, hk, rfl⟩ := List.mem_map.mp h; exact ⟨k, hk, by simp⟩
+
+theorem kidAt_of_mem {kids : List (Path × PTree V)} (hnd : (heads kids).Nodup) {k : Path × PTree V}
+    (hk : k ∈ kids) : kidAt kids (k.1.headD 0) = some k := by
+  induction kids with
+  | nil => cases hk
+  | cons k' rest ih =>
+    simp only [heads, List.map_cons, List.nodup_cons] at hnd
+    unfold kidAt at ih ⊢
+    rcases List.mem_cons.mp hk with rfl | hk
+    · simp
+    · have hne : (k'.1.headD 0 == k.1.headD 0) = false := by
+        have : k'.1.headD 0 ≠ k.1.headD 0 := fun h => hnd.1 (h ▸ List.mem_map.mpr ⟨k, hk, rfl⟩)
+        exact beq_eq_false_iff_ne.mpr this
+      rw [List.find?_cons, hne]
+      exact ih hnd.2 hk
+
+theorem lookup_ents_isSome_nil (c : PTree V) : ((ents c).lookup []).isSome := by
+  cases c; rw [lookup_ents_nil]; rfl
+
+/-- The child below edge `e` of a node is what the node holds below `e`. -/
+theorem lookup_kid {v : Option V} {kids : List (Path × PTree V)} (hne : ∀ k ∈ kids, k.1 ≠ [])
+    (hnd : (heads kids).Nodup) {e : Path} {c : PTree V} (hk : (e, c) ∈ kids) (r : Path) :
+    (ents (node v kids)).lookup (e ++ r) = (ents c).lookup r := by
+  obtain ⟨b, x, rfl⟩ : ∃ b x, e = b :: x := by
+    cases e with
+    | nil => exact absurd rfl (hne _ hk)
+    | cons b x => exact ⟨b, x, rfl⟩
+  have := kidAt_of_mem hnd hk
+  simp only [List.headD_cons] at this
+  rw [List.cons_append, lookup_ents_cons, lookup_entsKids _ hne hnd, this]
+  simp [edgeLook_append]
+
+theorem edgeLook_append_left (g : Path → Option (Option V)) :
+    ∀ (y w p : Path), edgeLook g (y ++ w) (y ++ p) = edgeLook g w p
+  | [], _, _ => rfl
+  | c :: y, w, p => by simp [edgeLook, edgeLook_append_left g y w p]
+
+theorem mem_blockEnts_append (L : List (Path × Option V)) (kv : Path × Option V) (h : kv ∈ L) :
+    ∀ e : Path, (e ++ kv.1, kv.2) ∈ blockEnts e L
+  | [] => h
+  | [b] => List.mem_map.mpr ⟨kv, h, rfl⟩
+  | b :: c :: x => by
+      rw [blockEnts]
+      exact List.mem_cons_of_mem _ (List.mem_map.mpr ⟨_, mem_blockEnts_append L kv h (c :: x), rfl⟩)
+
+theorem mem_entsKids_of_mem {kids : List (Path × PTree V)} {k : Path × PTree V} (hk : k ∈ kids)
+    {kv : Path × Option V} (h : kv ∈ ents k.2) : (k.1 ++ kv.1, kv.2) ∈ entsKids kids := by
+  induction kids with
+  | nil => cases hk
+  | cons k' rest ih =>
+    rw [entsKids, List.mem_append]
+    rcases List.mem_cons.mp hk with rfl | hk
+    · exact Or.inl (mem_blockEnts_append _ kv h _)
+    · exact Or.inr (ih hk)
+
+theorem height_kid {v : Option V} {kids : List (Path × PTree V)} {k : Path × PTree V}
+    (hk : k ∈ kids) : height k.2 + 1 ≤ height (node v kids) := by
+  have : ∀ ks : List (Path × PTree V), k ∈ ks → height k.2 ≤ height.heightKids ks := by
+    intro ks hks
+    induction ks with
+    | nil => cases hks
+    | cons k' rest ih =>
+      rw [height.heightKids]
+      rcases List.mem_cons.mp hks with rfl | h
+      · exact Nat.le_max_left _ _
+      · exact Nat.le_trans (ih h) (Nat.le_max_right _ _)
+  have := this kids hk
+  rw [height]; omega
+
+theorem heightKids_cases : ∀ kids : List (Path × PTree V),
+    height.heightKids kids = 0 ∨ ∃ k ∈ kids, height.heightKids kids = height k.2
+  | [] => Or.inl rfl
+  | (e, c) :: rest => by
+      rw [height.heightKids]
+      rcases heightKids_cases rest with h | ⟨k, hk, h⟩
+      · right; refine ⟨(e, c), List.mem_cons_self .., ?_⟩; rw [h]; simp
+      · right
+        by_cases hm : height c ≤ height.heightKids rest
+        · exact ⟨k, List.mem_cons_of_mem _ hk, by rw [Nat.max_eq_right hm, h]⟩
+        · exact ⟨(e, c), List.mem_cons_self .., by rw [Nat.max_eq_left (by omega)]⟩
+
+/-- Some location is as deep as the tree is high (edges non-empty). -/
+theorem deep_key : ∀ t : PTree V, Ordered t → ∃ kv ∈ ents t, height t ≤ kv.1.length + 1 := by
+  refine PTree.ind (fun v kids ih ho => ?_)
+  cases ho with
+  | node _ _ _ hne hk =>
+    rcases heightKids_cases kids with h | ⟨k, hkm, h⟩
+    · exact ⟨([], v), by simp [ents], by rw [height, h]; simp⟩
+    · obtain ⟨kv, hkv, hd⟩ := ih k.1 k.2 hkm (hk k hkm)
+      refine ⟨(k.1 ++ kv.1, kv.2), ?_, ?_⟩
+      · rw [ents]; exact List.mem_cons_of_mem _ (mem_entsKids_of_mem hkm hkv)
+      · have : k.1.length ≥ 1 := by
+          cases h' : k.1 with
+          | nil => exact absurd h' (hne k hkm)
+          | cons _ _ => simp
+        rw [height, h]; simp; omega
+
+end PTree
+namespace PathMap
+open PTree
+variable {V : Type}
+
+/-- `T` holds below `q` exactly what `P` holds. -/
+def Looks (T : PathMap V) (q : Path) (P : PTree V) : Prop :=
+  ∀ r, T.entries.lookup (q ++ r) = (ents P).lookup r
+
+theorem valAt_of_looks {T : PathMap V} {q : Path} {v : Option V} {kids : List (Path × PTree V)}
+    (h : Looks T q (node v kids)) : T.valAt q = v := by
+  rw [valAt_eq]; have := h []; rw [List.append_nil, lookup_ents_nil] at this; rw [this]; rfl
+
+theorem childMask_of_looks {T : PathMap V} {q : Path} {v : Option V} {kids : List (Path × PTree V)}
+    (h : Looks T q (node v kids)) (hne : ∀ k ∈ kids, k.1 ≠ []) (hp : (heads kids).Pairwise (· < ·)) :
+    T.childMask q = heads kids := by
+  apply eq_of_sorted_of_mem (T.sorted_childMask q) hp
+  intro b
+  rw [T.mem_childMask, h [b], lookup_ents_cons, lookup_entsKids _ hne (nodup_of_sorted hp),
+    ← kidAt_isSome]
+  cases hk : kidAt kids b with
+  | none => simp
+  | some k => simpa using edgeLook_nil_isSome _ (lookup_ents_isSome_nil k.2) _
+
+theorem isFeature_of_looks {T : PathMap V} {q : Path} {v : Option V} {kids : List (Path × PTree V)}
+    (h : Looks T q (node v kids)) (hne : ∀ k ∈ kids, k.1 ≠ []) (hp : (heads kids).Pairwise (· < ·)) :
+    T.isFeature q = (node v kids).isFeat := by
+  simp only [isFeature, childCount, valAt_of_looks h, childMask_of_looks h hne hp, isFeat, heads,
+    List.length_map]
+
+theorem looks_kid {T : PathMap V} {q : Path} {v : Option V} {kids : List (Path × PTree V)}
+    (h : Looks T q (node v kids)) (hne : ∀ k ∈ kids, k.1 ≠ []) (hnd : (heads kids).Nodup)
+    {e : Path} {c : PTree V} (hk : (e, c) ∈ kids) : Looks T (q ++ e) c := by
+  intro r; rw [List.append_assoc, h, lookup_kid hne hnd hk]
+
+theorem height_pos (t : PTree V) : 1 ≤ t.height := by cases t; simp [height]
+
+theorem cata_of_looks (T : PathMap V) (d : PTree V) :
+    ∀ P : PTree V, ByteForm P → ∀ (q : Path) (n : Nat), P.height ≤ n → Looks T q P →
+      T.cata algB d n q = P := by
+  refine PTree.ind (fun v kids ih => ?_)
+  intro hb q n hn hl
+  cases hb with
+  | node _ _ hp hl1 hk =>
+  have hne : ∀ k ∈ kids, k.1 ≠ [] := fun k hk' h => by have := hl1 k hk'; rw [h] at this; cases this
+  obtain ⟨n, rfl⟩ : ∃ m, n = m + 1 := ⟨n - 1, by have := height_pos (node v kids); omega⟩
+  rw [cata_succ, algB, zipWith_map_self, valAt_of_looks hl, childMask_of_looks hl hne hp]
+  congr 1
+  rw [heads, List.map_map]
+  conv => rhs; rw [← List.map_id kids]
+  apply List.map_congr_left
+  rintro ⟨e, c⟩ hkm
+  obtain ⟨b, rfl⟩ : ∃ b, e = [b] := by
+    have := hl1 _ hkm
+    match e, this with
+    | [b], _ => exact ⟨b, rfl⟩
+  simp only [Function.comp, List.headD_cons, id]
+  rw [ih [b] c hkm (hk _ hkm) (q ++ [b]) n (by have := height_kid (v := v) hkm; simp at this; omega)
+    (looks_kid hl hne (nodup_of_sorted hp) hkm)]
+
+theorem height_le_fuel {P : PTree V} (h : Ordered P) : P.height ≤ P.flatten.fuel := by
+  obtain ⟨kv, hkv, hd⟩ := deep_key P h
+  have := lt_fuel (T := P.flatten) (r := kv.1) (List.mem_map.mpr ⟨kv, hkv, rfl⟩)
+  omega
+
+/-- **(b), byte level.**  Flattening a byte-form tree and serializing the trie
+gives the tree back.  With (a): byte-form trees and well-formed tries are in
+bijection. -/
+theorem toBytes_flatten {P : PTree V} (h : ByteForm P) : toBytes P.flatten = P :=
+  cata_of_looks _ _ P h [] _ (height_le_fuel h.ordered) (fun _ => rfl)
+
+end PathMap
+namespace PTree
+variable {V : Type}
+
+theorem LineForm.ordered : ∀ {t : PTree V}, LineForm t → Ordered t := by
+  intro t
+  induction t using PTree.ind with
+  | h v kids ih =>
+    intro hl
+    cases hl with
+    | node _ _ hp hf hk =>
+      exact .node v kids hp (fun k hk' => (hf k hk').1) (fun k hk' => ih k.1 k.2 hk' (hk k hk'))
+
+end PTree
+
+namespace PathMap
+open PTree
+variable {V : Type}
+
+/-- `follow` walks a line: valueless one-child locations up to a feature. -/
+theorem follow_line (T : PathMap V) : ∀ (x r : Path) (N : Nat), x.length ≤ N →
+    (∀ y c z, x = y ++ c :: z → T.isFeature (r ++ y) = false ∧ T.childMask (r ++ y) = [c]) →
+    T.isFeature (r ++ x) = true → T.follow N r = r ++ x
+  | [], r, N, _, _, hf => by
+      simp only [List.append_nil] at hf ⊢
+      cases N with
+      | zero => rfl
+      | succ N => rw [follow_succ, if_pos hf]
+  | c :: z, r, N, hN, hch, hf => by
+      obtain ⟨M, rfl⟩ : ∃ M, N = M + 1 := ⟨N - 1, by simp at hN; omega⟩
+      obtain ⟨h1, h2⟩ := hch [] c z rfl
+      simp only [List.append_nil] at h1 h2
+      rw [follow_succ, if_neg (by simp [h1]), h2]
+      simp only
+      have := follow_line T z (r ++ [c]) M (by simp at hN; omega)
+        (fun y c' z' hy => by
+          have := hch (c :: y) c' z' (by simp [hy])
+          simpa using this)
+        (by simpa using hf)
+      rw [this]; simp
+
+/-- Below the first byte of a kid's edge, a node holds the edge's rest and then the kid. -/
+theorem lookup_looks_edge {T : PathMap V} {q : Path} {v : Option V} {kids : List (Path × PTree V)}
+    (h : Looks T q (node v kids)) (hne : ∀ k ∈ kids, k.1 ≠ []) (hnd : (heads kids).Nodup)
+    {b : UInt8} {x : Path} {c : PTree V} (hk : (b :: x, c) ∈ kids) (p : Path) :
+    T.entries.lookup (q ++ b :: p) = edgeLook (fun s => (ents c).lookup s) x p := by
+  have := kidAt_of_mem hnd hk
+  simp only [List.headD_cons] at this
+  rw [h, lookup_ents_cons, lookup_entsKids _ hne hnd, this]; rfl
+
+theorem single_of_mem {l : List UInt8} {c : UInt8} (hp : l.Pairwise (· < ·)) (h : ∀ b, b ∈ l ↔ b = c) :
+    l = [c] :=
+  eq_of_sorted_of_mem hp (List.pairwise_singleton _ _) (fun b => by rw [h]; simp)
+
+/-- A kid's edge is the line `follow` walks from its first byte. -/
+theorem follow_kid {T : PathMap V} {q : Path} {v : Option V} {kids : List (Path × PTree V)}
+    (h : Looks T q (node v kids)) (hl : LineForm (node v kids))
+    {b : UInt8} {x : Path} {c : PTree V} (hk : (b :: x, c) ∈ kids) (N : Nat) (hN : x.length ≤ N) :
+    T.follow N (q ++ [b]) = q ++ b :: x := by
+  cases hl with
+  | node _ _ hp hf hks =>
+  have hne : ∀ k ∈ kids, k.1 ≠ [] := fun k hk' => (hf k hk').1
+  have hnd := nodup_of_sorted hp
+  have hedge := lookup_looks_edge h hne hnd hk
+  rw [follow_line T x (q ++ [b]) N hN]
+  · simp
+  · intro y c' z hx
+    subst hx
+    have hloc : ∀ s, T.entries.lookup (q ++ [b] ++ y ++ s) =
+        edgeLook (fun s => (ents c).lookup s) (c' :: z) s := by
+      intro s
+      have := hedge (y ++ s)
+      rw [edgeLook_append_left] at this
+      simpa using this
+    have hv : T.valAt (q ++ [b] ++ y) = none := by
+      rw [valAt_eq]; have := hloc []; rw [List.append_nil] at this; rw [this]; rfl
+    have hm : T.childMask (q ++ [b] ++ y) = [c'] := by
+      apply single_of_mem (T.sorted_childMask _)
+      intro b''
+      rw [T.mem_childMask, hloc [b'']]
+      simp only [edgeLook]
+      by_cases hb : b'' = c'
+      · subst hb
+        simpa using edgeLook_nil_isSome _ (lookup_ents_isSome_nil c) z
+      · simp [hb]
+    have e : q ++ [b] ++ y = q ++ b :: y := by simp
+    rw [e] at hv hm ⊢
+    refine ⟨?_, hm⟩
+    simp [isFeature, hv, childCount, hm]
+  · obtain ⟨v', kids'⟩ := c
+    cases hks _ hk with
+    | node _ _ hp' hf' _ =>
+    have hlc : Looks T (q ++ (b :: x)) (node v' kids') := looks_kid h hne hnd hk
+    have := isFeature_of_looks hlc (fun k hk' => (hf' k hk').1) hp'
+    simp only [List.append_assoc, List.singleton_append] at this ⊢
+    rw [this]; exact (hf _ hk).2
+
+theorem cataJ_of_looks (T : PathMap V) (d : Path × PTree V) :
+    ∀ P : PTree V, LineForm P → ∀ (q sub : Path) (n : Nat), P.height ≤ n → Looks T q P →
+      T.cataJ algL d n q sub = (sub, P) := by
+  refine PTree.ind (fun v kids ih => ?_)
+  intro hlf q sub n hn hl
+  have hlf' := hlf
+  cases hlf with
+  | node _ _ hp hf hk =>
+  have hne : ∀ k ∈ kids, k.1 ≠ [] := fun k hk' => (hf k hk').1
+  obtain ⟨n, rfl⟩ : ∃ m, n = m + 1 := ⟨n - 1, by have := height_pos (node v kids); omega⟩
+  rw [cataJ_lines, valAt_of_looks hl, childMask_of_looks hl hne hp]
+  congr 2
+  rw [heads, List.map_map]
+  conv => rhs; rw [← List.map_id kids]
+  apply List.map_congr_left
+  rintro ⟨e, c⟩ hkm
+  obtain ⟨b, x, rfl⟩ : ∃ b x, e = b :: x := by
+    cases e with
+    | nil => exact absurd rfl (hne _ hkm)
+    | cons b x => exact ⟨b, x, rfl⟩
+  simp only [Function.comp, List.headD_cons, id]
+  have hlc := looks_kid hl hne (nodup_of_sorted hp) hkm
+  have hex : (T.entries.lookup (q ++ (b :: x))).isSome := by
+    have := hlc []; rw [List.append_nil] at this; rw [this]; exact lookup_ents_isSome_nil c
+  have hfuel := lt_fuel ((T.mem_paths _).mpr hex)
+  rw [follow_kid hl hlf' hkm T.fuel (by simp at hfuel; omega)]
+  have hdrop : (q ++ b :: x).drop (q.length + 1) = x := by
+    rw [show q ++ b :: x = (q ++ [b]) ++ x by simp, List.drop_append_of_le_length (by simp)]; simp
+  rw [hdrop, ih (b :: x) c hkm (hk _ hkm) (q ++ b :: x) x n
+    (by have := height_kid (v := v) hkm; simp at this; omega) hlc]
+
+/-- **(b), line level.**  Flattening a line-form tree and serializing the trie
+gives the tree back.  With (a): line-form trees and well-formed tries are in
+bijection. -/
+theorem toLines_flatten {P : PTree V} (h : LineForm P) : toLines P.flatten = P := by
+  have hl : Looks P.flatten [] P := fun _ => rfl
+  have hh := height_le_fuel h.ordered
+  rw [toLines_eq]
+  obtain ⟨v, kids⟩ := P
+  have h' := h
+  cases h' with
+  | node _ _ hp hf hk =>
+  have hne : ∀ k ∈ kids, k.1 ≠ [] := fun k hk' => (hf k hk').1
+  have hfeat := isFeature_of_looks hl hne hp
+  obtain ⟨k, hk2⟩ := fuel_succ (node v kids).flatten
+  by_cases hft : (node v kids).isFeat = true
+  · have hf0 : (node v kids).flatten.follow (node v kids).flatten.fuel [] = [] := by
+      rw [hk2, follow_succ, if_pos (by rw [hfeat]; exact hft)]
+    rw [hf0, cataJ_of_looks _ _ _ h [] [] _ hh hl]; rfl
+  · simp only [isFeat, Bool.or_eq_true, Option.isSome_iff_ne_none, bne_iff_ne, ne_eq,
+      Decidable.not_not, not_or] at hft
+    obtain ⟨hv, hlen⟩ := hft
+    subst hv
+    obtain ⟨⟨e, c⟩, rfl⟩ : ∃ kc, kids = [kc] := by
+      match kids, hlen with
+      | [kc], _ => exact ⟨kc, rfl⟩
+    obtain ⟨b, x, rfl⟩ : ∃ b x, e = b :: x := by
+      cases e with
+      | nil => exact absurd rfl (hne _ (List.mem_singleton_self _))
+      | cons b x => exact ⟨b, x, rfl⟩
+    have hm : (node none [(b :: x, c)]).flatten.childMask [] = [b] := by
+      rw [childMask_of_looks hl hne hp]; rfl
+    have hlc := looks_kid hl hne (nodup_of_sorted hp) (List.mem_singleton_self _)
+    have hex : ((node none [(b :: x, c)]).flatten.entries.lookup (b :: x)).isSome := by
+      have := hlc []; rw [List.append_nil, List.nil_append] at this; rw [this]; exact lookup_ents_isSome_nil c
+    have hfuel := lt_fuel (((node none [(b :: x, c)]).flatten.mem_paths _).mpr hex)
+    have hf0 : (node none [(b :: x, c)]).flatten.follow (node none [(b :: x, c)]).flatten.fuel [] = b :: x := by
+      rw [hk2, follow_succ, if_neg (by rw [hfeat]; simp [isFeat]), hm]
+      simp only
+      have := follow_kid hl h (List.mem_singleton_self _) (k + 1) (by simp at hfuel; omega)
+      simpa using this
+    rw [hf0, cataJ_of_looks _ _ c (hk _ (List.mem_singleton_self _)) (b :: x) (b :: x) _
+      (by have := height_kid (v := (none : Option V)) (List.mem_singleton_self (b :: x, c)); simp only at this; omega)
+      (by simpa using hlc)]
+    rfl
+
+end PathMap
 end PathMapModel
