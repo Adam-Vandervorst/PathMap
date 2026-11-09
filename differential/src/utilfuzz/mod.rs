@@ -12,6 +12,8 @@
 
 use core::fmt::Write as _;
 
+use pathmap::ring::AlgebraicResult;
+
 use crate::harness::*;
 
 pub mod mask;
@@ -35,6 +37,16 @@ pub fn mask_bytes(d: &mut Dec) -> Option<Vec<u8>> {
         v.push(d.u8()?);
     }
     Some(v)
+}
+
+/// Render an `AlgebraicResult`: `None`, `Identity(<mask, decimal>)` or
+/// `Element(<show v>)`.  `showAlgResult` in `UtilFuzz/Base.lean`.
+pub fn show_alg_result<V>(r: &AlgebraicResult<V>, show: impl Fn(&V) -> String) -> String {
+    match r {
+        AlgebraicResult::None => "None".to_string(),
+        AlgebraicResult::Identity(mask) => format!("Identity({mask})"),
+        AlgebraicResult::Element(v) => format!("Element({})", show(v)),
+    }
 }
 
 pub fn run(bytes: &[u8], _check: bool) -> String {

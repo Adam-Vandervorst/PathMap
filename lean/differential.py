@@ -425,6 +425,12 @@ KNOWN = [
      "node layout differs (a dangling path at a valued key, structure left by a "
      "removal); reproducers lean/corpus/map-join_into-status-*.bin "
      "[map_join_into_layout_status]"),
+    # Util fuzzer (--source util), u-mask group; lean/findings/u-mask.md.
+    # `ret=x ` is op 20's tag for a RangeInclusive iterated to its end.
+    (["src:util\n", "bm_incl_range ret=x "],
+     "ByteMask::set_/clear_/toggle_inclusive_bit_range read start()/end() of "
+     "an exhausted (empty) RangeInclusive and act on bit `end` "
+     "[u-mask M2: incl_range_exhausted]"),
     # DependentProductZipperG (--source dependent / dependent-lazy):
     # lean/findings/dependent.md.
     # Keyed on `ret=`, not READ-SIDE: a divergence in `ret` alone is tagged

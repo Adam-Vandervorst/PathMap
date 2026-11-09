@@ -19,6 +19,7 @@ is and is not covered. This page is the index.
 | [map-morph.md](map-morph.md) | catamorphisms, anamorphisms, `ZipperHead` sessions and conflicts | `map` ops 50–60 |
 | [ptree.md](ptree.md) | catamorphisms serialize into prefix trees, anamorphisms deserialize them (byte and line level, proved in `PrefixTree.lean`); `SplitCata(Jumping)` | `map` ops 57–59 |
 | [ctors.md](ctors.md) | alternative constructors (`PathTracker::new`, `EmptyZipper::new`, `ProductZipper::new_with_primary`, ...), and the round-2 list of uncalled functions | `tracker`, `empty-new`, `product`, `diff-product`, `owned`, `map` ops 1, 17, 18, 48, 55, 60 |
+| [u-mask.md](u-mask.md) | `ByteMask`, `BitMask` for `ByteMask` and `[u64; 4]`, their `Lattice` impls, iterators, formatters, the rest of `utils/mod.rs` | `util` ops 0–28 |
 
 Plus the `tracker` source (`PathTracker`), written as the template.
 
@@ -69,6 +70,9 @@ wrong answers by component, imprecise status, debug-only): [BUGS.md](BUGS.md).
 | 36 | `remove_unmasked_branches(prune=true)` at a missing focus prunes a dangling parent left by an empty `graft_masked_branches` (O3, family of 1) | ops |
 | 37 | `TrieBuilder::graft_at_byte` panics when the zipper's focus is an existing leaf (PT1) | ptree |
 | 38 | `SplitCata(Jumping)` debug-asserts a childless valueless location is the root; dangling leaves trip it (PT2, debug only) | ptree |
+| 39 | `Lattice::join_all` (trait default) over all-empty byte masks answers `Identity` or `None` by the parity of the argument count (allowed by the contract; recorded) (M1) | u-mask, `skip:join-all-empty` |
+| 40 | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` act on bit `end` of an exhausted (empty) `RangeInclusive` (M2) | u-mask |
+| 41 | `ByteMask::*_inclusive_bit_range` `debug_assert` on an empty `a..=b` with `a > b` (M3, debug only) | u-mask |
 
 Also a doc/code mismatch: `path_indices().len()` is `focus_factor() + 1` at a
 joint (dependent D4, product P6). There is also a debug-only assertion in

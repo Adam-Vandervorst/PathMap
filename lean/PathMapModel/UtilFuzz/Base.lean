@@ -46,5 +46,27 @@ def maskBytes (d : Dec) : Option (List UInt8 × Dec) := do
         some (b :: rest, d)
   go n d
 
+/-- `pathmap::ring::AlgebraicResult<V>` with its identity mask as a number (bit
+`i` = "the result is argument `i`"; for a binary op `1` is `SELF_IDENT`, `2` is
+`COUNTER_IDENT`).  `ValRes` in `Basic.lean` spells the mask as two flags, which
+cannot express an n-ary result such as `join_all`'s; `ofValRes` converts. -/
+inductive AlgResult (V : Type) where
+  | none
+  | identity (mask : Nat)
+  | element (v : V)
+deriving BEq, Repr
+
+def AlgResult.ofValRes {V : Type} : ValRes V → AlgResult V
+  | .elem v => .element v
+  | .identity s c => .identity ((if s then 1 else 0) + (if c then 2 else 0))
+  | .none => .none
+
+/-- Render an `AlgebraicResult`: `None`, `Identity(<mask, decimal>)`,
+`Element(<showV v>)`.  `show_alg_result` in `differential/src/utilfuzz/mod.rs`. -/
+def showAlgResult {V : Type} (showV : V → String) : AlgResult V → String
+  | .none => "None"
+  | .identity m => s!"Identity({m})"
+  | .element v => s!"Element({showV v})"
+
 end UtilFuzz
 end PathMapModel

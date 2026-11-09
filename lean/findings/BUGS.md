@@ -69,6 +69,7 @@ that node is there.
 | 30 | `write_trie` from a zipper below the map root drops path bytes (treats the absolute `origin_path` as relative; `MAX_PATH_LEN` counts the prefix) | 26 | map-serial |
 | 31 | `write_trie` rolls back a duplicate last record without truncating the file; `deserialize_file` then rejects it | 27 | map-serial |
 | 32 | `Debug for PathMap` omits the root value (a map holding only a root value prints `{}`) | 23 | map-core |
+| 32a | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` read `start()`/`end()` of a `RangeInclusive` iterated to its end (empty; std calls the bounds unspecified) and act on bit `end`; `ByteMask::from` of the same range is correctly empty | 40 | u-mask |
 
 ## Imprecise `AlgebraicStatus` (contents correct)
 
@@ -76,6 +77,7 @@ that node is there.
 |---|---|---|---|
 | 33 | `PathMap::pjoin` / `psubtract` / `join_all` report `Element` when the result equals `self` | 22 | map-core |
 | 34 | `PathMap::join_into` / `ZipperWriting::join_into` / `join_into_take` report `Element` for an unchanged map whose source has a different node layout (possibly allowed by the docs; recorded, not accepted) | 24 | map-core, ops |
+| 34a | `Lattice::join_all` (trait default) over all-empty arguments answers `Identity(1 << (n-1))` for odd `n`, `None` for even (`ByteMask`, `[u64; 4]`, any type using the default); the contract allows both, `None` "should" win | 39 | u-mask |
 
 ## Debug builds only
 
@@ -83,6 +85,7 @@ that node is there.
 |---|---|---|---|
 | 35 | `SplitCata` / `SplitCataJumping` assert a childless valueless location is the root; a dangling leaf trips it | 38 | ptree |
 | 36 | `deserialize_file` asserts `!path_node.is_empty()` on a `write_trie` file containing a dangling path (release drops it, matching the model) | (map-serial 5) | map-serial |
+| 36a | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` `debug_assert!(start <= end)` on an empty `a..=b` (`a > b`); release correctly does nothing, and `from_range` documents `start >= end` as empty | 41 | u-mask |
 
 36 entries: 35 defects and one doc mismatch, from the 38 numbered index rows
 plus 2 notes, with 4 duplicate pairs merged (4/7, 5/8, 6/9, 17/35).  Bug 24's

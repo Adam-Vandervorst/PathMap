@@ -470,6 +470,7 @@ skips diverges:
 | `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
 | `skip:k-path-borrowed` | op 80 `k_path_overrun` at the root of a `--source head` read zipper, which may come from `read_zipper_at_borrowed_path`: a cold `to_next_k_path` there underflows `path_len()` (known `to_next_k_path_borrowed`) and corrupts later iteration (findings/ops.md). |
 | `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
+| `skip:join-all-empty` | util op 25 (`--source util`): `Lattice::join_all` on byte masks when every argument is empty and the crate answers `None` or an in-range `Identity` -- both allowed by `AlgebraicResult`'s contract; the crate picks by argument-count parity (findings/u-mask.md M1).  Defined in `utilfuzz/mask.rs` / `UtilFuzz/Mask.lean`, not the harness vocabulary. |
 
 Naming these turned up an ordering bug the bare token had hidden: for
 `restricting` the model tested ACT mode first and the harness tested the empty
