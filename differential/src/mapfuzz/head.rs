@@ -19,6 +19,18 @@ pub const SKIP_UNCHECKED_CONFLICT: &str = "skip:unchecked-conflict";
 /// writer's (absent in release) tracker and panics.  See lean/findings/map-morph.md.
 pub const SKIP_UNCHECKED_INTO_READ: &str = "skip:unchecked-into-read";
 
+/// Skip token: a reader opened from a head whose root path does not exist
+/// creates that path (it should create nothing; `zipper_headf` says so for the
+/// map root).  The stray dangling path would contaminate everything after, so
+/// such opens are skipped.  See lean/findings/map-morph.md.
+pub const SKIP_HEAD_ROOT_ABSENT: &str = "skip:head-root-absent";
+
+/// Skip token: `cleanup_write_zipper` on a head made from a write zipper whose
+/// focus is below its root.  It resolves the child's path against the parent's
+/// *root* rather than its focus (where the child was created), prunes or panics
+/// there, and resets the parent.  See lean/findings/map-morph.md.
+pub const SKIP_CLEANUP_OFF_ROOT: &str = "skip:cleanup-off-root";
+
 /// Slots per session; `slotCap` in `Head.lean`.
 const SLOTS: usize = 8;
 
@@ -77,13 +89,30 @@ fn show_conflict(msg: &str, path: &[u8]) -> String {
     format!("C:{with}@{}", hex_path(path))
 }
 
+/// The slot a step names: byte `k` picks among the live slots (live writers,
+/// for a writer-only step) in slot order; with none, slot 0, which the step then
+/// finds empty or of the wrong kind.  `pick` in `Head.lean`.
+fn pick(slots: &[Option<Slot>], k: u8, writers: bool) -> usize {
+    let live: Vec<usize> = (0..slots.len())
+        .filter(|&i| matches!(&slots[i], Some(s) if !writers || matches!(s.z, Zp::W(_))))
+        .collect();
+    if live.is_empty() { 0 } else { live[k as usize % live.len()] }
+}
+
 fn free_slot(slots: &[Option<Slot>]) -> Option<usize> {
     slots.iter().position(|s| s.is_none())
 }
 
 /// Run one session's steps on `head`.  `depth` 0 may nest one more session
 /// in a writer's `zipper_head`.
-fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) -> Option<String> {
+///
+/// `base_exists`: whether the head's root path exists in the map.  It starts as
+/// the caller found it and becomes true when a writer is opened (which creates
+/// its path, and so the root's); nothing in a session can remove the root.
+///
+/// `cleanup_ok`: false for a head taken from a write zipper whose focus is not
+/// its root, where `cleanup_write_zipper` is skipped (`SKIP_CLEANUP_OFF_ROOT`).
+fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize, mut base_exists: bool, cleanup_ok: bool) -> Option<String> {
     let n = d.modn(if depth == 0 { 10 } else { 6 })?;
     let arena = Arena(RefCell::new(vec![]));
     let mut slots: Vec<Option<Slot>> = (0..SLOTS).map(|_| None).collect();
@@ -99,7 +128,9 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                     _ => (d.boolean()?, true),
                 };
                 let p = d.path(5)?;
-                if unchecked_clash(&slots, &p, writer, unchecked) {
+                if !writer && !base_exists {
+                    SKIP_HEAD_ROOT_ABSENT.to_string()
+                } else if unchecked_clash(&slots, &p, writer, unchecked) {
                     SKIP_UNCHECKED_CONFLICT.to_string()
                 } else if let Some(ix) = free_slot(&slots) {
                     let z: Result<Zp, _> = match kind {
@@ -121,6 +152,7 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                     };
                     match z {
                         Ok(z) => {
+                            base_exists |= writer;
                             slots[ix] = Some(Slot { z, path: p, unchecked });
                             format!("o{ix}")
                         }
@@ -131,11 +163,11 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                 }
             }
             5 => {
-                let k = d.modn(SLOTS)?;
+                let k = pick(&slots, d.u8()?, false);
                 if slots[k].take().is_some() { "d".to_string() } else { "-".to_string() }
             }
             6 => {
-                let (k, sub, rel, v) = (d.modn(SLOTS)?, d.modn(4)?, d.path(3)?, val(d)?);
+                let (k, sub, rel, v) = (pick(&slots, d.u8()?, true), d.modn(4)?, d.path(3)?, val(d)?);
                 match &mut slots[k] {
                     Some(Slot { z: Zp::W(w), .. }) => {
                         w.reset();
@@ -152,7 +184,7 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                 }
             }
             7 => {
-                let k = d.modn(SLOTS)?;
+                let k = pick(&slots, d.u8()?, false);
                 match &mut slots[k] {
                     Some(Slot { z: Zp::R(z), .. }) => {
                         z.reset();
@@ -166,8 +198,12 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                 }
             }
             8 => {
-                let k = d.modn(SLOTS)?;
+                let k = pick(&slots, d.u8()?, true);
                 match slots[k].take() {
+                    Some(s @ Slot { z: Zp::W(_), .. }) if !cleanup_ok => {
+                        slots[k] = Some(s);
+                        SKIP_CLEANUP_OFF_ROOT.to_string()
+                    }
                     Some(Slot { z: Zp::W(w), .. }) => {
                         head.cleanup_write_zipper(w);
                         "cl".to_string()
@@ -179,7 +215,7 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                 }
             }
             9 => {
-                let k = d.modn(SLOTS)?;
+                let k = pick(&slots, d.u8()?, false);
                 match slots[k].take() {
                     Some(Slot { z: Zp::W(w), path, unchecked: false }) => {
                         slots[k] = Some(Slot { z: Zp::R(w.into_read_zipper()), path, unchecked: false });
@@ -204,11 +240,13 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                 }
             }
             10 => {
-                let k = d.modn(SLOTS)?;
+                let k = pick(&slots, d.u8()?, true);
                 match &mut slots[k] {
                     Some(Slot { z: Zp::W(w), .. }) if depth == 0 => {
+                        let exists = w.path_exists();
+                        let at_root = w.path().is_empty();
                         let sub = w.zipper_head();
-                        let r = session(&sub, d, depth + 1)?;
+                        let r = session(&sub, d, depth + 1, exists, at_root)?;
                         drop(sub);
                         format!("[{r}]")
                     }
@@ -216,7 +254,7 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
                 }
             }
             _ => {
-                let k = d.modn(SLOTS)?;
+                let k = pick(&slots, d.u8()?, true);
                 match slots[k].take() {
                     Some(Slot { z: Zp::W(w), .. }) => {
                         buffer = Some(w.into_zipper_buffer());
@@ -237,6 +275,38 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize) 
     Some(out.join(" "))
 }
 
+/// Rebuild `t` from scratch, location by location (`set_val_at` for a value,
+/// `create_path` for a dangling leaf).  The identity on the trie's meaning, so
+/// the model does nothing here.  A session leaves representation behind that
+/// later ops mishandle, each a separate finding in lean/findings/map-morph.md:
+/// a writer dropped without `cleanup_write_zipper` leaves an empty
+/// `CellByteNode` stump that `remove` *below* it prunes
+/// (`head_stump_pruned_by_remove_below`), and a reader opened from a head whose
+/// root is a leaf leaves an empty node there that keeps `remove(root)` from
+/// pruning (`head_reader_empty_node_blocks_prune`).  Left in place, they would
+/// surface in every later op that touches the map.
+fn rebuild(t: &mut PathMap<u64>) {
+    let mut fresh = PathMap::<u64>::new();
+    {
+        let mut z = t.read_zipper();
+        if let Some(v) = z.val() {
+            fresh.set_val_at([], *v);
+        }
+        while z.to_next_step() {
+            match z.val() {
+                Some(v) => {
+                    fresh.set_val_at(z.path(), *v);
+                }
+                None if z.child_count() == 0 => {
+                    fresh.create_path(z.path());
+                }
+                None => {}
+            }
+        }
+    }
+    *t = fresh;
+}
+
 pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
     Some(match op {
         60 => {
@@ -245,12 +315,13 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             let ret = match mode {
                 0 => {
                     let zh = t.zipper_head();
-                    format!("m0 {}", session(&zh, d, 0)?)
+                    format!("m0 {}", session(&zh, d, 0, true, true)?)
                 }
                 1 => {
                     let base = d.path(4)?;
+                    let exists = t.read_zipper_at_path(&base).path_exists();
                     let zh = t.into_zipper_head(&base);
-                    let r = session(&zh, d, 0);
+                    let r = session(&zh, d, 0, exists, true);
                     t = zh.into_map();
                     format!("m1 {}", r?)
                 }
@@ -258,8 +329,9 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
                     let (r, f, post) = (d.path(3)?, d.path(3)?, d.u8()?);
                     let mut wz = t.write_zipper_at_path(&r);
                     wz.descend_to(&f);
+                    let exists = wz.path_exists();
                     let zh = wz.zipper_head();
-                    let res = session(&zh, d, 0)?;
+                    let res = session(&zh, d, 0, exists, f.is_empty())?;
                     drop(zh);
                     let post_r = if post % 2 == 1 {
                         wz.descend_to_byte((post >> 1) % 4);
@@ -270,6 +342,7 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
                     format!("m2 {res} post={post_r}")
                 }
             };
+            rebuild(&mut t);
             st.maps[i] = t;
             ("head", ret)
         }
