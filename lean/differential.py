@@ -218,9 +218,12 @@ KNOWN = [
      "PrefixZipper::make_map() at a focus that has left the prefix returns the "
      "whole source trie instead of an empty map "
      "[prefix: make_map_off_prefix, lean/findings/prefix.md]"),
-    # join_map_into reads the read zipper's make_map(); the read focus not
-    # existing (` e0 v- c0 n0` in the R= fingerprint) is the off-prefix case.
-    (["src:prefix", "join_map_into", "R=", " e0 v- c0 n0 f"],
+    # join_map_into reads the read zipper's make_map().  Off the prefix the
+    # crate joins in the whole source (more locations than the model: only
+    # reaches the first divergence when the source holds no values, else the
+    # val_count entry above fires first); inside the prefix over an empty
+    # source it joins in nothing (fewer).
+    (["src:prefix", "join_map_into", "WRITE-SIDE", "DANGLING-KEPT"],
      "PrefixZipper::make_map() at a focus that has left the prefix returns the "
      "whole source trie, which join_map_into() then joins "
      "[prefix: make_map_off_prefix, lean/findings/prefix.md]"),
