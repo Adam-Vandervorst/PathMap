@@ -70,6 +70,8 @@ that node is there.
 | 31 | `write_trie` rolls back a duplicate last record without truncating the file; `deserialize_file` then rejects it | 27 | map-serial |
 | 32 | `Debug for PathMap` omits the root value (a map holding only a root value prints `{}`) | 23 | map-core |
 | 32a | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` read `start()`/`end()` of a `RangeInclusive` iterated to its end (empty; std calls the bounds unspecified) and act on bit `end`; `ByteMask::from` of the same range is correctly empty | 40 | u-mask |
+| 32b | `SetLattice` `pmeet` (`HashMap`, `HashSet`, the `set_lattice!` macro) passes each shared key's values to the value `pmeet` swapped when `self` is not the smaller map; with the integers' left-biased meet the answer's value comes from `other` or `self` depending on which map has more keys | 42 | u-lattice |
+| 32c | `AlgebraicResult::merge`: a `None` field next to an `Identity(mask)` field is turned into `Identity(mask)` after checking only argument 0's field, unsound for meet composites (latent; not reachable through the crate's callers) | 43 | u-lattice |
 
 ## Imprecise `AlgebraicStatus` (contents correct)
 
@@ -86,6 +88,12 @@ that node is there.
 | 35 | `SplitCata` / `SplitCataJumping` assert a childless valueless location is the root; a dangling leaf trips it | 38 | ptree |
 | 36 | `deserialize_file` asserts `!path_node.is_empty()` on a `write_trie` file containing a dangling path (release drops it, matching the model) | (map-serial 5) | map-serial |
 | 36a | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` `debug_assert!(start <= end)` on an empty `a..=b` (`a > b`); release correctly does nothing, and `from_range` documents `start >= end` as empty | 41 | u-mask |
+
+## Doc mismatches
+
+| | bug | # | file |
+|---|---|---|---|
+| 37a | `Lattice::IDEMPOTENT` is `true` for `bool`, the integers and their containers, whose `pjoin(a, a)` / `pmeet(a, a)` are `Identity(SELF)`, not the promised `Identity(SELF\|COUNTER)` (informational constant) | 44 | u-lattice |
 
 36 entries: 35 defects and one doc mismatch, from the 38 numbered index rows
 plus 2 notes, with 4 duplicate pairs merged (4/7, 5/8, 6/9, 17/35).  Bug 24's

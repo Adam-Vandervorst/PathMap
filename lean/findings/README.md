@@ -20,6 +20,7 @@ is and is not covered. This page is the index.
 | [ptree.md](ptree.md) | catamorphisms serialize into prefix trees, anamorphisms deserialize them (byte and line level, proved in `PrefixTree.lean`); `SplitCata(Jumping)` | `map` ops 57–59 |
 | [ctors.md](ctors.md) | alternative constructors (`PathTracker::new`, `EmptyZipper::new`, `ProductZipper::new_with_primary`, ...), and the round-2 list of uncalled functions | `tracker`, `empty-new`, `product`, `diff-product`, `owned`, `map` ops 1, 17, 18, 48, 55, 60 |
 | [u-mask.md](u-mask.md) | `ByteMask`, `BitMask` for `ByteMask` and `[u64; 4]`, their `Lattice` impls, iterators, formatters, the rest of `utils/mod.rs` | `util` ops 0–28 |
+| [u-lattice.md](u-lattice.md) | `ring.rs`: the `Lattice`/`DistributiveLattice`/`LatticeRef` impls of the primitive and std types, `AlgebraicResult`, `AlgebraicStatus`, `SetLattice` (`HashMap`, `HashSet`) | `util` ops 30–59 |
 
 Plus the `tracker` source (`PathTracker`), written as the template.
 
@@ -73,6 +74,9 @@ wrong answers by component, imprecise status, debug-only): [BUGS.md](BUGS.md).
 | 39 | `Lattice::join_all` (trait default) over all-empty byte masks answers `Identity` or `None` by the parity of the argument count (allowed by the contract; recorded) (M1) | u-mask, `skip:join-all-empty` |
 | 40 | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` act on bit `end` of an exhausted (empty) `RangeInclusive` (M2) | u-mask |
 | 41 | `ByteMask::*_inclusive_bit_range` `debug_assert` on an empty `a..=b` with `a > b` (M3, debug only) | u-mask |
+| 42 | `SetLattice` (`HashMap`/`HashSet`) `pmeet` calls the value `pmeet` with the operands swapped when `self` is not the smaller map: a non-symmetric value meet (integers, `bool`) answers from the wrong operand (L1) | u-lattice, `skip:setlattice-meet-swap` |
+| 43 | `AlgebraicResult::merge` asks argument 0 whether an annihilated field was absent, so for a meet it can claim a false `Identity` (latent: the crate's own callers never take that path) (L2) | u-lattice |
+| 44 | `Lattice::IDEMPOTENT = true` (never overridden) promises `pjoin`/`pmeet(self)` = `Identity(SELF\|COUNTER)`; `bool`, the integers and their containers answer `Identity(SELF)` (doc mismatch, constant unused) (L3) | u-lattice |
 
 Also a doc/code mismatch: `path_indices().len()` is `focus_factor() + 1` at a
 joint (dependent D4, product P6). There is also a debug-only assertion in
