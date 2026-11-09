@@ -673,7 +673,8 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              if t == 1 && !s.src.caps.trieRef then some (emit s "focus_probe" s.src.skip, d) else
              let z := getTarget s t
              some (emit s "focus_probe"
-               ("g" ++ showBool (z.trie.childCount (z.focus ++ p) > 0) ++ ";kok"), d)
+               ((if t == 0 then "W" else "R") ++ "g" ++
+                 showBool (z.trie.childCount (z.focus ++ p) > 0) ++ ";kok"), d)
   | 79 => do let (_o, d) ← d.bool
              -- `to_next_get_val_with_witness(_observed)`: as op 52.
              if !s.src.caps.witnessIter then some (emit s "witness_next_val" s.src.skip, d) else

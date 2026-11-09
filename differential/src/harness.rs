@@ -582,16 +582,15 @@ pub fn has_focus_node_at<Z: ZipperInfallibleSubtries<u64>>(z: &Z, p: &[u8], chil
     !none && !childless()
 }
 
-/// Op 78 `focus_probe`: `g<get_focus_at(p) has a node>;k<checks>`, see
-/// [`has_focus_node_at`].  `k` is `ok`, or `<side>TBF` (`W` for the write
-/// zipper, `R` for the read source) when `try_borrow_focus()` is `Some` at a
-/// focus that does not exist (it may be `None` anywhere: it only borrows a node
-/// the focus sits exactly on).
+/// Op 78 `focus_probe`: `<side>g<get_focus_at(p) has a node>;k<checks>`, see
+/// [`has_focus_node_at`]; `side` is `W` (write zipper) or `R` (read source),
+/// so KNOWN entries can tell the two apart.  `k` is `ok`, or `TBF` when
+/// `try_borrow_focus()` is `Some` at a focus that does not exist (it may be
+/// `None` anywhere: it only borrows a node the focus sits exactly on).
 pub fn focus_probe_subtries<Z: ZipperInfallibleSubtries<u64>>(z: &Z, p: &[u8], side: &str) -> String {
     let g = has_focus_node_at(z, p, || z.make_map().read_zipper_at_path(p).child_count() == 0);
-    let tbf = format!("{side}TBF");
-    let k = if z.try_borrow_focus().is_some() && !z.path_exists() { tbf.as_str() } else { "ok" };
-    format!("g{};k{}", show_bool(g), k)
+    let k = if z.try_borrow_focus().is_some() && !z.path_exists() { "TBF" } else { "ok" };
+    format!("{side}g{};k{}", show_bool(g), k)
 }
 
 /// Op 79 `witness_next_val` on a zipper with `ZipperReadOnlyConditionalIteration`:

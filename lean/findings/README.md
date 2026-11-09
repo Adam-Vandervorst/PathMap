@@ -62,6 +62,7 @@ Plus the `tracker` source (`PathTracker`), written as the template.
 | 33 | a reader at a leaf head root leaves an empty node that blocks pruning (H5, family of 1) | map-morph |
 | 34 | `WriteZipperCore::try_borrow_focus` is `Some` at a missing focus below a dangling path (O1) | ops |
 | 35 | `PrefixZipper::get_focus_at`/`try_borrow_focus` ignore the prefix (O2, same defect as 17) | ops |
+| 36 | `remove_unmasked_branches(prune=true)` at a missing focus prunes a dangling parent left by an empty `graft_masked_branches` (O3, family of 1) | ops |
 
 Also a doc/code mismatch: `path_indices().len()` is `focus_factor() + 1` at a
 joint (dependent D4, product P6). There is also a debug-only assertion in

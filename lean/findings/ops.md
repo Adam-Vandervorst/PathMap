@@ -78,7 +78,7 @@ in the same situation.  The method is `#[doc(hidden)]` "internal use only",
 which `ZipperHead` relies on to cut out exclusive regions.
 
 Corpus `lean/corpus/wz-try-borrow-focus-below-dangling.bin`; KNOWN
-`[ops: wz_try_borrow_focus_below_dangling]`.
+`[ops: wz_try_borrow_focus_below_dangling]` (keyed on the write side, `ret=Wg...;kTBF`).
 
 ```rust
 let mut m = PathMap::<u64>::new();
@@ -114,6 +114,40 @@ pz.reset();
 pz.descend_to(&[2u8]);
 // get_focus_at(&[]) returns the source's root node {[1]: 7}, not the view's
 // subtrie {[1, 3, 1]: 7}.
+```
+
+### O3. `remove_unmasked_branches(_, prune=true)` at a missing focus prunes a dangling parent left by an empty `graft_masked_branches`
+
+Not one of the new ops: the final native campaign hit it once in 60000 inputs
+(seed 31).  `graft_masked_branches(src, mask, true)` whose mask selects
+nothing removes every branch below the focus and leaves the focus dangling,
+represented by an empty node.  A `remove_unmasked_branches(mask, true)` one
+byte below, at a *missing* focus, then prunes that dangling parent away.  The
+same sequence with `remove_branches(false)` instead of the empty graft leaves
+the parent in place, so the outcome depends on node representation; the
+model (prune at a missing focus removes nothing above it) and the second
+sequence agree.  Same family as index #1 (`remove_val(prune=true)` after an
+empty `graft_masked_branches`).  Too rare and too shapeless (it surfaces as an
+`e1`/`e0` difference on whichever op looks next) for a KNOWN key that could not
+also swallow other bugs, so it has none.
+
+Corpus `lean/corpus/remove_unmasked_branches-prune-at-missing-focus-after-empty-graft-masked.bin`.
+
+```rust
+let mut m0 = PathMap::<u64>::new();
+m0.set_val_at(&[], 0);
+m0.set_val_at(&[0u8, 0, 0, 0, 0], 0);
+let mut m1 = PathMap::<u64>::new();
+m1.set_val_at(&[1u8, 1, 0, 0], 0);
+let rz = m1.read_zipper_at_path(&[1u8]);
+let mut wz = m0.write_zipper();
+wz.descend_to(&[0u8]);
+wz.graft_masked_branches(&rz, ByteMask::from_iter([3u8, 2, 0]), true); // clears below [0]
+assert!(wz.path_exists());                                            // [0] dangling
+wz.descend_to_byte(0);                                                // [0, 0]: missing
+wz.remove_unmasked_branches(ByteMask::from_iter([0u8]), true);
+wz.ascend_byte();
+assert!(wz.path_exists());   // fails: [0] was pruned (with remove_branches(false) it is kept)
 ```
 
 ### Known bugs the new ops reach
@@ -157,4 +191,35 @@ pz.descend_to(&[2u8]);
 
 ## Campaigns
 
-See the end of this file (filled in with the final numbers).
+`lean/differential.py --source NAME --random N -j 6`, release build, after
+merging spec/coverage-models (6f546ba, which added `empty-new` and
+`diff-product`):
+
+| sources | inputs since the ops landed | new divergences |
+|---|---|---|
+| native, act, tracker, overlay, overlay-filter, diff, dependent, head | ~270k each (seeds 11, 21, 22@maxlen 900, 31, 32@900, 51) | none but O3 (1 input, seed 31) |
+| owned, empty, prefix, product, productg, product-full, productg-full, dependent-lazy | ~120k each (seeds 11, 31, 32@900, 51) | none but O3 |
+| empty-new, diff-product | 105k each (seeds 31, 32@900, 51) | none |
+| map (op table untouched) | 45k (seeds 33, 51) | none |
+
+Every KNOWN hit on a new or changed op was audited
+(scratchpad wrapper printing the first differing op and its KNOWN note): they
+are O1 and O2, the `EmptyZipper` rewind bug (E1) on op 79, and op 75's existing
+`trie_ref_owned_empty_node`.  Those two write-side bugs (O1, ~1.4% of inputs;
+#20, ~4%) stop comparison of the rest of their inputs on every source.
+
+Coverage of the ops on random programs is thin where values are needed: the
+zippers wander off the trie, so most `join_take` snapshots are empty
+(`None`/`Identity`), `drop_head` is `true` in ~15% of calls and
+`focus_probe` finds children in ~5%.  All branches are reached, though.
+
+## Shared files touched
+
+* `Source.lean`: `Caps.witnessIter` (default `false`; native, head, owned,
+  prefix, empty set it) and `Caps.coldKPath` (default `true`; head clears it).
+* `Sources/{Head,Owned,Prefix,Empty}.lean`: the caps above.
+* `sources/{head,prefix,empty}.rs`: `witness_iter_source!()`, and head's
+  `k_path_cold_skip`.
+* `Zipper.lean`: `Zip.toNextKPath` for `k > depth` (see above).
+* `differential.py`: KNOWN entries; the `<status>;<report>` STATUS-ONLY shape;
+  op 75's KNOWN string gained the `g` field.

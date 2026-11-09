@@ -282,7 +282,7 @@ KNOWN = [
      "rewinding to the root [empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
     # PrefixZipper's ZipperInfallibleSubtries internals forward to the source
     # zipper unadjusted, like its trie_ref_at_path (prefix P6); lean/findings/ops.md.
-    (["src:prefix", "focus_probe ret="],
+    (["src:prefix", "focus_probe ret=Rg"],
      "PrefixZipper::get_focus_at()/try_borrow_focus() forward to the source "
      "zipper without accounting for the prefix: no node inside the prefix, "
      "Some off it [ops: prefix_focus_ignores_prefix]"),
@@ -476,7 +476,7 @@ KNOWN = [
      "left-biased spec (join/meet and everything that later reads the "
      "location) [value_bias_by_node_layout]"),
     # ops workstream (lean/findings/ops.md).
-    (["focus_probe ret=", ";kWTBF W="],
+    (["focus_probe ret=Wg", ";kTBF W="],
      "WriteZipperCore::try_borrow_focus() returns the (empty) node of a dangling "
      "path above the focus when the focus lies below it: Some at a non-existent "
      "focus (debug: assertion at write_zipper.rs:1435) "
