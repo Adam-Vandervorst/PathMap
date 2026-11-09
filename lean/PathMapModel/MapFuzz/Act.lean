@@ -183,6 +183,9 @@ private def fx : PathMap V := PathMap.mk' [([], 7), ([1, 2], 3)] [[2, 2]]
 #guard (mergeR fx (PathMap.mk' [([1, 2], 9)] [[3]])).paths.contains [2, 2]
 #guard (mergeR fx (PathMap.mk' [([1, 2], 9)] [[3]])).paths.contains [3]
 #guard same (mergeR fx (PathMap.mk' [([1, 2], 3)] [[2]])) fx
+-- Op 48's unit walk: every location, depth-first, with its value flag.
+#guard unitWalk fx [] == "_v/01-/0102v/02-/0202-"
+#guard unitWalk fx [1] == "_-/02v"
 #guard streamRaw [([1], 5), ([1], 6), ([1, 0], 4), ([0], 1)] == ("1010", [([1], 5), ([1, 0], 0)])
 #guard streamRaw [([], 5), ([], 6)] == ("10", [([], 5)])
 #guard fmap 2 (0 : V) == 0xFFFFFFFFFFFFFFFF

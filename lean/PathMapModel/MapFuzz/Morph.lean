@@ -339,6 +339,11 @@ private def test9 : PathMap V := PathMap.mk' [([0], 0), ([0, 1, 2], 1), ([0, 1, 
 -- the root, so everything but a root value).
 #guard (ana (fun (_ : Nat) _ => (none, [AnaKid.graft 2 test9])) 0 3).1.entries ==
   (PathMap.mk' [([2, 0], 0), ([2, 0, 1, 2], 1), ([2, 0, 1, 3], 2)] [] : PathMap V).entries
+-- Each call records the first bytes it pushed (`TrieBuilder::len` = their
+-- number, `child_mask` = their set): a `push` of `[1, 2]` counts as byte 1, a
+-- graft at 3 as byte 3; the recursion below `[1, 2]` pushes nothing.
+#guard (ana (fun (n : Nat) _ => (none, if n == 0 then [AnaKid.w [1, 2] 1, AnaKid.graft 3 test9] else []))
+  0 3).2 == [([], [1, 3]), ([1, 2], [])]
 
 end Morph
 

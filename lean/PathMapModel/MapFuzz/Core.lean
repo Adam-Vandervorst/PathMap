@@ -9,7 +9,7 @@ import PathMapModel.MapFuzz.Base
 | op | method(s) | operands | ret |
 |---|---|---|---|
 | 0 | `get` | map, path | the value |
-| 1 | `insert` / `set_val_at` (by the map byte), on the path or the path ++ `longTail` | map, path, val | the replaced value |
+| 1 | `insert` / `set_val_at` (by the map byte), on the path or (map byte `/6 % 4 = 3`) the path ++ `longTail` | map, path, val | the replaced value |
 | 2 | `remove` | map, path | the removed value |
 | 3 | `contains` | map, path | value at the path? |
 | 4 | `path_exists_at`, `contains_path`, `val_at`, `get_val_at`, `val` | map, path | `e\|e\|v\|v\|rootval` |
@@ -64,10 +64,11 @@ namespace MapFuzz
 
 open Fuzz (V Dec hexPath showVal showBool dumpAt)
 
-/-- What op 1 appends to a long path (`LONG_TAIL` in `core_ops.rs`): 16
-bytes, longer than a `LineListNode` key slot (14), so the crate has to build
-continuation nodes.  A representation matter only; the meaning is a path. -/
-def longTail : Path := [1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0]
+/-- What op 1 appends to a long path (`LONG_TAIL` in `core_ops.rs`): 48
+bytes, longer than a `LineListNode` key buffer (42 bytes with the default
+`slim_ptrs`), so the crate has to build continuation nodes.  A representation
+matter only; the meaning is a path. -/
+def longTail : Path := (List.replicate 12 [1, 2, 3, 0]).flatten
 
 /-- Rust's `str` `Debug` escaping of one byte of an ASCII key. -/
 def debugEscByte (b : UInt8) : String :=
@@ -134,10 +135,10 @@ def stepCore (op : Nat) (s : MSt) (d : Dec) : Option (Res × Dec) :=
       some (("get", showVal (Map.getValAt (s.get i) p), s), d)
   | 1 => do -- `insert` / `set_val_at`: returns the old value
       -- The map byte's spare bits: `/3 % 2` picks `insert` (an alias of
-      -- `set_val_at`, so the same answer), `/6 % 2` appends `longTail`.
+      -- `set_val_at`, so the same answer), `/6 % 4 == 3` appends `longTail`.
       let (raw, d) ← d.u8; let i := raw.toNat % 3
       let (p0, d) ← d.mpath (s.get i); let (v, d) ← d.val
-      let p := if (raw.toNat / 6) % 2 == 1 then p0 ++ longTail else p0
+      let p := if (raw.toNat / 6) % 4 == 3 then p0 ++ longTail else p0
       let (old, t) := Map.setValAt (s.get i) p v
       some (("insert", showVal old, s.set i t), d)
   | 2 => do -- `remove`: `remove_val_at(p, prune = true)`

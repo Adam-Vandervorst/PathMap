@@ -9,9 +9,14 @@ pub const SKIP_DEBUG_ROOT_VAL: &str = "skip:debug-root-val";
 pub const SKIP_MAP_IDENT: &str = "skip:map-ident";
 
 /// What op 1 appends to a path when its map byte asks for a long one
-/// (`longTail` in `Core.lean`): 16 bytes, so the key outgrows a
-/// `LineListNode` slot (14 bytes) and continuation nodes are made.
-pub const LONG_TAIL: [u8; 16] = [1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+/// (`longTail` in `Core.lean`): 48 bytes, so the key outgrows a
+/// `LineListNode` key buffer (`KEY_BYTES_CNT`: 42 with the default
+/// `slim_ptrs`, 14 without) and continuation nodes are made
+/// (`set_child_0` / `set_child_1`).
+pub const LONG_TAIL: [u8; 48] = [
+    1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0,
+    1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0,
+];
 
 /// Every location of `m`, depth-first, uncapped (for comparing whole maps).
 pub fn full_dump(m: &PathMap<u64>) -> String {
@@ -104,13 +109,15 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
         }
         1 => {
             // The map byte's spare bits (`Core.lean`, op 1): `/3 % 2` picks
-            // `insert` over `set_val_at` (an alias), `/6 % 2` stretches the
-            // path by `LONG_TAIL`, past a `LineListNode` key's 14 bytes.
+            // `insert` over `set_val_at` (an alias), `/6 % 4 == 3` stretches the
+            // path by `LONG_TAIL`, past a `LineListNode`'s key buffer (only a
+            // quarter of the time: a long path is 48 locations of the final
+            // dumps' 64).
             let raw = d.u8()? as usize;
             let i = raw % 3;
             let mut p = mpath(d, &st.maps[i])?;
             let (v,) = (val(d)?,);
-            if (raw / 6) % 2 == 1 {
+            if (raw / 6) % 4 == 3 {
                 p.extend_from_slice(&LONG_TAIL);
             }
             let m = &mut st.maps[i];
