@@ -216,3 +216,15 @@ no sharing op), `ZipperPathBuffer`, `Debug`, `new_with_primary`,
 `new_factors`, the deprecated `reserve_path_buffer`, `OneFactor`, secondaries
 not at a node root (documented to panic), factors with a root prefix, and more
 than three factors.
+
+## Framework changes (shared files)
+
+Three optional hooks, each a no-op for every other source:
+
+* `ReadSource::source_info` / `Source.info`: a string appended to the read
+  zipper's per-step fingerprint (here `ZipperProduct`).
+* `ReadSource::val_at_skip` / `Source.valAtSkip`: a named skip for `val_at`
+  (op 24) and `get_val_agrees` (op 51) on the read side, decided per call
+  from the focus and the path.
+* `Source.inputSkip`: a named skip for a whole input; the trace is that one
+  token (the Rust runner returns the same line itself).
