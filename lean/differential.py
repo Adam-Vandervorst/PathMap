@@ -208,6 +208,14 @@ KNOWN = [
      "factor stacked after an empty one only on a later call (D2); reproducers "
      "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
      "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
+    # Source-specific entries first (keyed on the `crate/<source>` label), so a
+    # generic op-name entry below cannot claim them.
+    (["crate/empty", "to_next_val"],
+     "EmptyZipper::to_next_val() returns false without rewinding to the root "
+     "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
+    (["crate/empty", "to_next_get_val"],
+     "EmptyZipper::to_next_get_val() returns None without rewinding to the root "
+     "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
     # Tested first: this one is keyed on a shape, and an ACT val_count-only
     # difference can land on a line whose op name matches an entry below.
     (["ACT-VALCOUNT-ONLY"],
@@ -799,7 +807,8 @@ def main():
     args.act = args.source == "act"
 
     trace_bin = find_trace_bin(args.act)
-    other_label = "crate"
+    # Named for the source, so a KNOWN entry can be keyed on one source's line.
+    other_label = "crate" if args.source in ("native", "act") else "crate/" + args.source
 
     # Inputs are produced by an `InputSource`, in whichever worker picks the
     # index up -- see the class docs.  Nothing is written to disk and no blob is
