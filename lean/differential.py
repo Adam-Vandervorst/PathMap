@@ -318,6 +318,18 @@ KNOWN = [
      "DependentProductZipperG::get_val_at() looks only in the focus factor; "
      "reproducer lean/corpus/dependent-get_val_at-ignores-later-factors.bin "
      "[dependent_val_at]"),
+    # Map fuzzer, serialization (lean/findings/map-serial.md).  `;r=` is the
+    # ret field saying whether the `.paths` stream carried the focus value.
+    (["src:map", ";r=1 n=", ";r=0 n="],
+     "serialize_paths() never writes the value at the read zipper's focus "
+     "[map-serial: serialize_paths_drops_focus_value]"),
+    (["src:map", "write_trie ret=err:tag"],
+     "write_trie() rolls back a duplicate final record without truncating the "
+     "file; the stale tail makes deserialize_file() reject it "
+     "[map-serial: write_trie_stale_tail_after_rollback]"),
+    (["src:map", "write_trie_at"],
+     "write_trie() from a zipper below the map root drops path bytes "
+     "(origin_path is absolute) [map-serial: write_trie_below_root_drops_prefix_bytes]"),
     # Shape classes, from `divergence_shape`.  Last on purpose: every entry
     # above is more specific, and these are meant to catch only what none of
     # them explain.
@@ -396,6 +408,10 @@ def divergence_shape(a, b):
         return None
     if any(t.startswith("n=") for t in ta):
         return None    # a map-fuzzer line (--source map): no zipper shapes apply
+    # The map fuzzer (`--source map`: `... n=a,b,c` step lines, `M0` dumps) has
+    # its own trace format; these zipper-trace shapes do not describe it.
+    if (ta and re.fullmatch(r"M\d", ta[0])) or any(t.startswith("n=") for t in ta):
+        return None
     diff = [(x, y) for x, y in zip(ta, tb) if x != y]
     if not diff:
         return None
