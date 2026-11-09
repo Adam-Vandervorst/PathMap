@@ -650,6 +650,49 @@ round-trips faithfully, and `merge_zipper_into_file` -- ACT's one write-shaped
 operation -- matches its specification on all 300 cases of
 `differential/src/bin/act_merge_check.rs`.
 
+## Read sources, write targets and the map fuzzer
+
+The ACT mode above was the first instance of a general mechanism.  The
+operation table (`harness::run_ops`) is generic over the read zipper (trait
+`ReadSource`) and the write zipper (`WriteTarget`), and `--source NAME` picks
+both, on `pathmap_trace`, `pathmap-oracle`, `differential.py` and `shrink.py`:
+
+| source | read zipper / write zipper | model |
+|---|---|---|
+| `native` | `ReadZipperUntracked` / `WriteZipperUntracked` | the original |
+| `act` | `ACTZipper` | `Source.act` |
+| `tracker` | `PathTracker` | `Sources/Tracker.lean` (the template) |
+| `overlay`, `overlay-filter` | `OverlayZipper` (map1 over a map0 snapshot) | `Sources/Overlay.lean` |
+| `diff` | `DiffZipper` over two copies of map1 | `Sources/Diff.lean` |
+| `dependent`, `dependent-lazy` | `DependentProductZipperG` | `Sources/Dependent.lean` |
+| `product`, `productg` (+ `-full`) | `ProductZipper`, `ProductZipperG` | `Sources/Product.lean` |
+| `prefix`, `empty` | `PrefixZipper`, `EmptyZipper` | `Sources/Prefix.lean`, `Sources/Empty.lean` |
+| `head` | `ReadZipperTracked` / `WriteZipperTracked` from a `ZipperHead` | `Sources/Head.lean` |
+| `owned` | `ReadZipperOwned` / `WriteZipperOwned` | `Sources/Owned.lean` |
+
+On the Lean side a source (`Source.lean`) is a **view** (the trie the read
+zipper presents, computed from the seeded maps) plus **capabilities**
+(forking, `make_map`, merges, read-only values and iteration, `val_count`,
+trie refs).  Every read, movement and iteration operation is the ordinary
+`Zip` specification applied to the view, so a virtual zipper is held to
+exactly what a native read zipper is.  A missing capability turns the ops that
+need it into `skip:<source>` on both sides.  The trace ends with a `SRC` line,
+the source reset and walked from its root.  Adding a source: see the header of
+`differential/src/sources/mod.rs`.
+
+`--source map` is a second op table (`MapFuzz*.lean`,
+`differential/src/mapfuzz/`) over three `PathMap`s, for what is not a zipper
+walking a trie: the `PathMap` surface and whole-map lattice ops (0–28),
+`.paths` / `write_trie` serialization and ACT files, merge and stream
+(30–48), catamorphisms and anamorphisms (50–56), and `ZipperHead` sessions
+with conflict checking (60).  Its inputs carry `MAP_NOPS` in the header.
+
+KNOWN entries can be keyed per source: `classify` sees `src:<source>` on the
+first line of every report, and op-line divergences are tagged `READ-SIDE` or
+`WRITE-SIDE`, so an entry for a write-zipper bug cannot absorb a read source's
+bug in the same op.  What these sources found is indexed in
+[findings/README.md](findings/README.md).
+
 ## Sharing
 
 `pathmap` is a DAG: subtries are shared between paths, `graft` clones a
