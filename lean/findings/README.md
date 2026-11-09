@@ -24,6 +24,9 @@ Plus the `tracker` source (`PathTracker`), written as the template.
 
 ## Crate bugs
 
+The same bugs as one deduplicated list, grouped by what goes wrong (panics,
+wrong answers by component, imprecise status, debug-only): [BUGS.md](BUGS.md).
+
 `file`, then the tag used in `lean/differential.py` KNOWN or the skip name.
 
 | # | bug | where |
