@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 
-from input_format import NOPS, input_header, versioned_input
+from input_format import MAP_NOPS, NOPS, input_header, versioned_input
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORACLE = os.environ.get("PATHMAP_ORACLE") or os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
@@ -676,8 +676,9 @@ def main():
     ap.add_argument("files", nargs="*")
     ap.add_argument("--random", type=int, default=0, help="generate N random inputs")
     ap.add_argument("--convex", type=int, default=0, help="generate N focused convex and path-set programs")
-    ap.add_argument("--selectors", type=int, default=NOPS, choices=range(1, NOPS + 1),
-                    metavar="N", help="selector count for random inputs (for baseline replay)")
+    ap.add_argument("--selectors", type=int, default=None, choices=range(1, 257),
+                    metavar="N", help="selector count for random inputs (for baseline replay; "
+                                      "default: the --source's current count)")
     ap.add_argument("--strict", action="store_true", help="fail on known divergences too")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--maxlen", type=int, default=300)
@@ -713,7 +714,8 @@ def main():
     if args.files:
         sources.append(FileInputs(args.files))
     if args.random:
-        sources.append(RandomInputs(args.seed, args.random, args.maxlen, args.selectors))
+        selectors = args.selectors or (MAP_NOPS if args.source == "map" else NOPS)
+        sources.append(RandomInputs(args.seed, args.random, args.maxlen, selectors))
     if args.convex:
         sources.append(ConvexInputs(args.seed, args.convex))
     source = ChainInputs(sources)

@@ -4,6 +4,9 @@ WIRE_MAGIC = b"PMFUZZ\x01\x00"
 LEGACY_NOPS = 56
 # Keep in sync with NOPS in differential/src/harness.rs.
 NOPS = 75
+# Selector count of the map-level fuzzer (--source map).  Keep in sync with
+# MAP_NOPS in differential/src/mapfuzz/mod.rs and mapNops in MapFuzz/Base.lean.
+MAP_NOPS = 80
 HEADER_SIZE = len(WIRE_MAGIC) + 2
 
 

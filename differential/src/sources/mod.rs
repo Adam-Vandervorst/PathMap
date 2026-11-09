@@ -34,6 +34,8 @@ pub const SOURCES: &[(&str, Runner)] = &[
     ("native", run),
     ("act", crate::act::run_act),
     ("tracker", tracker::run),
+    // Not a read source: the map-level fuzzer, a different op table.
+    ("map", crate::mapfuzz::run),
 ];
 
 pub fn runner(name: &str) -> Option<Runner> {

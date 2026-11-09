@@ -73,7 +73,7 @@ def hexDecode (s : String) : Option ByteArray :=
     go cs ByteArray.empty
 
 /-- The resident command loop. -/
-partial def serve (src : Source) : IO Unit := do
+partial def serve (runner : ByteArray → List String) : IO Unit := do
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
   let rec loop : IO Unit := do
@@ -89,7 +89,7 @@ partial def serve (src : Source) : IO Unit := do
           -- "Why there is no in-process timeout here" above.
           match ms.toNat?, hexDecode (String.intercalate " " rest) with
           | some _, some bytes => do
-              for line in Fuzz.run bytes 256 src do
+              for line in runner bytes do
                 stdout.putStrLn line
               pure "!DONE"
           | _, _ => pure "!PANIC bad run-input arguments"
@@ -108,11 +108,16 @@ def sourceArg : List String → Option String
 
 def main (args : List String) : IO UInt32 := do
   let name := (sourceArg args).getD "native"
-  let some src := Source.byName name
-    | IO.eprintln s!"unknown --source {name}; known: {String.intercalate " " (Source.all.map (·.name))}"
+  -- `map` is the map-level fuzzer (`MapFuzz.lean`); every other name is a read
+  -- source for the zipper fuzzer.
+  let runner? : Option (ByteArray → List String) :=
+    if name == "map" then some (MapFuzz.run · 256)
+    else (Source.byName name).map (fun src => (Fuzz.run · 256 src))
+  let some runner := runner?
+    | IO.eprintln s!"unknown --source {name}; known: map {String.intercalate " " (Source.all.map (·.name))}"
       return 2
   if args.contains "--server" then
-    serve src
+    serve runner
     return 0
   let rec files : List String → List String
     | "--source" :: _ :: rest => files rest
@@ -121,6 +126,6 @@ def main (args : List String) : IO UInt32 := do
   let bytes ← match files args with
     | [] => (← IO.getStdin).readBinToEnd
     | path :: _ => IO.FS.readBinFile path
-  for line in Fuzz.run bytes 256 src do
+  for line in runner bytes do
     IO.println line
   return 0
