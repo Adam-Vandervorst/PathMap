@@ -431,6 +431,14 @@ KNOWN = [
      "ByteMask::set_/clear_/toggle_inclusive_bit_range read start()/end() of "
      "an exhausted (empty) RangeInclusive and act on bit `end` "
      "[u-mask M2: incl_range_exhausted]"),
+    # Util fuzzer, u-lattice group; lean/findings/u-lattice.md.  `ring_pmeet!`
+    # is the meet op with its skip turned off (full byte 255), only there to
+    # reproduce what `skip:setlattice-meet-swap` holds back.
+    (["src:util\n", " ring_pmeet! ret="],
+     "SetLattice (HashMap/HashSet) pmeet calls the value pmeet with the "
+     "operands swapped when self is not the smaller map, so a non-symmetric "
+     "value meet answers from the wrong operand "
+     "[u-lattice L1: setlattice_meet_swap]"),
     # DependentProductZipperG (--source dependent / dependent-lazy):
     # lean/findings/dependent.md.
     # Keyed on `ret=`, not READ-SIDE: a divergence in `ret` alone is tagged
