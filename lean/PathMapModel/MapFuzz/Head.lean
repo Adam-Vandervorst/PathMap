@@ -29,7 +29,7 @@ Every zipper path is relative to `b`.
 | 1 | `read_zipper_at_borrowed_path` | `path(5)` | same |
 | 2 | `write_zipper_at_exclusive_path` | `path(5)` | same |
 | 3 | `…_with_buffer` (the held buffer, if any; else as 2) | `path(5)` | same |
-| 4 | `read_zipper_at_path_unchecked` / `write_…_unchecked` | `writer : bool`, `path(5)` | `o<slot>` |
+| 4 | `read_zipper_at_path_unchecked` or (by the bool byte's bit 1) `read_zipper_at_borrowed_path_unchecked` / `write_…_unchecked` | `writer : bool`, `path(5)` | `o<slot>` |
 | 5 | drop slot `k` | `k := u8` (see `pick`) | `d` |
 | 6 | through writer `k`: `reset; descend_to(rel)`, then `sub`: 0 `set_val(v)`, 1 `remove_val(v odd)`, 2 `remove_branches(v odd)`, 3 `create_path` | `k, sub := u8 % 4, rel : path(3), v : u8` | `s<old>` `r<old>` `b<0/1>` `c<0/1>` |
 | 7 | read slot `k` from its root | `k` | `e<path_exists>[<dump>]` |

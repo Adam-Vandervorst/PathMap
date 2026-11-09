@@ -8,6 +8,11 @@ use pathmap::zipper::*;
 pub const SKIP_DEBUG_ROOT_VAL: &str = "skip:debug-root-val";
 pub const SKIP_MAP_IDENT: &str = "skip:map-ident";
 
+/// What op 1 appends to a path when its map byte asks for a long one
+/// (`longTail` in `Core.lean`): 16 bytes, so the key outgrows a
+/// `LineListNode` slot (14 bytes) and continuation nodes are made.
+pub const LONG_TAIL: [u8; 16] = [1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+
 /// Every location of `m`, depth-first, uncapped (for comparing whole maps).
 pub fn full_dump(m: &PathMap<u64>) -> String {
     let mut z = m.read_zipper();
@@ -98,10 +103,19 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             ("get", show_val(st.maps[i].get(&p)))
         }
         1 => {
-            let i = map_ix(d)?;
-            let p = mpath(d, &st.maps[i])?;
+            // The map byte's spare bits (`Core.lean`, op 1): `/3 % 2` picks
+            // `insert` over `set_val_at` (an alias), `/6 % 2` stretches the
+            // path by `LONG_TAIL`, past a `LineListNode` key's 14 bytes.
+            let raw = d.u8()? as usize;
+            let i = raw % 3;
+            let mut p = mpath(d, &st.maps[i])?;
             let (v,) = (val(d)?,);
-            ("insert", show_val(st.maps[i].set_val_at(&p, v).as_ref()))
+            if (raw / 6) % 2 == 1 {
+                p.extend_from_slice(&LONG_TAIL);
+            }
+            let m = &mut st.maps[i];
+            let old = if (raw / 3) % 2 == 1 { m.insert(&p, v) } else { m.set_val_at(&p, v) };
+            ("insert", show_val(old.as_ref()))
         }
         2 => {
             let i = map_ix(d)?;
@@ -249,8 +263,18 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             ("clone", shared_ids_sound(&st.maps).to_string())
         }
         17 => {
-            let (i, k, p, v) = (map_ix(d)?, d.modn(5)?, d.path(6)?, val(d)?);
+            // `kraw / 5 % 2` builds kinds 0-2 through an owned write zipper
+            // instead (`WriteZipperOwned::new` / `new_in`, `descend_to`,
+            // `set_val`, `into_map`): the same map (`Core.lean`, op 17).
+            let (i, kraw, p, v) = (map_ix(d)?, d.u8()? as usize, d.path(6)?, val(d)?);
+            let k = kraw % 5;
             let t: PathMap<u64> = match k {
+                0..=2 if (kraw / 5) % 2 == 1 => {
+                    let mut wz = if k == 2 { WriteZipperOwned::new_in(pathmap::alloc::global_alloc()) } else { WriteZipperOwned::new() };
+                    wz.descend_to(&p);
+                    wz.set_val(v);
+                    wz.into_map()
+                }
                 0 => PathMap::single(&p, v),
                 1 => PathMap::from((&p, v)),
                 2 => PathMap::single_in(&p, v, pathmap::alloc::global_alloc()),
@@ -262,9 +286,15 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             ("single", s)
         }
         18 => {
-            let (i, k) = (map_ix(d)?, d.modn(3)?);
+            // `kraw / 3 % 2` reads kinds 0 and 1 through `PathMap::trie_ref_at_path`
+            // instead (`&Vec` and `&[u8]` keys), dumping its `fork_read_zipper`
+            // (`_:-` where the path is missing, as `dump` prints a missing root).
+            let (i, kraw) = (map_ix(d)?, d.u8()? as usize);
+            let (k, tref) = (kraw % 3, (kraw / 3) % 2 == 1);
             let p = mpath(d, &st.maps[i])?;
             let s = match k {
+                0 if tref => dump_fork(&st.maps[i].trie_ref_at_path(&p)),
+                1 if tref => dump_fork(&st.maps[i].trie_ref_at_path(p.as_slice())),
                 0 => dump(&mut st.maps[i].read_zipper_at_borrowed_path(&p)),
                 1 => dump(&mut st.maps[i].read_zipper_at_path(&p)),
                 _ => {

@@ -50,11 +50,13 @@ pub const SOURCES: &[(&str, Runner)] = &[
     ("head", head::run),
     ("owned", owned::run),
     ("empty", empty::run),
+    ("empty-new", empty::run_new),
     ("prefix", prefix::run),
     ("product", product::run),
     ("productg", product::run_g),
     ("product-full", product::run_full),
     ("productg-full", product::run_g_full),
+    ("diff-product", product::run_diff),
     // Not a read source: the map-level fuzzer, a different op table.
     ("map", crate::mapfuzz::run),
 ];

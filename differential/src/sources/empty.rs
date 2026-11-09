@@ -11,6 +11,16 @@
 //! the empty-root marker), `ZipperReadOnlyValues` and
 //! `ZipperReadOnlyIteration`, but no subtries: it cannot make a map or be a
 //! merge source (`skip:empty`).  `Sources/Empty.lean` mirrors this.
+//!
+//! `--source empty-new` ([`run_new`]) checks the other constructor,
+//! `EmptyZipper::new()`: the same zipper with an empty root prefix.  Its root
+//! is a missing `[]`, which the model cannot hold, so the zipper is given the
+//! same root prefix as `empty`'s through `PathTracker::with_origin` (which
+//! resets it and tracks the path above it).  Every answer except the path is
+//! then `EmptyZipper::new()`'s own (`path_exists`, `child_mask`, `at_root`,
+//! values, moves), and the view is `empty`'s.  `PathTracker` has no forking and
+//! no `ZipperReadOnlyIteration`, so `dump` and `to_next_get_val` read
+//! `skip:empty-new` there.  See lean/findings/ctors.md.
 
 use pathmap::zipper::*;
 
@@ -44,6 +54,43 @@ impl ReadSource for EmptyZipper {
             || (got.is_none() && self.at_root());
         Some((got.is_some(), got, agree))
     }
+}
+
+impl ReadSource for PathTracker<EmptyZipper> {
+    const SKIP: &'static str = "skip:empty-new";
+    fn dump_fork(&self) -> Option<String> {
+        None
+    }
+    fn make_map_val_count(&self) -> Option<usize> {
+        None
+    }
+    fn get_val_probe(&self, path: &[u8]) -> Option<(Option<u64>, Option<u64>, bool)> {
+        let g = <Self as ZipperReadOnlyValues<u64>>::get_val(self).copied();
+        let ga = <Self as ZipperReadOnlyValues<u64>>::get_val_at(self, path).copied();
+        let agree = g == <Self as ZipperValues<u64>>::val(self).copied()
+            && ga == <Self as ZipperValuesAt<u64>>::val_at(self, path).copied();
+        Some((g, ga, agree))
+    }
+    fn to_next_get_val_probe(&mut self) -> Option<(bool, Option<u64>, bool)> {
+        None
+    }
+}
+
+/// `--source empty-new`: `PathTracker::with_origin(EmptyZipper::new(), root)`.
+pub fn run_new(bytes: &[u8], check: bool) -> String {
+    let Some(mut d) = Dec::new(bytes) else { return "EMPTY\n".to_string(); };
+    let Some((mut map0, map1, root0, root1)) = decode_header(&mut d) else {
+        return "EMPTY\n".to_string();
+    };
+    let mut out = String::new();
+    let root = empty_root(&root1);
+    {
+        let mut rz = PathTracker::with_origin(EmptyZipper::new(), &root);
+        let mut wz = map0.write_zipper_at_path(&root0);
+        run_ops(&mut d, &mut out, &mut wz, &root0, &mut rz, &root, check);
+    }
+    trailer(&mut out, &map0, &map1, &root0, &root);
+    out
 }
 
 pub fn run(bytes: &[u8], check: bool) -> String {

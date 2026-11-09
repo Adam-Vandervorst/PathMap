@@ -69,7 +69,7 @@ anything below it does not exist.  `ana` below is that rule for any closure;
 | 52 | `cata_cached` | csrc, `pred`, `v` | stepping cached fold; `pred % 4 ≠ 0`: `_fallible` (see `cachedFails`) |
 | 53 | `cata_jump_cached` | csrc, `pred`, `v` | the same, jumping |
 | 54 | `hash` | csrc, csrc | `eq=` hashes equal, `eqw=` `hash_with(v % 3)` equal |
-| 55 | `ana_copy` | `i`, `p`, `dst`, `s`, `in` | `m[dst] := new_from_ana(_in)(p, copyAlg m[i] s)` |
+| 55 | `ana_copy` | `i`, `p`, `dst`, `s`, `in` | `m[dst] := new_from_ana(_in)(p, copyAlg m[i] s)`; each call reported as `<path>#<len>.<mask>`, the builder's `len()` and `child_mask()` after it |
 | 56 | `ana_replicate` | `i`, `p`, `dst`, `lv`, `mb` | `m[dst] :=` a `lv`-level tree grafting `m[i]`'s node at `p` (see `repAlg`) |
 
 A *csrc* is `i : map, kind : u8 % 3, p : path(4), f : path(4), q : path(6)`: a
@@ -244,14 +244,21 @@ inductive AnaKid (W : Type) where
   strictly below its root is placed, at `path ++ [b]`. -/
   | graft (b : UInt8) (node : PathMap V)
 
-/-- Values, grafted locations and call paths (pre-order) of an anamorphism. -/
+/-- The first byte of the branch a kid starts (its `TrieBuilder` child-mask bit). -/
+def AnaKid.byte {W : Type} : AnaKid W → UInt8
+  | .w sub _ => sub.headD 0
+  | .graft b _ => b
+
+/-- Values, grafted locations and calls (pre-order) of an anamorphism.  A call
+is its path and the first bytes of what it pushed: after the closure,
+`TrieBuilder::len` is their number and `child_mask` their set. -/
 def anaGo {W : Type} (alg : W → Path → Option V × List (AnaKid W)) :
-    Nat → W → Path → List (Path × V) × List Path × List Path
+    Nat → W → Path → List (Path × V) × List Path × List (Path × List UInt8)
   | 0, _, _ => ([], [], [])
   | n + 1, w, path =>
       let (v, kids) := alg w path
       let vals0 : List (Path × V) := match v with | some x => [(path, x)] | none => []
-      kids.foldl (fun (acc : List (Path × V) × List Path × List Path) k =>
+      kids.foldl (fun (acc : List (Path × V) × List Path × List (Path × List UInt8)) k =>
         match k with
         | .w sub w' =>
             let (vs, ps, cs) := anaGo alg n w' (path ++ sub)
@@ -261,11 +268,11 @@ def anaGo {W : Type} (alg : W → Path → Option V × List (AnaKid W)) :
                 if q.isEmpty then none else some (path ++ [b] ++ q, x)),
              acc.2.1 ++ node.paths.filterMap (fun q =>
                 if q.isEmpty then none else some (path ++ [b] ++ q)),
-             acc.2.2)) (vals0, [], [path])
+             acc.2.2)) (vals0, [], [(path, kids.map AnaKid.byte)])
 
-/-- `PathMap::new_from_ana(w, alg)`: the map and the paths `alg` was called at. -/
+/-- `PathMap::new_from_ana(w, alg)`: the map and the calls of `alg` (see `anaGo`). -/
 def ana {W : Type} (alg : W → Path → Option V × List (AnaKid W)) (w : W) (fuel : Nat) :
-    PathMap V × List Path :=
+    PathMap V × List (Path × List UInt8) :=
   let (vs, ps, cs) := anaGo alg fuel w []
   (PathMap.mk' vs ps, cs)
 
@@ -368,7 +375,9 @@ def stepMorph (op : Nat) (s : MSt) (d : Dec) : Option (Res × Dec) :=
       let (_useIn, d) ← d.bool
       let src := s.get i
       let (m, calls) := ana (copyAlg src sb.toNat) p (fuel src + 1)
-      some (("ana_copy", "calls=" ++ String.intercalate "," (calls.map hexPath), s.set dst m), d)
+      let showCall := fun (c : Path × List UInt8) =>
+        hexPath c.1 ++ "#" ++ toString c.2.length ++ "." ++ hexPath (Path.sortDedup (c.2.map ([·]))).flatten
+      some (("ana_copy", "calls=" ++ String.intercalate "," (calls.map showCall), s.set dst m), d)
   | 56 => do
       let (i, d) ← d.map
       let (p, d) ← d.path 4

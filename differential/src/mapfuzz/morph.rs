@@ -260,9 +260,11 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             let (i, p, dst, s, use_in) = (map_ix(d)?, d.path(4)?, map_ix(d)?, d.u8()?, d.boolean()?);
             let src = st.maps[i].clone();
             let mut calls: Vec<String> = vec![];
+            // Each call is reported with what the builder then holds:
+            // `<path>#<len>.<child_mask>` (`TrieBuilder::len`, `child_mask`).
             let alg = |w: Vec<u8>, val: &mut Option<u64>, b: &mut TrieBuilder<u64, Vec<u8>, GlobalAlloc>, path: &[u8]| {
-                calls.push(hex_path(path));
                 copy_alg(&src, s, w, val, b, path.len());
+                calls.push(format!("{}#{}.{}", hex_path(path), b.len(), hex_mask(&ByteMask(b.child_mask()))));
             };
             let m = if use_in { PathMap::new_from_ana_in(p, alg, global_alloc()) } else { PathMap::new_from_ana(p, alg) };
             st.maps[dst] = m;

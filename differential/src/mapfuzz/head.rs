@@ -127,10 +127,17 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize, 
         let kind = d.modn(12)?;
         let r: String = match kind {
             0..=4 => {
-                let (writer, unchecked) = match kind {
-                    0 | 1 => (false, false),
-                    2 | 3 => (true, false),
-                    _ => (d.boolean()?, true),
+                // Kind 4's byte: odd opens a writer; for a reader, `/2 % 2` picks
+                // `read_zipper_at_borrowed_path_unchecked` over
+                // `read_zipper_at_path_unchecked` (the same zipper; `Head.lean`
+                // reads the byte as a bool).
+                let (writer, unchecked, borrowed) = match kind {
+                    0 | 1 => (false, false, false),
+                    2 | 3 => (true, false, false),
+                    _ => {
+                        let b = d.u8()?;
+                        (b % 2 == 1, true, (b / 2) % 2 == 1)
+                    }
                 };
                 let p = d.path(5)?;
                 if !writer && !base_exists {
@@ -151,6 +158,8 @@ fn session<'t, H: ZipperCreation<'t, u64>>(head: &H, d: &mut Dec, depth: usize, 
                         // skipped the same way while it lives.
                         _ => Ok(if writer {
                             Zp::W(unsafe { head.write_zipper_at_exclusive_path_unchecked(&p) })
+                        } else if borrowed {
+                            Zp::R(unsafe { head.read_zipper_at_borrowed_path_unchecked(arena.alloc(p.clone())) })
                         } else {
                             Zp::R(unsafe { head.read_zipper_at_path_unchecked(&p) })
                         }),

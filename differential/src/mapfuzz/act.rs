@@ -42,6 +42,28 @@ fn walk_paths<Z: ZipperMoving + ZipperPath>(z: &mut Z) -> String {
     show_paths(ps)
 }
 
+/// Every location of a unit-valued `ACTZipper` below its root, depth-first,
+/// relative to it, capped like `dump`: `<path>` + `v` (a value) or `-`, and `!`
+/// where `get_val` (`ZipperReadOnlyValues<()>`) disagrees with `val`.  Joined
+/// with `/`.  `Act.unitWalk`.
+fn unit_walk<'t, S: AsRef<[u8]>>(z: &mut pathmap::arena_compact::ACTZipper<'t, S, ()>) -> String {
+    let one = |z: &pathmap::arena_compact::ACTZipper<'t, S, ()>| {
+        let v = ZipperValues::<()>::val(z).is_some();
+        let g = ZipperReadOnlyValues::<()>::get_val(z).is_some();
+        format!("{}{}{}", hex_path(z.path()), if v { "v" } else { "-" }, if v == g { "" } else { "!" })
+    };
+    z.reset();
+    let mut ps = vec![one(z)];
+    while ps.len() < DUMP_CAP && z.to_next_step() {
+        if z.path().is_empty() {
+            ps.push("ESCAPED-ROOT".to_string());
+            break;
+        }
+        ps.push(one(z));
+    }
+    ps.join("/")
+}
+
 pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
     Some(match op {
         40 => {
@@ -167,7 +189,21 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             let t = ArenaCompactTree::from_zipper(st.maps[i].read_zipper_at_path(&p), |v: &u64| fmap(mode, *v));
             let mut z = t.read_zipper_at_borrowed_path_u64(&q);
             let mut u = t.read_zipper_at_borrowed_path(&q);
-            ("act_zipper_at", format!("{};{}", dump(&mut z), walk_paths(&mut u)))
+            // The unit-valued zipper over the whole tree (`read_zipper`): its
+            // walk, `val_at(q)` / `get_val_at(q)` from the root, and the walk of
+            // its `fork_read_zipper` at `q` (`_` when there is none).
+            let mut r = t.read_zipper();
+            let whole = unit_walk(&mut r);
+            r.reset();
+            let a = ZipperValuesAt::<()>::val_at(&r, &q).is_some();
+            let ga = ZipperReadOnlyValues::<()>::get_val_at(&r, &q).is_some();
+            r.descend_to(&q);
+            let fork = match ZipperForking::<()>::fork_read_zipper(&r) {
+                Some(mut f) => unit_walk(&mut f),
+                None => "_".to_string(),
+            };
+            ("act_zipper_at", format!("{};{};U{};a{}{};F{}", dump(&mut z), walk_paths(&mut u), whole,
+                show_bool(a), if a == ga { "" } else { "!" }, fork))
         }
         _ => ("nop", "-".to_string()),
     })

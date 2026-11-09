@@ -393,6 +393,22 @@ def Source.productLike (name : String) (generic full : Bool) : Source :=
 def Source.product : Source := Source.productLike "product" false false
 /-- `ProductZipperG` over the same factors: the same view, no `val_count`. -/
 def Source.productg : Source := Source.productLike "productg" true false
+/-- `DiffZipper` over two `ProductZipper`s over the product factors, one from
+`new`, one from `new_with_primary` + `new_factors` (`run_diff` in
+`sources/product.rs`).  The two constructions are one zipper, and `DiffZipper`
+forwards every answer of the first (panicking if the second disagrees), its
+`ZipperProduct` included: the product view, info and skips.  `DiffZipper` has
+no read-only values (the adapter's `val`/`val_at` come from a third
+`ProductZipper` moved in lockstep), no forking, no subtries.
+
+(`ProductZipper`'s own source also picks one of the three constructions per
+input; they present the same zipper, so nothing here depends on which.) -/
+def Source.diffProduct : Source :=
+  { Source.product with
+    name := "diff-product"
+    caps := { fork := false, makeMap := false, merge := false, getVal := false,
+              getValIter := false } }
+
 def Source.productFull : Source := Source.productLike "product-full" false true
 def Source.productgFull : Source := Source.productLike "productg-full" true true
 

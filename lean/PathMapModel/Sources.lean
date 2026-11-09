@@ -20,8 +20,10 @@ namespace PathMapModel
 
 def Source.all : List Source :=
   [ Source.native, Source.act, Source.tracker, Source.overlay, Source.overlayFilter, Source.diff,
-    Source.dependent, Source.dependentLazy, Source.head, Source.owned, Source.empty, Source.prefix,
-    Source.product, Source.productg, Source.productFull, Source.productgFull ]
+    Source.dependent, Source.dependentLazy, Source.head, Source.owned,
+    Source.empty, Source.emptyNew, Source.prefix,
+    Source.product, Source.productg, Source.productFull, Source.productgFull,
+    Source.diffProduct ]
 
 def Source.byName (n : String) : Option Source :=
   Source.all.find? (·.name == n)

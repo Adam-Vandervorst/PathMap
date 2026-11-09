@@ -21,7 +21,8 @@ What is new is the ownership plumbing, which extra lines after `ROOT1` check:
   exactly the values at or after the focus in depth-first order.
 * `W2R` — `WriteZipperOwned::into_read_zipper` keeps the root and focus, so its
   fingerprint is the write zipper's.  (`MAP0`, before these, comes from
-  `into_map()` on whichever of the two is left.)
+  `into_map()` on whichever of the two is left, and `MAP1` from
+  `ReadZipperOwned::into_map` on `rz`: the map it was built from, unchanged.)
 * `RCLONE` / `WCLONE` — a `clone()` of a zipper is the same zipper: same root,
   same focus.  `rz` is first moved off its root (`reset`, `descend_last_path`),
   `wz` is wherever the program left it.  Last, since the crate's clones lose

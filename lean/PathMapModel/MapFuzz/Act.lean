@@ -28,7 +28,10 @@ model is that trie:
   cache limit (`with_cache_limit`, `0` disables it) never changes contents.
 * `get_val_at` (and the deprecated `get`), `iter` (every value, root first,
   depth-first), `read_zipper_at_borrowed_path[_u64]`: the trie's values and
-  subtries.
+  subtries.  Op 48 also reads the unit-valued zipper over the whole tree
+  (`read_zipper`, `Value = ()`): every location with whether it has a value
+  (`val`, which `get_val` must agree with), `val_at(q)` / `get_val_at(q)` from
+  the root, and `fork_read_zipper` at `q` (none where `q` is missing).
 
 Value mappings: `0` identity, `1` `v * 0x0101010101010101` (eight-byte
 varints), `2` `!v` (the nine-byte varint form).
@@ -83,6 +86,13 @@ def streamRaw (xs : List (Path × V)) : String × List (Path × V) :=
 
 /-- Every location of `t` at and below `q`, relative to `q`, capped like a dump. -/
 def walkPaths (t : PathMap V) (q : Path) : List Path := ((t.subtrie q).paths).take 64
+
+/-- Op 48's walk of a unit-valued `ACTZipper` rooted at `q` (`unit_walk` in
+act.rs): each location `hexPath` + `v`/`-`; `get_val` must agree with `val`
+(the crate marks a disagreement `!`, which the model never prints). -/
+def unitWalk (t : PathMap V) (q : Path) : String :=
+  let u := t.subtrie q
+  String.intercalate "/" ((u.paths.take 64).map fun p => hexPath p ++ (if (u.valAt p).isSome then "v" else "-"))
 
 def decPairs (d : Dec) : Nat → Option (List (Path × V) × Dec)
   | 0 => some ([], d)
@@ -155,10 +165,12 @@ def stepAct (op : Nat) (s : MSt) (d : Dec) : Option (Res × Dec) :=
       let gets := qs.map (fun q => showVal (t.valAt q) ++ "/" ++ showVal (t.valAt q))
       let g := if gets.isEmpty then "-" else String.intercalate "," gets
       some (("act_get", g ++ ";" ++ showPairs t.vals, s), d)
-  | 48 => do -- `read_zipper_at_borrowed_path_u64` / `read_zipper_at_borrowed_path`
+  | 48 => do -- `read_zipper_at_borrowed_path_u64` / `read_zipper_at_borrowed_path` / `read_zipper`
       let (i, d) ← d.map; let (p, d) ← d.path; let (q, d) ← d.path; let (mode, d) ← d.mod 3
       let t := actOf mode ((s.get i).subtrie p)
-      some (("act_zipper_at", dumpAt t q ++ ";" ++ showPaths (walkPaths t q), s), d)
+      let fork := if t.pathExists q then unitWalk t q else "_"
+      some (("act_zipper_at", dumpAt t q ++ ";" ++ showPaths (walkPaths t q) ++ ";U" ++ unitWalk t []
+        ++ ";a" ++ showBool (t.valAt q).isSome ++ ";F" ++ fork, s), d)
   | _ => some (("nop", "-", s), d)
 
 /-! ## Fixtures -/

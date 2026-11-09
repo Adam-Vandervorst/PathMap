@@ -18,7 +18,9 @@
 //!   `wz` wherever the program left it).  A clone is the same zipper.  Last,
 //!   because the clones lose their focus (a known defect) and an input is
 //!   classified by its first differing line.
-//! * `MAP0` comes from `into_map()` on whichever of the two is left.
+//! * `MAP0` comes from `into_map()` on whichever of the two is left, and
+//!   `MAP1` from `rz.into_map()` (`ReadZipperOwned::into_map`, on the clone
+//!   when `rz` is one): a read zipper hands back the map it was given.
 //!
 //! Variants, from the decoder position after the header (`hdr`): `hdr % 2`
 //! makes `rz` the clone of a fresh owned read zipper; `hdr / 2 % 2` goes
@@ -86,6 +88,8 @@ pub fn run(bytes: &[u8], check: bool) -> String {
     rz.descend_last_path();
     let _ = writeln!(extra, "RCLONE {}", fp(&rz.clone(), &root1));
     let _ = writeln!(extra, "WCLONE {wclone}");
+    drop(map1);
+    let map1 = rz.into_map();
     trailer(&mut out, &map0, &map1, &root0, &root1);
     out.push_str(&extra);
     out

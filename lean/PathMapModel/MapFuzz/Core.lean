@@ -9,7 +9,7 @@ import PathMapModel.MapFuzz.Base
 | op | method(s) | operands | ret |
 |---|---|---|---|
 | 0 | `get` | map, path | the value |
-| 1 | `insert` | map, path, val | the replaced value |
+| 1 | `insert` / `set_val_at` (by the map byte), on the path or the path ++ `longTail` | map, path, val | the replaced value |
 | 2 | `remove` | map, path | the removed value |
 | 3 | `contains` | map, path | value at the path? |
 | 4 | `path_exists_at`, `contains_path`, `val_at`, `get_val_at`, `val` | map, path | `e\|e\|v\|v\|rootval` |
@@ -25,8 +25,8 @@ import PathMapModel.MapFuzz.Base
 | 14 | `FromIterator`: owned pairs, `&(K, V)` pairs, `&[u8]` keys into `PathMap<()>` | dst, src, kind | the result |
 | 15 | `IntoIterator` of a clone (the original must survive), or of the map itself, rebuilt with `collect` | map, bool | pairs |
 | 16 | `clone` | dst, src | soundness of `shared_node_id` |
-| 17 | `single`, `From<(K, V)>`, `single_in`, `new`, `default` | map, kind, path, val | the new map |
-| 18 | `read_zipper_at_borrowed_path`, `read_zipper_at_path`, `into_read_zipper` + `into_map` | map, kind, path | dump at the path |
+| 17 | `single`, `From<(K, V)>`, `single_in`, `new`, `default`; or (by `kind / 5`) kinds 0–2 built with `WriteZipperOwned::new`/`new_in` + `descend_to` + `set_val` + `into_map` | map, kind, path, val | the new map |
+| 18 | `read_zipper_at_borrowed_path`, `read_zipper_at_path`, `into_read_zipper` + `into_map`; or (by `kind / 3`) kinds 0–1 as `trie_ref_at_path` + `fork_read_zipper` | map, kind, path | dump at the path |
 | 19 | `into_write_zipper(p)`, `descend_to(q)`, `set_val`, `into_map` | map, p, q, val | `old\|dump at p` |
 
 A single-map path operand is `Dec.mpath`: half the time an existing location
@@ -63,6 +63,11 @@ namespace PathMapModel
 namespace MapFuzz
 
 open Fuzz (V Dec hexPath showVal showBool dumpAt)
+
+/-- What op 1 appends to a long path (`LONG_TAIL` in `core_ops.rs`): 16
+bytes, longer than a `LineListNode` key slot (14), so the crate has to build
+continuation nodes.  A representation matter only; the meaning is a path. -/
+def longTail : Path := [1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0]
 
 /-- Rust's `str` `Debug` escaping of one byte of an ASCII key. -/
 def debugEscByte (b : UInt8) : String :=
@@ -128,7 +133,11 @@ def stepCore (op : Nat) (s : MSt) (d : Dec) : Option (Res × Dec) :=
       let (i, d) ← d.map; let (p, d) ← d.mpath (s.get i)
       some (("get", showVal (Map.getValAt (s.get i) p), s), d)
   | 1 => do -- `insert` / `set_val_at`: returns the old value
-      let (i, d) ← d.map; let (p, d) ← d.mpath (s.get i); let (v, d) ← d.val
+      -- The map byte's spare bits: `/3 % 2` picks `insert` (an alias of
+      -- `set_val_at`, so the same answer), `/6 % 2` appends `longTail`.
+      let (raw, d) ← d.u8; let i := raw.toNat % 3
+      let (p0, d) ← d.mpath (s.get i); let (v, d) ← d.val
+      let p := if (raw.toNat / 6) % 2 == 1 then p0 ++ longTail else p0
       let (old, t) := Map.setValAt (s.get i) p v
       some (("insert", showVal old, s.set i t), d)
   | 2 => do -- `remove`: `remove_val_at(p, prune = true)`

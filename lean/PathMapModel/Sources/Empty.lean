@@ -25,6 +25,19 @@ def Source.empty : Source :=
     view := fun _ _ _ r1 => (PathMap.empty, emptyRoot r1)
     caps := { makeMap := false, merge := false } }
 
+/-- `EmptyZipper::new()` behind `PathTracker::with_origin(_, emptyRoot r1)`
+(`run_new` in `sources/empty.rs`).  `new()` is the same zipper as
+`new_at_path` with an empty root prefix, and its root is a *missing* `[]`: the
+model's tries always contain `[]`, so the root prefix comes from the tracker
+instead (which resets the zipper and only tracks the path).  Everything but the
+path is `new()`'s own answer, held to `empty`'s view.  `PathTracker` has no
+forking and no `ZipperReadOnlyIteration`.  See `lean/findings/ctors.md` for the
+decision on the root. -/
+def Source.emptyNew : Source :=
+  { Source.empty with
+    name := "empty-new"
+    caps := { fork := false, makeMap := false, merge := false, getValIter := false } }
+
 #guard emptyRoot [] = [3]
 #guard emptyRoot [0, 1] = [0, 1]
 #guard (PathMap.empty : PathMap UInt64).pathExists (emptyRoot []) = false
