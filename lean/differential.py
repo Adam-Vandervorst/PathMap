@@ -276,6 +276,12 @@ KNOWN = [
     (["descend_last_path"],
      "ACTZipper::descend_last_path() runs one byte past the end of the trie "
      "[act: last_path_overshoots]"),
+    # Map fuzzer (--source map), map-core group; lean/findings/map-core.md.
+    (["src:map", "join_into ret=Identity/", "join_into ret=Element=SELF/"],
+     "PathMap::join_into reports Element for an unchanged map when the source's "
+     "node layout differs (a dangling path at a valued key, structure left by a "
+     "removal); reproducers lean/corpus/map-join_into-status-*.bin "
+     "[map_join_into_layout_status]"),
     # Shape classes, from `divergence_shape`.  Last on purpose: every entry
     # above is more specific, and these are meant to catch only what none of
     # them explain.
@@ -352,6 +358,8 @@ def divergence_shape(a, b):
     ta, tb = a.split(), b.split()
     if len(ta) != len(tb):
         return None
+    if any(t.startswith("n=") for t in ta):
+        return None    # a map-fuzzer line (--source map): no zipper shapes apply
     diff = [(x, y) for x, y in zip(ta, tb) if x != y]
     if not diff:
         return None
@@ -425,7 +433,13 @@ def act_valcount_only(a, b):
 
 
 def classify(msg):
+    # The map fuzzer (--source map) is a different op table: the entries above
+    # were written for zipper traces, and their op-name keys can match map ops
+    # (`remove_branches_at`, `restrict`, ...).  Only `src:map` entries apply.
+    map_src = msg.startswith("src:map\n")
     for keys, note in KNOWN:
+        if map_src and "src:map" not in keys:
+            continue
         if all(k in msg for k in keys):
             return note
     return None
@@ -751,7 +765,10 @@ def main():
             if args.verbose:
                 print("ok   %s" % name)
             return False
-        note = None if args.strict else classify(msg)
+        # Prefixed with the source name so a KNOWN entry for a virtual read
+        # source's own defect can be keyed on `src:<name>` and never hide
+        # the same-looking divergence of another source.
+        note = None if args.strict else classify("src:%s\n%s" % (args.source, msg))
         if note:
             known[note] = known.get(note, 0) + 1
             if args.verbose:

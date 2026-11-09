@@ -13,6 +13,7 @@ of them reduce to a snippet small enough to write out as a Rust example.
 | --- | --- |
 | `status-imprecise-join_map_into.bin` | `join_map_into` reports `Element` where the trie is provably unchanged (FINDINGS.md #8) |
 | `status-imprecise-restrict.bin` | `restrict` reports `Element` where the trie is provably unchanged (FINDINGS.md #8) |
+| `map-join_into-status-*.bin` | `--source map`: `PathMap::join_into` reports `Element` for an unchanged map when the source's node layout differs (findings/map-core.md) |
 
 Everything else in FINDINGS.md has a standalone reproducer instead; see
 `cargo run -p differential --bin zipper_bug_repros -- --list`.
