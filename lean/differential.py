@@ -318,35 +318,6 @@ KNOWN = [
     (["join_into"],
      "join_into() drops the source subtrie when the destination map is empty "
      "[join_into_empty_dst]"),
-    # --source dependent-lazy exists to replay two DependentProductZipperG
-    # entry defects (lean/findings/dependent.md D1, D2) that make what the
-    # zipper presents depend on its history; they surface under any op and
-    # would otherwise be credited to whatever generic entry matches first
-    # (CONTENT-DROPPED, in practice).  The campaign source is `dependent`.
-    (["src:dependent-lazy\n"],
-     "DependentProductZipperG enters a root joint only on a descend (D1) / a "
-     "factor stacked after an empty one only on a later call (D2); reproducers "
-     "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
-     "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
-    # Tested first: this one is keyed on a shape, and an ACT val_count-only
-    # difference can land on a line whose op name matches an entry below.
-    (["ACT-VALCOUNT-ONLY"],
-     "ACTZipper::val_count() counts from the zipper root, not the focus "
-     "[act: val_count_ignores_focus]"),
-    (["ESCAPED-ROOT"],
-     "a zipper left its own root: root_prefix_path() changed [root_escape]"),
-    (["to_next_val"],
-     "to_next_val() misses downstream values after a token-maintaining move "
-     "[to_next_val_after_step]"),
-    (["sibling_byte"],
-     "sibling movement fails after a token-maintaining move "
-     "[sibling_after_iteration]"),
-    (["to_next_get_val"],
-     "to_next_get_val() inherits the to_next_val() iteration defect "
-     "[to_next_val_after_step]"),
-    (["join_into"],
-     "join_into() drops the source subtrie when the destination map is empty "
-     "[join_into_empty_dst]"),
     # OverlayZipper (differential/src/sources/overlay.rs).  Before the generic
     # `ascend_until` entry below, which would otherwise swallow them.  See
     # lean/findings/overlay-exp.md.
@@ -419,26 +390,6 @@ KNOWN = [
     (["descend_last_path"],
      "ACTZipper::descend_last_path() runs one byte past the end of the trie "
      "[act: last_path_overshoots]"),
-    # Map fuzzer (--source map), map-core group; lean/findings/map-core.md.
-    (["src:map", "join_into ret=Identity/", "join_into ret=Element=SELF/"],
-     "PathMap::join_into reports Element for an unchanged map when the source's "
-     "node layout differs (a dangling path at a valued key, structure left by a "
-     "removal); reproducers lean/corpus/map-join_into-status-*.bin "
-     "[map_join_into_layout_status]"),
-    # Util fuzzer (--source util), u-mask group; lean/findings/u-mask.md.
-    # `ret=x ` is op 20's tag for a RangeInclusive iterated to its end.
-    (["src:util\n", "bm_incl_range ret=x "],
-     "ByteMask::set_/clear_/toggle_inclusive_bit_range read start()/end() of "
-     "an exhausted (empty) RangeInclusive and act on bit `end` "
-     "[u-mask M2: incl_range_exhausted]"),
-    # Util fuzzer, u-lattice group; lean/findings/u-lattice.md.  `ring_pmeet!`
-    # is the meet op with its skip turned off (full byte 255), only there to
-    # reproduce what `skip:setlattice-meet-swap` holds back.
-    (["src:util\n", " ring_pmeet! ret="],
-     "SetLattice (HashMap/HashSet) pmeet calls the value pmeet with the "
-     "operands swapped when self is not the smaller map, so a non-symmetric "
-     "value meet answers from the wrong operand "
-     "[u-lattice L1: setlattice_meet_swap]"),
     # DependentProductZipperG (--source dependent / dependent-lazy):
     # lean/findings/dependent.md.
     # Keyed on `ret=`, not READ-SIDE: a divergence in `ret` alone is tagged
@@ -464,6 +415,26 @@ KNOWN = [
     (["src:map", "write_trie_at"],
      "write_trie() from a zipper below the map root drops path bytes "
      "(origin_path is absolute) [map-serial: write_trie_below_root_drops_prefix_bytes]"),
+    # Map fuzzer (--source map), map-core group; lean/findings/map-core.md.
+    (["src:map", "join_into ret=Identity/", "join_into ret=Element=SELF/"],
+     "PathMap::join_into reports Element for an unchanged map when the source's "
+     "node layout differs (a dangling path at a valued key, structure left by a "
+     "removal); reproducers lean/corpus/map-join_into-status-*.bin "
+     "[map_join_into_layout_status]"),
+    # Util fuzzer (--source util), u-mask group; lean/findings/u-mask.md.
+    # `ret=x ` is op 20's tag for a RangeInclusive iterated to its end.
+    (["src:util\n", "bm_incl_range ret=x "],
+     "ByteMask::set_/clear_/toggle_inclusive_bit_range read start()/end() of "
+     "an exhausted (empty) RangeInclusive and act on bit `end` "
+     "[u-mask M2: incl_range_exhausted]"),
+    # Util fuzzer, u-lattice group; lean/findings/u-lattice.md.  `ring_pmeet!`
+    # is the meet op with its skip turned off (full byte 255), only there to
+    # reproduce what `skip:setlattice-meet-swap` holds back.
+    (["src:util\n", " ring_pmeet! ret="],
+     "SetLattice (HashMap/HashSet) pmeet calls the value pmeet with the "
+     "operands swapped when self is not the smaller map, so a non-symmetric "
+     "value meet answers from the wrong operand "
+     "[u-lattice L1: setlattice_meet_swap]"),
     # Shape classes, from `divergence_shape`.  Last on purpose: every entry
     # above is more specific, and these are meant to catch only what none of
     # them explain.
@@ -504,6 +475,17 @@ KNOWN = [
      "TrieRefOwned::new_with_node_and_val_in drops the location and its value "
      "when the node below it is empty (TrieRefOwned::from(PathMap), "
      "write zippers' get_trie_ref) [trie_ref_owned_empty_node]"),
+    # After the generic TrieRefOwned entry: an empty map's owned trie ref is
+    # that bug, not PrefixZipper's.
+    # Op 75 is ret-only (no side tag).  Mode 0 is PrefixZipper's own
+    # trie_ref_at_path, which hands `p` to the source unadjusted; modes 1-3
+    # go through make_map/get_trie_ref and inherit the make_map entries above.
+    (["src:prefix", "trie_ref_probe"],
+     "PrefixZipper::trie_ref_at_path() passes the path to the source zipper "
+     "without stripping the rest of the prefix (and from a focus off the "
+     "prefix reads the source anyway); the make_map-based trie refs inherit "
+     "make_map's off-prefix / empty-stem bugs "
+     "[prefix: trie_ref_ignores_prefix, lean/findings/prefix.md]"),
     (["src:owned", "crate: RCLONE _;"],
      "ReadZipperOwned::clone() returns a zipper at the root, not at the "
      "original's focus [owned_clone_resets_focus]"),
@@ -569,8 +551,6 @@ def divergence_shape(a, b):
         tb = [t for t in tb if not restated(t)]
     if len(ta) != len(tb):
         return None
-    if any(t.startswith("n=") for t in ta):
-        return None    # a map-fuzzer line (--source map): no zipper shapes apply
     # The map fuzzer (`--source map`: `... n=a,b,c` step lines, `M0` dumps) has
     # its own trace format; these zipper-trace shapes do not describe it.
     if (ta and re.fullmatch(r"M\d", ta[0])) or any(t.startswith("n=") for t in ta):
@@ -659,10 +639,11 @@ def classify(msg):
     map_src = msg.startswith("src:map\n")
     # Likewise the util fuzzer (--source util): only `src:util` entries apply.
     util_src = msg.startswith("src:util\n")
+    keyed = lambda keys, src: any(k.startswith(src) for k in keys)   # "src:map" or "src:map\n"
     for keys, note in KNOWN:
-        if map_src and "src:map" not in keys:
+        if map_src and not keyed(keys, "src:map"):
             continue
-        if util_src and "src:util" not in keys:
+        if util_src and not keyed(keys, "src:util"):
             continue
         if all(k in msg for k in keys):
             return note
