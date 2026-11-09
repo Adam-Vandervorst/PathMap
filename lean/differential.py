@@ -295,6 +295,19 @@ KNOWN = [
      "node layout differs (a dangling path at a valued key, structure left by a "
      "removal); reproducers lean/corpus/map-join_into-status-*.bin "
      "[map_join_into_layout_status]"),
+    # DependentProductZipperG (--source dependent / dependent-lazy):
+    # lean/findings/dependent.md.
+    # Keyed on `ret=`, not READ-SIDE: a divergence in `ret` alone is tagged
+    # WRITE-SIDE by `divergence_side` even when the op ran on the read zipper.
+    # "src:dependent" covers dependent-lazy too.
+    (["src:dependent", " val_at ret="],
+     "DependentProductZipperG::val_at() looks only in the focus factor, not in "
+     "the factors grafted below it; reproducer "
+     "lean/corpus/dependent-val_at-ignores-later-factors.bin [dependent_val_at]"),
+    (["src:dependent", "get_val_agrees ret="],
+     "DependentProductZipperG::get_val_at() looks only in the focus factor; "
+     "reproducer lean/corpus/dependent-get_val_at-ignores-later-factors.bin "
+     "[dependent_val_at]"),
     # Shape classes, from `divergence_shape`.  Last on purpose: every entry
     # above is more specific, and these are meant to catch only what none of
     # them explain.

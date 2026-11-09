@@ -2,6 +2,7 @@ import PathMapModel.Source
 import PathMapModel.Sources.Tracker
 import PathMapModel.Sources.Overlay
 import PathMapModel.Sources.Diff
+import PathMapModel.Sources.Dependent
 
 /-!
 # The source registry
@@ -13,7 +14,8 @@ must match `SOURCES` in `differential/src/sources/mod.rs`.
 namespace PathMapModel
 
 def Source.all : List Source :=
-  [ Source.native, Source.act, Source.tracker, Source.overlay, Source.overlayFilter, Source.diff ]
+  [ Source.native, Source.act, Source.tracker, Source.overlay, Source.overlayFilter, Source.diff,
+    Source.dependent, Source.dependentLazy ]
 
 def Source.byName (n : String) : Option Source :=
   Source.all.find? (·.name == n)
