@@ -75,13 +75,17 @@ seed:
 | campaign | inputs | result |
 |---|---|---|
 | seeds 201–230 (ops 57/58) | 300k | 0 divergences; no known-bug hit on a tree op |
-| seeds 401–430 (ops 57–59, after merging spec/coverage-models 27e74ce) | 300k | see below |
-| `--random` map, seed 77 | 50k | see below |
-| `--random` native, seed 78 | 20k | see below |
+| seeds 401–430 (ops 57–59, after merging spec/coverage-models 27e74ce) | 300k | 0 divergences; no known-bug hit on a tree op |
+| `--random` map, seed 77 | 50k | 0 new (3264 known: map-serial/map-core entries) |
+| `--random` native, seed 78 | 20k | 0 new (1195 known) |
 
 Known hits in these runs are all map-serial / map-core entries (25, 26, 27,
 24 in the index), from random bytes selecting ops 30–39 / 27; a wrapper
 printed every known-classified message that mentioned a tree op: none.
+A sample of 200 biased inputs ran ~3 tree ops each (300 `tree_bytes`, 323
+`tree_lines`, 77 of those with a non-feature root, 208 rebuilding with
+`same=0`, i.e. a dangling part dropped), so the two 300k campaigns ran
+roughly 1.8M tree round trips.
 
 ## Crate bugs
 
