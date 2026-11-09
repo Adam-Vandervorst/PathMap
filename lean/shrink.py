@@ -6,7 +6,7 @@ crate panic) while deleting bytes, so the result is a minimal reproducer.
 
     ./lean/shrink.py <input-file> [-o out.bin]
 """
-import argparse, os, re, subprocess, sys
+import argparse, atexit, os, re, shutil, subprocess, sys, tempfile
 
 from input_format import HEADER_SIZE, versioned_input
 
@@ -24,7 +24,11 @@ ACT_DEBUG = os.path.join(ROOT, "target", "debug", "act_trace")
 TRACE = TRACE_RELEASE
 ORACLE_ARGS = []
 TRACE_ARGS = []
-TMP = os.path.join(ROOT, "lean", ".shrink.bin")
+# One scratch file per shrink process, so several shrinks can run at once
+# (a single shared `lean/.shrink.bin` made parallel shrinks corrupt each other).
+_TMPDIR = tempfile.mkdtemp(prefix="pathmap-shrink-")
+atexit.register(shutil.rmtree, _TMPDIR, True)
+TMP = os.path.join(_TMPDIR, "candidate.bin")
 
 
 def signature(blob):
