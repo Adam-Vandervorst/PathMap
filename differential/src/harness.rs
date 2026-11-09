@@ -722,10 +722,11 @@ pub fn run(bytes: &[u8], check: bool) -> String {
     };
     let mut out = String::new();
     {
-        // NOTE: `read_zipper_at_borrowed_path` would panic (release: wrap) in
-        // `to_next_k_path`, whose `path_len()` underflows before the path buffer
-        // is prepared.  Use the owned-path constructor so that known bug does
-        // not abort every run.
+        // NOTE: `read_zipper_at_borrowed_path` panics (release: wraps) in a
+        // *cold* `to_next_k_path`, whose `path_len()` underflows before the path
+        // buffer is prepared.  The op table only runs whole k-path walks, which
+        // work on a borrowed path (`--source head` uses one for half its
+        // inputs; lean/findings/head-owned.md); this keeps the owned path.
         let mut rz = map1.read_zipper_at_path(&root1);
         let mut wz = map0.write_zipper_at_path(&root0);
         run_ops(&mut d, &mut out, &mut wz, &root0, &mut rz, &root1, check);
