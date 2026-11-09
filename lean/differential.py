@@ -486,9 +486,15 @@ def divergence_side(a, b):
     fingerprint (`W=...`, and possibly `ret=`), `READ-SIDE` when the read
     zipper's (`R=...`) differs; None for other lines.  Lets a KNOWN entry for a
     write-zipper bug avoid swallowing a read source's bug in the same op."""
-    if " R=" not in a or " R=" not in b:
+    if " R=" not in a or " R=" not in b or " W=" not in a or " W=" not in b:
         return None
-    return "READ-SIDE" if a.split(" R=", 1)[1] != b.split(" R=", 1)[1] else "WRITE-SIDE"
+    wa, ra = a.split(" W=", 1)[1].split(" R=", 1)
+    wb, rb = b.split(" W=", 1)[1].split(" R=", 1)
+    if ra != rb:
+        return "READ-SIDE"
+    if wa != wb:
+        return "WRITE-SIDE"
+    return None     # only `ret=` differs: the line alone cannot say which zipper
 
 
 def compare(blob, oracle, other, other_label, act=False):
