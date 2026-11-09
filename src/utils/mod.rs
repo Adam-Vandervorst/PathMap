@@ -15,6 +15,7 @@ pub use fast_slice_utils::find_prefix_overlap;
 /// A 256-bit type containing a bit for every possible value in a byte
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
+#[cfg_attr(feature = "trace_zipper", derive(bitcode::Encode, bitcode::Decode))]
 pub struct ByteMask(pub [u64; 4]);
 
 /// Alternate formatter for displaying a [`ByteMask`] as binary instead of as a set of byte indices.
