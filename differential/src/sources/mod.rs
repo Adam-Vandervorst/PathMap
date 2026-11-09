@@ -24,6 +24,8 @@
 use crate::harness::*;
 
 pub mod tracker;
+pub mod overlay;
+pub mod diff;
 
 /// A runner: decode and execute one input, return the trace.
 pub type Runner = fn(&[u8], bool) -> String;
@@ -34,6 +36,9 @@ pub const SOURCES: &[(&str, Runner)] = &[
     ("native", run),
     ("act", crate::act::run_act),
     ("tracker", tracker::run),
+    ("overlay", overlay::run),
+    ("overlay-filter", overlay::run_filter),
+    ("diff", diff::run),
     // Not a read source: the map-level fuzzer, a different op table.
     ("map", crate::mapfuzz::run),
 ];

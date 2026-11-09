@@ -217,6 +217,17 @@ KNOWN = [
     (["join_into"],
      "join_into() drops the source subtrie when the destination map is empty "
      "[join_into_empty_dst]"),
+    # OverlayZipper (differential/src/sources/overlay.rs).  Before the generic
+    # `ascend_until` entry below, which would otherwise swallow them.  See
+    # lean/findings/overlay-exp.md.
+    (["src:overlay", "ascend_until"],
+     "OverlayZipper::ascend_until()/ascend_until_branch() stop only where a "
+     "*source* branches or has a value: they climb past a branch formed by the "
+     "union, and stop at a value the mapping filtered out "
+     "[overlay_ascend_until_union_branch]"),
+    (["src:overlay-filter", "descend_until"],
+     "OverlayZipper::descend_until() stops at a source value that the mapping "
+     "filtered out [overlay_descend_until_filtered_value]"),
     (["ascend_until"],
      "ascend_until()/ascend_until_branch() corrupt a write zipper rooted at a "
      "node boundary [ascend_until_wz]"),

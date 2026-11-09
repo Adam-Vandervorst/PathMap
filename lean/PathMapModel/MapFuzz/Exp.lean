@@ -3,7 +3,10 @@ import PathMapModel.MapFuzz.Base
 /-!
 # Map fuzzer, ops 70–79: experimental zippers
 
-Not written yet: every selector in the range is a `nop`.
+Every selector in the range is a `nop`, on purpose.  The group was meant for
+`FullZipper` and `NullZipper` in `src/experimental.rs`, but both are private
+(no `pub`, no public constructor), so the fuzzer cannot build them.  See
+`lean/findings/overlay-exp.md`.
 -/
 
 namespace PathMapModel
