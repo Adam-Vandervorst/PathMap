@@ -216,11 +216,51 @@ def composition (s t : PathMap UInt64) : PathMap UInt64 :=
       mk' (t.vals.map fun (q, v) => (u ++ q, v)) (t.paths.map (u ++ ·))
     PathMap.join u64Ops acc tu) PathMap.empty
 
-/-- Which semantics the `product`/`productg` view uses.  `leaf` is the model;
-`composition` is the alternative the findings compare it with.  Flipping
-`semantics` below switches both sources' view (and turns the `ZipperProduct`
-report off, which has no meaning under `composition`). -/
-inductive Semantics | leaf | composition
+/-! ### The graft spec (user, 2026-11-10)
+
+    map(PZ(x, y)) = values(x).map(wz.descend_to(-).graft(y))
+
+Starting from `x`, for each value path `u` of `x` in iteration order (a key
+before its extensions): descend a write zipper to `u` and `graft` `y` there.
+`graft` replaces everything below `u` with `y`'s content and sets the value at
+`u` to `y`'s root value (clearing it if `y` has none).  Written here literally
+with the model's own write-zipper operations.
+
+Against the crate's leaf-based product (`prod2`) it differs in three ways: a
+value with children below it is a joint (and `y` replaces those children); a
+dangling leaf is not a joint; and the joint shows `y`'s root value, not `x`'s.
+When `x` has values exactly on its leaves (`leafValued`) the joints coincide
+and it is `prod2` with only the joint value changed (`prod2AtJoint`), which is
+also Zippy's `Composition`.  With nested keys it is *not* `Composition`: the
+deeper graft replaces what the shallower one put there, where `Composition`
+takes the union. -/
+
+/-- One graft step per value path of `x`. -/
+def graft2 (x y : PathMap V) : PathMap V :=
+  (keys x).foldl (fun t u => (((Map.zipper t).descendTo u).graft (Map.zipper y)).trie) x
+
+/-- The n-ary graft product, right-nested. -/
+def graftProd : List (PathMap V) → PathMap V
+  | [] => PathMap.empty
+  | [t] => t
+  | t :: fs => graft2 t (graftProd fs)
+
+/-- `prod2` with the joint value changed to the next factor's root value. -/
+def prod2AtJoint (t s : PathMap V) : PathMap V :=
+  { entries := t.entries.flatMap fun (p, v) =>
+      if t.childCount p == 0 then (p, s.valAt []) :: shiftBelow s p else [(p, v)] }
+
+/-- Values exactly on the leaves: every leaf (dangling included) has a value,
+and no value has anything below it. -/
+def leafValued (x : PathMap V) : Bool :=
+  x.entries.all fun (p, v) => (x.childCount p == 0) == v.isSome
+
+/-- Which semantics the `product`/`productg` view uses.  `leaf` is the model
+of what the crate does; `composition` and `graft` are the alternatives the
+findings compare it with (`graft` is the stated spec).  Flipping `semantics`
+below switches both sources' view (and turns the `ZipperProduct` report off for
+`composition`, where factor boundaries are not defined). -/
+inductive Semantics | leaf | composition | graft
 
 def semantics : Semantics := .leaf
 
@@ -230,6 +270,7 @@ def prodWith : Semantics → List (PathMap UInt64) → PathMap UInt64
   | .composition, [] => PathMap.empty
   | .composition, [t] => t
   | .composition, t :: fs => composition t (prodWith .composition fs)
+  | .graft, fs => graftProd fs
 
 def viewWith (sem : Semantics) (m0 m1 : PathMap UInt64) (r1 : Path) :
     PathMap UInt64 × Path :=
@@ -355,6 +396,30 @@ private def prefixFreeClean (t : PathMap UInt64) : Bool :=
 #guard battery.all fun a => pairs.all fun (b, c) =>
   ents (prod2 (prod2 a b) c) == ents (prod2 a (prod2 b c))
 
+-- The graft spec: equal to `prod2` with the joint value changed, and to
+-- `Composition`, exactly when `x` has values exactly on its leaves (over the battery).
+#guard pairs.all fun (a, b) => !leafValued a || ents (graft2 a b) == ents (prod2AtJoint a b)
+#guard pairs.all fun (a, b) => !leafValued a || ents (graft2 a b) == ents (composition a b)
+-- Associative over the battery.
+#guard battery.all fun a => pairs.all fun (b, c) =>
+  ents (graft2 (graft2 a b) c) == ents (graft2 a (graft2 b c))
+-- Against the crate's leaf product, one example per difference:
+-- (1) a value with children below it is a joint, and `y` replaces the children;
+#guard ents (graft2 (T [([1], some 1), ([1, 2], some 2)]) (T [([5], some 5)])) ==
+  [([], none), ([1], none), ([1, 2], none), ([1, 2, 5], some 5), ([1, 5], some 5)]
+#guard ents (prod2 (T [([1], some 1), ([1, 2], some 2)]) (T [([5], some 5)])) ==
+  [([], none), ([1], some 1), ([1, 2], some 2), ([1, 2, 5], some 5)]
+-- (2) a dangling leaf is not a joint;
+#guard ents (graft2 (T [([1], none)]) (T [([5], some 5)])) == [([], none), ([1], none)]
+-- (3) the joint shows `y`'s root value.
+#guard ents (graft2 (T [([1], some 1)]) (T [([], some 7), ([5], some 5)])) ==
+  [([], none), ([1], some 7), ([1, 5], some 5)]
+-- Against `Composition`, nested keys: the deeper graft replaces the shallower copy.
+#guard ents (graft2 (T [([1], some 1), ([1, 2], some 2)]) (T [([2], some 9)])) ==
+  [([], none), ([1], none), ([1, 2], none), ([1, 2, 2], some 9)]
+#guard keys (composition (T [([1], some 1), ([1, 2], some 2)]) (T [([2], some 9)])) ==
+  [[1, 2], [1, 2, 2]]
+
 -- The four counterexamples, one each.
 -- 1. An internal key of `T1` gets no copy of `T2`.
 #guard keys (prod2 (T [([1], some 1), ([1, 2], some 2)]) (T [([], some 0), ([5], some 5)])) ==
@@ -382,7 +447,7 @@ def Source.productLike (name : String) (generic full : Bool) : Source :=
   { name := name
     view := fun m0 m1 _ r1 => viewWith semantics m0 m1 r1
     info := match semantics with
-      | .leaf => some productInfo
+      | .leaf | .graft => some productInfo
       | .composition => none
     valAtSkip := if full then none else some (Product.valAtSkip (!generic))
     inputSkip := if full then none else some Product.inputSkip

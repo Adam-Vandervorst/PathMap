@@ -198,6 +198,61 @@ over the three factors; the view keeps map1's value at `r`), and the
 `ZipperProduct` report switches off, since factor boundaries are not defined
 under it.  The skips stay keyed on the leaf structure and would need revisiting.
 
+## The stated spec: graft at values (2026-11-10)
+
+The spec, as given:
+
+    map(PZ(x, y)) = values(x).map(wz.descend_to(-).graft(y))
+
+Starting from `x`, for each value path `u` of `x` in iteration order (a key
+before its extensions), descend a write zipper to `u` and `graft` `y` there:
+everything below `u` becomes `y`'s content and the value at `u` becomes `y`'s
+root value (cleared if `y` has none).  n factors nest to the right.  It is
+`Product.graft2` / `graftProd` in `Sources/Product.lean`, written literally
+with the model's write-zipper operations, selectable as `Semantics.graft`.
+
+**How the crate deviates.**  `ProductZipper` / `ProductZipperG` implement the
+leaf product (`prod2`), which differs from the spec in three ways (each a
+`#guard`):
+
+1. **A value with children below it is a joint** in the spec, and `y`
+   replaces those children.  The crate joins only at leaves and keeps the
+   children.
+2. **A dangling leaf is not a joint** in the spec (it is not a value); the
+   crate joins there.
+3. **The joint shows `y`'s root value** in the spec; the crate keeps `x`'s
+   (the "one change" above).
+
+With the product sources pointed at the spec (`semantics := .graft`), 1 726 of
+10 000 random `product` inputs agree.  The rest diverge, nearly all through
+these three; they are not recorded as KNOWN entries, since the sources stay on
+`.leaf` (what the crate does) so that campaigns keep finding the crate's other
+bugs.
+
+**Relations** (`#guard`s over the battery):
+
+* When `x` has values exactly on its leaves (`leafValued`), the joints
+  coincide: the spec is the leaf product with only the joint value changed
+  (`prod2AtJoint`), and it is Zippy's `Composition`.  So for such factors the
+  minimal crate change is change 3.
+* With nested keys the spec is **not** `Composition`: the deeper graft
+  replaces what the shallower graft put there (the deepest key wins), where
+  `Composition` takes the union.  `x = {a:1, ab:2}`, `y = {b:9}` gives
+  `{abb:9}`; `Composition` gives `{ab:9, abb:9}`.
+* `x`'s dangling paths outside every key survive; those below a key are
+  replaced.  (`CompositionZipper` keeps both.)
+* The spec is associative over every triple of the battery.
+
+**Implementing it as a zipper.**  Changes 2 and 3 are local: test `is_val`
+rather than "no children" for a joint, and read the next factor's root value
+there.  Change 1 is the hard one.  Below a joint `u`, the result holds `y`'s
+copy plus the paths leading to `x`'s deeper keys (created by the later
+`descend_to`s), but not `x`'s other content.  For a cursor in `x`, "does a key
+lie below this location" is a search of the subtrie, which is the O(N)-per-step
+cost the composition design avoided.  It is O(1) when `x` has no dangling paths
+(every existing path then leads to a key), so a zipper for this spec is cheap
+on pruned factors and needs a search, or a cached per-node flag, otherwise.
+
 ## What is covered / what is not
 
 Answer-checked now (previously never run or crash-only): `new`,

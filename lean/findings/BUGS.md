@@ -97,6 +97,18 @@ that node is there.
 | 36a | `ByteMask::set_`/`clear_`/`toggle_inclusive_bit_range` `debug_assert!(start <= end)` on an empty `a..=b` (`a > b`); release correctly does nothing, and `from_range` documents `start >= end` as empty | 41 | u-mask |
 
 | 36b | `indices_to_weave::<16, u128>` and over-long `weave_to_indices` panic with shift overflow (release: 32a, 32b) | 45, 46 | u-ints |
+## Deviations from the stated product spec
+
+The spec `map(PZ(x, y)) = values(x).map(wz.descend_to(-).graft(y))`
+(product.md, "The stated spec").  Not counted in the totals below; the crate's
+current leaf semantics is a coherent design that the spec replaces.
+
+| | deviation | file |
+|---|---|---|
+| S1 | `ProductZipper(G)` joins only at leaves: a value with children below it is not a joint, and its children are kept | product |
+| S2 | `ProductZipper(G)` joins at dangling leaves, which are not values | product |
+| S3 | `ProductZipper(G)` shows the earlier factor's value at a joint, not the next factor's root value | product |
+
 ## Doc mismatches
 
 | | bug | # | file |
