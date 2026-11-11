@@ -224,6 +224,8 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             61 => "pathmap::morphisms::CatamorphismCachedIterative::<u64>::hash_with_scheme(&rz, &pathmap::morphisms::trie_hash::Fnv1a64Scheme);".to_string(),
             62 => format!("{{ let path = wz.path().to_vec(); drop(wz); pathmap::morphisms::CatamorphismCached::<u64>::hash_with_scheme(&map0, &pathmap::morphisms::trie_hash::Fnv1a64Scheme); wz = map0.write_zipper_at_path({}); wz.descend_to(&path); }}", rs_bytes(&r0)),
             63 => format!("{{ let path = wz.path().to_vec(); drop(wz); map0.merkleize(); wz = map0.write_zipper_at_path({}); wz.descend_to(&path); }}", rs_bytes(&r0)),
+            64 => { let p = g!(d.path(6)); let v = g!(d.u8()) as u64;
+                    format!("wz.set_val_at({}, {v});", rs_bytes(&p)) }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

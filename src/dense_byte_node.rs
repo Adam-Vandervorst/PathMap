@@ -147,8 +147,11 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
         if self.mask.test_bit(k) {
             let cf = unsafe { self.values.get_unchecked_mut(ix) };
             match cf.rec_mut() {
-                Some(existing_node) => {
-                    existing_node.join_into(node)
+                Some(existing_node) => match existing_node.join_into(node) {
+                    //Only two empty nodes join to nothing: the path stays dangling and nothing changes.
+                    // `None` would tell the caller this whole node is empty
+                    AlgebraicStatus::None => AlgebraicStatus::Identity,
+                    status => status,
                 },
                 None => {
                     cf.set_rec(node);
@@ -1609,6 +1612,24 @@ pub(crate) fn merge_branches_into_byte_node<V: Clone + Send + Sync, A: Allocator
 where
     ByteNode<CfDst, A>: TrieNodeDowncast<V, A>,
 {
+    // A fully covered mask needs no per-branch source-membership checks.  This
+    // only establishes that the locations exist: dangling children must still
+    // be checked by the merge and emptied in the destination.
+    if REMOVE_UNSET || child_mask & src_node.mask == child_mask {
+        merge_branches_into_byte_node_impl::<_, _, _, _, REMOVE_UNSET, true>(dst_node, src_node, child_mask)
+    } else {
+        merge_branches_into_byte_node_impl::<_, _, _, _, REMOVE_UNSET, false>(dst_node, src_node, child_mask)
+    }
+}
+
+fn merge_branches_into_byte_node_impl<V: Clone + Send + Sync, A: Allocator, CfDst: CoFree<V=V, A=A>, CfSrc: CoFree<V=V, A=A>, const REMOVE_UNSET: bool, const SOURCE_COVERS_MASK: bool>(
+    dst_node: &ByteNode<CfDst, A>,
+    src_node: &ByteNode<CfSrc, A>,
+    child_mask: ByteMask
+) -> TrieNodeODRc<V, A>
+where
+    ByteNode<CfDst, A>: TrieNodeDowncast<V, A>,
+{
     let old_mask = dst_node.mask;
     let combined_mask = if REMOVE_UNSET { child_mask } else { child_mask | old_mask };
     let mut new_values = ValuesVec::with_capacity_in(combined_mask.count_bits(), dst_node.alloc.clone());
@@ -1633,14 +1654,42 @@ where
             }
         }
 
-        let src_range_mask = src_node.mask & ByteMask::from_range(range_start..=range_end);
+        let range_mask = ByteMask::from_range(range_start..=range_end);
+        let src_range_mask = src_node.mask & range_mask;
         let mut src_ix = src_node.mask.index_of(range_start) as usize;
-        for child_byte in src_range_mask.iter() {
-            let cf = unsafe { src_node.values.get_unchecked(src_ix) };
-            src_ix += 1;
-
-            if cf.has_rec() || cf.has_val() {
-                new_values.v.push(CfDst::from_cf(cf.clone()));
+        if REMOVE_UNSET {
+            //Only the source's branches can survive
+            for child_byte in src_range_mask.iter() {
+                let cf = unsafe { src_node.values.get_unchecked(src_ix) };
+                src_ix += 1;
+                if cf.has_val() || cf.rec().is_some_and(|rec| !rec.is_empty() && !rec.as_tagged().node_is_empty()) {
+                    new_values.v.push(CfDst::from_cf(cf.clone()));
+                    new_mask.set_bit(child_byte);
+                }
+            }
+            prev_end = range_end as usize + 1;
+            continue
+        }
+        let range_children = if SOURCE_COVERS_MASK {
+            src_range_mask
+        } else {
+            src_range_mask | (old_mask & range_mask)
+        };
+        for child_byte in range_children.iter() {
+            if SOURCE_COVERS_MASK || src_range_mask.test_bit(child_byte) {
+                let cf = unsafe { src_node.values.get_unchecked(src_ix) };
+                src_ix += 1;
+                // A dangling source branch is nothing to graft, like an absent one
+                if cf.has_val() || cf.rec().is_some_and(|rec| !rec.is_empty() && !rec.as_tagged().node_is_empty()) {
+                    new_values.v.push(CfDst::from_cf(cf.clone()));
+                    new_mask.set_bit(child_byte);
+                    continue
+                }
+            }
+            if old_mask.test_bit(child_byte) {
+                // Grafting nothing over an existing branch empties it, but the location survives
+                // as a dangling path, as after `graft` of an empty source
+                new_values.v.push(CfDst::new(Some(TrieNodeODRc::new_empty()), None));
                 new_mask.set_bit(child_byte);
             }
         }

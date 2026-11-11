@@ -15,6 +15,10 @@ divergence shows up as a textual diff.
 The input is consumed one byte at a time; decoding stops (and the program ends)
 as soon as the input runs out.
 
+Versioned inputs start with the eight bytes `PMFUZZ\x01\x00` and a
+little-endian u16 selector count (1..=256). Headerless inputs use 56 selectors.
+Both forms then decode the same map/zipper header and operations:
+
 ```
 header:
   n         := u8 % 8            -- entries seeded into map0 (the write target)
@@ -24,13 +28,8 @@ header:
   r0        := u8 % 4 ; r0 × pathbyte    -- write zipper root
   r1        := u8 % 4 ; r1 × pathbyte    -- read  zipper root
 body:
-  repeated: op := u8 % 56 ; operands per op (see `step`)
+  repeated: op := u8 % selectors ; operands per op (see `step`)
 ```
-
-Inputs prefixed with `PMFUZZ\x01\x00` followed by a little-endian u16 selector
-count (1..=256) use the same map/zipper header but decode operations modulo that
-recorded count. Headerless inputs use 56. Operation 56 is `remove_subtrie`,
-followed by a prune byte.
 
 Every **path byte** is masked to `b % 4`, so the generated tries share prefixes
 heavily — that is where the interesting trie shapes (branch points, dangling
@@ -243,6 +242,9 @@ which ends the program. -/
 def step (s : St) (d : Dec) : Option (St × Dec) := do
   let (opRaw, d) ← d.u8
   let op := opRaw.toNat % d.opCount
+  -- Master used opcode 60 for set_val_at in its 61-selector format. The Merkle
+  -- lineage used 60..63 for hashes in its 64-selector format; preserve both.
+  let op := if d.opCount == 61 && op == 60 then 64 else op
   match op with
   | 0 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
             let (_, s) := onTarget s t (fun z => ((), z.descendTo p))
@@ -554,6 +556,10 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 59 => do let (_, d) ← d.mod 2
              let (r, z) := s.rz.toPrevVal
              some (emit { s with rz := z } "to_prev_val" (showBool r), d)
+  | 64 => do let (p, d) ← d.path
+             let (v, d) ← d.u8
+             let (old, z) := s.wz.setValAt p (UInt64.ofNat v.toNat)
+             some (emit { s with wz := z } "set_val_at" (showVal old), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/
