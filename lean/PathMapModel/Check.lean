@@ -68,17 +68,6 @@ def inputWithCount (lo hi : UInt8) : ByteArray :=
 #guard (Fuzz.Dec.init (ByteArray.mk Fuzz.wireMagic.toArray)).isNone
 #guard (Fuzz.Dec.init (ByteArray.mk (Fuzz.wireMagic ++ [57]).toArray)).isNone
 
-/-- Preserve inputs recorded on both sides of the master/Merkle opcode collision. -/
-def programWithCount (count : UInt8) (program : List UInt8) : ByteArray :=
-  ByteArray.mk (Fuzz.wireMagic ++ [count, 0] ++ program).toArray
-
-#guard [false, true].all (fun act =>
-  Fuzz.run (programWithCount 61 [0, 0, 0, 0, 60, 1, 2, 7, 27, 9]) 256 act ==
-  Fuzz.run (programWithCount 65 [0, 0, 0, 0, 64, 1, 2, 7, 27, 9]) 256 act)
-#guard [false, true].all (fun act =>
-  Fuzz.run (programWithCount 64 [0, 0, 0, 0, 60, 0, 61, 62, 63, 27, 9]) 256 act ==
-  Fuzz.run (programWithCount 65 [0, 0, 0, 0, 60, 0, 61, 62, 63, 27, 9]) 256 act)
-
 /-! ## Regression fixtures from `src/write_zipper.rs` -/
 
 /-- `write_zipper_prune_path_test2`, first phase: removing the value at

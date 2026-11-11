@@ -242,9 +242,6 @@ which ends the program. -/
 def step (s : St) (d : Dec) : Option (St × Dec) := do
   let (opRaw, d) ← d.u8
   let op := opRaw.toNat % d.opCount
-  -- Master used opcode 60 for set_val_at in its 61-selector format. The Merkle
-  -- lineage used 60..63 for hashes in its 64-selector format; preserve both.
-  let op := if d.opCount == 61 && op == 60 then 64 else op
   match op with
   | 0 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
             let (_, s) := onTarget s t (fun z => ((), z.descendTo p))
@@ -354,14 +351,14 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              some (emit s "dump" result, d)
   -- Hashing (see `Hash.lean`).  The crate hashes with `Fnv1a64Scheme` for these ops; the model
   -- computes the same function over the logical trie, which knows nothing about node layout.
-  | 60 => do let (t, d) ← d.mod 2
+  | 61 => do let (t, d) ← d.mod 2
              let z := getTarget s t
              some (emit s "hash" (Hash.hex64 (Hash.hashU64 z.trie z.focus)), d)
-  | 61 => -- The zipper-driven engine on the read zipper; ACT drives it too
+  | 62 => -- The zipper-driven engine on the read zipper; ACT drives it too
           some (emit s "hash_iter" (Hash.hex64 (Hash.hashU64 s.rz.trie s.rz.focus)), d)
-  | 62 => -- The whole write map from its root, root value included
+  | 63 => -- The whole write map from its root, root value included
           some (emit s "map_hash" (Hash.hex64 (Hash.hashU64 s.wz.trie [])), d)
-  | 63 => -- `merkleize` is the identity on the logical trie, and the hash it reports is the
+  | 64 => -- `merkleize` is the identity on the logical trie, and the hash it reports is the
           -- map's hash under the production scheme, which the crate checks and reports as `1`
           some (emit s "merkleize" "1", d)
   | 27 => do let (v, d) ← d.u8
@@ -556,7 +553,7 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
   | 59 => do let (_, d) ← d.mod 2
              let (r, z) := s.rz.toPrevVal
              some (emit { s with rz := z } "to_prev_val" (showBool r), d)
-  | 64 => do let (p, d) ← d.path
+  | 60 => do let (p, d) ← d.path
              let (v, d) ← d.u8
              let (old, z) := s.wz.setValAt p (UInt64.ofNat v.toNat)
              some (emit { s with wz := z } "set_val_at" (showVal old), d)

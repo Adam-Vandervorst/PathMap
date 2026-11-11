@@ -65,10 +65,7 @@ impl<'a> Dec<'a> {
         Some(Self { bytes, pos, op_count })
     }
     pub fn op(&mut self) -> Option<usize> {
-        let op = self.modn(self.op_count)?;
-        // Master's 61-selector format assigned 60 to set_val_at, while the Merkle
-        // lineage's 64-selector format used 60..63 for hashing. Preserve both formats.
-        Some(if self.op_count == 61 && op == 60 { 64 } else { op })
+        self.modn(self.op_count)
     }
     pub fn u8(&mut self) -> Option<u8> {
         let b = *self.bytes.get(self.pos)?;
@@ -976,6 +973,11 @@ pub fn run_ops<R: ReadSource>(
                     ("to_prev_val", show_bool(rz.to_prev_val()).to_string())
                 }
                 60 => {
+                    let p = get!(d.path(6));
+                    let v = get!(d.u8()) as u64;
+                    ("set_val_at", show_val(wz.set_val_at(&p, v).as_ref()))
+                }
+                61 => {
                     // The logical trie hash at the focus, through the recursive cata engine.  The
                     // model computes the same function over the logical trie, so this pins down
                     // that the hash is independent of node layout, and that a value at the focus,
@@ -988,13 +990,13 @@ pub fn run_ops<R: ReadSource>(
                     };
                     ("hash", h.map(show_hash).unwrap_or_else(|| "skip".to_string()))
                 }
-                61 => {
+                62 => {
                     // The same hash of the read zipper through the zipper-driven engine.  The
                     // model emits the same value as for `hash`, so the two engines are held to
                     // agree with the model and hence with each other.
                     ("hash_iter", (*rz).hash_iter_probe().map(show_hash).unwrap_or_else(|| "skip".to_string()))
                 }
-                62 => {
+                63 => {
                     // The hash of the whole write map from its root, including the root value.
                     // Release the write zipper to hash the map, then restore its root and focus.
                     let path = wz.path().to_vec();
@@ -1004,7 +1006,7 @@ pub fn run_ops<R: ReadSource>(
                     wz.descend_to(&path);
                     ("map_hash", show_hash(h))
                 }
-                63 => {
+                64 => {
                     // Merkleize the write map.  Merkleize always uses the production (gxhash)
                     // scheme, which the model cannot compute, so what is reported is whether the
                     // hash it returns equals the map's hash under that same scheme -- the model
@@ -1019,11 +1021,6 @@ pub fn run_ops<R: ReadSource>(
                     wz = map0.write_zipper_at_path(root0);
                     wz.descend_to(&path);
                     ("merkleize", show_bool(r.hash == h).to_string())
-                }
-                64 => {
-                    let p = get!(d.path(6));
-                    let v = get!(d.u8()) as u64;
-                    ("set_val_at", show_val(wz.set_val_at(&p, v).as_ref()))
                 }
                 47 => {
                     let t = get!(d.modn(2));
@@ -1071,7 +1068,7 @@ mod input_format_tests {
 
     #[test]
     fn input_header_count_controls_decoding_independently_of_current_operation_count() {
-        for count in [1u16, 32, 56, 57, 58, 256] {
+        for count in [1u16, 32, 56, 57, 58, 61, 65, 256] {
             let mut bytes = WIRE_MAGIC.to_vec();
             bytes.extend_from_slice(&count.to_le_bytes());
             bytes.extend(0..=255);
@@ -1079,26 +1076,6 @@ mod input_format_tests {
             for byte in 0..=255 {
                 assert_eq!(d.op(), Some(byte % count as usize));
             }
-        }
-    }
-
-    #[test]
-    fn saved_master_and_merkle_inputs_keep_their_operation_meanings() {
-        let header = |count: u16, payload: &[u8]| {
-            let mut bytes = WIRE_MAGIC.to_vec();
-            bytes.extend_from_slice(&count.to_le_bytes());
-            bytes.extend_from_slice(payload);
-            bytes
-        };
-        let old_master = header(61, &[0, 0, 0, 0, 60, 1, 2, 7, 27, 9]);
-        let new_master = header(65, &[0, 0, 0, 0, 64, 1, 2, 7, 27, 9]);
-        let merkle_payload = &[0, 0, 0, 0, 60, 0, 61, 62, 63, 27, 9];
-        let old_merkle = header(64, merkle_payload);
-        let new_merkle = header(65, merkle_payload);
-        for (old, new) in [(old_master, new_master), (old_merkle, new_merkle)] {
-            assert_eq!(run(&old, true), run(&new, true));
-            assert_eq!(run_act(&old, true), run_act(&new, true));
-            assert_eq!(emit_repro(&old, 256), emit_repro(&new, 256));
         }
     }
 
@@ -1138,11 +1115,11 @@ mod input_format_tests {
         bytes.extend_from_slice(&[
             0, 0, 0, 0, // Empty maps and zipper roots.
             0, 0, 1, 1, // Descend the write zipper to [1].
-            64, 2, 0, 1, 0, // [0,1] := 0.
-            64, 2, 0, 2, 1, // [0,2] := 1.
-            64, 2, 0, 1, 2, // [0,1] := 2, replacing 0 (issue #175).
-            64, 0, 9, 64, 0, 10, // Empty path writes the focus, then replaces it.
-            64, 2, 3, // Truncated path must not execute a write.
+            60, 2, 0, 1, 0, // [0,1] := 0.
+            60, 2, 0, 2, 1, // [0,2] := 1.
+            60, 2, 0, 1, 2, // [0,1] := 2, replacing 0 (issue #175).
+            60, 0, 9, 60, 0, 10, // Empty path writes the focus, then replaces it.
+            60, 2, 3, // Truncated path must not execute a write.
         ]);
         for trace in [run(&bytes, true), run_act(&bytes, false)] {
             for expected in [
@@ -1258,7 +1235,7 @@ mod input_format_tests {
             1, 1, 2, 11, // map1: [2].
             1, 0, 0, // Write root [0], read root [].
             0, 0, 1, 1, // Write focus [0,1].
-            60, 0, 60, 1, 61, 62, 63, // Hash both foci and the map; merkleize.
+            61, 0, 61, 1, 62, 63, 64, // Hash both foci and the map; merkleize.
             27, 14, // The restored focus must still be [0,1].
         ]);
         let native = run(&bytes, true);

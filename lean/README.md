@@ -222,17 +222,12 @@ headers or invalid selector counts. Headerless inputs use 56 selectors.
 Each input's selector count controls decoding independently of the running
 software's operation table.
 
-Operations 60–63 are `hash`, `hash_iter`, `map_hash`, and `merkleize`.
+Operation 60 is `set_val_at`, with a path and a value byte, as established on master.
+Operations 61–64 are `hash`, `hash_iter`, `map_hash`, and `merkleize`.
 `hash` consumes a target byte; the other three have no operands. Both native
-and ACT read sources support the recursive and iterative hash probes. These
-operations are appended so inputs recorded with selector counts 56 or 60 retain
-their original decoding.
-
-Operation 64 is `set_val_at`, with a path and a value byte. Master assigned it
-opcode 60 in the 61-selector format before the Merkle lineage was merged.
-The decoder preserves that format by mapping its opcode 60 to operation 64;
-64-selector inputs retain the Merkle lineage's hash operations at 60–63.
-New inputs use 65 selectors.
+and ACT read sources support the recursive and iterative hash probes.
+New inputs use 65 selectors. Operation decoding is simply the input byte modulo
+the recorded selector count, with no format-specific opcode remapping.
 
 Generators always write the current header, using `NOPS` in
 `lean/input_format.py`, which must match `differential/src/harness.rs`.

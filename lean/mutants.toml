@@ -204,7 +204,7 @@ replace = """            Self::Identity => match b {
                 Self::Element => Self::Identity,
                 Self::Identity => Self::Identity,"""
 
-# --- The logical trie hash (Hash.lean; ops 60..63) --------------------------
+# --- The logical trie hash (Hash.lean; ops 61..64) --------------------------
 # The model computes the hash over the logical trie, so these mutate the algebra and the
 # recursive engine's handling of values and runs, not the FNV primitive.
 
