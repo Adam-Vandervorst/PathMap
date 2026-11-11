@@ -7,6 +7,17 @@ pub mod ints;
 
 pub mod debug;
 
+/// Aborts if dropped, preventing unwinding through a temporarily invalid state.
+/// Forget this guard once the protected invariants have been restored.
+pub(crate) struct AbortOnUnwind;
+
+impl Drop for AbortOnUnwind {
+    #[cold]
+    fn drop(&mut self) {
+        std::process::abort();
+    }
+}
+
 /// Use `fast_slice_utils` directly.  We don't want to maintain this re-export from pathmap
 //GOAT, remove this re-export when nothing downstream is going to break
 #[deprecated]

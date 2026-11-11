@@ -6,7 +6,7 @@ use std::hint::unreachable_unchecked;
 
 use crate::alloc::Allocator;
 use crate::ring::*;
-use crate::utils::ByteMask;
+use crate::utils::{AbortOnUnwind, ByteMask};
 
 use crate::utils::BitMask;
 use crate::trie_node::*;
@@ -2215,6 +2215,10 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         let mut r = 0;
         let mut c = 0;
 
+        // The loop moves entries before repairing vector lengths. Do not let a
+        // panic unwind into vectors that still claim ownership of moved entries.
+        let abort_on_unwind = AbortOnUnwind;
+
         for i in 0..4 {
             let mut lm = jm.0[i];
             while lm != 0 {
@@ -2250,6 +2254,7 @@ impl<V: Clone + Send + Sync + Lattice, A: Allocator, Cf: CoFree<V=V, A=A>, Other
         unsafe { self.values.set_len(0) }
         unsafe { other.values.set_len(0) }
         unsafe { v.v.set_len(c) }
+        core::mem::forget(abort_on_unwind);
         self.mask = jm;
         self.values = v.v;
 
