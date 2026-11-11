@@ -53,6 +53,12 @@ pub struct MerkleizeResult {
 /// paths are laid out in nodes and key segments, and regardless of the value the parent stores for
 /// the node's root position.
 ///
+/// A subtrie's root value is conceptually part of the subtrie. Ignoring the parent-slot value
+/// when sharing physical nodes reflects its current storage location, not the subtrie's meaning.
+/// FUTURE: When nodes own their root values, the memo should use the complete node hash, and the
+/// separate value-free hash and parent-slot value restoration can be removed. The logical hash
+/// of a subtrie, including `MerkleizeResult::hash`, already includes the value at its root.
+///
 /// The cata records the value-free hash of every node, in the order it finishes them.  A second,
 /// bottom-up pass over the physical nodes then replaces every child whose hash was seen before with
 /// the first node that produced that hash.
@@ -104,6 +110,8 @@ pub(crate) fn merkleize_root<V, A, S>(root: &TrieNodeODRc<V, A>, root_val: Optio
 
 /// Both hashes describe the same starting position. `full` includes its value, while
 /// `without_value` excludes only that position's value, retaining every descendant value.
+/// The second hash is needed only for sharing physical nodes under the current parent-owned
+/// root-value contract. It can be removed when each node owns its root value.
 #[derive(Clone, Copy)]
 struct NodeHash {
     full: u128,
@@ -144,6 +152,7 @@ impl<V: Clone + Send + Sync, A: Allocator, F: Fn(&V, u128) -> u128> CataCache<V,
         self.order.push((key, w.without_value));
         if node.refcount() > 1 {
             // Every parent has its own slot value, so reuse only the value-free summary.
+            // FUTURE: With node-owned root values, cache the full hash instead.
             self.shared.insert(key, NodeHash { full: w.without_value, without_value: w.without_value });
         }
     }

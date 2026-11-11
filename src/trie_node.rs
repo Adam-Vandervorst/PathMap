@@ -2533,6 +2533,10 @@ mod tagged_node_ref {
 ///
 /// Ordinary algebras cache only summaries without a parent-slot value. Merkleization also
 /// records unshared nodes and can restore a slot value onto a cached value-free hash.
+///
+/// A subtrie's root value is conceptually part of the subtrie. The separation here accommodates
+/// the current physical storage of that value in the parent. When nodes own their root values,
+/// their complete summaries can be cached by node ID instead.
 pub(crate) trait CataCache<V: Clone + Send + Sync, A: Allocator, W> {
     /// Whether to consult and fill the cache for this node. Must be false for the empty sentinel;
     /// its refcount must never be read.
@@ -2580,6 +2584,14 @@ where
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
     FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
 {
+    // NOTE: A caller-supplied value can make this trie-node boundary fall within a factored_cata callback,
+    // therefore the W is not cacheable based on node ID alone.
+    // FUTURE: When the node contract associates values at the root of nodes with the node and not with the parent,
+    // then the `passed_in_val.is_none()` check can be removed
+    //
+    // That guard is now split between the match below and the ordinary cache's `insert` method.
+    // Merkleization's `get_with_value` is a specialized workaround: it restores the supplied value
+    // onto a value-free hash. Once nodes own their root values, that workaround can be removed too.
     if cache.caches(node) {
         let key = node.shared_node_id();
         match passed_in_val {
