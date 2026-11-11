@@ -89,7 +89,7 @@ fn val_count_cata<V>(_bm: &ByteMask, vals: &mut[usize], _val: Option<&V>, _path:
 fn introspecting_pathmap_pathmap(bencher: Bencher) {
     use pathmap::{
         PathMap,
-        morphisms::Catamorphism,
+        morphisms::CatamorphismSideEffecting,
         zipper::{ProductZipper},
     };
     let mut sink = 0;
@@ -106,7 +106,7 @@ fn introspecting_pathmap_pathmap(bencher: Bencher) {
 fn generic_pathmap_pathmap(bencher: Bencher) {
     use pathmap::{
         PathMap,
-        morphisms::Catamorphism,
+        morphisms::CatamorphismSideEffecting,
         zipper::{ProductZipperG},
     };
     let mut sink = 0;
@@ -125,7 +125,7 @@ fn generic_act_act(bencher: Bencher) {
     use pathmap::{
         PathMap,
         arena_compact::{ArenaCompactTree},
-        morphisms::Catamorphism,
+        morphisms::CatamorphismSideEffecting,
         zipper::{ProductZipperG},
     };
     let mut sink = 0;
@@ -146,7 +146,7 @@ fn generic_pathmap_act(bencher: Bencher) {
     use pathmap::{
         PathMap,
         arena_compact::{ArenaCompactTree},
-        morphisms::Catamorphism,
+        morphisms::CatamorphismSideEffecting,
         zipper::{ProductZipperG},
     };
     let mut sink = 0;

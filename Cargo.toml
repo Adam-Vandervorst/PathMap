@@ -119,8 +119,21 @@ name = "product_zipper"
 harness = false
 
 [[bench]]
+name = "catamorphism"
+harness = false
+
+[[bench]]
+name = "merkleize"
+harness = false
+
+[[example]]
+name = "merkleize_sharing"
+required-features = ["viz"]
+
+[[bench]]
 name = "sla"
 harness = false
+required-features = ["viz"]
 
 [[bench]]
 name = "multiplicities"

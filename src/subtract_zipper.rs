@@ -1,8 +1,10 @@
-use std::{cell::Cell, num::NonZeroUsize};
+use std::{cell::Cell, convert::Infallible, num::NonZeroUsize};
 
 use smallvec::SmallVec;
 
 use crate::{
+    alloc::Allocator,
+    morphisms::CatamorphismCached,
     ring::{self, AlgebraicResult, DistributiveLattice, DistributiveLatticeRef},
     utils::{BitMask, ByteMask},
     zipper::{
@@ -832,76 +834,91 @@ where
     }
 }
 
-/// Counts values in the materialized subtraction below the current focus.
+/// Folds the virtual subtraction without materializing it. Unaffected subtrees use
+/// the left zipper's native recursive morphism; overlapping subtrees use the
+/// surviving child masks maintained by `SubtractZipper`.
 ///
-/// LHS-only subtrees are counted using the native `val_count()` operation;
-/// only overlapping subtrees are traversed explicitly.
-///
-/// Both zippers are restored to their original focus before returning.
-fn subtract_val_count<V, A, B>(lhs: &mut A, rhs: &mut B) -> usize
+/// Overlapping paths fall back to stepping (an empty prefix), which is allowed by
+/// the jumping morphism contract. No results are cached by left-node identity:
+/// the same left node can have different results against different right nodes.
+fn subtract_cata<V, A, B, Alloc, Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+    zipper: &mut SubtractZipper<V, A, B>,
+    new_acc_f: NewAccF,
+    fold_child_f: FoldChildF,
+    summarize_f: SummarizeF,
+) -> Result<W, Err>
 where
     V: DistributiveLattice + Clone,
-    A: ZipperMoving + ZipperValues<V>,
-    B: ZipperMoving + ZipperValues<V>,
+    A: ZipperMoving + ZipperValues<V> + Clone + CatamorphismCached<V, Alloc>,
+    B: ZipperMoving + ZipperValues<V> + Clone,
+    Alloc: Allocator,
+    W: Clone,
+    NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+    SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
 {
-    if !lhs.path_exists() {
-        return 0;
+    if !zipper.rhs.path_exists() && zipper.lhs.path_exists() {
+        return zipper.lhs.factored_cata_jumping::<_, _, _, _, _, _, COMPUTE_PATH>(
+            new_acc_f, fold_child_f, summarize_f,
+        );
     }
 
-    if !rhs.path_exists() {
-        return lhs.val_count();
-    }
-
-    let mut depth = 0;
-    let mut count = 0;
-    let mut lhs_mask = lhs.child_mask();
-    let mut rhs_mask = rhs.child_mask();
-
-    'descend: loop {
-        count += usize::from(value_survives::<V, _, _>(lhs, rhs));
-
-        let lhs_only = (lhs_mask ^ rhs_mask) & lhs_mask;
-        for lhs_byte in lhs_only.iter() {
-            lhs.descend_to_byte(lhs_byte);
-            count += lhs.val_count();
-            lhs.ascend_byte();
-        }
-
-        let mut combined_mask = lhs_mask & rhs_mask;
-        let mut next_common_byte = combined_mask.indexed_bit::<true>(0);
-        loop {
-            match next_common_byte {
-                Some(byte) => {
-                    lhs.descend_to_byte(byte);
-                    rhs.descend_to_byte(byte);
-
-                    lhs_mask = lhs.child_mask();
-                    rhs_mask = rhs.child_mask();
-
-                    depth += 1;
-                    continue 'descend;
-                }
-                None => {
-                    if depth == 0 {
-                        break 'descend;
-                    }
-
-                    let cur_byte = lhs.focus_byte().expect("non-empty path when depth > 0");
-                    lhs.ascend_byte();
-                    rhs.ascend_byte();
-
-                    lhs_mask = lhs.child_mask();
-                    rhs_mask = rhs.child_mask();
-                    combined_mask = lhs_mask & rhs_mask;
-                    next_common_byte = combined_mask.next_bit(cur_byte);
-
-                    depth -= 1;
-                }
-            }
+    let mask = zipper.child_mask;
+    let mut accumulator = if mask.is_empty_mask() {
+        None
+    } else {
+        Some(new_acc_f(&mask)?)
+    };
+    if let Some(acc) = &mut accumulator {
+        for byte in mask.iter() {
+            zipper.descend_to_byte(byte);
+            let child = subtract_cata::<_, _, _, Alloc, _, _, _, _, _, _, COMPUTE_PATH>(
+                zipper, new_acc_f, fold_child_f, summarize_f,
+            )?;
+            zipper.ascend_byte();
+            fold_child_f(&mask, child, acc)?;
         }
     }
+    summarize_f(&mask, zipper.val(), accumulator, &[])
+}
 
-    count
+impl<V, A, B, Alloc> CatamorphismCached<V, Alloc> for SubtractZipper<V, A, B>
+where
+    V: DistributiveLattice + Clone,
+    A: ZipperMoving + ZipperValues<V> + Clone + CatamorphismCached<V, Alloc>,
+    B: ZipperMoving + ZipperValues<V> + Clone,
+    Alloc: Allocator,
+{
+    fn factored_cata_jumping<Acc, W, Err, NewAccF, FoldChildF, SummarizeF, const COMPUTE_PATH: bool>(
+        &self,
+        new_acc_f: NewAccF,
+        fold_child_f: FoldChildF,
+        summarize_f: SummarizeF,
+    ) -> Result<W, Err>
+    where
+        W: Clone,
+        NewAccF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+        FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+        SummarizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+    {
+        let mut zipper = SubtractZipper::new(self.lhs.clone(), self.rhs.clone());
+        subtract_cata::<_, _, _, Alloc, _, _, _, _, _, _, COMPUTE_PATH>(
+            &mut zipper, new_acc_f, fold_child_f, summarize_f,
+        )
+    }
+
+    fn val_count(&self) -> usize {
+        if let Some(count) = self.val_count.get() {
+            return count;
+        }
+        let count = self.factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
+            |_| Ok(0usize),
+            |_mask, child, total| { *total += child; Ok(()) },
+            |_mask, value, total, _prefix| Ok(usize::from(value.is_some()) + total.unwrap_or(0)),
+        ).unwrap();
+        self.val_count.set(Some(count));
+        count
+    }
 }
 
 impl<V, A, B> Zipper for SubtractZipper<V, A, B>
@@ -974,27 +991,6 @@ where
     // fn at_root(&self) -> bool {
     //     self.lhs.path().len() == self.lhs_root_depth
     // }
-
-    fn val_count(&self) -> usize {
-        if let Some(count) = self.val_count.get() {
-            return count;
-        }
-
-        let count = if !self.path_exists() {
-            0
-        } else if self.child_mask.is_empty_mask() {
-            1
-        } else if !self.rhs.path_exists() {
-            self.lhs.val_count()
-        } else {
-            let mut lhs = self.lhs.clone();
-            let mut rhs = self.rhs.clone();
-            subtract_val_count::<V, _, _>(&mut lhs, &mut rhs)
-        };
-
-        self.val_count.set(Some(count));
-        count
-    }
 
     fn descend_to<K: AsRef<[u8]>>(&mut self, path: K) {
         let path = path.as_ref();
@@ -1754,6 +1750,25 @@ mod tests {
         State::Leaf(true).assert(&zipper);
     }
 
+    type CataDescription<V> = Vec<(Vec<u8>, Option<V>, Vec<u8>)>;
+
+    // Include every byte position and its child mask, so this detects incorrect
+    // pruning and prefix handling as well as incorrect values.
+    fn describe_cata_step<V: Clone>(
+        mask: &ByteMask,
+        children: &mut [CataDescription<V>],
+        value: Option<&V>,
+    ) -> CataDescription<V> {
+        let mut result = vec![(Vec::new(), value.cloned(), mask.iter().collect())];
+        for (byte, child) in mask.iter().zip(children) {
+            for (mut path, value, child_bytes) in std::mem::take(child) {
+                path.insert(0, byte);
+                result.push((path, value, child_bytes));
+            }
+        }
+        result
+    }
+
     fn assert_subtract_matches_materialized<K, V>(
         lhs: &PathMap<V>,
         rhs: &PathMap<V>,
@@ -1769,9 +1784,12 @@ mod tests {
             expected_z.descend_to(path.as_ref());
             let actual = subtract_at(lhs, rhs, path.as_ref());
 
+            // A concrete zipper reports its empty root as existing; the virtual
+            // subtraction reports existence only when some output survives.
+            let expected_exists = expected_z.is_val() || expected_z.child_count() != 0;
             assert_eq!(
                 actual.path_exists(),
-                expected_z.path_exists(),
+                expected_exists,
                 "path_exists differs at {path:?}"
             );
 
@@ -1801,7 +1819,104 @@ mod tests {
                 "val_count differs at {path:?}"
             );
 
+            assert_eq!(actual.val_count(), expected_z.val_count(), "cached count at {path:?}");
+            assert_eq!(
+                actual.cata_cached(describe_cata_step),
+                expected_z.cata_cached(describe_cata_step),
+                "morphism structure differs at {path:?}"
+            );
             expected_z.reset();
+        }
+    }
+
+    #[test]
+    fn subtract_cata_handles_empty_results_root_values_and_owned_values() {
+        use std::collections::HashSet;
+        let lhs = PathMap::from_iter([
+            (b"".as_slice(), HashSet::from([1u8, 2])),
+            (b"a", HashSet::from([3])),
+            (b"a/removed", HashSet::from([4])),
+            (b"b/kept", HashSet::from([5])),
+        ]);
+        let rhs = PathMap::from_iter([
+            (b"".as_slice(), HashSet::from([1u8])),
+            (b"a", HashSet::from([3])),
+            (b"a/removed", HashSet::from([4])),
+        ]);
+        let paths = [b"".as_slice(), b"a", b"a/removed", b"b", b"b/kept", b"missing"];
+        assert_subtract_matches_materialized(&lhs, &rhs, paths);
+        assert_subtract_matches_materialized(&lhs, &lhs, paths);
+        let empty = PathMap::new();
+        assert_subtract_matches_materialized(&empty, &lhs, paths);
+        assert_subtract_matches_materialized(&lhs, &empty, paths);
+    }
+
+    #[test]
+    fn subtract_cata_delegates_unaffected_runs_and_invalidates_counts() {
+        let lhs = PathMap::from_iter([
+            (b"a/x".as_slice(), true),
+            (b"a/y", true),
+            (b"b/long/unaffected/path", true),
+        ]);
+        let rhs = PathMap::from_iter([(b"a/x".as_slice(), true)]);
+        let mut zipper = subtract_at(&lhs, &rhs, &[]);
+        let saw_prefix = Cell::new(false);
+        let count = zipper.factored_cata_jumping::<_, _, Infallible, _, _, _, true>(
+            |_| Ok(0usize),
+            |_, child, total| { *total += child; Ok(()) },
+            |_, value, total, prefix| {
+                saw_prefix.set(saw_prefix.get() || !prefix.is_empty());
+                Ok(total.unwrap_or(0) + usize::from(value.is_some()))
+            },
+        ).unwrap();
+        assert_eq!(count, 2);
+        assert!(saw_prefix.get(), "left-only runs should use the native jumping morphism");
+        let count_without_paths = zipper.factored_cata_jumping::<_, _, Infallible, _, _, _, false>(
+            |_| Ok(0usize),
+            |_, child, total| { *total += child; Ok(()) },
+            |_, value, total, prefix| {
+                assert!(prefix.is_empty());
+                Ok(total.unwrap_or(0) + usize::from(value.is_some()))
+            },
+        ).unwrap();
+        assert_eq!(count_without_paths, count);
+        assert!(zipper.path().is_empty());
+        assert_eq!(zipper.val_count(), 2);
+        assert_eq!(zipper.val_count.get(), Some(2));
+        zipper.descend_to(b"a");
+        assert_eq!(zipper.val_count.get(), None);
+        assert_eq!(zipper.val_count(), 1);
+        zipper.reset();
+        assert_eq!(zipper.val_count(), 2);
+    }
+
+    #[test]
+    fn subtract_cata_propagates_callback_errors_without_moving_source() {
+        let lhs = PathMap::from_iter([(b"a".as_slice(), true), (b"b/long/path", true)]);
+        let rhs = PathMap::from_iter([(b"a".as_slice(), false)]);
+        let zipper = subtract_at(&lhs, &rhs, &[]);
+        for failing_stage in ["start", "fold", "summarize"] {
+            let failed = Cell::new(false);
+            let check = |stage| {
+                assert!(!failed.get(), "callback invoked after error");
+                if stage == failing_stage {
+                    failed.set(true);
+                    Err(stage)
+                } else {
+                    Ok(())
+                }
+            };
+            let result = zipper.factored_cata_jumping::<_, _, _, _, _, _, true>(
+                |_| { check("start")?; Ok(0usize) },
+                |_, child, total| { check("fold")?; *total += child; Ok(()) },
+                |_, value, total, _| {
+                    check("summarize")?;
+                    Ok(total.unwrap_or(0) + usize::from(value.is_some()))
+                },
+            );
+            assert_eq!(result, Err(failing_stage));
+            assert!(zipper.path().is_empty());
+            assert_eq!(zipper.val_count(), 2);
         }
     }
 

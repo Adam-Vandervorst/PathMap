@@ -1,4 +1,3 @@
-#![allow(unused)]
 use std::hash::{Hasher, Hash};
 use std::time::Instant;
 use num_traits::Zero;
@@ -7,7 +6,7 @@ use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::Distribution;
 use pathmap::*;
-use pathmap::morphisms::Catamorphism;
+use pathmap::morphisms::CatamorphismCached;
 use pathmap::ring::{AlgebraicResult, Lattice};
 use pathmap::utils::{BitMask, ByteMask, ints::{indices_to_weave, indices_to_bob}};
 use pathmap::zipper::{ReadZipperUntracked, WriteZipperUntracked, Zipper, ZipperMoving, ZipperValues, ZipperWriting};

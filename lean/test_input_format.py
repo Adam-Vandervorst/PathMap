@@ -27,7 +27,7 @@ class InputFormatTests(unittest.TestCase):
             self.assertEqual(versioned_input(payload), input_header(56) + payload)
 
     def test_versioned_inputs_keep_recorded_count(self):
-        for count in [1, 56, 57, 58, 256]:
+        for count in [1, 56, 57, 58, 61, 64, 65, 256]:
             blob = input_header(count) + bytes(range(256))
             self.assertEqual(versioned_input(blob), blob)
 

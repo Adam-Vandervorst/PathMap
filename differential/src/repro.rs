@@ -221,6 +221,11 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             59 => { let _t = g!(d.modn(2)); "rz.to_prev_val();".to_string() }
             60 => { let p = g!(d.path(6)); let v = g!(d.u8()) as u64;
                     format!("wz.set_val_at({}, {v});", rs_bytes(&p)) }
+            61 => { let t = g!(d.modn(2));
+                    format!("pathmap::morphisms::CatamorphismCached::<u64>::hash_with_scheme(&{}, &pathmap::morphisms::trie_hash::Fnv1a64Scheme);", z!(t)) }
+            62 => "pathmap::morphisms::CatamorphismCachedIterative::<u64>::hash_with_scheme(&rz, &pathmap::morphisms::trie_hash::Fnv1a64Scheme);".to_string(),
+            63 => format!("{{ let path = wz.path().to_vec(); drop(wz); pathmap::morphisms::CatamorphismCached::<u64>::hash_with_scheme(&map0, &pathmap::morphisms::trie_hash::Fnv1a64Scheme); wz = map0.write_zipper_at_path({}); wz.descend_to(&path); }}", rs_bytes(&r0)),
+            64 => format!("{{ let path = wz.path().to_vec(); drop(wz); map0.merkleize(); wz = map0.write_zipper_at_path({}); wz.descend_to(&path); }}", rs_bytes(&r0)),
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

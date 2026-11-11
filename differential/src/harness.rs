@@ -14,6 +14,8 @@
 //! `lean/PathMapModel/Fuzz.lean`; any change here must be mirrored there.
 
 use pathmap::PathMap;
+use pathmap::alloc::GlobalAlloc;
+use pathmap::morphisms::{CatamorphismCached, CatamorphismCachedIterative, trie_hash::Fnv1a64Scheme};
 use pathmap::ring::AlgebraicStatus;
 use pathmap::utils::ByteMask;
 use pathmap::zipper::*;
@@ -26,7 +28,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 61;
+pub const NOPS: usize = 65;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -147,7 +149,7 @@ pub fn show_byte_opt(b: Option<u8>) -> String {
 /// leave it, so a mismatch is tagged `ESCAPED-ROOT` — the model can never
 /// produce that tag, which lets `differential.py` recognise the escape bug
 /// instead of reporting it as an unexplained state divergence.
-pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath>(
+pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath + CatamorphismCached<u64>>(
     z: &Z,
     expected_root: &[u8],
 ) -> String {
@@ -239,10 +241,17 @@ pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
 /// Keeping this behind a trait means there is still exactly one operation table,
 /// so the two front ends cannot drift apart.
 pub trait ReadSource:
-    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration
+    Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration + CatamorphismCached<u64>
 {
     /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk).
     fn dump_fork(&self) -> String;
+    /// `CatamorphismCached::hash_with_scheme(Fnv1a64Scheme)` at the focus through the recursive
+    /// engine, or `None` if the read source has no concrete subtries to recurse over.
+    fn hash_probe(&self) -> Option<u128> { None }
+    /// The same hash through the zipper-driven engine (`CatamorphismCachedIterative`), or `None`
+    /// if the read source cannot drive it.
+    fn hash_iter_probe(&self) -> Option<u128> { None }
+
     /// `make_map().val_count()`, or `None` if subtries cannot be materialised.
     fn make_map_val_count(&self) -> Option<usize>;
 
@@ -276,6 +285,12 @@ pub trait ReadSource:
 impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     fn dump_fork(&self) -> String {
         dump_fork(self)
+    }
+    fn hash_probe(&self) -> Option<u128> {
+        Some(CatamorphismCached::<u64, GlobalAlloc>::hash_with_scheme(self, &Fnv1a64Scheme))
+    }
+    fn hash_iter_probe(&self) -> Option<u128> {
+        Some(CatamorphismCachedIterative::<u64>::hash_with_scheme(self, &Fnv1a64Scheme))
     }
     fn make_map_val_count(&self) -> Option<usize> {
         Some(self.make_map().val_count())
@@ -364,7 +379,7 @@ macro_rules! tgt {
 /// trait documentation or forced by the meaning of the accessors.
 pub fn check_zipper<Z>(z: &Z, label: &str, expected_root: &[u8])
 where
-    Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath,
+    Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath + CatamorphismCached<u64>,
 {
     // `at_root` is defined as "the path back to the root is empty".
     assert_eq!(
@@ -962,6 +977,51 @@ pub fn run_ops<R: ReadSource>(
                     let v = get!(d.u8()) as u64;
                     ("set_val_at", show_val(wz.set_val_at(&p, v).as_ref()))
                 }
+                61 => {
+                    // The logical trie hash at the focus, through the recursive cata engine.  The
+                    // model computes the same function over the logical trie, so this pins down
+                    // that the hash is independent of node layout, and that a value at the focus,
+                    // in a run, or in a parent's slot is layered on in the same place.
+                    let t = get!(d.modn(2));
+                    let h = if t == 0 {
+                        Some(CatamorphismCached::<u64, GlobalAlloc>::hash_with_scheme(&wz, &Fnv1a64Scheme))
+                    } else {
+                        (*rz).hash_probe()
+                    };
+                    ("hash", h.map(show_hash).unwrap_or_else(|| "skip".to_string()))
+                }
+                62 => {
+                    // The same hash of the read zipper through the zipper-driven engine.  The
+                    // model emits the same value as for `hash`, so the two engines are held to
+                    // agree with the model and hence with each other.
+                    ("hash_iter", (*rz).hash_iter_probe().map(show_hash).unwrap_or_else(|| "skip".to_string()))
+                }
+                63 => {
+                    // The hash of the whole write map from its root, including the root value.
+                    // Release the write zipper to hash the map, then restore its root and focus.
+                    let path = wz.path().to_vec();
+                    drop(wz);
+                    let h = CatamorphismCached::<u64, GlobalAlloc>::hash_with_scheme(&*map0, &Fnv1a64Scheme);
+                    wz = map0.write_zipper_at_path(root0);
+                    wz.descend_to(&path);
+                    ("map_hash", show_hash(h))
+                }
+                64 => {
+                    // Merkleize the write map.  Merkleize always uses the production (gxhash)
+                    // scheme, which the model cannot compute, so what is reported is whether the
+                    // hash it returns equals the map's hash under that same scheme -- the model
+                    // says it always does.  Merkleize is the identity on the logical trie, so the
+                    // model does nothing else: the fingerprints, the final dump and a later
+                    // `map_hash` hold it to changing no path, value or hash.  The write zipper
+                    // borrows the map, so it is re-created at the same logical position.
+                    let path = wz.path().to_vec();
+                    drop(wz);
+                    let r = map0.merkleize();
+                    let h = CatamorphismCached::<u64, GlobalAlloc>::hash(&*map0);
+                    wz = map0.write_zipper_at_path(root0);
+                    wz.descend_to(&path);
+                    ("merkleize", show_bool(r.hash == h).to_string())
+                }
                 47 => {
                     let t = get!(d.modn(2));
                     // The blind-zipper addition: `descend_until` reporting the
@@ -1008,7 +1068,7 @@ mod input_format_tests {
 
     #[test]
     fn input_header_count_controls_decoding_independently_of_current_operation_count() {
-        for count in [1u16, 32, 56, 57, 58, 256] {
+        for count in [1u16, 32, 56, 57, 58, 61, 65, 256] {
             let mut bytes = WIRE_MAGIC.to_vec();
             bytes.extend_from_slice(&count.to_le_bytes());
             bytes.extend(0..=255);
@@ -1099,8 +1159,7 @@ mod input_format_tests {
             57, 1, // Initialize reverse value iteration at [2].
             59, 1, 59, 1, 59, 1, 59, 1, // Iterate, exhaust at the valued root, wrap.
         ]);
-        // ACT's known val_count defect prevents --check at a missing focus.
-        for trace in [run(&bytes, true), run_act(&bytes, false)] {
+        for trace in [run(&bytes, true), run_act(&bytes, true)] {
             for expected in [
                 "1 to_prev_step ret=1 W=02",
                 "2 to_prev_step ret=1 W=00",
@@ -1167,4 +1226,32 @@ mod input_format_tests {
         assert!(repro.contains("wz.remove_subtrie(true);"));
         assert!(repro.contains("wz.set_val(14);"));
     }
+
+    #[test]
+    fn hash_probes_and_merkleize_preserve_the_write_focus_and_decoder_alignment() {
+        let mut bytes = input_header();
+        bytes.extend_from_slice(&[
+            2, 1, 0, 9, 2, 0, 1, 10, // map0: [0], [0,1].
+            1, 1, 2, 11, // map1: [2].
+            1, 0, 0, // Write root [0], read root [].
+            0, 0, 1, 1, // Write focus [0,1].
+            61, 0, 61, 1, 62, 63, 64, // Hash both foci and the map; merkleize.
+            27, 14, // The restored focus must still be [0,1].
+        ]);
+        let native = run(&bytes, true);
+        assert_eq!(native, run_act(&bytes, true));
+        for expected in ["1 hash ret=", "2 hash ret=", "3 hash_iter ret=", "4 map_hash ret=", "5 merkleize ret=1"] {
+            assert!(native.contains(expected), "missing {expected}:\n{native}");
+        }
+        assert!(native.contains("6 set_val ret=10 W=01 o0001 e1 v14"), "{native}");
+        assert!(native.contains("MAP0 _:-,00:9,0001:14"), "{native}");
+        let repro = emit_repro(&bytes, 256);
+        assert_eq!(repro.matches("hash_with_scheme").count(), 4);
+        assert!(repro.contains("map0.merkleize();"));
+        assert!(repro.contains("wz.set_val(14);"));
+    }
+}
+
+fn show_hash(h: u128) -> String {
+    format!("{:016x}", h as u64)
 }
