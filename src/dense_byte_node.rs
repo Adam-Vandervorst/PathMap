@@ -9,7 +9,6 @@ use crate::utils::ByteMask;
 
 use crate::utils::BitMask;
 use crate::trie_node::*;
-use crate::gxhash::HashMap;
 use crate::line_list_node::LineListNode;
 use crate::morphisms::summarize_run;
 
@@ -410,7 +409,7 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
     }
 
     #[inline(always)]
-    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut impl crate::trie_node::CataCache<V, A, W>) -> Result<W, Err>
     where
         W: Clone,
         StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,

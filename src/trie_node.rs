@@ -2529,6 +2529,40 @@ mod tagged_node_ref {
     }
 }
 
+/// Storage for summaries at physical node boundaries in the recursive cached cata.
+///
+/// Ordinary algebras cache only summaries without a parent-slot value. Merkleization also
+/// records unshared nodes and can restore a slot value onto a cached value-free hash.
+pub(crate) trait CataCache<V: Clone + Send + Sync, A: Allocator, W> {
+    /// Whether to consult and fill the cache for this node. Must be false for the empty sentinel;
+    /// its refcount must never be read.
+    fn caches(&self, node: &TrieNodeODRc<V, A>) -> bool;
+    /// A summary computed without a value supplied by the parent.
+    fn get(&self, key: u64) -> Option<&W>;
+    /// Optionally restore a parent-slot value onto a cached summary. General algebras cannot
+    /// separate that value from their summary and must recompute instead.
+    fn get_with_value(&self, _key: u64, _value: &V) -> Option<W> { None }
+    /// Record a completed summary, together with the parent-slot value used to compute it.
+    fn insert(&mut self, key: u64, node: &TrieNodeODRc<V, A>, value: Option<&V>, w: &W);
+}
+
+impl<V: Clone + Send + Sync, A: Allocator, W: Clone> CataCache<V, A, W> for HashMap<u64, W> {
+    #[inline]
+    fn caches(&self, node: &TrieNodeODRc<V, A>) -> bool {
+        !node.is_empty() && node.refcount() > 1
+    }
+    #[inline]
+    fn get(&self, key: u64) -> Option<&W> {
+        self.get(&key)
+    }
+    #[inline]
+    fn insert(&mut self, key: u64, _node: &TrieNodeODRc<V, A>, value: Option<&V>, w: &W) {
+        if value.is_none() {
+            self.insert(key, w.clone());
+        }
+    }
+}
+
 /// Internal implementation of `CatamorphismCached::factored_cata_jumping`
 pub(crate) fn recursive_cata_cached<A, V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(
     node: &TrieNodeODRc<V, A>,
@@ -2536,7 +2570,7 @@ pub(crate) fn recursive_cata_cached<A, V, Acc, W, Err, StartF, FoldChildF, Final
     start_f: StartF,
     fold_child_f: FoldChildF,
     finalize_f: FinalizeF,
-    cache: &mut HashMap<u64, W>,
+    cache: &mut impl CataCache<V, A, W>,
 ) -> Result<W, Err>
 where
     V: Clone + Send + Sync,
@@ -2546,20 +2580,23 @@ where
     FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
     FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
 {
-    // NOTE: A caller-supplied value can make this trie-node boundary fall within a factored_cata callback,
-    // therefore the W is not cacheable based on node ID alone.
-    // FUTURE: When the node contract associates values at the root of nodes with the node and not with the parent,
-    // then the `passed_in_val.is_none()` check can be removed
-    if passed_in_val.is_none() && !node.is_empty() && node.refcount() > 1 {
-        let hash = node.shared_node_id();
-        match cache.get(&hash) {
-            Some(cached) => Ok(cached.clone()),
+    if cache.caches(node) {
+        let key = node.shared_node_id();
+        match passed_in_val {
             None => {
-                let w = recursive_cata_dispatch::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)?;
-                cache.insert(hash, w.clone());
-                Ok(w)
+                if let Some(w) = cache.get(key) {
+                    return Ok(w.clone());
+                }
+            },
+            Some(value) => {
+                if let Some(w) = cache.get_with_value(key, value) {
+                    return Ok(w);
+                }
             },
         }
+        let w = recursive_cata_dispatch::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)?;
+        cache.insert(key, node, passed_in_val, &w);
+        Ok(w)
     } else {
         recursive_cata_dispatch::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)
     }
@@ -2572,7 +2609,7 @@ fn recursive_cata_dispatch<A, V, Acc, W, Err, StartF, FoldChildF, FinalizeF, con
     start_f: StartF,
     fold_child_f: FoldChildF,
     finalize_f: FinalizeF,
-    cache: &mut HashMap<u64, W>,
+    cache: &mut impl CataCache<V, A, W>,
 ) -> Result<W, Err>
 where
     V: Clone + Send + Sync,
@@ -3200,6 +3237,7 @@ mod opaque_dyn_rc_trie_node {
         }
         #[inline]
         pub(crate) fn refcount(&self) -> usize {
+            debug_assert!(!self.is_empty(), "refcount of the empty-node sentinel, which is not a real allocation");
             let (ptr, _tag) = self.ptr.get_raw_parts();
             unsafe{ &*ptr }.load(Acquire) as usize
         }

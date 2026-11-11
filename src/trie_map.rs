@@ -4,10 +4,9 @@ use crate::alloc::{Allocator, GlobalAlloc, global_alloc};
 use crate::morphisms::{new_map_from_ana_in, CatamorphismCached, TrieBuilder};
 use crate::trie_node::*;
 use crate::zipper::*;
-use crate::merkleization::{MerkleizeResult, merkleize_impl};
+use crate::merkleization::{MerkleizeResult, merkleize_root};
 use crate::ring::{AlgebraicResult, AlgebraicStatus, COUNTER_IDENT, SELF_IDENT, Lattice, LatticeRef, DistributiveLattice, DistributiveLatticeRef, Quantale};
 
-use crate::gxhash;
 
 /// A map type that uses a trie based on byte slices (`&[u8]`) known as "paths"
 ///
@@ -583,16 +582,16 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> PathMap<V, A> {
     }
 
     /// Optimize the `PathMap` by factoring shared subtries using a temporary [Merkle Tree](https://en.wikipedia.org/wiki/Merkle_tree)
+    ///
+    /// Subtries are identified by their logical hash, so [`MerkleizeResult::hash`] equals
+    /// [`CatamorphismCached::hash`](crate::morphisms::CatamorphismCached::hash) for this map.
     pub fn merkleize(&mut self) -> MerkleizeResult
         where V: core::hash::Hash
     {
         let Some(root) = self.root() else {
             return MerkleizeResult::default();
         };
-        let mut result = MerkleizeResult::default();
-        let mut memo = gxhash::HashMap::default();
-        let (hash, new_root) = merkleize_impl(&mut result, &mut memo, root, self.root_val());
-        result.hash = hash;
+        let (result, new_root) = merkleize_root(root, self.root_val(), &crate::morphisms::trie_hash::GxHashScheme);
         if let Some(new_root) = new_root {
             *self.root.get_mut() = Some(new_root);
         }

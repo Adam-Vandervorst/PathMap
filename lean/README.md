@@ -152,6 +152,9 @@ focus, such that ..." — instead of as a node walk.
 | `PathMapModel/Write.lean` | the write API: `ZipperWriting` in full |
 | `PathMapModel/Map.lean` | the `PathMap` surface, which is the zipper API applied at the root — plus `PathMap::restrict`, the one genuinely map-level operation |
 | `PathMapModel/Spec.lean` | §1 proved laws (the cursor algebra); §2 checkable laws (metamorphic properties) |
+| `PathMapModel/Hash.lean` | the logical trie hash (`CatamorphismCached::hash` under `Fnv1a64Scheme`), defined over the flat representation so node layout cannot enter |
+| `PathMapModel/HashSecurity.lean` | the scheme's collision reduction: two logically different tries that hash alike exhibit a collision of the primitive, for any primitive |
+| `PathMapModel/GraftNoop.lean` | `wz.graft(&rz)` is a no-op when the two foci hash alike (or the primitive collided); on the way, what `mk'`, `removeBelow`, `graftBelow`, `setVal`, `removeVal` and `subtrie` do, as observations |
 | `PathMapModel/Check.lean` | `#guard`s: regression fixtures transcribed from `src/write_zipper.rs`'s own tests, and the §2 laws over a battery of tries |
 | `PathMapModel/Fuzz.lean` | the wire format, the operation table, and the trace producer (including `--act` mode) |
 | `Main.lean` | the `pathmap-oracle` binary |
@@ -231,6 +234,12 @@ zipper, matching `to_next_val`. The model selects the greatest existing
 non-root path (or valued path) strictly before the focus, wrapping from the
 root to the last such location. Nonexistent starting paths are allowed;
 exhaustion returns `false` at the zipper root, even when it holds a value.
+
+Operations 60–63 are `hash`, `hash_iter`, `map_hash`, and `merkleize`.
+`hash` consumes a target byte; the other three have no operands. Both native
+and ACT read sources support the recursive and iterative hash probes. These
+operations are appended so inputs recorded with selector counts 56 or 60 retain
+their original decoding.
 
 Generators always write the current header, using `NOPS` in
 `lean/input_format.py`, which must match `differential/src/harness.rs`.
@@ -644,6 +653,61 @@ cargo run -p differential --bin sharing_check
 Both hold wherever they run (266/266 and 214/214, 1464 node references reused)
 and both abort on tries containing a *shared dangling path* — see finding 16.
 
+## The logical hash
+
+`CatamorphismCached::hash` (and the subtrie identity behind `PathMap::merkleize`)
+is a Merkle tree over the **logical** trie: every byte of a path is a node with
+one child, a branch point hashes its child mask and its children in ascending
+byte order, and a value is layered on the hash of the subtrie below it.  Nothing
+about the physical nodes enters, so two layouts of the same paths and values
+must hash alike.
+
+`PathMapModel/Hash.lean` is that definition over the model's `PathMap`, which
+has no node layout to leak.  The production primitive is gxhash, which is not
+worth transcribing; instead the crate exposes the primitive as a
+`pathmap::morphisms::trie_hash::HashScheme`, and the harness runs the crate with
+`Fnv1a64Scheme`, whose primitives are the few lines of FNV-1a the Lean file
+mirrors.  `merkleize` itself is fixed to gxhash (a caller-supplied scheme with
+collisions would merge subtries that differ), so its op reports whether the hash
+it returns equals the map's hash under that scheme, which the model says is
+always `1`.
+
+`HashSecurity.lean` proves the scheme sound relative to its primitive: for any
+`H`, if two positions with different subtries (`LogicalEq` fails) have equal
+hashes, then two different messages collided under `H` (or two different values
+under the value hash), and the proof constructs them
+(`collision_of_hash_eq`; `hashWith_inj_imp_logicalEq` is the ideal-primitive
+form, `fnv_collision_of_hashU64_eq` the instance for the harness's maps).  The
+reduction rests on the messages being decodable, which is why both schemes tag
+node and value messages (`N`, `V`), absorb the mask as a fixed 32-byte bitmap
+whose popcount fixes how many fixed-width digests follow, and hash the empty
+message when fuel runs out.  It says nothing about the primitive: gxhash makes
+no collision-resistance claim, so this is a statement about the scheme, and the
+primitive is treated as replaceable.
+
+`GraftNoop.lean` takes this to the operation merkleize actually performs.
+`graft_noop_of_hash_eq`: if `hash(wz) = hash(rz)` under an ideal primitive, then
+`wz.graft(&rz)` leaves every `Entry` of the write map as it was;
+`collision_of_graft_ne` is the unconditional contrapositive, and
+`graft_noop_of_hashU64_eq` the instance for the harness's maps.  Most of that
+file characterizes the model's normalizer `mk'` (`valAt_mk'`, `pathExists_mk'`)
+and, from it, the write operations as observations rather than list
+manipulations; those lemmas need no hashing and are there for `Spec.lean` to
+use.  The hypotheses are the canonical-form invariants: the write map is
+prefix-closed with an existing root, the source is prefix-closed.
+
+Four ops exercise it: `hash` (target zipper's focus, recursive engine),
+`hash_iter` (read zipper, zipper-driven engine, also on an ACT source),
+`map_hash` (the write map from its root), and `merkleize` (the write map; the
+model treats it as the identity, so the fingerprints and the final dump hold it
+to changing nothing).  `Check.lean` pins the definition with `#guard`s, and
+`mutants.toml` carries mutants for the algebra and the engine's value and run
+handling.
+
+The first run found a memory-safety bug (FINDINGS.md #17): the recursive cached
+cata read the refcount of the empty-node sentinel when a two-slot node had a
+dangling child, a segfault in release.
+
 ## Structural invariants
 
 `pathmap_trace --check <file>` (and `act_trace --check`) asserts structural
@@ -662,9 +726,10 @@ invariant should show up as a trace diff rather than as an abort.
 ## Out of scope
 
 `ZipperHead` and the concurrency story, `ProductZipper` / `PrefixZipper` /
-`OverlayZipper` / the ACT format, serialisation, `merkleize`, catamorphisms, and
+`OverlayZipper` / the ACT format, serialisation, catamorphisms beyond logical hashing, and
 allocator behaviour.  The model covers `PathMap`, `ReadZipper` and `WriteZipper`
-over an in-memory trie.
+over an in-memory trie. Merkleization is checked for preservation of logical
+contents and hash agreement; physical sharing is checked by Rust tests.
 
 That said, the containment invariant `--check` asserts
 (`root_prefix_path()` never changes) is exactly the property `ZipperHead` relies

@@ -1,3 +1,4 @@
+import PathMapModel.Hash
 import PathMapModel.Spec
 
 /-!
@@ -349,6 +350,18 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                | some fork => dumpAt fork.trie fork.root
                | none => "_:-"
              some (emit s "dump" result, d)
+  -- Hashing (see `Hash.lean`).  The crate hashes with `Fnv1a64Scheme` for these ops; the model
+  -- computes the same function over the logical trie, which knows nothing about node layout.
+  | 60 => do let (t, d) ← d.mod 2
+             let z := getTarget s t
+             some (emit s "hash" (Hash.hex64 (Hash.hashU64 z.trie z.focus)), d)
+  | 61 => -- The zipper-driven engine on the read zipper; ACT drives it too
+          some (emit s "hash_iter" (Hash.hex64 (Hash.hashU64 s.rz.trie s.rz.focus)), d)
+  | 62 => -- The whole write map from its root, root value included
+          some (emit s "map_hash" (Hash.hex64 (Hash.hashU64 s.wz.trie [])), d)
+  | 63 => -- `merkleize` is the identity on the logical trie, and the hash it reports is the
+          -- map's hash under the production scheme, which the crate checks and reports as `1`
+          some (emit s "merkleize" "1", d)
   | 27 => do let (v, d) ← d.u8
              let (old, z) := s.wz.setVal (UInt64.ofNat v.toNat)
              some (emit { s with wz := z } "set_val" (showVal old), d)

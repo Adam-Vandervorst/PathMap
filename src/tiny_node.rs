@@ -14,7 +14,6 @@ use fast_slice_utils::{find_prefix_overlap, starts_with};
 use crate::utils::ByteMask;
 use crate::alloc::Allocator;
 use crate::trie_node::*;
-use crate::gxhash::HashMap;
 use crate::ring::*;
 
 /// A borrowed reference to a payload with a key stored elsewhere, contained in 16 Bytes
@@ -122,7 +121,7 @@ impl<'a, V: Clone + Send + Sync, A: Allocator> TinyRefNode<'a, V, A> {
         unsafe{ core::slice::from_raw_parts(self.key_bytes.as_ptr().cast(), self.key_len()) }
     }
 
-    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut impl crate::trie_node::CataCache<V, A, W>) -> Result<W, Err>
     where
         W: Clone,
         StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,

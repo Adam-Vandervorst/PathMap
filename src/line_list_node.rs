@@ -7,7 +7,6 @@ use local_or_heap::LocalOrHeap;
 use crate::utils::{BitMask, ByteMask};
 use crate::alloc::Allocator;
 use crate::trie_node::*;
-use crate::gxhash::HashMap;
 use crate::ring::*;
 use crate::dense_byte_node::{DenseByteNode, ByteNode, CoFree, OrdinaryCoFree, CellCoFree};
 use crate::tiny_node::TinyRefNode;
@@ -3066,7 +3065,7 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
     }
 
     #[inline(always)]
-    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut HashMap<u64, W>) -> Result<W, Err>
+    pub(crate) fn node_recursive_cata<Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(&self, passed_in_val: Option<&V>, start_f: StartF, fold_child_f: FoldChildF, finalize_f: FinalizeF, cache: &mut impl crate::trie_node::CataCache<V, A, W>) -> Result<W, Err>
     where
         W: Clone,
         StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
