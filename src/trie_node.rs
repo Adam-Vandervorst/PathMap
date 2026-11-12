@@ -1554,7 +1554,14 @@ mod tagged_node_ref {
             }
         }
 
+        //With the check below, the compiler stops inlining this dispatch, which slows deep restricts by about 10%
+        #[inline(always)]
         pub fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
+            //x <| x = x.  Every empty sentinel shares one address, and an empty node restricts to nothing,
+            // so an empty node takes the ordinary path
+            if self.shared_node_id() == other.shared_node_id() && !self.node_is_empty() {
+                return AlgebraicResult::Identity(SELF_IDENT);
+            }
             match self {
                 Self::DenseByteNode(node) => node.prestrict_dyn(other),
                 Self::LineListNode(node) => node.prestrict_dyn(other),
@@ -2220,7 +2227,14 @@ mod tagged_node_ref {
             }
         }
 
+        //With the check below, the compiler stops inlining this dispatch, which slows deep restricts by about 10%
+        #[inline(always)]
         pub fn prestrict_dyn(&self, other: TaggedNodeRef<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> {
+            //x <| x = x.  Every empty sentinel shares one address, and an empty node restricts to nothing,
+            // so an empty node takes the ordinary path
+            if self.ptr == other.ptr && !self.node_is_empty() {
+                return AlgebraicResult::Identity(SELF_IDENT);
+            }
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
                 EMPTY_NODE_TAG => AlgebraicResult::None,
@@ -3308,6 +3322,11 @@ impl<V: Lattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V, A> {
             *self = node;
             return AlgebraicStatus::Element
         }
+        //x ∨ x = x.  `make_mut` would clone a node shared with itself, and the joins below would then
+        // clone every shared descendant in turn
+        if self.ptr_eq(&node) {
+            return AlgebraicStatus::Identity
+        }
         let (status, result) = self.make_mut().join_into_dyn(node);
         match result {
             Ok(()) => {},
@@ -3340,7 +3359,12 @@ impl<V: DistributiveLattice + Clone + Send + Sync, A: Allocator> TrieNodeODRc<V,
 
 impl <V: Clone + Send + Sync, A: Allocator> Quantale for TrieNodeODRc<V, A> {
     fn prestrict(&self, other: &Self) -> AlgebraicResult<Self> where Self: Sized {
-        self.as_tagged().prestrict_dyn(other.as_tagged())
+        //x <| x = x, as in `prestrict_dyn`, but before the tagged refs are built
+        if self.ptr_eq(other) && !self.as_tagged().node_is_empty() {
+            AlgebraicResult::Identity(SELF_IDENT)
+        } else {
+            self.as_tagged().prestrict_dyn(other.as_tagged())
+        }
     }
 }
 
