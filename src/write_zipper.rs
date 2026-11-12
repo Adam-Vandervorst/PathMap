@@ -2110,11 +2110,15 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         } else {
             PathMap::new_in(self.alloc.clone())
         };
-        if temp_map.is_empty() {
+        //Only values count: a result of nothing but dangling paths is empty
+        if temp_map.val_at::<&[u8]>(&[]).is_none() && !temp_map.read_zipper().to_next_val() {
             self.remove_branches(prune);
             false
         } else {
             self.graft_map(temp_map);
+            if prune {
+                self.drop_dangling_below_focus();
+            }
             true
         }
     }
@@ -2180,6 +2184,47 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
         self.graft_internal(downstream_node);
         fully_ascended
+    }
+    /// The subtrie below the focus as a map without a root value, sharing the focus node
+    fn below_focus_map(&self) -> Option<PathMap<V, A>> {
+        self.get_focus().into_option().map(|node| PathMap::new_with_root_in(Some(node), None, self.alloc.clone()))
+    }
+    /// `true` if any value lies strictly below the focus.  Stops at the first one
+    fn below_focus_has_val(&self) -> bool {
+        match self.below_focus_map() {
+            Some(map) => map.read_zipper().to_next_val(),
+            None => false,
+        }
+    }
+    /// Removes every dangling path strictly below the focus; the focus itself stays.  Walks the
+    /// whole subtrie, but only copies the nodes along the paths it removes
+    fn drop_dangling_below_focus(&mut self) {
+        /// Returns whether the subtrie below `rz`'s focus holds a value.  Records, for every location
+        /// that survives, the child bytes whose subtries hold none
+        fn walk<Z: ZipperMoving + ZipperPath + ZipperValues<V2>, V2>(rz: &mut Z, at_top: bool, doomed: &mut Vec<(Vec<u8>, ByteMask)>) -> bool {
+            let mut drop = ByteMask::EMPTY;
+            let mut any = false;
+            for b in rz.child_mask().iter() {
+                rz.descend_to_byte(b);
+                let has = rz.is_val() | walk(rz, false, doomed);
+                rz.ascend_byte();
+                if has { any = true } else { drop.set_bit(b) }
+            }
+            if drop != ByteMask::EMPTY && (any || at_top || rz.is_val()) {
+                doomed.push((rz.path().to_vec(), drop));
+            }
+            any
+        }
+        let Some(map) = self.below_focus_map() else { return };
+        let mut doomed = vec![];
+        walk(&mut map.read_zipper(), true, &mut doomed);
+        drop(map);
+        for (path, drop) in doomed {
+            self.descend_to(&path);
+            let keep = self.child_mask() & drop.not();
+            self.remove_unmasked_branches(keep, false);
+            self.ascend(path.len());
+        }
     }
     /// See [ZipperWriting::meet_into]
     pub fn meet_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: Lattice {
@@ -2250,8 +2295,16 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
         };
 
-        if prune && node_was_none {
-            // No node operation ran at an already dangling focus.
+        //`prune` leaves no dangling path below the focus.  Without it some may remain, but the
+        // status only reflects the values: a result without any is `None`
+        if prune {
+            self.drop_dangling_below_focus();
+        }
+        let node_status = match node_status {
+            AlgebraicStatus::None => AlgebraicStatus::None,
+            status => if self.below_focus_has_val() { status } else { AlgebraicStatus::None },
+        };
+        if prune {
             self.prune_path();
         }
 
@@ -2279,14 +2332,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             }
         };
         match a.pmeet_dyn(b) {
-            AlgebraicResult::Element(intersection) => {
-                self.graft_internal(Some(intersection));
-                AlgebraicStatus::Element
-            },
-            AlgebraicResult::None => {
-                self.graft_internal(None);
-                AlgebraicStatus::None
-            },
+            AlgebraicResult::Element(intersection) => self.graft_internal(Some(intersection)),
+            AlgebraicResult::None => self.graft_internal(None),
             AlgebraicResult::Identity(mask) => {
                 let src = if mask & SELF_IDENT > 0 {
                     a_focus.into_option()
@@ -2294,19 +2341,12 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
                     debug_assert_eq!(mask, COUNTER_IDENT); //It's gotta be a or b
                     b_focus.into_option()
                 };
-                match src {
-                    Some(node) => {
-                        self.graft_internal(Some(node));
-                        AlgebraicStatus::Element
-                    }
-                    None => {
-                        //An empty result subtrie means clear the destination
-                        self.graft_internal(None);
-                        AlgebraicStatus::None
-                    }
-                }
+                //An empty result subtrie means clear the destination
+                self.graft_internal(src);
             },
         }
+        //Dangling paths may remain, but a result without values is `None`
+        if self.below_focus_has_val() { AlgebraicStatus::Element } else { AlgebraicStatus::None }
     }
     /// See [ZipperWriting::subtract_into]
     pub fn subtract_into<Z: ZipperInfallibleSubtries<V, A>>(&mut self, read_zipper: &Z, prune: bool) -> AlgebraicStatus where V: DistributiveLattice {
@@ -4193,7 +4233,8 @@ mod tests {
         assert_eq!(btm.path_exists_at(&[1, 255, 0]), true);
         assert_eq!(btm.path_exists_at(&[0, 255, 0]), true);
 
-        // Test 3: meet from a higher level with all dangling paths and prune=true
+        // Test 3: meet from a higher level with all dangling paths and prune=true.  The meet keeps no
+        // value, and `prune` leaves no dangling path, so nothing is left below the focus
         let mut btm2: PathMap<()> = PathMap::new();
         btm2.create_path(&[0, 255, 0]);
         btm2.create_path(&[0, 255, 1]);
@@ -4204,14 +4245,14 @@ mod tests {
         let mut wz = zh2.write_zipper_at_exclusive_path(&[0]).unwrap();
         let rz = zh2.read_zipper_at_path(&[1]).unwrap();
         let alg_result = wz.meet_into(&rz, true);
-        assert_eq!(alg_result, AlgebraicStatus::Element);
+        assert_eq!(alg_result, AlgebraicStatus::None);
         drop(wz);
         drop(rz);
         drop(zh2);
 
         // Verify the meet operation did what it should have
         assert_eq!(btm2.path_exists_at(&[1, 255, 0]), true);
-        assert_eq!(btm2.path_exists_at(&[0, 255, 0]), true);
+        assert_eq!(btm2.path_exists_at(&[0, 255, 0]), false);
         assert_eq!(btm2.path_exists_at(&[0, 200, 5]), false);
         assert_eq!(btm2.path_exists_at(&[0, 255, 1]), false);
     }
@@ -6454,7 +6495,8 @@ mod tests {
                             2 => { wz.remove_unmasked_branches(mask, prune); },
                             3 => { wz.take_map(prune); },
                             4 => { wz.join_k_path_into(k, prune); },
-                            5 => { wz.meet_into(&src.read_zipper_at_path(&focus), prune); },
+                            //`prune` leaves no dangling path anywhere below the focus, not just at it
+                            5 => { wz.meet_into(&src.read_zipper_at_path(&focus), prune); if !prune { wz.z.drop_dangling_below_focus(); } },
                             6 => { wz.subtract_into(&src.read_zipper_at_path(&focus), prune); },
                             7 => {
                                 let mut src_wz = src.write_zipper_at_path(&focus[..root_len]);
