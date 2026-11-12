@@ -8,9 +8,14 @@
 //! * [`server`] is the resident-process protocol the driver speaks.
 //! * [`repro`] turns an input back into standalone `pathmap` calls.
 //! * [`act`] is the `ArenaCompactTree` read source behind `act_trace`.
+//! * [`pruned`] is a second, smaller harness: the subset of the API that
+//!   cannot leave a dangling path, checked against `lean/PrunedModel` and
+//!   driven by `lean/pruned_differential.py`.  See its module docs for why it
+//!   is not `harness` with a flag.
 
 pub mod act;
 pub mod harness;
+pub mod pruned;
 pub mod repro;
 pub mod server;
 
