@@ -119,8 +119,8 @@ def valAt (k : Path) : Option V := z.trie.valAt (z.focus ++ k)
 
 /-! ## `trait ZipperSubtries` / `ZipperInfallibleSubtries` -/
 
-/-- `ZipperInfallibleSubtries::make_map`.  Under the default `graft_root_vals`
-feature the value at the focus becomes the new map's root value. -/
+/-- `ZipperInfallibleSubtries::make_map`.  The value at the focus becomes the
+new map's root value. -/
 def makeMap : PathMap V := z.trie.subtrie z.focus
 
 /-- The node below the focus — what `get_focus` returns, i.e. `make_map` with the
