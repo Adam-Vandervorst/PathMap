@@ -225,7 +225,8 @@ jobs:
     # Regression check: head and base run on identical inputs; an input on which head diverges
     # from the model but base did not is reported as a warning annotation (master has known
     # divergences).  Set FUZZ_STRICT=1 below to make that fail the job instead.
-    # Ordered after the tests but not gated on them: findings are warnings, and a PR whose
+    # Focused convex programs have no known-bug exemptions: every divergence fails.
+    # Ordered after the tests but not gated on them: baseline findings are warnings, and a PR whose
     # tests fail is exactly one whose divergences are worth seeing.
     needs: test
     if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') }}
@@ -270,6 +271,30 @@ jobs:
           FUZZ_OUT: ${{ runner.temp }}/fuzz-out
         run: |
           .github/scripts/fuzz_ab.py "${{ steps.base.outputs.sha }}" "${{ github.sha }}"
+      - name: fuzzer encoding tests
+        run: |
+          cargo test --release -p differential --lib --target-dir "$CARGO_TARGET_DIR/fuzz-head"
+          python3 -m unittest discover -s lean -p 'test_input_format.py'
+      - name: convex programs against Lean
+        shell: bash
+        env:
+          PATHMAP_TRACE: ${{ env.CARGO_TARGET_DIR }}/fuzz-head/release/pathmap_trace
+          TMPDIR: ${{ runner.temp }}/fuzz-out/fails-convex
+        run: |
+          mkdir -p "$TMPDIR"
+          if python3 lean/differential.py --convex 2000 --seed 7 --strict --max-fails 0 -j 16 | tee "${{ runner.temp }}/fuzz-out/fuzz-convex-head.txt"; then
+            convex_status=0
+          else
+            convex_status=$?
+          fi
+          {
+            printf '\n## Convex programs\n\n'
+            tail -n 1 "${{ runner.temp }}/fuzz-out/fuzz-convex-head.txt"
+          } >> "${{ runner.temp }}/fuzz-out/summary.md"
+          if [ "$convex_status" -ne 0 ]; then
+            printf 'Convex program check failed\n' >> "${{ runner.temp }}/fuzz-out/findings"
+          fi
+          exit "$convex_status"
       - name: comment on the PR
         # One comment per PR for this job (separate from the bench one): verdict, per-mode tables,
         # newly diverging inputs and their shrunk Rust reproducers.  Created only when there is
@@ -281,7 +306,7 @@ jobs:
         run: |
           python3 .github/scripts/pr_comment.py --id fuzz --title "Differential fuzz vs Lean model" \
             --dir "${{ runner.temp }}/fuzz-out" --create-only-if "${{ runner.temp }}/fuzz-out/findings" \
-            "${{ github.event.pull_request.number }}" "${{ steps.fuzz.outcome }}" || true
+            "${{ github.event.pull_request.number }}" "${{ job.status }}" || true
       - name: summary
         if: always()
         run: |

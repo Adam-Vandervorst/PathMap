@@ -221,6 +221,15 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
             59 => { let _t = g!(d.modn(2)); "rz.to_prev_val();".to_string() }
             60 => { let p = g!(d.path(6)); let v = g!(d.u8()) as u64;
                     format!("wz.set_val_at({}, {v});", rs_bytes(&p)) }
+            61..=64 => {
+                let operation = if op % 2 == 0 { "convex_subtract" } else { "convex_meet" };
+                let call = if op >= 63 {
+                    format!("let mut result = PathMap::new(); pathmap::experimental::convex::zipper_{operation}(&mut left.read_zipper(), &mut rz, &mut result.write_zipper());")
+                } else {
+                    format!("let result = pathmap::experimental::convex::{operation}(&left, &rz.make_map());")
+                };
+                format!("{{ let left = wz.make_map(); {call} let canonical: PathMap<u64> = result.iter().map(|(p, v)| (p, *v)).collect(); wz.graft_map(canonical); }}")
+            }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

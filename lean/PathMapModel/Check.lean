@@ -250,6 +250,22 @@ wraps from the root, and stays within a zipper rooted below the map root. -/
 #guard fixtures.all (subSelfEmptyVals ops)
 #guard fixtures.all (restrictSelf ops)
 
+/-! Convex opcodes are operand-free, left-biased, and prune to stability.
+These encoded examples also check ACT skips and compatibility with count 61. -/
+def convexProgram (op : UInt8) : ByteArray := ByteArray.mk <|
+  (Fuzz.wireMagic ++ [65, 0,
+    3, 0, 10, 1, 0, 11, 2, 0, 1, 12,
+    3, 0, 20, 1, 0, 21, 2, 0, 2, 22, 0, 0, op, op]).toArray
+
+#guard [61, 63].all (fun op => (Fuzz.run (convexProgram op)).contains "MAP0 _:-")
+#guard [62, 64].all (fun op =>
+  (Fuzz.run (convexProgram op)).contains "MAP0 _:10,00:11,0001:12")
+#guard [61, 62, 63, 64].all (fun op =>
+  (Fuzz.run (convexProgram op) 256 true).contains "MAP0 _:10,00:11,0001:12")
+#guard ((Fuzz.run (ByteArray.mk
+  (Fuzz.wireMagic ++ [61, 0, 0, 0, 0, 0, 61, 0, 1, 2]).toArray)).head!).startsWith
+  "0 descend_to ret=02"
+
 /-! ## Naive oracles
 
 `PathMap.join` / `meet` / `sub` are defined in terms of `ValOps`, which was

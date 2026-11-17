@@ -46,6 +46,13 @@ def tail(path, n=30):
     return '\n'.join(Path(path).read_text().splitlines()[-n:])
 
 
+def selector_count(src):
+    """Read the append-only operation table, including pre-versioned baselines."""
+    harness = (src / 'differential' / 'src' / 'harness.rs').read_text()
+    match = re.search(r'pub const NOPS: usize = (\d+);', harness)
+    return int(match[1]) if match else 56
+
+
 class Fuzz:
     def __init__(self, base, head):
         self.repo = Path.cwd()
@@ -107,16 +114,18 @@ class Fuzz:
         git('clean', '-fdq', '--', 'differential', 'lean', cwd=self.base_src)
         return 'base-harness' if self.build_side('base', self.base_src) else 'none'
 
-    def run_side(self, side, src, label, n, flags):
+    def run_side(self, side, src, label, n, flags, selectors):
         env = dict(os.environ,
                    TMPDIR=str(self.out / f'fails-{side}-{label}'),
+                   PATHMAP_ORACLE=str(src / 'lean' / '.lake' / 'build' / 'bin' / 'pathmap-oracle'),
                    PATHMAP_TRACE=str(self.target / f'fuzz-{side}' / 'release' / 'pathmap_trace'),
                    PATHMAP_ACT_TRACE=str(self.target / f'fuzz-{side}' / 'release' / 'act_trace'))
         Path(env['TMPDIR']).mkdir(parents=True, exist_ok=True)
         log(f'== fuzz {label} {side}: {n} inputs, seed {self.seed}')
         outf = self.out / f'fuzz-{label}-{side}.txt'
         with open(outf, 'w') as f:
-            subprocess.run([str(src / 'lean' / 'differential.py'), '--random', str(n), '--seed', self.seed,
+            subprocess.run([str(self.repo / 'lean' / 'differential.py'), '--random', str(n), '--seed', self.seed,
+                            '--selectors', str(selectors),
                             '--maxlen', '300', '--max-fails', '0', '-j', self.jobs, *flags],
                            cwd=src, env=env, stdout=f, stderr=subprocess.STDOUT)
         text = outf.read_text()
@@ -189,7 +198,7 @@ class Fuzz:
             L += ['**No baseline**: base could not be built with either harness, so only head was run and nothing is gated.', '']
         elif baseline == 'base-harness':
             L += ["Base was built with its own harness and model (head's did not build against it), "
-                  'so harness changes may show up as differences.', '']
+                  'so harness changes may show up as differences. Random inputs use the shared selector range.', '']
         new_total, unfinished = 0, 0
         for label, n, _ in self.modes:
             hf, hs, hk = self.parse(label, 'head')
@@ -272,10 +281,17 @@ class Fuzz:
             if not self.build_side('head', self.repo):
                 sys.exit(1)
             baseline = self.prepare_base()
+            # Always use head's generator with one recorded selector count.
+            # A fallback baseline may not implement newly appended operations;
+            # those are exercised separately by the strict convex CI sweep.
+            selectors = selector_count(self.repo)
+            if baseline == 'base-harness':
+                selectors = min(selectors, selector_count(self.base_src))
+            log(f'== shared random input encoding: {selectors} selectors')
             for label, n, flags in self.modes:
-                self.run_side('head', self.repo, label, n, flags)
+                self.run_side('head', self.repo, label, n, flags, selectors)
                 if baseline != 'none':
-                    self.run_side('base', self.base_src, label, n, flags)
+                    self.run_side('base', self.base_src, label, n, flags, selectors)
             new_total, unfinished = self.summarize(baseline)
             return 1 if unfinished or (self.strict and new_total) else 0
         finally:

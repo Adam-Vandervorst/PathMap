@@ -1,4 +1,5 @@
 import PathMapModel.Spec
+import PathMapModel.ConvexMap
 
 /-!
 # Differential-fuzzing front end
@@ -195,7 +196,12 @@ def showBool (b : Bool) : String := if b then "1" else "0"
 
 `op % selector_count` selects the operation (56 for headerless inputs). Ops `0`–`26`
 act on a target zipper chosen by a following `u8 % 2` byte (`0` = write zipper,
-`1` = read zipper); ops `27`–`46` and `56` are write-zipper operations. -/
+`1` = read zipper); ops `27`–`46`, `56`, and `60`–`64` write at the focus.
+Ops `61`/`62` apply native convex meet/subtract; `63`/`64` apply the zipper
+implementations. They take no operands and replace the write focus with the
+valued projection of the result, using the read focus as RHS. Bare result
+structure is unspecified by convex algebra, so both interpreters canonicalise
+it before later operations observe it. ACT skips these four operations. -/
 
 /-- Input header marker. Must match `WIRE_MAGIC` in the Rust harness. -/
 def wireMagic : List UInt8 := [80, 77, 70, 85, 90, 90, 1, 0]
@@ -544,6 +550,16 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              let (v, d) ← d.u8
              let (old, z) := s.wz.setValAt p (UInt64.ofNat v.toNat)
              some (emit { s with wz := z } "set_val_at" (showVal old), d)
+  | 61 | 62 | 63 | 64 => do
+             let name := match op with
+               | 61 => "convex_meet"
+               | 62 => "convex_subtract"
+               | 63 => "zipper_convex_meet"
+               | _ => "zipper_convex_subtract"
+             if s.act then some (emit s name skipAct, d) else
+             let z := if op % 2 == 0 then s.wz.convexSubtract s.rz s.wz
+                      else s.wz.convexMeet s.rz s.wz
+             some (emit { s with wz := z } name "-", d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/
