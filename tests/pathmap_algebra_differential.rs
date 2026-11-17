@@ -336,3 +336,6 @@ fn wide_restricted_by_sparse_matches_btreeset_oracle() {
         assert_eq!(set_from_map(&stems), expected, "WriteZipper::restricting seed {seed}");
     }
 }
+
+#[path = "support/path_set_laws.rs"]
+mod path_set_laws;

@@ -12,6 +12,9 @@ use crate::write_zipper::write_zipper_priv::WriteZipperPriv;
 #[cfg(feature = "serialization")]
 pub mod serialization;
 
+/// Prefix basis, hull, branches, and cross-space divergence.
+pub mod path_sets;
+
 #[cfg(feature = "zipper_alg")]
 pub mod zipper_algebra;
 #[cfg(not(feature = "zipper_alg"))]
