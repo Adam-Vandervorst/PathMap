@@ -3,7 +3,10 @@
 use super::{KeySet, map_from_set, next_u64, prefix_heavy_set, set_from_map, wide_set};
 use pathmap::{
     PathMap,
-    experimental::path_sets::{basis, branches as br, divergence as d, hull},
+    experimental::{
+        convex::{convex_meet as cm, convex_subtract as cs},
+        path_sets::{basis, branches as br, divergence as d, hull, retain},
+    },
     zipper::*,
 };
 use std::collections::BTreeSet;
@@ -61,15 +64,6 @@ fn product(a: &M, b: &M) -> M {
         z.join_map_into(b.clone());
         if b.get([]).is_some() {
             z.set_val(());
-        }
-    }
-    out
-}
-fn live(p: &M, a: &M) -> M {
-    let mut out = M::new();
-    for (q, _) in p.iter() {
-        if a.read_zipper_at_path(&q).val_count() != 0 {
-            out.set_val_at(q, ());
         }
     }
     out
@@ -146,14 +140,14 @@ fn divergence_rec(a: &M, b: &M) -> M {
         out.join(&wrap(&p, &divergence_rec(&unwrap(a, &p), &unwrap(b, &p))))
     })
 }
-fn live_rec(p: &M, a: &M) -> M {
+fn retain_rec(p: &M, a: &M) -> M {
     let root = if p.get([]).is_some() && !a.is_empty() {
         e()
     } else {
         M::new()
     };
     head(p).meet(&head(a)).iter().fold(root, |out, (q, _)| {
-        out.join(&wrap(&q, &live_rec(&unwrap(p, &q), &unwrap(a, &q))))
+        out.join(&wrap(&q, &retain_rec(&unwrap(p, &q), &unwrap(a, &q))))
     })
 }
 fn overlaps(a: &M, b: &M, x: &M, y: &M) -> M {
@@ -191,7 +185,166 @@ impl Coverage {
         self.0.insert(name);
     }
 }
+fn retention_laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
+    let zero = M::new();
+    let same = |a: M, b: M| assert_eq!(set_from_map(&a), set_from_map(&b));
+    same(cm(a, b), retain(&a.meet(b), &hull(a).meet(&hull(b))));
+    same(cs(a, b), retain(a, &hull(a).subtract(b)));
+    same(cm(a, b).restrict(c), cm(&a.restrict(c), &b.restrict(c)));
+    same(cs(a, b).restrict(c), cs(&a.restrict(c), b));
+    same(cs(a, b).restrict(c), cs(&a.restrict(c), &b.restrict(c)));
+    let tips = hull(a).meet(c);
+    let other_tips = hull(b).meet(f);
+    same(
+        cm(&retain(a, &tips), b),
+        retain(&a.meet(b), &tips.meet(&hull(b))),
+    );
+    same(
+        cm(&retain(a, &tips), &retain(b, &other_tips)),
+        retain(&a.meet(b), &tips.meet(&other_tips)),
+    );
+    same(cs(&retain(a, &tips), b), retain(a, &tips.subtract(b)));
+    same(cm(a, &retain(a, &tips)), retain(a, &tips));
+    t.eq("retain_empty_left", &retain(&zero, a), &zero);
+    t.eq("retain_empty_right", &retain(a, &zero), &zero);
+    t.eq("retain_self", &retain(a, a), a);
+    t.eq(
+        "retain_union_left",
+        &retain(&a.join(b), c),
+        &retain(a, c).join(&retain(b, c)),
+    );
+    t.eq(
+        "retain_inter_left",
+        &retain(&a.meet(b), c),
+        &retain(a, c).meet(&retain(b, c)),
+    );
+    t.eq(
+        "retain_diff_left",
+        &retain(&a.subtract(b), c),
+        &retain(a, c).subtract(&retain(b, c)),
+    );
+    t.eq(
+        "retain_symDiff_left",
+        &retain(&sym(a, b), c),
+        &sym(&retain(a, c), &retain(b, c)),
+    );
+    t.eq(
+        "retain_union_right",
+        &retain(a, &b.join(c)),
+        &retain(a, b).join(&retain(a, c)),
+    );
+    t.eq(
+        "retain_filter_inter",
+        &retain(&retain(a, b), c),
+        &retain(a, b).meet(&retain(a, c)),
+    );
+    t.eq(
+        "retain_filter_comm",
+        &retain(&retain(a, b), c),
+        &retain(&retain(a, c), b),
+    );
+    t.eq(
+        "retain_filter_idem",
+        &retain(&retain(a, b), b),
+        &retain(a, b),
+    );
+    t.eq("retain_hull_mask", &retain(a, &hull(b)), &retain(a, b));
+    t.eq(
+        "retain_completion_mask",
+        &retain(a, &completion(b)),
+        &retain(a, b),
+    );
+    t.eq(
+        "retain_restrict_witnesses",
+        &retain(a, &b.restrict(a)),
+        &retain(a, b),
+    );
+    t.eq(
+        "restrict_retain_mask",
+        &a.restrict(&retain(b, a)),
+        &a.restrict(b),
+    );
+    t.eq("retain_restrict_disjoint", &retain(a, &raff(b, a)), &zero);
+    t.eq(
+        "retain_restrict_source",
+        &retain(&a.restrict(b), c),
+        &retain(a, c).restrict(b),
+    );
+    t.eq(
+        "retain_raffinate_source",
+        &retain(&raff(a, b), c),
+        &raff(&retain(a, c), b),
+    );
+    t.eq(
+        "retain_lcp_masks",
+        &retain(&retain(a, b), c),
+        &retain(a, &lcp_product(b, c)),
+    );
+    t.eq(
+        "retain_divergence_masks",
+        &retain(&retain(a, b), c),
+        &retain(a, &d(b, c).join(&retain(b, c)).join(&retain(c, b))),
+    );
+    t.eq(
+        "restrict_overlap_masks",
+        &a.restrict(b).restrict(c),
+        &a.restrict(&b.restrict(c).join(&c.restrict(b))),
+    );
+    t.eq(
+        "retain_restrict_mask",
+        &retain(a, &b.restrict(c)),
+        &retain(a, b).restrict(c).join(&retain(a, &retain(c, b))),
+    );
+    t.eq(
+        "restrict_retain_lcp",
+        &a.restrict(&retain(b, c)),
+        &a.restrict(&lcp_product(a, c).restrict(b)),
+    );
+    t.eq("basis_retain", &basis(&retain(a, b)), &retain(&basis(a), b));
+    t.eq("hull_restrict", &hull(&a.restrict(b)), &hull(a).restrict(b));
+    t.sub("retain_subset", &retain(a, b), a);
+    t.sub(
+        "retain_inter_right_bound",
+        &retain(a, &b.meet(c)),
+        &retain(a, b).meet(&retain(a, c)),
+    );
+    t.sub(
+        "retain_diff_right_bound",
+        &retain(a, b).subtract(&retain(a, c)),
+        &retain(a, &b.subtract(c)),
+    );
+    t.sub(
+        "retain_nested_bound",
+        &retain(a, &retain(b, c)),
+        &retain(&retain(a, b), c),
+    );
+    t.sub(
+        "retain_hull_source_bound",
+        &retain(&hull(a), b),
+        &hull(&retain(a, b)),
+    );
+    t.sub(
+        "divergence_retain_bound",
+        &d(&retain(a, c), &retain(b, f)),
+        &d(a, b).meet(&d(c, f)),
+    );
+    t.sub(
+        "branches_retain_bound",
+        &br(&retain(a, b)),
+        &br(a).meet(&br(b)),
+    );
+    t.check(
+        "retain_empty_duality",
+        retain(a, b).is_empty() == b.restrict(a).is_empty(),
+    );
+    t.check(
+        "retain_identity",
+        (set_from_map(&retain(a, b)) == set_from_map(a)) == covers(a, b),
+    );
+    t.check("retain_count_bound", count(&retain(a, b)) <= count(a));
+}
 fn laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
+    retention_laws(t, a, b, c, f);
     let x = d(a, b);
     let ba = br(a);
     let ha = hull(a);
@@ -278,7 +431,7 @@ fn laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
     t.sub("output_heads", &head(&x), &head(a).meet(&head(b)));
     t.sub("tails_bound", &tails(&x), &d(&tails(a), &tails(b)));
     t.eq("recursive_divergence", &divergence_rec(a, b), &x);
-    t.eq("live_recursive", &live_rec(a, b), &live(a, b));
+    t.eq("retain_recursive", &retain_rec(a, b), &retain(a, b));
     t.check(
         "output_cardinality",
         count(&x) <= count(&hull(&a.join(b))).saturating_sub(1),
@@ -294,7 +447,11 @@ fn laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
     t.eq("fork_completion", &br(&product(a, &fork)), &ca);
     let m = lcp_product(a, b);
     t.eq("fork_lcp", &d(&product(a, &fork), &product(b, &fork)), &m);
-    t.eq("lcp_correction", &m, &x.join(&live(a, b)).join(&live(b, a)));
+    t.eq(
+        "lcp_correction",
+        &m,
+        &x.join(&retain(a, b)).join(&retain(b, a)),
+    );
     t.eq("lcp_diagonal", &lcp_product(a, a), &ca);
     t.eq("lcp_symmetry", &m, &lcp_product(b, a));
     t.eq("lcp_output_completion", &completion(&m), &m);
@@ -357,12 +514,12 @@ fn laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
     t.eq(
         "one_mask",
         &d(&a.restrict(c), b),
-        &x.restrict(c).join(&d(&live(c, a), b)),
+        &x.restrict(c).join(&d(&retain(c, a), b)),
     );
     t.eq(
         "same_mask",
         &d(&a.restrict(c), &b.restrict(c)),
-        &x.restrict(c).join(&d(&live(c, a), &live(c, b))),
+        &x.restrict(c).join(&d(&retain(c, a), &retain(c, b))),
     );
     t.eq(
         "filter_partition",
@@ -396,9 +553,9 @@ fn laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
         &d(&a.restrict(c), &b.restrict(f)),
         &x.restrict(c)
             .restrict(f)
-            .join(&d(a, &live(f, b)).restrict(c))
-            .join(&d(&live(c, a), b).restrict(f))
-            .join(&d(&live(c, a), &live(f, b))),
+            .join(&d(a, &retain(f, b)).restrict(c))
+            .join(&d(&retain(c, a), b).restrict(f))
+            .join(&d(&retain(c, a), &retain(f, b))),
     );
     t.sub(
         "raffination_bound",

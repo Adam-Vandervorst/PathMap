@@ -84,6 +84,14 @@ fn exhaustive_binary_spaces() {
         assert_eq!(keys(&branches(ma)), oracle(a, a));
         for (b, mb) in spaces.iter().zip(&maps) {
             assert_eq!(keys(&divergence(ma, mb)), oracle(a, b), "{a:?}, {b:?}");
+            let expected = a
+                .iter()
+                .filter(|p| b.iter().any(|q| q.starts_with(p)))
+                .cloned()
+                .collect();
+            let retained = retain(ma, mb);
+            assert_eq!(keys(&retained), expected, "retain {a:?}, {b:?}");
+            assert_value_supported(&retained);
         }
     }
 }
@@ -284,6 +292,14 @@ fn linear_work_and_basis_cutoff() {
         assert_eq!(a.moves + b.moves, 4 * (n - 1));
         assert_eq!(out.val_count(), (1 << h) - 1);
         assert_eq!(a.depth() + b.depth(), 0);
+        let mut a = Counted::new(h);
+        let mut b = Counted::new(h);
+        zipper_retain(&mut a, &mut b, &mut out.write_zipper());
+        assert_eq!(a.moves + b.moves, 4 * (n - 1));
+        assert_eq!(a.masks.get(), n);
+        assert_eq!(b.masks.get(), n);
+        assert_eq!(a.depth() + b.depth(), 0);
+        assert_eq!(out.val_count(), 1 << h);
     }
     let mut a = Counted::new(1_000_000);
     a.root_value = true;
@@ -315,4 +331,68 @@ fn disjoint_fringe_stops_at_first_value_and_empty_annihilates() {
     zipper_divergence(&mut bare, &mut actual, &mut out.write_zipper());
     assert!(out.is_empty());
     assert_eq!(bare.moves + actual.moves, 4 * ((1 << 9) - 2));
+}
+
+#[test]
+fn retain_focus_payloads_and_bare_witnesses() {
+    let mut a = PathMap::new();
+    for (p, v) in [("left/", 1), ("left/a", 2), ("left/ab", 3), ("left/b", 4)] {
+        a.set_val_at(p, v);
+    }
+    let mut b = PathMap::single("right/abc", "witness".to_owned());
+    b.write_zipper_at_path(b"right/b/c").create_path();
+    let mut out = PathMap::single("keep", 9);
+    out.set_val_at("dest/stale", 10);
+    let mut left = a.read_zipper();
+    let mut right = b.read_zipper();
+    left.descend_to("left/");
+    right.descend_to("right/");
+    {
+        let mut dest = out.write_zipper();
+        dest.descend_to("dest/");
+        zipper_retain(&mut left, &mut right, &mut dest);
+        assert_eq!(left.path(), b"left/");
+        assert_eq!(right.path(), b"right/");
+        assert_eq!(dest.path(), b"dest/");
+    }
+    assert_eq!(
+        out.iter().map(|(p, v)| (p, *v)).collect::<Vec<_>>(),
+        vec![
+            (b"dest/".to_vec(), 1),
+            (b"dest/a".to_vec(), 2),
+            (b"dest/ab".to_vec(), 3),
+            (b"keep".to_vec(), 9)
+        ]
+    );
+    right.descend_to("b");
+    zipper_retain(
+        &mut left,
+        &mut right,
+        &mut out.write_zipper_at_path(b"dest/"),
+    );
+    assert_eq!(keys(&out), [b"keep".to_vec()].into());
+    assert_eq!(right.path(), b"right/b");
+}
+
+#[test]
+fn retain_fringe_witness_and_empty_shortcuts() {
+    let mut arg = Counted::new(0);
+    let mut witnesses = Counted::new(30);
+    let mut out = PathMap::new();
+    zipper_retain(&mut arg, &mut witnesses, &mut out.write_zipper());
+    assert_eq!(arg.moves, 0);
+    assert_eq!(witnesses.moves, 60);
+    assert_eq!(witnesses.depth(), 0);
+    assert_eq!(keys(&out), [vec![]].into());
+    let mut bare = Counted::new(8);
+    bare.leaf_values = false;
+    zipper_retain(&mut arg, &mut bare, &mut out.write_zipper());
+    assert_eq!(bare.moves, 2 * ((1 << 9) - 2));
+    assert_eq!(bare.depth(), 0);
+    assert!(out.is_empty());
+    arg.leaf_values = false;
+    let mut huge = Counted::new(1_000_000);
+    zipper_retain(&mut arg, &mut huge, &mut out.write_zipper());
+    assert_eq!(huge.moves, 0);
+    assert!(out.is_empty());
 }

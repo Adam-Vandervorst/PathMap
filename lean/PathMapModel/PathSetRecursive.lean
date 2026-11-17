@@ -75,12 +75,12 @@ theorem hull_nil (a : PathSpace) : [] ∈ hull a ↔ [] ∈ a ∧ head a = [] :=
   simp only [Path.isPrefixOf]
   grind
 
-theorem live_nil (m a : PathSpace) : [] ∈ live m a ↔ [] ∈ m ∧ a ≠ [] := by
-  cases a <;> simp [live,Path.isPrefixOf]
+theorem retain_nil (m a : PathSpace) : [] ∈ retain m a ↔ [] ∈ m ∧ a ≠ [] := by
+  cases a <;> simp [retain,Path.isPrefixOf]
 
-theorem live_cons (m a : PathSpace) (c : UInt8) (p : Path) :
-    c :: p ∈ live m a ↔ p ∈ live (unwrap m [c]) (unwrap a [c]) := by
-  simp only [mem_live,mem_unwrap,List.singleton_append]
+theorem retain_cons (m a : PathSpace) (c : UInt8) (p : Path) :
+    c :: p ∈ retain m a ↔ p ∈ retain (unwrap m [c]) (unwrap a [c]) := by
+  simp only [mem_retain,mem_unwrap,List.singleton_append]
   constructor
   · rintro ⟨hp,q,hq,he⟩
     cases q with
@@ -113,7 +113,7 @@ theorem mem_common_head_expansion (a b : PathSpace) (f : Path → PathSpace) (p 
     subst d; exact ⟨c,r,hc,hd',hr,rfl⟩
   · rintro ⟨c,r,hc,hd,hr,rfl⟩; exact ⟨[c],⟨⟨c,rfl,hc⟩,⟨c,rfl,hd⟩⟩,r,hr,rfl⟩
 
-theorem mem_live_head_expansion (a b : PathSpace) (f : Path → PathSpace) (p : Path) :
+theorem mem_retain_head_expansion (a b : PathSpace) (f : Path → PathSpace) (p : Path) :
     p ∈ (normalize (inter (head a) (head b))).flatMap (fun q => wrap q (f q)) ↔
     ∃ c r, Child a [] c ∧ Child b [] c ∧ r ∈ f [c] ∧ c :: r = p := by
   simp only [List.mem_flatMap,mem_inter,mem_normalize,mem_head,mem_wrap]
@@ -215,35 +215,35 @@ theorem divergenceRec_spec (n : Nat) (a b : PathSpace) (p : Path) :
           obtain ⟨x,hx,y,hy,hd⟩ := (mem_divergence _ _ _).mp hp
           exact ⟨c,ps,child_of_unwrap hx,child_of_unwrap hy,⟨hp,by omega⟩,rfl,rfl⟩
 
-theorem liveRec_spec (n : Nat) (m a : PathSpace) (p : Path) :
-    p ∈ liveRec n m a ↔ p ∈ live m a ∧ p.length < n := by
+theorem retainRec_spec (n : Nat) (m a : PathSpace) (p : Path) :
+    p ∈ retainRec n m a ↔ p ∈ retain m a ∧ p.length < n := by
   induction n generalizing m a p with
-  | zero => simp [liveRec]
+  | zero => simp [retainRec]
   | succ n ih =>
-    simp only [liveRec,List.mem_append,mem_live_head_expansion]
+    simp only [retainRec,List.mem_append,mem_retain_head_expansion]
     by_cases he : (m.contains [] && !a.isEmpty) = true
-    · have hh : [] ∈ live m a := (live_nil m a).mpr (by simpa using he)
+    · have hh : [] ∈ retain m a := (retain_nil m a).mpr (by simpa using he)
       simp only [he]
       simp only [if_true]
       cases p with
       | nil => simp [hh]
       | cons c ps =>
-        simp only [List.mem_singleton,List.cons_ne_nil,false_or,List.cons.injEq,ih,List.length_cons,live_cons]
+        simp only [List.mem_singleton,List.cons_ne_nil,false_or,List.cons.injEq,ih,List.length_cons,retain_cons]
         constructor
         · rintro ⟨_,_,_,_,⟨hp,hl⟩,rfl,rfl⟩; exact ⟨hp,by omega⟩
         · rintro ⟨hp,hl⟩
-          obtain ⟨hm,q,hq,_⟩ := (mem_live _ _ _).mp hp
+          obtain ⟨hm,q,hq,_⟩ := (mem_retain _ _ _).mp hp
           exact ⟨c,ps,child_of_unwrap hm,child_of_unwrap hq,⟨hp,by omega⟩,rfl,rfl⟩
     · have hb : (m.contains [] && !a.isEmpty) = false := by simpa using he
       simp only [hb,Bool.false_eq_true,if_false]
       cases p with
-      | nil => simp [live_nil]; simpa using he
+      | nil => simp [retain_nil]; simpa using he
       | cons c ps =>
-        simp only [List.not_mem_nil,false_or,List.cons.injEq,ih,List.length_cons,live_cons]
+        simp only [List.not_mem_nil,false_or,List.cons.injEq,ih,List.length_cons,retain_cons]
         constructor
         · rintro ⟨_,_,_,_,⟨hp,hl⟩,rfl,rfl⟩; exact ⟨hp,by omega⟩
         · rintro ⟨hp,hl⟩
-          obtain ⟨hm,q,hq,_⟩ := (mem_live _ _ _).mp hp
+          obtain ⟨hm,q,hq,_⟩ := (mem_retain _ _ _).mp hp
           exact ⟨c,ps,child_of_unwrap hm,child_of_unwrap hq,⟨hp,by omega⟩,rfl,rfl⟩
 
 theorem basis_recursive (a : PathSpace) (p : Path) :
@@ -273,8 +273,8 @@ theorem branch_recursive (a : PathSpace) (p : Path) :
     p ∈ divergenceRec (height a + 1) a a ↔ p ∈ branches a := by
   simpa [branches] using divergence_recursive a a p
 
-theorem live_recursive (m a : PathSpace) (p : Path) :
-    p ∈ liveRec (height m + 1) m a ↔ p ∈ live m a := by
-  rw [liveRec_spec]
-  exact ⟨And.left,fun h => ⟨h,Nat.lt_succ_of_le (length_le_height ((mem_live _ _ _).mp h).1)⟩⟩
+theorem retain_recursive (m a : PathSpace) (p : Path) :
+    p ∈ retainRec (height m + 1) m a ↔ p ∈ retain m a := by
+  rw [retainRec_spec]
+  exact ⟨And.left,fun h => ⟨h,Nat.lt_succ_of_le (length_le_height ((mem_retain _ _ _).mp h).1)⟩⟩
 end PathMapModel.PathSpace

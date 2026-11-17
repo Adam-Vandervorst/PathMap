@@ -4,8 +4,8 @@ import PathMapModel.PathSetCertificates
 Subtraction retains supporting interiors; its mask selects original tips. -/
 namespace PathMapModel.PathSpace
 
-def convexMeet (a b : PathSpace) : PathSpace := live (inter a b) (inter (hull a) (hull b))
-def convexSubtract (a b : PathSpace) : PathSpace := live a (diff (hull a) b)
+def convexMeet (a b : PathSpace) : PathSpace := retain (inter a b) (inter (hull a) (hull b))
+def convexSubtract (a b : PathSpace) : PathSpace := retain a (diff (hull a) b)
 abbrev Included (a b : PathSpace) : Prop := ∀ p, p ∈ a → p ∈ b
 abbrev Same (a b : PathSpace) : Prop := ∀ p, p ∈ a ↔ p ∈ b
 def ConvexLE (a b : PathSpace) : Prop := Included a b ∧ Included (hull a) (hull b)
@@ -14,14 +14,14 @@ theorem same_equiv (a b : PathSpace) : Same a b ↔ equiv a b = true := (equiv_i
 
 theorem mem_convexMeet (a b : PathSpace) (p : Path) :
     p ∈ convexMeet a b ↔ p ∈ a ∧ p ∈ b ∧ ∃ t, t ∈ hull a ∧ t ∈ hull b ∧ (p ≼ t) = true := by
-  simp only [convexMeet, mem_live, mem_inter]; grind
+  simp only [convexMeet, mem_retain, mem_inter]; grind
 
 theorem mem_convexSubtract (a b : PathSpace) (p : Path) :
     p ∈ convexSubtract a b ↔ p ∈ a ∧ ∃ t, t ∈ hull a ∧ t ∉ b ∧ (p ≼ t) = true := by
-  simp only [convexSubtract, mem_live, mem_diff]; grind
+  simp only [convexSubtract, mem_retain, mem_diff]; grind
 
-theorem live_congr {a b t u : PathSpace} (h : Same a b) (k : Same t u) : Same (live a t) (live b u) := by
-  intro p; simp only [mem_live, h, k]
+theorem retain_congr {a b t u : PathSpace} (h : Same a b) (k : Same t u) : Same (retain a t) (retain b u) := by
+  intro p; simp only [mem_retain, h, k]
 
 theorem hull_max {a : PathSpace} {p q : Path} (hp : p ∈ hull a) (hq : q ∈ a)
     (h : (p ≼ q) = true) : p = q := by
@@ -41,21 +41,21 @@ theorem hull_of_antichain {a : PathSpace} (h : Antichain a) : Same (hull a) a :=
     | false => rfl
     | true => exact False.elim (hn (h p hp q hq he).symm)
 
-theorem live_hull (a : PathSpace) : Same (live a (hull a)) a := by
-  intro p; rw [mem_live]; exact ⟨And.left, fun hp => ⟨hp, hull_covers hp⟩⟩
+theorem retain_hull (a : PathSpace) : Same (retain a (hull a)) a := by
+  intro p; rw [mem_retain]; exact ⟨And.left, fun hp => ⟨hp, hull_covers hp⟩⟩
 
-theorem hull_live {a t : PathSpace} (ht : Included t (hull a)) : Same (hull (live a t)) t := by
+theorem hull_retain {a t : PathSpace} (ht : Included t (hull a)) : Same (hull (retain a t)) t := by
   intro p; constructor
   · intro hp
-    obtain ⟨ha, q, hq, hpq⟩ := (mem_live a t p).mp (hull_subset _ hp)
-    have hqm : q ∈ live a t := (mem_live _ _ _).mpr ⟨hull_subset _ (ht q hq), q, hq, Path.prefix_self q⟩
+    obtain ⟨ha, q, hq, hpq⟩ := (mem_retain a t p).mp (hull_subset _ hp)
+    have hqm : q ∈ retain a t := (mem_retain _ _ _).mpr ⟨hull_subset _ (ht q hq), q, hq, Path.prefix_self q⟩
     have he := hull_max hp hqm hpq
     exact he ▸ hq
   · intro hp
     apply (mem_hull _ _).mpr
-    refine ⟨(mem_live _ _ _).mpr ⟨hull_subset _ (ht p hp), p, hp, Path.prefix_self p⟩, ?_⟩
+    refine ⟨(mem_retain _ _ _).mpr ⟨hull_subset _ (ht p hp), p, hp, Path.prefix_self p⟩, ?_⟩
     intro q hq hn
-    exact ((mem_hull a p).mp (ht p hp)).2 q ((mem_live _ _ _).mp hq).1 hn
+    exact ((mem_hull a p).mp (ht p hp)).2 q ((mem_retain _ _ _).mp hq).1 hn
 
 theorem meet_tips_subset (a b : PathSpace) : Included (inter (hull a) (hull b)) (hull (inter a b)) := by
   intro p hp; obtain ⟨ha,hb⟩ := (mem_inter _ _ _).mp hp
@@ -64,10 +64,10 @@ theorem meet_tips_subset (a b : PathSpace) : Included (inter (hull a) (hull b)) 
     fun q hq hn => ((mem_hull a p).mp ha).2 q ((mem_inter _ _ _).mp hq).1 hn⟩
 
 theorem hull_convexMeet (a b : PathSpace) : Same (hull (convexMeet a b)) (inter (hull a) (hull b)) :=
-  hull_live (meet_tips_subset a b)
+  hull_retain (meet_tips_subset a b)
 
 theorem hull_convexSubtract (a b : PathSpace) : Same (hull (convexSubtract a b)) (diff (hull a) b) :=
-  hull_live (fun _ h => ((mem_diff _ _ _).mp h).1)
+  hull_retain (fun _ h => ((mem_diff _ _ _).mp h).1)
 
 theorem convexMeet_congr {a b c d : PathSpace} (h : Same a c) (k : Same b d) :
     Same (convexMeet a b) (convexMeet c d) := by
@@ -98,7 +98,7 @@ theorem convexMeet_empty (a : PathSpace) : Same (convexMeet a []) [] := by
   intro p; simp [mem_convexMeet]
 
 theorem convexSubtract_empty_right (a : PathSpace) : Same (convexSubtract a []) a := by
-  intro p; simpa [convexSubtract, mem_live, mem_diff] using live_hull a p
+  intro p; simpa [convexSubtract, mem_retain, mem_diff] using retain_hull a p
 
 theorem convexSubtract_empty_left (a : PathSpace) : Same (convexSubtract [] a) [] := by
   intro p; simp [mem_convexSubtract]
@@ -111,7 +111,7 @@ theorem convexMeet_zero (a b : PathSpace) : Same (convexMeet a b) [] ↔ Same (i
   constructor
   · intro h p; have hh := (hull_convexMeet a b p).symm.trans (hull_congr h p)
     simpa only [hull, List.filter_nil] using hh
-  · intro h p; simp only [convexMeet, mem_live]; have := h; simp only [Same, List.not_mem_nil, iff_false] at this; grind
+  · intro h p; simp only [convexMeet, mem_retain]; have := h; simp only [Same, List.not_mem_nil, iff_false] at this; grind
 
 theorem convexSubtract_zero (a b : PathSpace) : Same (convexSubtract a b) [] ↔ Included (hull a) b := by
   constructor
@@ -138,7 +138,7 @@ theorem convexSubtract_identity (a b : PathSpace) : Same (convexSubtract a b) a 
 theorem convexMeet_ordinary (a b : PathSpace) : Same (convexMeet a b) (inter a b) ↔ Included (hull (inter a b)) (inter (hull a) (hull b)) := by
   constructor
   · intro h p hp; exact (hull_convexMeet a b p).mp ((hull_congr h p).mpr hp)
-  · intro h p; rw [convexMeet,mem_live]; constructor
+  · intro h p; rw [convexMeet,mem_retain]; constructor
     · exact And.left
     · intro hp; obtain ⟨t,ht,hpt⟩ := hull_covers hp; exact ⟨hp,t,h t ht,hpt⟩
 

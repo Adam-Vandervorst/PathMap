@@ -2,7 +2,7 @@
 //!
 //! A dangling path is not a set member. Termination is not a branch: `foo`
 //! and `food` have no divergence. Basis and hull retain the original values;
-//! divergence and branches return unit-valued maps.
+//! retain preserves candidate values; divergence and branches return unit-valued maps.
 //!
 //! All traversals use zipper movements and explicit heap stacks, never pairs
 //! of keys, recursive Rust calls, repeated root lookups, or subtree `val_count`.
@@ -166,6 +166,105 @@ fn has_value<Z: ZipperMoving>(src: &mut Z) -> bool {
             src.ascend(1);
         }
     }
+}
+
+struct RetainFrame {
+    common: ByteMask,
+    fringe: ByteMask,
+    witnessed: bool,
+}
+
+impl RetainFrame {
+    fn new<L: Zipper, R: Zipper>(left: &L, right: &R) -> Self {
+        let right_mask = right.child_mask();
+        let common = left.child_mask() & right_mask;
+        Self {
+            common,
+            fringe: right_mask & !common,
+            witnessed: right.is_val(),
+        }
+    }
+}
+
+/// Retain input values whose paths prefix a valued witness in `witnesses`.
+/// Replace the output focus and restore all three focuses. Witness payloads
+/// are ignored; output payloads come from `src`.
+///
+/// O(C + F + output + value cloning) time and O(h) traversal storage: C counts
+/// common structural byte prefixes, and F counts the first-witness searches in
+/// disjoint witness-only fringes. Bare fringes may require a full scan. Each
+/// common edge is traversed once in each direction; no subtree recount is used.
+/// Replacing an existing output also incurs its destruction/COW cost.
+pub fn zipper_retain<V, A, L, R, Out>(src: &mut L, witnesses: &mut R, out: &mut Out)
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    L: ZipperMoving + ZipperValues<V>,
+    R: ZipperMoving,
+    Out: ZipperWriting<V, A>,
+{
+    clear_output(out);
+    if !src.is_val() && src.child_count() == 0 {
+        return;
+    }
+    let mut stack = vec![RetainFrame::new(src, witnesses)];
+    loop {
+        if let Some(byte) = pop_byte(&mut stack.last_mut().unwrap().common) {
+            src.descend_to_byte(byte);
+            witnesses.descend_to_byte(byte);
+            out.descend_to_byte(byte);
+            stack.push(RetainFrame::new(src, witnesses));
+        } else {
+            let mut frame = stack.pop().unwrap();
+            while !frame.witnessed {
+                let Some(byte) = pop_byte(&mut frame.fringe) else {
+                    break;
+                };
+                witnesses.descend_to_byte(byte);
+                frame.witnessed = has_value(witnesses);
+                witnesses.ascend(1);
+            }
+            if frame.witnessed {
+                if let Some(value) = src.val() {
+                    out.set_val(value.clone());
+                }
+            }
+            let Some(parent) = stack.last_mut() else {
+                break;
+            };
+            parent.witnessed |= frame.witnessed;
+            src.ascend(1);
+            witnesses.ascend(1);
+            out.ascend(1);
+        }
+    }
+}
+
+/// Keep the valued paths of `src` that prefix a valued path in `witnesses`.
+/// Preserve source payloads and allocator; dangling paths are not witnesses.
+///
+/// ```
+/// use pathmap::{PathMap, experimental::path_sets::retain};
+/// let args: PathMap<_> = [0, 2, 4, 6].into_iter().map(|x| ([x], x)).collect();
+/// let graph: PathMap<_> = [[1, 1], [2, 4], [3, 9], [4, 16], [5, 25]]
+///     .into_iter().map(|p| (p, ())).collect();
+/// let kept = retain(&args, &graph);
+/// assert_eq!(kept.iter().map(|(p, _)| p).collect::<Vec<_>>(), vec![vec![2], vec![4]]);
+/// ```
+pub fn retain<V, W, A, B>(src: &PathMap<V, A>, witnesses: &PathMap<W, B>) -> PathMap<V, A>
+where
+    V: Clone + Send + Sync + Unpin,
+    W: Clone + Send + Sync + Unpin,
+    A: Allocator,
+    B: Allocator,
+{
+    let mut out = PathMap::new_in(src.alloc.clone());
+    zipper_retain(
+        &mut src.read_zipper(),
+        &mut witnesses.read_zipper(),
+        &mut out.write_zipper(),
+    );
+    out
 }
 
 struct BinaryFrame {

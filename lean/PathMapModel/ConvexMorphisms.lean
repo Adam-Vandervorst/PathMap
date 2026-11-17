@@ -34,9 +34,9 @@ theorem hull_unwrap (a : PathSpace) (r p : Path) : p ∈ hull (unwrap a r) ↔ r
     intro q hq hpq
     exact List.append_cancel_left (h (r ++ q) hq (by simpa only [Path.prefix_append_same] using hpq))
 
-theorem live_unwrap (a t : PathSpace) (r p : Path) :
-    p ∈ live (unwrap a r) (unwrap t r) ↔ r ++ p ∈ live a t := by
-  simp only [mem_live,mem_unwrap]; constructor
+theorem retain_unwrap (a t : PathSpace) (r p : Path) :
+    p ∈ retain (unwrap a r) (unwrap t r) ↔ r ++ p ∈ retain a t := by
+  simp only [mem_retain,mem_unwrap]; constructor
   · rintro ⟨hp,q,hq,hpq⟩; exact ⟨hp,r ++ q,hq,by simpa only [Path.prefix_append_same] using hpq⟩
   · rintro ⟨hp,q,hq,hpq⟩
     obtain ⟨s,rfl⟩ := (Path.prefix_iff_extension _ _).mp (Path.prefix_trans (Path.prefix_append r p) hpq)
@@ -49,14 +49,14 @@ theorem convexMeet_unwrap (a b : PathSpace) (r : Path) :
     intro q; simp only [mem_inter,mem_unwrap]
   have ht : Same (inter (hull (unwrap a r)) (hull (unwrap b r))) (unwrap (inter (hull a) (hull b)) r) := by
     intro q; simp only [mem_inter,mem_unwrap,hull_unwrap]
-  exact (mem_unwrap _ _ _).trans ((live_unwrap (inter a b) (inter (hull a) (hull b)) r p).symm.trans (live_congr he ht p).symm)
+  exact (mem_unwrap _ _ _).trans ((retain_unwrap (inter a b) (inter (hull a) (hull b)) r p).symm.trans (retain_congr he ht p).symm)
 
 theorem convexSubtract_unwrap (a b : PathSpace) (r : Path) :
     Same (unwrap (convexSubtract a b) r) (convexSubtract (unwrap a r) (unwrap b r)) := by
   intro p
   have ht : Same (diff (hull (unwrap a r)) (unwrap b r)) (unwrap (diff (hull a) b) r) := by
     intro q; simp only [mem_diff,mem_unwrap,hull_unwrap]
-  exact (mem_unwrap _ _ _).trans ((live_unwrap a (diff (hull a) b) r p).symm.trans (live_congr (fun _ => Iff.rfl) ht p).symm)
+  exact (mem_unwrap _ _ _).trans ((retain_unwrap a (diff (hull a) b) r p).symm.trans (retain_congr (fun _ => Iff.rfl) ht p).symm)
 
 /-- Distinct prefix-code cones cannot interfere, even for empty suffixes. -/
 theorem code_prefix {code : PathSpace} (hc : Antichain code) {r s : Path}

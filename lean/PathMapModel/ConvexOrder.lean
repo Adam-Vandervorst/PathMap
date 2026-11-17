@@ -87,36 +87,36 @@ theorem convex_compatible (a b : PathSpace) :
 
 /-- All Boolean operations on canonical prunings reduce to operations on tips. -/
 theorem pruning_meet {a t u : PathSpace} (ht : Included t (hull a)) (hu : Included u (hull a)) :
-    Same (convexMeet (live a t) (live a u)) (live a (inter t u)) := by
-  intro p; simp only [mem_convexMeet,hull_live ht,hull_live hu,mem_live,mem_inter]; grind
+    Same (convexMeet (retain a t) (retain a u)) (retain a (inter t u)) := by
+  intro p; simp only [mem_convexMeet,hull_retain ht,hull_retain hu,mem_retain,mem_inter]; grind
 
-theorem pruning_union (a t u : PathSpace) : Same (union (live a t) (live a u)) (live a (union t u)) := by
-  intro p; simp only [union,List.mem_append,mem_live]; grind
+theorem pruning_union (a t u : PathSpace) : Same (union (retain a t) (retain a u)) (retain a (union t u)) := by
+  intro p; simp only [union,List.mem_append,mem_retain]; grind
 
 theorem pruning_subtract {a t : PathSpace} (ht : Included t (hull a)) (b : PathSpace) :
-    Same (convexSubtract (live a t) b) (live a (diff t b)) := by
-  intro p; simp only [mem_convexSubtract,hull_live ht,mem_live,mem_diff]; grind
+    Same (convexSubtract (retain a t) b) (retain a (diff t b)) := by
+  intro p; simp only [mem_convexSubtract,hull_retain ht,mem_retain,mem_diff]; grind
 
 theorem pruning_complement {a t : PathSpace} (ht : Included t (hull a)) :
-    Same (convexSubtract a (hull (live a t))) (live a (diff (hull a) t)) := by
-  intro p; simp only [mem_convexSubtract,hull_live ht,mem_live,mem_diff]; grind
+    Same (convexSubtract a (hull (retain a t))) (retain a (diff (hull a) t)) := by
+  intro p; simp only [mem_convexSubtract,hull_retain ht,mem_retain,mem_diff]; grind
 
 theorem pruning_order {a t u : PathSpace} (ht : Included t (hull a)) (hu : Included u (hull a)) :
-    ConvexLE (live a t) (live a u) ↔ Included t u := by
+    ConvexLE (retain a t) (retain a u) ↔ Included t u := by
   constructor
-  · intro h p hp; exact (hull_live hu p).mp (h.2 p ((hull_live ht p).mpr hp))
+  · intro h p hp; exact (hull_retain hu p).mp (h.2 p ((hull_retain ht p).mpr hp))
   · intro h; constructor
-    · intro p hp; obtain ⟨hp,q,hq,hpq⟩ := (mem_live _ _ _).mp hp
-      exact (mem_live _ _ _).mpr ⟨hp,q,h q hq,hpq⟩
-    · intro p hp; exact (hull_live hu p).mpr (h p ((hull_live ht p).mp hp))
+    · intro p hp; obtain ⟨hp,q,hq,hpq⟩ := (mem_retain _ _ _).mp hp
+      exact (mem_retain _ _ _).mpr ⟨hp,q,h q hq,hpq⟩
+    · intro p hp; exact (hull_retain hu p).mpr (h p ((hull_retain ht p).mp hp))
 
 theorem pruning_injective {a t u : PathSpace} (ht : Included t (hull a)) (hu : Included u (hull a)) :
-    Same (live a t) (live a u) ↔ Same t u := by
+    Same (retain a t) (retain a u) ↔ Same t u := by
   constructor
-  · intro h p; exact (hull_live ht p).symm.trans ((hull_congr h p).trans (hull_live hu p))
-  · intro h; exact live_congr (fun _ => Iff.rfl) h
+  · intro h p; exact (hull_retain ht p).symm.trans ((hull_congr h p).trans (hull_retain hu p))
+  · intro h; exact retain_congr (fun _ => Iff.rfl) h
 
-theorem pruning_bottom (a : PathSpace) : Same (live a []) [] := by intro p; simp [mem_live]
+theorem pruning_bottom (a : PathSpace) : Same (retain a []) [] := by intro p; simp [mem_retain]
 
 theorem convexSubtract_faithful (b c : PathSpace) :
     (∀ a, Same (convexSubtract a b) (convexSubtract a c)) ↔ Same b c := by
@@ -148,18 +148,18 @@ theorem hull_convexMeetMany (a : PathSpace) (bs : List PathSpace) :
   | cons b bs ih => intro p; simp only [convexMeetMany,hull_convexMeet,mem_inter,List.map_cons,interMany,ih]
 
 theorem convexMeetMany_normal (a : PathSpace) (bs : List PathSpace) :
-    Same (convexMeetMany a bs) (live (interMany a bs) (interMany (hull a) (bs.map hull))) := by
+    Same (convexMeetMany a bs) (retain (interMany a bs) (interMany (hull a) (bs.map hull))) := by
   induction bs generalizing a with
-  | nil => exact fun p => (live_hull a p).symm
+  | nil => exact fun p => (retain_hull a p).symm
   | cons b bs ih =>
     intro p
-    simp only [convexMeetMany,mem_convexMeet,hull_convexMeetMany,ih,mem_live,List.map_cons,interMany,mem_inter]
+    simp only [convexMeetMany,mem_convexMeet,hull_convexMeetMany,ih,mem_retain,List.map_cons,interMany,mem_inter]
     grind
 
 theorem convex_normal_form (a : PathSpace) (bs masks : List PathSpace) :
     Same (convexSubtract (convexMeetMany a bs) masks.flatten)
-      (live (interMany a bs) (diff (interMany (hull a) (bs.map hull)) masks.flatten)) := by
-  intro p; simp only [mem_convexSubtract,hull_convexMeetMany,convexMeetMany_normal,mem_live,mem_diff]; grind
+      (retain (interMany a bs) (diff (interMany (hull a) (bs.map hull)) masks.flatten)) := by
+  intro p; simp only [mem_convexSubtract,hull_convexMeetMany,convexMeetMany_normal,mem_retain,mem_diff]; grind
 
 def convexSubtractMany (a : PathSpace) : List PathSpace → PathSpace
   | [] => a
@@ -173,7 +173,7 @@ theorem convexSubtractMany_normal (a : PathSpace) (masks : List PathSpace) :
 
 theorem convex_many_normal_form (a : PathSpace) (bs masks : List PathSpace) :
     Same (convexSubtractMany (convexMeetMany a bs) masks)
-      (live (interMany a bs) (diff (interMany (hull a) (bs.map hull)) masks.flatten)) :=
+      (retain (interMany a bs) (diff (interMany (hull a) (bs.map hull)) masks.flatten)) :=
   fun p => (convexSubtractMany_normal _ _ p).trans (convex_normal_form a bs masks p)
 
 end PathMapModel.PathSpace

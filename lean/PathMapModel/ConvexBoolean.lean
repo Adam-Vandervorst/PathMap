@@ -57,7 +57,7 @@ theorem tipChoices_distinct {xs : PathSpace} (hx : xs.Nodup) :
       obtain ⟨v,hv,rfl⟩ := List.mem_map.mp hu
       intro he; exact no_p t ht ((he p).mpr List.mem_cons_self)
 
-def pruningFamily (a : PathSpace) : List PathSpace := (tipChoices (hull a).eraseDups).map (live a)
+def pruningFamily (a : PathSpace) : List PathSpace := (tipChoices (hull a).eraseDups).map (retain a)
 
 theorem pruningFamily_length (a : PathSpace) : (pruningFamily a).length = 2 ^ count (hull a) := by
   simp only [pruningFamily,List.length_map,tipChoices_length,count]
@@ -71,14 +71,14 @@ theorem pruningFamily_distinct (a : PathSpace) : (pruningFamily a).Pairwise (fun
   exact hne ((pruning_injective ts us).mp he)
 
 theorem pruningFamily_complete {a t : PathSpace} (ht : Included t (hull a)) :
-    ∃ r ∈ pruningFamily a, Same r (live a t) := by
+    ∃ r ∈ pruningFamily a, Same r (retain a t) := by
   let u := (hull a).eraseDups.filter t.contains
-  refine ⟨live a u,List.mem_map.mpr ⟨u,tipChoices_select _ t,rfl⟩,live_congr (fun _ => Iff.rfl) ?_⟩
+  refine ⟨retain a u,List.mem_map.mpr ⟨u,tipChoices_select _ t,rfl⟩,retain_congr (fun _ => Iff.rfl) ?_⟩
   intro p; simp only [u,List.mem_filter,List.mem_eraseDups,List.contains_iff_mem]
   exact ⟨And.right,fun hp => ⟨ht p hp,hp⟩⟩
 
 theorem pruningFamily_sound {a r : PathSpace} (hr : r ∈ pruningFamily a) :
-    ∃ t, Included t (hull a) ∧ r = live a t := by
+    ∃ t, Included t (hull a) ∧ r = retain a t := by
   obtain ⟨t,ht,rfl⟩ := List.mem_map.mp hr
   exact ⟨t,fun p hp => List.mem_eraseDups.mp (tipChoices_subset ht p hp),rfl⟩
 
@@ -102,7 +102,7 @@ def eval (v : Nat → Bool) : ConvexFormula → Bool
 def tips (a : PathSpace) (v : Nat → PathSpace) (e : ConvexFormula) : PathSpace :=
   (hull a).filter (fun p => eval (fun i => (v i).contains p) e)
 def interpret (a : PathSpace) (v : Nat → PathSpace) : ConvexFormula → PathSpace
-  | .atom i => live a (inter (hull a) (v i))
+  | .atom i => retain a (inter (hull a) (v i))
   | .bot => []
   | .top => a
   | .meet x y => convexMeet (interpret a v x) (interpret a v y)
@@ -113,31 +113,31 @@ theorem tips_subset (a : PathSpace) (v : Nat → PathSpace) (e : ConvexFormula) 
   fun _ h => (List.mem_filter.mp h).1
 
 theorem interpret_correct (a : PathSpace) (v : Nat → PathSpace) (e : ConvexFormula) :
-    Same (interpret a v e) (live a (tips a v e)) := by
+    Same (interpret a v e) (retain a (tips a v e)) := by
   induction e with
   | atom i =>
-    apply live_congr (fun _ => Iff.rfl)
+    apply retain_congr (fun _ => Iff.rfl)
     intro p; simp [tips,eval,mem_inter]
-  | bot => intro p; simp [interpret,tips,eval,mem_live]
-  | top => intro p; simpa [interpret,tips,eval,mem_live] using (live_hull a p).symm
+  | bot => intro p; simp [interpret,tips,eval,mem_retain]
+  | top => intro p; simpa [interpret,tips,eval,mem_retain] using (retain_hull a p).symm
   | meet x y ihx ihy =>
     intro p
     apply (convexMeet_congr ihx ihy p).trans
     apply (pruning_meet (tips_subset a v x) (tips_subset a v y) p).trans
-    apply live_congr (fun _ => Iff.rfl) _ p
+    apply retain_congr (fun _ => Iff.rfl) _ p
     intro q; simp [tips,eval,mem_inter]; grind
   | join x y ihx ihy =>
     intro p
-    have he : Same (union (interpret a v x) (interpret a v y)) (union (live a (tips a v x)) (live a (tips a v y))) := by
+    have he : Same (union (interpret a v x) (interpret a v y)) (union (retain a (tips a v x)) (retain a (tips a v y))) := by
       intro q; simp only [union,List.mem_append,ihx,ihy]
     apply (he p).trans ((pruning_union a _ _ p).trans ?_)
-    apply live_congr (fun _ => Iff.rfl) _ p
+    apply retain_congr (fun _ => Iff.rfl) _ p
     intro q; simp [tips,eval,union]; grind
   | compl x ih =>
     intro p
     apply (convexSubtract_congr (fun _ => Iff.rfl) (hull_congr ih) p).trans
     apply (pruning_complement (tips_subset a v x) p).trans
-    apply live_congr (fun _ => Iff.rfl) _ p
+    apply retain_congr (fun _ => Iff.rfl) _ p
     intro q; simp [tips,eval,mem_diff]; grind
 
 /-- Every Boolean identity transfers to the canonical prunings of every source.
@@ -147,7 +147,7 @@ theorem transfer {e f : ConvexFormula} (h : ∀ v, eval v e = eval v f)
   intro p
   apply (interpret_correct a v e p).trans
   apply Iff.trans _ (interpret_correct a v f p).symm
-  apply live_congr (fun _ => Iff.rfl) _ p
+  apply retain_congr (fun _ => Iff.rfl) _ p
   intro q; simp only [tips,List.mem_filter,h]
 
 end ConvexFormula

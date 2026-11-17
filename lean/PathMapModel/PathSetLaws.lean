@@ -75,14 +75,14 @@ def binary (a b : PathSpace) : Checks :=
     ("output_heads", sub (head x) (inter (head a) (head b))),
     ("tails_bound", sub (tails x) (D (tails a) (tails b))),
     ("recursive_divergence", eq (divergenceRec (min (height a) (height b) + 1) a b) x),
-    ("live_recursive", eq (liveRec (height a + 1) a b) (live a b)),
+    ("retain_recursive", eq (retainRec (height a + 1) a b) (retain a b)),
     ("output_cardinality", decide (count x <= count (hull (union a b)) - 1)),
     ("output_hull_cardinality", decide (count (hull x) <= min (count ha) (count hb))),
     ("output_depth", implies (!x.isEmpty) (height x < min (height a) (height b))),
     ("output_covered", covers x a && covers x b),
     ("fork_completion", eq (Br (product a fork)) (C a)),
     ("fork_lcp", eq (D (product a fork) (product b fork)) (M a b)),
-    ("lcp_correction", eq (M a b) (union x (union (live a b) (live b a)))),
+    ("lcp_correction", eq (M a b) (union x (union (retain a b) (retain b a)))),
     ("lcp_diagonal", eq (M a a) (C a)),
     ("lcp_symmetry", eq (M a b) (M b a)),
     ("lcp_output_completion", eq (C (M a b)) (M a b)),
@@ -106,9 +106,9 @@ def ternary (a b c : PathSpace) : Checks :=
     ("branch_probe_exchange", sub (inter (D a b) (Br c)) (inter (D a c) (D b c))),
     ("lcp_associativity", eq (M (M a b) c) (M a (M b c))),
     ("lcp_bilinearity", eq (M (union a b) c) (union (M a c) (M b c))),
-    ("one_mask", eq (D (restrict a c) b) (union (restrict (D a b) c) (D (live c a) b))),
+    ("one_mask", eq (D (restrict a c) b) (union (restrict (D a b) c) (D (retain c a) b))),
     ("same_mask", eq (D (restrict a c) (restrict b c))
-      (union (restrict (D a b) c) (D (live c a) (live c b)))),
+      (union (restrict (D a b) c) (D (retain c a) (retain c b)))),
     ("filter_partition", eq (D a b) (union (D (restrict a c) b) (D (raffinate a c) b))),
     ("common_prefix_code", implies (prefixFree a && !b.isEmpty && !c.isEmpty)
       (eq (D (product a b) (product a c)) (union (Br a) (product a (D b c))))) ]
@@ -122,8 +122,8 @@ def rightOverlap (a b x y : PathSpace) : PathSpace :=
 
 def quaternary (a b c f : PathSpace) : Checks :=
   let x := D a b
-  let pa := live c a
-  let qb := live f b
+  let pa := retain c a
+  let qb := retain f b
   [ ("four_point_absorption", sub (D (D a b) (D c f))
       (inter (inter (D a c) (D a f)) (inter (D b c) (D b f)))),
     ("four_point_exchange", sub (inter (D a b) (D c f))
@@ -158,9 +158,46 @@ def powers (a : PathSpace) (m n : Nat) : Checks :=
         ((List.range (min m n)).flatMap fun i => product (power a i) (Br a)))),
     ("branch_leaf_bound", implies (!(branchIter a n).isEmpty) (2^n <= count (hull a))) ]
 
+def retention (a b c f : PathSpace) : Checks :=
+  [ ("retain_empty_left", eq (retain [] a) ([])),
+    ("retain_empty_right", eq (retain a []) ([])),
+    ("retain_self", eq (retain a a) (a)),
+    ("retain_union_left", eq (retain (union a b) c) (union (retain a c) (retain b c))),
+    ("retain_inter_left", eq (retain (inter a b) c) (inter (retain a c) (retain b c))),
+    ("retain_diff_left", eq (retain (diff a b) c) (diff (retain a c) (retain b c))),
+    ("retain_symDiff_left", eq (retain (symDiff a b) c) (symDiff (retain a c) (retain b c))),
+    ("retain_union_right", eq (retain a (union b c)) (union (retain a b) (retain a c))),
+    ("retain_filter_inter", eq (retain (retain a b) c) (inter (retain a b) (retain a c))),
+    ("retain_filter_comm", eq (retain (retain a b) c) (retain (retain a c) b)),
+    ("retain_filter_idem", eq (retain (retain a b) b) (retain a b)),
+    ("retain_hull_mask", eq (retain a (hull b)) (retain a b)),
+    ("retain_completion_mask", eq (retain a (C b)) (retain a b)),
+    ("retain_restrict_witnesses", eq (retain a (restrict b a)) (retain a b)),
+    ("restrict_retain_mask", eq (restrict a (retain b a)) (restrict a b)),
+    ("retain_restrict_disjoint", eq (retain a (raffinate b a)) ([])),
+    ("retain_restrict_source", eq (retain (restrict a b) c) (restrict (retain a c) b)),
+    ("retain_raffinate_source", eq (retain (raffinate a b) c) (raffinate (retain a c) b)),
+    ("retain_lcp_masks", eq (retain (retain a b) c) (retain a (M b c))),
+    ("retain_divergence_masks", eq (retain (retain a b) c) (retain a (union (D b c) (union (retain b c) (retain c b))))),
+    ("restrict_overlap_masks", eq (restrict (restrict a b) c) (restrict a (union (restrict b c) (restrict c b)))),
+    ("retain_restrict_mask", eq (retain a (restrict b c)) (union (restrict (retain a b) c) (retain a (retain c b)))),
+    ("restrict_retain_lcp", eq (restrict a (retain b c)) (restrict a (restrict (M a c) b))),
+    ("basis_retain", eq (basis (retain a b)) (retain (basis a) b)),
+    ("hull_restrict", eq (hull (restrict a b)) (restrict (hull a) b)),
+    ("retain_subset", sub (retain a b) (a)),
+    ("retain_inter_right_bound", sub (retain a (inter b c)) (inter (retain a b) (retain a c))),
+    ("retain_diff_right_bound", sub (diff (retain a b) (retain a c)) (retain a (diff b c))),
+    ("retain_nested_bound", sub (retain a (retain b c)) (retain (retain a b) c)),
+    ("retain_hull_source_bound", sub (retain (hull a) b) (hull (retain a b))),
+    ("divergence_retain_bound", sub (D (retain a c) (retain b f)) (inter (D a b) (D c f))),
+    ("branches_retain_bound", sub (Br (retain a b)) (inter (Br a) (Br b))),
+    ("retain_empty_duality", (retain a b).isEmpty == (restrict b a).isEmpty),
+    ("retain_identity", eq (retain a b) a == covers a b),
+    ("retain_count_bound", decide (count (retain a b) <= count a)) ]
+
 /-- Assumptions are executable guards, so unconstrained inputs are safe to test. -/
 def all (a b c f : PathSpace) : Checks :=
-  unary a ++ binary a b ++ ternary a b c ++ quaternary a b c f ++
+  unary a ++ binary a b ++ ternary a b c ++ quaternary a b c f ++ retention a b c f ++
     (pathLaws a b []) ++ (pathLaws a b [0]) ++ (pathLaws a b [0,1,0])
 
 def failures (checks : Checks) : List String := (checks.filter (! ·.2)).map (·.1)

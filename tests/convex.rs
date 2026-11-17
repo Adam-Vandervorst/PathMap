@@ -1,4 +1,8 @@
-use pathmap::{PathMap, experimental::convex::*, zipper::*};
+use pathmap::{
+    PathMap,
+    experimental::{convex::*, path_sets::retain},
+    zipper::*,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Space = BTreeSet<Vec<u8>>;
@@ -46,6 +50,19 @@ fn check(a: &Space, b: &Space, ma: &PathMap<u64>, mb: &PathMap<u64>) {
         hull(a).intersection(&hull(b)).cloned().collect(),
     );
     let sub = prune(a.clone(), hull(a).difference(b).cloned().collect());
+    let common = map(&a.intersection(b).cloned().collect());
+    let common_tips = map(&hull(a).intersection(&hull(b)).cloned().collect());
+    let surviving_tips = map(&hull(a).difference(b).cloned().collect());
+    assert_eq!(
+        vals(&retain(&common, &common_tips)),
+        meet,
+        "retain meet {a:?} {b:?}"
+    );
+    assert_eq!(
+        vals(&retain(ma, &surviving_tips)),
+        sub,
+        "retain subtract {a:?} {b:?}"
+    );
     assert_eq!(vals(&convex_meet(ma, mb)), meet, "node meet {a:?} {b:?}");
     assert_eq!(
         vals(&convex_subtract(ma, mb)),

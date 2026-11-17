@@ -7,45 +7,45 @@ def IsConvex (a : PathSpace) : Prop := ∀ p ∈ a, ∀ r ∈ a, ∀ q,
   (p ≼ q) = true → (q ≼ r) = true → q ∈ a
 def IsPrefixClosed (a : PathSpace) : Prop := ∀ r ∈ a, ∀ p, (p ≼ r) = true → p ∈ a
 
-theorem live_lower {a t : PathSpace} {p q : Path} (hp : p ∈ a)
-    (hq : q ∈ live a t) (hpq : (p ≼ q) = true) : p ∈ live a t := by
-  obtain ⟨_,r,hr,hqr⟩ := (mem_live _ _ _).mp hq
-  exact (mem_live _ _ _).mpr ⟨hp,r,hr,Path.prefix_trans hpq hqr⟩
+theorem retain_lower {a t : PathSpace} {p q : Path} (hp : p ∈ a)
+    (hq : q ∈ retain a t) (hpq : (p ≼ q) = true) : p ∈ retain a t := by
+  obtain ⟨_,r,hr,hqr⟩ := (mem_retain _ _ _).mp hq
+  exact (mem_retain _ _ _).mpr ⟨hp,r,hr,Path.prefix_trans hpq hqr⟩
 
-theorem live_convex {a : PathSpace} (ha : IsConvex a) (t : PathSpace) : IsConvex (live a t) := by
+theorem retain_convex {a : PathSpace} (ha : IsConvex a) (t : PathSpace) : IsConvex (retain a t) := by
   intro p hp r hr q hpq hqr
-  exact live_lower (ha p ((mem_live _ _ _).mp hp).1 r ((mem_live _ _ _).mp hr).1 q hpq hqr) hr hqr
+  exact retain_lower (ha p ((mem_retain _ _ _).mp hp).1 r ((mem_retain _ _ _).mp hr).1 q hpq hqr) hr hqr
 
-theorem live_prefixClosed {a : PathSpace} (ha : IsPrefixClosed a) (t : PathSpace) : IsPrefixClosed (live a t) := by
-  intro r hr p hpr; exact live_lower (ha r ((mem_live _ _ _).mp hr).1 p hpr) hr hpr
+theorem retain_prefixClosed {a : PathSpace} (ha : IsPrefixClosed a) (t : PathSpace) : IsPrefixClosed (retain a t) := by
+  intro r hr p hpr; exact retain_lower (ha r ((mem_retain _ _ _).mp hr).1 p hpr) hr hpr
 
 theorem convexMeet_convex {a b : PathSpace} (ha : IsConvex a) (hb : IsConvex b) : IsConvex (convexMeet a b) := by
-  apply live_convex
+  apply retain_convex
   intro p hp r hr q hpq hqr
   exact (mem_inter _ _ _).mpr ⟨ha p ((mem_inter _ _ _).mp hp).1 r ((mem_inter _ _ _).mp hr).1 q hpq hqr,
     hb p ((mem_inter _ _ _).mp hp).2 r ((mem_inter _ _ _).mp hr).2 q hpq hqr⟩
 
-theorem convexSubtract_convex {a : PathSpace} (ha : IsConvex a) (b : PathSpace) : IsConvex (convexSubtract a b) := live_convex ha _
+theorem convexSubtract_convex {a : PathSpace} (ha : IsConvex a) (b : PathSpace) : IsConvex (convexSubtract a b) := retain_convex ha _
 
 theorem convexMeet_prefixClosed {a b : PathSpace} (ha : IsPrefixClosed a) (hb : IsPrefixClosed b) : IsPrefixClosed (convexMeet a b) := by
-  apply live_prefixClosed
+  apply retain_prefixClosed
   intro r hr p hpr; exact (mem_inter _ _ _).mpr ⟨ha r ((mem_inter _ _ _).mp hr).1 p hpr,hb r ((mem_inter _ _ _).mp hr).2 p hpr⟩
 
-theorem convexSubtract_prefixClosed {a : PathSpace} (ha : IsPrefixClosed a) (b : PathSpace) : IsPrefixClosed (convexSubtract a b) := live_prefixClosed ha _
+theorem convexSubtract_prefixClosed {a : PathSpace} (ha : IsPrefixClosed a) (b : PathSpace) : IsPrefixClosed (convexSubtract a b) := retain_prefixClosed ha _
 
 /-- Basis of the discarded region generates precisely the pruning cut. -/
 theorem pruning_basis_cut (x t : PathSpace) :
-    Same (restrict x (basis (diff x (live x t)))) (diff x (live x t)) := by
+    Same (restrict x (basis (diff x (retain x t)))) (diff x (retain x t)) := by
   intro p; rw [restriction_basis_mask,mem_restrict,mem_diff]
   constructor
   · rintro ⟨hp,q,hq,hqp⟩
     have hqn := ((mem_diff _ _ _).mp hq).2
-    exact ⟨hp,fun hr => hqn (live_lower ((mem_diff _ _ _).mp hq).1 hr hqp)⟩
+    exact ⟨hp,fun hr => hqn (retain_lower ((mem_diff _ _ _).mp hq).1 hr hqp)⟩
   · rintro ⟨hp,hn⟩; exact ⟨hp,p,(mem_diff _ _ _).mpr ⟨hp,hn⟩,Path.prefix_self p⟩
 
 theorem pruning_basis_raffinate (x t : PathSpace) :
-    Same (raffinate x (basis (diff x (live x t)))) (live x t) := by
-  intro p; simp only [raffinate,mem_diff,pruning_basis_cut,mem_live]; grind
+    Same (raffinate x (basis (diff x (retain x t)))) (retain x t) := by
+  intro p; simp only [raffinate,mem_diff,pruning_basis_cut,mem_retain]; grind
 
 theorem convexMeet_basis (a b : PathSpace) :
     Same (raffinate (inter a b) (basis (diff (inter a b) (convexMeet a b)))) (convexMeet a b) := pruning_basis_raffinate _ _
@@ -102,17 +102,17 @@ theorem branches_convex_partition (a b : PathSpace) (p : Path) :
   exact (divergence_congr (convex_partition a b) (convex_partition a b) p).symm.trans (branches_union _ _ p)
 
 /-- Literal subtraction is a separate operator and can introduce gaps. -/
-def convexLiteralSubtract (a b : PathSpace) : PathSpace := live (diff a b) (diff (hull a) b)
+def convexLiteralSubtract (a b : PathSpace) : PathSpace := retain (diff a b) (diff (hull a) b)
 
 theorem convexLiteralSubtract_diff (a b : PathSpace) : Same (convexLiteralSubtract a b) (diff (convexSubtract a b) b) := by
-  intro p; simp only [convexLiteralSubtract,mem_live,mem_diff,mem_convexSubtract]; grind
+  intro p; simp only [convexLiteralSubtract,mem_retain,mem_diff,mem_convexSubtract]; grind
 
 theorem hull_surviving_diff {a b : PathSpace} {t : Path} (ht : t ∈ hull a) (hn : t ∉ b) : t ∈ hull (diff a b) := by
   apply (mem_hull _ _).mpr
   exact ⟨(mem_diff _ _ _).mpr ⟨hull_subset a ht,hn⟩,fun q hq hne => ((mem_hull _ _).mp ht).2 q ((mem_diff _ _ _).mp hq).1 hne⟩
 
 theorem convexLiteralSubtract_meet (a b : PathSpace) : Same (convexLiteralSubtract a b) (convexMeet a (diff a b)) := by
-  intro p; simp only [convexLiteralSubtract,mem_live,mem_diff,mem_convexMeet]
+  intro p; simp only [convexLiteralSubtract,mem_retain,mem_diff,mem_convexMeet]
   constructor
   · rintro ⟨⟨hp,hn⟩,t,⟨ht,htn⟩,hpt⟩; exact ⟨hp,⟨hp,hn⟩,t,ht,hull_surviving_diff ht htn,hpt⟩
   · rintro ⟨hp,⟨_,hn⟩,t,ht,htd,hpt⟩
@@ -120,7 +120,7 @@ theorem convexLiteralSubtract_meet (a b : PathSpace) : Same (convexLiteralSubtra
 
 theorem convexLiteralSubtract_hull (a b : PathSpace) :
     Same (hull (convexLiteralSubtract a b)) (diff (hull a) b) := by
-  apply hull_live
+  apply hull_retain
   intro t ht; obtain ⟨hh,hn⟩ := (mem_diff _ _ _).mp ht
   exact hull_surviving_diff hh hn
 

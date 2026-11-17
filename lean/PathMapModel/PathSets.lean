@@ -57,7 +57,8 @@ def wrap (p : Path) (a : PathSpace) : PathSpace := a.map (p ++ ·)
 def unwrap (a : PathSpace) (p : Path) : PathSpace := a.filterMap (Path.stripPrefix p)
 def restrict (a p : PathSpace) : PathSpace := a.filter fun x => p.any (· ≼ x)
 def raffinate (a p : PathSpace) : PathSpace := diff a (restrict a p)
-def live (p a : PathSpace) : PathSpace := p.filter fun x => a.any (x ≼ ·)
+/-- Keep candidate arguments that prefix a valued witness in the second operand. -/
+def retain (p a : PathSpace) : PathSpace := p.filter fun x => a.any (x ≼ ·)
 def head (a : PathSpace) : PathSpace := a.filterMap fun p => p.head?.map (fun b => [b])
 def tails (a : PathSpace) : PathSpace := a.filterMap fun p => match p with
   | [] => none
@@ -110,12 +111,12 @@ def hullRec : Nat → PathSpace → PathSpace
   | n + 1, a =>
     let root := if a.contains [] && (head a).isEmpty then [[]] else []
     root ++ (normalize (head a)).flatMap fun p => wrap p (hullRec n (unwrap a p))
-def liveRec : Nat → PathSpace → PathSpace → PathSpace
+def retainRec : Nat → PathSpace → PathSpace → PathSpace
   | 0, _, _ => []
   | n + 1, p, a =>
     let root := if p.contains [] && !a.isEmpty then [[]] else []
     root ++ (normalize (inter (head p) (head a))).flatMap fun q =>
-      wrap q (liveRec n (unwrap p q) (unwrap a q))
+      wrap q (retainRec n (unwrap p q) (unwrap a q))
 
 def ofMap {V : Type} (t : PathMap V) : PathSpace := t.vals.map (·.1)
 
@@ -173,6 +174,11 @@ end PathSpace
 
 namespace Map
 
+/-- Keep argument values whose paths prefix a valued witness in the graph. -/
+def retain {V W : Type} (a : PathMap V) (b : PathMap W) : PathMap V :=
+  let support := PathSpace.retain (PathSpace.ofMap a) (PathSpace.ofMap b)
+  PathMap.mk' (a.vals.filter (fun kv => support.contains kv.1)) []
+
 def basis {V : Type} (t : PathMap V) : PathMap V :=
   let support := PathSpace.basis (PathSpace.ofMap t)
   PathMap.mk' (t.vals.filter (fun kv => support.contains kv.1)) []
@@ -185,6 +191,9 @@ def branches {V : Type} (a : PathMap V) : PathMap Unit := divergence a a
 end Map
 
 namespace Zip
+
+def retain {V W : Type} (src : Zip V) (witnesses : Zip W) (out : Zip V) : Zip V :=
+  out.graftMap (Map.retain src.makeMap witnesses.makeMap)
 /-- Relative focus semantics; input and output cursor positions are unchanged. -/
 def basis {V : Type} (src out : Zip V) : Zip V := out.graftMap (Map.basis src.makeMap)
 def hull {V : Type} (src out : Zip V) : Zip V := out.graftMap (Map.hull src.makeMap)

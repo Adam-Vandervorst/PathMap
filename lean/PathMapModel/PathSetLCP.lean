@@ -96,8 +96,8 @@ theorem mem_lcpProduct (a b : PathSpace) (p : Path) :
   simp [lcpProduct,List.mem_flatMap]
 
 theorem lcp_correction (a b : PathSpace) (p : Path) :
-    p ∈ lcpProduct a b ↔ p ∈ divergence a b ∨ p ∈ live a b ∨ p ∈ live b a := by
-  simp only [mem_lcpProduct,mem_divergence,mem_live,Path.lcp_cases]
+    p ∈ lcpProduct a b ↔ p ∈ divergence a b ∨ p ∈ retain a b ∨ p ∈ retain b a := by
+  simp only [mem_lcpProduct,mem_divergence,mem_retain,Path.lcp_cases]
   constructor
   · rintro ⟨x,hx,y,hy,h⟩
     rcases h with hd | ⟨rfl,hp⟩ | ⟨rfl,hp⟩
@@ -112,8 +112,8 @@ theorem lcp_correction (a b : PathSpace) (p : Path) :
 theorem lcp_diagonal (a : PathSpace) (p : Path) :
     p ∈ lcpProduct a a ↔ p ∈ completion a := by
   rw [lcp_correction]
-  have hl : p ∈ live a a ↔ p ∈ a := by
-    rw [mem_live]; exact ⟨And.left,fun h => ⟨h,p,h,Path.prefix_self p⟩⟩
+  have hl : p ∈ retain a a ↔ p ∈ a := by
+    rw [mem_retain]; exact ⟨And.left,fun h => ⟨h,p,h,Path.prefix_self p⟩⟩
   simp only [completion,union,List.mem_append,hl,branches]
   grind
 

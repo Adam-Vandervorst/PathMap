@@ -1,8 +1,8 @@
 //! Stable convex algebra on valued paths, preserving left-hand payloads.
 //!
-//! `meet(A,B) = live(A ∩ B, Hull(A) ∩ Hull(B))` and
-//! `subtract(A,B) = live(A, Hull(A) \ B)`. In particular, a masked interior
-//! survives if it supports a surviving original tip. `live(X, T)` selects the
+//! `meet(A,B) = retain(A ∩ B, Hull(A) ∩ Hull(B))` and
+//! `subtract(A,B) = retain(A, Hull(A) \ B)`. In particular, a masked interior
+//! survives if it supports a surviving original tip. `retain(X, T)` selects the
 //! paths in `X` that prefix a tip in `T`; `Hull` selects prefix-maximal valued
 //! paths. Bare paths are not tips.
 //!

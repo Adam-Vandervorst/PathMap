@@ -29,9 +29,9 @@ end PathMapModel.Path
 
 namespace PathMapModel.PathSpace
 
-theorem mem_live (m a : PathSpace) (p : Path) :
-    p ∈ live m a ↔ p ∈ m ∧ ∃ q ∈ a, (p ≼ q) = true := by
-  simp [live, List.any_eq_true]
+theorem mem_retain (m a : PathSpace) (p : Path) :
+    p ∈ retain m a ↔ p ∈ m ∧ ∃ q ∈ a, (p ≼ q) = true := by
+  simp [retain, List.any_eq_true]
 
 theorem mem_raffinate (a m : PathSpace) (p : Path) :
     p ∈ raffinate a m ↔ p ∈ a ∧ ∀ q ∈ m, (q ≼ p) = false := by
@@ -47,7 +47,7 @@ theorem mem_raffinate (a m : PathSpace) (p : Path) :
 
 theorem divergence_one_mask (a b m : PathSpace) (p : Path) :
     p ∈ divergence (restrict a m) b ↔
-    p ∈ restrict (divergence a b) m ∨ p ∈ divergence (live m a) b := by
+    p ∈ restrict (divergence a b) m ∨ p ∈ divergence (retain m a) b := by
   constructor
   · intro h
     obtain ⟨x,hx,y,hy,hd⟩ := (mem_divergence _ _ _).mp h
@@ -56,38 +56,38 @@ theorem divergence_one_mask (a b m : PathSpace) (p : Path) :
     · exact Or.inl ((mem_restrict _ _ _).mpr
         ⟨(mem_divergence _ _ _).mpr ⟨x,hx,y,hy,hd⟩,r,hr,hrp⟩)
     · exact Or.inr ((mem_divergence _ _ _).mpr
-        ⟨r,(mem_live _ _ _).mpr ⟨hr,x,hx,hrx⟩,y,hy,hdr⟩)
+        ⟨r,(mem_retain _ _ _).mpr ⟨hr,x,hx,hrx⟩,y,hy,hdr⟩)
   · rintro (h | h)
     · obtain ⟨hp,r,hr,hrp⟩ := (mem_restrict _ _ _).mp h
       obtain ⟨x,hx,y,hy,hd⟩ := (mem_divergence _ _ _).mp hp
       exact (mem_divergence _ _ _).mpr ⟨x,(mem_restrict _ _ _).mpr
         ⟨hx,r,hr,Path.prefix_trans hrp (Path.divergence_prefix_left hd)⟩,y,hy,hd⟩
-    · apply divergence_covered_mono (a := live m a) (b := restrict a m) ?_ p h
+    · apply divergence_covered_mono (a := retain m a) (b := restrict a m) ?_ p h
       intro r hr
-      obtain ⟨hr,x,hx,hrx⟩ := (mem_live _ _ _).mp hr
+      obtain ⟨hr,x,hx,hrx⟩ := (mem_retain _ _ _).mp hr
       exact ⟨x,(mem_restrict _ _ _).mpr ⟨hx,r,hr,hrx⟩,hrx⟩
 
 theorem divergence_two_masks (a b m n : PathSpace) (p : Path) :
     p ∈ divergence (restrict a m) (restrict b n) ↔
     p ∈ restrict (restrict (divergence a b) m) n ∨
-    p ∈ restrict (divergence a (live n b)) m ∨
-    p ∈ restrict (divergence (live m a) b) n ∨
-    p ∈ divergence (live m a) (live n b) := by
+    p ∈ restrict (divergence a (retain n b)) m ∨
+    p ∈ restrict (divergence (retain m a) b) n ∨
+    p ∈ divergence (retain m a) (retain n b) := by
   rw [divergence_one_mask]
   have hb := divergence_one_mask b a n p
   simp only [mem_restrict] at hb
   rw [divergence_comm (restrict b n) a, divergence_comm b a,
-    divergence_comm (live n b) a] at hb
-  have hc := divergence_one_mask b (live m a) n p
+    divergence_comm (retain n b) a] at hb
+  have hc := divergence_one_mask b (retain m a) n p
   simp only [mem_restrict] at hc
-  rw [divergence_comm (restrict b n) (live m a), divergence_comm b (live m a),
-    divergence_comm (live n b) (live m a)] at hc
+  rw [divergence_comm (restrict b n) (retain m a), divergence_comm b (retain m a),
+    divergence_comm (retain n b) (retain m a)] at hc
   simp only [mem_restrict] at hb hc ⊢
   grind
 
 theorem divergence_same_mask (a b m : PathSpace) (p : Path) :
     p ∈ divergence (restrict a m) (restrict b m) ↔
-    p ∈ restrict (divergence a b) m ∨ p ∈ divergence (live m a) (live m b) := by
+    p ∈ restrict (divergence a b) m ∨ p ∈ divergence (retain m a) (retain m b) := by
   rw [divergence_two_masks]
   constructor
   · rintro (h | h | h | h)
@@ -95,12 +95,12 @@ theorem divergence_same_mask (a b m : PathSpace) (p : Path) :
     · obtain ⟨hd,r,hr,hrp⟩ := (mem_restrict _ _ _).mp h
       have he : p ∈ divergence a b := by
         apply (divergence_comm b a p).mp
-        apply divergence_covered_mono (a := live m b) (fun q hq => ((mem_live _ _ _).mp hq).2) p
-        exact (divergence_comm a (live m b) p).mp hd
+        apply divergence_covered_mono (a := retain m b) (fun q hq => ((mem_retain _ _ _).mp hq).2) p
+        exact (divergence_comm a (retain m b) p).mp hd
       exact Or.inl ((mem_restrict _ _ _).mpr ⟨he,r,hr,hrp⟩)
     · obtain ⟨hd,r,hr,hrp⟩ := (mem_restrict _ _ _).mp h
-      have he := divergence_covered_mono (a := live m a) (b := a)
-        (fun q hq => ((mem_live _ _ _).mp hq).2) p hd
+      have he := divergence_covered_mono (a := retain m a) (b := a)
+        (fun q hq => ((mem_retain _ _ _).mp hq).2) p hd
       exact Or.inl ((mem_restrict _ _ _).mpr ⟨he,r,hr,hrp⟩)
     · exact Or.inr h
   · rintro (h | h)
@@ -111,11 +111,11 @@ theorem divergence_single_mask (a b : PathSpace) (q p : Path) :
     p ∈ divergence (restrict a [q]) (restrict b [q]) ↔
     p ∈ restrict (divergence a b) [q] := by
   rw [divergence_same_mask]
-  have hn : p ∉ divergence (live [q] a) (live [q] b) := by
+  have hn : p ∉ divergence (retain [q] a) (retain [q] b) := by
     intro h
     obtain ⟨x,hx,y,hy,hd⟩ := (mem_divergence _ _ _).mp h
-    have hxq := ((mem_live _ _ _).mp hx).1
-    have hyq := ((mem_live _ _ _).mp hy).1
+    have hxq := ((mem_retain _ _ _).mp hx).1
+    have hyq := ((mem_retain _ _ _).mp hy).1
     simp only [List.mem_singleton] at hxq hyq
     subst x; subst y; simp at hd
   exact or_iff_left hn
