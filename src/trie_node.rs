@@ -3248,7 +3248,16 @@ mod opaque_dyn_rc_trie_node {
 
             let (ptr, _tag) = self.ptr.get_raw_parts();
 
-            if unsafe{ &*ptr }.compare_exchange(1, 0, Acquire, Relaxed).is_err() {
+            // A count of 1 means `self` is the only reference to the node, and it stays the only one
+            // for as long as it is borrowed mutably: a reference can only be cloned from one that
+            // exists, and there are no weak references to upgrade.  So reading the count is enough,
+            // as `Arc::get_mut` does with its strong count, where `Arc::make_mut` has to take the
+            // count with a compare-exchange to hold off `Weak::upgrade`.
+            //
+            // The load is `Acquire` to synchronize with the `Release` decrement in `drop` of the
+            // references that are gone.  Whatever their owners read from the node then happens
+            // before what the caller goes on to write to it.
+            if unsafe{ &*ptr }.load(Acquire) != 1 {
                 #[cfg(feature = "counters")]
                 crate::counters::record_make_unique(true);
 
@@ -3261,9 +3270,6 @@ mod opaque_dyn_rc_trie_node {
             } else {
                 #[cfg(feature = "counters")]
                 crate::counters::record_make_unique(false);
-
-                // We were the sole reference so bump back up the  ref count.
-                unsafe{ &*ptr }.store(1, Release);
             }
         }
         #[inline]
@@ -3502,6 +3508,56 @@ mod tests {
         let cloned = node_ref.clone();
         node_ref.make_unique();
         drop(cloned);
+    }
+
+    /// Threads that each hold a reference to one node take it mutably at the same time.  A thread
+    /// gets the node itself only when every other reference to it is gone, and a copy until then,
+    /// so what one thread writes must never show up for another
+    #[test]
+    fn make_unique_from_many_threads() {
+        #[cfg(miri)]
+        let (rounds, thread_cnt) = (4, 3);
+        #[cfg(not(miri))]
+        let (rounds, thread_cnt) = (500, 8);
+
+        for _ in 0..rounds {
+            let node = LineListNode::<usize, GlobalAlloc>::new_in(global_alloc());
+            let mut original = TrieNodeODRc::new_in(node, global_alloc());
+            original.make_mut().node_set_val(b"k", usize::MAX).unwrap();
+            let barrier = std::sync::Barrier::new(thread_cnt + 1);
+            let barrier = &barrier;
+
+            let nodes: Vec<TrieNodeODRc<usize, GlobalAlloc>> = std::thread::scope(move |scope| {
+                let threads: Vec<_> = (0..thread_cnt).map(|n| {
+                    let mut node = original.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        //Half of the threads move the count around first
+                        if n % 2 == 1 {
+                            drop(node.clone());
+                        }
+                        //Nobody may write to the node while this thread refers to it
+                        assert_eq!(node.as_tagged().node_get_val(b"k"), Some(&usize::MAX));
+                        node.make_mut().node_set_val(b"k", n).unwrap();
+                        assert_eq!(node.as_tagged().node_get_val(b"k"), Some(&n));
+                        node
+                    })
+                }).collect();
+
+                //The original is still referenced here, so every thread that is done wrote to a copy.
+                // Dropping it lets the last thread to arrive have the node itself
+                barrier.wait();
+                assert_eq!(original.as_tagged().node_get_val(b"k"), Some(&usize::MAX));
+                drop(original);
+                threads.into_iter().map(|thread| thread.join().unwrap()).collect()
+            });
+
+            for (n, node) in nodes.iter().enumerate() {
+                assert_eq!(node.as_tagged().node_get_val(b"k"), Some(&n));
+                assert_eq!(node.refcount(), 1);
+                assert!(nodes[..n].iter().all(|other| !other.ptr_eq(node)));
+            }
+        }
     }
 
 }
