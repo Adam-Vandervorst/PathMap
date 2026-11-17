@@ -20,6 +20,13 @@
 //!
 //! Descents are the movement that shows this.  A walk over a whole shared trie copies all of it, but
 //! it visits every child of a node it cloned, which hides the cost of the clone.
+//!
+//! # Writes below nodes the zipper doesn't own (`shared_set_val_*`)
+//!
+//! The same descents, each followed by setting the value at the end of the path.  Here the clones
+//! are needed: `wz_shared` copies every node on each path, and `wz_owned` copies none.  This is the
+//! cost that `shared_descend_to_wz_shared` shouldn't have.  It is here so that a change to how a
+//! WriteZipper moves over shared nodes also shows what it does to the write that follows.
 
 use divan::{Bencher, Divan, black_box};
 use pathmap::PathMap;
@@ -92,6 +99,35 @@ fn shared_descend_to_wz_shared(bencher: Bencher, branching: usize) {
     let (map, paths) = spine_trie(branching);
     bencher.with_inputs(|| map.clone()).bench_local_values(|mut map| {
         black_box(descend_to_each(&mut map.write_zipper(), &paths));
+        map
+    });
+}
+
+/// Descends from the root to the end of each path, and sets the value there
+fn set_val_at_each<Z: ZipperMoving + ZipperWriting<u64>>(z: &mut Z, paths: &[Vec<u8>]) -> usize {
+    let mut replaced = 0;
+    for path in paths {
+        z.descend_to(path);
+        replaced += z.set_val(1).is_some() as usize;
+        z.reset();
+    }
+    assert_eq!(replaced, paths.len());
+    replaced
+}
+
+#[divan::bench(args = BRANCHING)]
+fn shared_set_val_wz_owned(bencher: Bencher, branching: usize) {
+    let (mut map, paths) = spine_trie(branching);
+    bencher.bench_local(|| set_val_at_each(&mut black_box(&mut map).write_zipper(), &paths));
+}
+
+/// As in [shared_descend_to_wz_shared], every run gets a fresh handle to the shared trie and hands
+/// it back, so the timing covers the movement, the clones and the writes, but not freeing the clones
+#[divan::bench(args = BRANCHING)]
+fn shared_set_val_wz_shared(bencher: Bencher, branching: usize) {
+    let (map, paths) = spine_trie(branching);
+    bencher.with_inputs(|| map.clone()).bench_local_values(|mut map| {
+        black_box(set_val_at_each(&mut map.write_zipper(), &paths));
         map
     });
 }
