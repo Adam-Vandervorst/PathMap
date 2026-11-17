@@ -14,3 +14,4 @@ import PathMapModel.PathSetChecks
 import PathMapModel.PathSetCertificates
 import PathMapModel.ConvexMap
 import PathMapModel.RetainChecks
+import PathMapModel.ClosedChecks

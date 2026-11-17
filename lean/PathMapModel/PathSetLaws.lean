@@ -195,9 +195,69 @@ def retention (a b c f : PathSpace) : Checks :=
     ("retain_identity", eq (retain a b) a == covers a b),
     ("retain_count_bound", decide (count (retain a b) <= count a)) ]
 
+/-- Closed divergence and branch closure, including canonical generators and filters. -/
+def closedAlgebra (a b c f : PathSpace) : Checks :=
+  [ ("completion_union", eq (C (union a b)) (union (union (C a) (C b)) (D a b))),
+    ("completion_union_lcp", eq (C (union a b)) (union (union (C a) (C b)) (M a b))),
+    ("completion_union_absorb", eq (C (union (C a) (C b))) (C (union a b))),
+    ("hull_completion", eq (hull (C a)) (hull a)),
+    ("completion_hull", eq (union a (C (hull a))) (C a)),
+    ("hull_remove_branches", eq (hull (diff a (Br a))) (hull a)),
+    ("branches_remove_branches", eq (Br (diff a (Br a))) (Br a)),
+    ("completion_remove_branches", eq (C (diff a (Br a))) (C a)),
+    ("completion_diff_branches", eq (diff (C a) (Br a)) (diff a (Br a))),
+    ("lcp_completion_left", eq (M (C a) b) (M a b)),
+    ("lcp_completion_right", eq (M a (C b)) (M a b)),
+    ("lcp_completion", eq (M (C a) (C b)) (M a b)),
+    ("lcp_repeat", eq (M a (M a b)) (M a b)),
+    ("lcp_medial", eq (M (M a b) (M c f)) (M (M a c) (M b f))),
+    ("lcp_four_factors", eq (M (union a b) (union c f)) (union (union (M a c) (M a f)) (union (M b c) (M b f)))),
+    ("lcp_closed_join", eq (M a (C (union b c))) (union (M a b) (M a c))),
+    ("lcp_new_marks", eq (diff (M a b) (union a b)) (diff (D a b) (union a b))),
+    ("retain_lcp_operand", eq (retain a (M a b)) (retain a b)),
+    ("hull_lcp_hulls", eq (hull (M (hull a) (hull b))) (hull (M a b))),
+    ("completion_restrict", eq (C (restrict a b)) (union (restrict (C a) b) (Br (retain b a)))),
+    ("completion_restrict_closed", eq (C (restrict a (C b))) (restrict (C a) (C b))),
+    ("lcp_restrict", eq (M (restrict a c) (restrict b c)) (union (restrict (M a b) c) (D (retain c a) (retain c b)))),
+    ("lcp_restrict_closed", eq (M (restrict a (C c)) (restrict b (C c))) (restrict (M a b) (C c))),
+    ("closed_inter", eq (C (inter (C a) (C b))) (inter (C a) (C b))),
+    ("closed_retain", eq (C (retain (C a) b)) (retain (C a) b)),
+    ("closed_restrict", eq (C (restrict (C a) (C b))) (restrict (C a) (C b))),
+    ("closed_raffinate", eq (C (raffinate (C a) b)) (raffinate (C a) b)),
+    ("closed_lcp_union", eq (C (union (M a b) (M a c))) (union (M a b) (M a c))),
+    ("closed_join_assoc", eq (C (union (C (union a b)) c)) (C (union a (C (union b c))))),
+    ("closed_join_comm", eq (C (union a b)) (C (union b a))),
+    ("closed_join_idem", eq (C (union (C a) (C a))) (C a)),
+    ("closed_join_empty", eq (C (union (C a) [])) (C a)),
+    ("closed_join_absorption", eq (C (union (C a) (inter (C a) b))) (C a)),
+    ("closed_meet_absorption", eq (inter a (C (union a b))) a),
+    ("lcpLE_product_left", eq (M (M a b) a) (M a b)),
+    ("lcpLE_product_right", eq (M (M a b) b) (M a b)),
+    ("completion_wrap", eq (C (wrap [0,1] a)) (wrap [0,1] (C a))),
+    ("completion_unwrap", eq (C (unwrap a [0])) (unwrap (C a) [0])),
+    ("completion_extensive", sub a (C a)),
+    ("completion_inter_bound", sub (C (inter a b)) (inter (C a) (C b))),
+    ("lcp_inter_lower", sub (inter a b) (M a b)),
+    ("lcp_inter_bound", sub (M (inter a b) c) (inter (M a c) (M b c))),
+    ("lcp_diff_bound", sub (diff (M a c) (M b c)) (M (diff a b) c)),
+    ("lcp_union_bound", sub (M a b) (C (union a b))),
+    ("lcp_retain_bound", sub (M (retain a c) (retain b f)) (retain (M a b) (M c f))),
+    ("completion_retain_bound", sub (C (retain a b)) (retain (C a) b)),
+    ("completion_raffinate_bound", sub (C (raffinate a b)) (raffinate (C a) b)),
+    ("completion_least", sub (C a) (C b) == sub a (C b)),
+    ("completion_generators", eq (C b) (C a) == (sub (diff a (Br a)) b && sub b (C a))),
+    ("completion_equiv_generators", eq (C a) (C b) == eq (diff a (Br a)) (diff b (Br b))),
+    ("closed_union_iff", eq (C (union (C a) (C b))) (union (C a) (C b)) == sub (D (C a) (C b)) (union (C a) (C b))),
+    ("closed_join_least", sub (C (union a b)) (C c) == (sub a (C c) && sub b (C c))),
+    ("lcpLE_iff", eq (M a b) a == (covers a b && sub (D a b) a && sub (retain b a) a)),
+    ("lcpLE_product_iff", eq (M a (M b c)) a == (eq (M a b) a && eq (M a c) a)),
+    ("completion_cardinality", decide (count (C a) <= count a + (count (hull a) - 1))),
+    ("completion_cardinality_linear", decide (count a <= count (C a) && count (C a) <= 2 * count a - 1)),
+    ("basis_completion", implies (!a.isEmpty) (eq (basis (C a)) [commonPrefix a])) ]
+
 /-- Assumptions are executable guards, so unconstrained inputs are safe to test. -/
 def all (a b c f : PathSpace) : Checks :=
-  unary a ++ binary a b ++ ternary a b c ++ quaternary a b c f ++ retention a b c f ++
+  unary a ++ binary a b ++ ternary a b c ++ quaternary a b c f ++ retention a b c f ++ closedAlgebra a b c f ++
     (pathLaws a b []) ++ (pathLaws a b [0]) ++ (pathLaws a b [0,1,0])
 
 def failures (checks : Checks) : List String := (checks.filter (! ·.2)).map (·.1)

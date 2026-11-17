@@ -343,7 +343,226 @@ fn retention_laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
     );
     t.check("retain_count_bound", count(&retain(a, b)) <= count(a));
 }
+fn closed_laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
+    let ca = completion(a);
+    let cb = completion(b);
+    let cc = completion(c);
+    let ab = lcp_product(a, b);
+    let ga = a.subtract(&br(a));
+    let same = |x: &M, y: &M| set_from_map(x) == set_from_map(y);
+    let subset = |x: &M, y: &M| set_from_map(x).is_subset(&set_from_map(y));
+    t.eq(
+        "completion_union",
+        &completion(&a.join(b)),
+        &ca.join(&cb).join(&d(a, b)),
+    );
+    t.eq(
+        "completion_union_lcp",
+        &completion(&a.join(b)),
+        &ca.join(&cb).join(&ab),
+    );
+    t.eq(
+        "completion_union_absorb",
+        &completion(&ca.join(&cb)),
+        &completion(&a.join(b)),
+    );
+    t.eq("hull_completion", &hull(&ca), &hull(a));
+    t.eq("completion_hull", &a.join(&completion(&hull(a))), &ca);
+    t.eq("hull_remove_branches", &hull(&ga), &hull(a));
+    t.eq("branches_remove_branches", &br(&ga), &br(a));
+    t.eq("completion_remove_branches", &completion(&ga), &ca);
+    t.eq("completion_diff_branches", &ca.subtract(&br(a)), &ga);
+    t.eq("lcp_completion_left", &lcp_product(&ca, b), &ab);
+    t.eq("lcp_completion_right", &lcp_product(a, &cb), &ab);
+    t.eq("lcp_completion", &lcp_product(&ca, &cb), &ab);
+    t.eq("lcp_repeat", &lcp_product(a, &ab), &ab);
+    t.eq(
+        "lcp_medial",
+        &lcp_product(&ab, &lcp_product(c, f)),
+        &lcp_product(&lcp_product(a, c), &lcp_product(b, f)),
+    );
+    t.eq(
+        "lcp_four_factors",
+        &lcp_product(&a.join(b), &c.join(f)),
+        &lcp_product(a, c)
+            .join(&lcp_product(a, f))
+            .join(&lcp_product(b, c))
+            .join(&lcp_product(b, f)),
+    );
+    t.eq(
+        "lcp_closed_join",
+        &lcp_product(a, &completion(&b.join(c))),
+        &ab.join(&lcp_product(a, c)),
+    );
+    t.eq(
+        "lcp_new_marks",
+        &ab.subtract(&a.join(b)),
+        &d(a, b).subtract(&a.join(b)),
+    );
+    t.eq("retain_lcp_operand", &retain(a, &ab), &retain(a, b));
+    t.eq(
+        "hull_lcp_hulls",
+        &hull(&lcp_product(&hull(a), &hull(b))),
+        &hull(&ab),
+    );
+    t.eq(
+        "completion_restrict",
+        &completion(&a.restrict(b)),
+        &ca.restrict(b).join(&br(&retain(b, a))),
+    );
+    t.eq(
+        "completion_restrict_closed",
+        &completion(&a.restrict(&cb)),
+        &ca.restrict(&cb),
+    );
+    t.eq(
+        "lcp_restrict",
+        &lcp_product(&a.restrict(c), &b.restrict(c)),
+        &ab.restrict(c).join(&d(&retain(c, a), &retain(c, b))),
+    );
+    t.eq(
+        "lcp_restrict_closed",
+        &lcp_product(&a.restrict(&cc), &b.restrict(&cc)),
+        &ab.restrict(&cc),
+    );
+    t.eq("closed_inter", &completion(&ca.meet(&cb)), &ca.meet(&cb));
+    t.eq(
+        "closed_retain",
+        &completion(&retain(&ca, b)),
+        &retain(&ca, b),
+    );
+    t.eq(
+        "closed_restrict",
+        &completion(&ca.restrict(&cb)),
+        &ca.restrict(&cb),
+    );
+    t.eq(
+        "closed_raffinate",
+        &completion(&raff(&ca, b)),
+        &raff(&ca, b),
+    );
+    t.eq(
+        "closed_lcp_union",
+        &completion(&ab.join(&lcp_product(a, c))),
+        &ab.join(&lcp_product(a, c)),
+    );
+    t.eq(
+        "closed_join_assoc",
+        &completion(&completion(&a.join(b)).join(c)),
+        &completion(&a.join(&completion(&b.join(c)))),
+    );
+    t.eq(
+        "closed_join_comm",
+        &completion(&a.join(b)),
+        &completion(&b.join(a)),
+    );
+    t.eq("closed_join_idem", &completion(&ca.join(&ca)), &ca);
+    t.eq("closed_join_empty", &completion(&ca.join(&M::new())), &ca);
+    t.eq(
+        "closed_join_absorption",
+        &completion(&ca.join(&ca.meet(b))),
+        &ca,
+    );
+    t.eq(
+        "closed_meet_absorption",
+        &a.meet(&completion(&a.join(b))),
+        a,
+    );
+    t.eq("lcpLE_product_left", &lcp_product(&ab, a), &ab);
+    t.eq("lcpLE_product_right", &lcp_product(&ab, b), &ab);
+    t.eq(
+        "completion_wrap",
+        &completion(&wrap(&[0, 1], a)),
+        &wrap(&[0, 1], &ca),
+    );
+    t.eq(
+        "completion_unwrap",
+        &completion(&unwrap(a, &[0])),
+        &unwrap(&ca, &[0]),
+    );
+    t.sub("completion_extensive", a, &ca);
+    t.sub(
+        "completion_inter_bound",
+        &completion(&a.meet(b)),
+        &ca.meet(&cb),
+    );
+    t.sub("lcp_inter_lower", &a.meet(b), &ab);
+    t.sub(
+        "lcp_inter_bound",
+        &lcp_product(&a.meet(b), c),
+        &lcp_product(a, c).meet(&lcp_product(b, c)),
+    );
+    t.sub(
+        "lcp_diff_bound",
+        &lcp_product(a, c).subtract(&lcp_product(b, c)),
+        &lcp_product(&a.subtract(b), c),
+    );
+    t.sub("lcp_union_bound", &ab, &completion(&a.join(b)));
+    t.sub(
+        "lcp_retain_bound",
+        &lcp_product(&retain(a, c), &retain(b, f)),
+        &retain(&ab, &lcp_product(c, f)),
+    );
+    t.sub(
+        "completion_retain_bound",
+        &completion(&retain(a, b)),
+        &retain(&ca, b),
+    );
+    t.sub(
+        "completion_raffinate_bound",
+        &completion(&raff(a, b)),
+        &raff(&ca, b),
+    );
+    t.check("completion_least", subset(&ca, &cb) == subset(a, &cb));
+    t.check(
+        "completion_generators",
+        same(&cb, &ca) == (subset(&ga, b) && subset(b, &ca)),
+    );
+    t.check(
+        "completion_equiv_generators",
+        same(&ca, &cb) == same(&ga, &b.subtract(&br(b))),
+    );
+    t.check(
+        "closed_union_iff",
+        same(&completion(&ca.join(&cb)), &ca.join(&cb)) == subset(&d(&ca, &cb), &ca.join(&cb)),
+    );
+    t.check(
+        "closed_join_least",
+        subset(&completion(&a.join(b)), &cc) == (subset(a, &cc) && subset(b, &cc)),
+    );
+    t.check(
+        "lcpLE_iff",
+        same(&ab, a) == (covers(a, b) && subset(&d(a, b), a) && subset(&retain(b, a), a)),
+    );
+    t.check(
+        "lcpLE_product_iff",
+        same(&lcp_product(a, &lcp_product(b, c)), a)
+            == (same(&ab, a) && same(&lcp_product(a, c), a)),
+    );
+    t.check(
+        "completion_cardinality",
+        count(&ca) <= count(a) + count(&hull(a)).saturating_sub(1),
+    );
+    t.check(
+        "completion_cardinality_linear",
+        count(a) <= count(&ca) && count(&ca) <= (2 * count(a)).saturating_sub(1),
+    );
+    if !a.is_empty() {
+        t.eq(
+            "basis_completion",
+            &basis(&ca),
+            &M::single(common_prefix(a), ()),
+        );
+    }
+    assert!(same(&completion(&cm(&ca, &cb)), &cm(&ca, &cb)));
+    assert!(same(&completion(&cs(&ca, b)), &cs(&ca, b)));
+    assert!(subset(&completion(&cm(a, b)), &cm(&ca, &cb)));
+    assert!(subset(&completion(&cs(a, b)), &cs(&ca, b)));
+    assert!(same(&hull(&completion(&cm(a, b))), &hull(&cm(&ca, &cb))));
+    assert!(same(&hull(&completion(&cs(a, b))), &hull(&cs(&ca, b))));
+}
 fn laws(t: &mut Coverage, a: &M, b: &M, c: &M, f: &M) {
+    closed_laws(t, a, b, c, f);
     retention_laws(t, a, b, c, f);
     let x = d(a, b);
     let ba = br(a);
@@ -635,6 +854,60 @@ fn small(seed: u64, salt: u64) -> KeySet {
         })
         .collect()
 }
+/// All subsets of a depth-two binary tree, including every closed subspace.
+/// Check anti-exchange and least generators independently of the named catalogue.
+#[test]
+fn exhaustive_branch_closure_generators() {
+    let paths = [
+        vec![],
+        vec![0],
+        vec![1],
+        vec![0, 0],
+        vec![0, 1],
+        vec![1, 0],
+        vec![1, 1],
+    ];
+    for mask in 0..(1usize << paths.len()) {
+        let keys: KeySet = paths
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, p)| p.clone())
+            .collect();
+        let a = map_from_set(&keys);
+        let closed = completion(&a);
+        let closed_keys = set_from_map(&closed);
+        assert_eq!(closed_keys, set_from_map(&lcp_product(&a, &a)));
+        let generators = a.subtract(&br(&a));
+        assert_eq!(closed_keys, set_from_map(&completion(&generators)));
+        for x in &paths {
+            // Deleting a least generator strictly changes the closure.
+            if generators.get(x).is_some() {
+                assert_ne!(
+                    closed_keys,
+                    set_from_map(&completion(&a.subtract(&M::single(x, ()))))
+                );
+            }
+            if closed_keys.contains(x) {
+                continue;
+            }
+            let with_x = completion(&a.join(&M::single(x, ())));
+            for y in &paths {
+                if x == y || closed_keys.contains(y) {
+                    continue;
+                }
+                let with_y = completion(&a.join(&M::single(y, ())));
+                if with_y.get(x).is_some() {
+                    assert!(
+                        with_x.get(y).is_none(),
+                        "anti-exchange: {keys:?}, {x:?}, {y:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn seeded_full_path_set_law_catalogue() {
     let mut t = Coverage::default();
