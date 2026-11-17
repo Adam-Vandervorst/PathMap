@@ -13,7 +13,7 @@ use crate::trie_node::*;
 use crate::line_list_node::LineListNode;
 
 //NOTE: This: `core::array::from_fn(|i| i as u8);` ought to work, but https://github.com/rust-lang/rust/issues/109341
-const ALL_BYTES: [u8; 256] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255];
+pub(crate) const ALL_BYTES: [u8; 256] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255];
 
 /// A ByteNode with insides that **cannot** be shared across threads
 pub type DenseByteNode<V, A> = ByteNode<OrdinaryCoFree<V, A>, A>;
@@ -409,6 +409,52 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A>
 }
 
 impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>> ByteNode<Cf, A> where Self: TrieNodeDowncast<V, A> {
+
+    /// Direct ordered output construction for the convex byte kernels. `visit`
+    /// selects candidate entries; entries outside it are dropped. As in pmeet,
+    /// slots are addressed by word-local ranks, without node iteration or edits.
+    /// Delay allocation and payload cloning until the first actual change.
+    pub(crate) fn convex_entries(
+        &self, visit: ByteMask,
+        mut entry: impl FnMut(u8, &Cf) -> AlgebraicResult<Cf>,
+    ) -> AlgebraicResult<TrieNodeODRc<V, A>> {
+        debug_assert_eq!(visit & self.mask, visit);
+        let mut mask = visit;
+        let mut output = (visit != self.mask).then(||
+            ValuesVec::with_capacity_in(visit.count_bits(), self.alloc.clone()));
+        let mut base = 0;
+        for word in 0..4 {
+            let mut bits = visit.0[word];
+            while bits != 0 {
+                let bit = bits.trailing_zeros();
+                let slot = Self::slot_in_word(self.mask.0[word], base, bit);
+                let byte = (word * 64 + bit as usize) as u8;
+                let cf = &self.values[slot];
+                let result = entry(byte, cf);
+                if !matches!(result, AlgebraicResult::Identity(_)) && output.is_none() {
+                    let mut values = ValuesVec::with_capacity_in(visit.count_bits(), self.alloc.clone());
+                    values.v.extend(self.values[..slot].iter().cloned());
+                    output = Some(values);
+                }
+                match result {
+                    AlgebraicResult::None => mask.clear_bit(byte),
+                    AlgebraicResult::Identity(id) => {
+                        debug_assert_eq!(id, SELF_IDENT);
+                        if let Some(out) = &mut output { out.v.push(cf.clone()); }
+                    },
+                    AlgebraicResult::Element(cf) => output.as_mut().unwrap().v.push(cf),
+                }
+                bits &= bits - 1;
+            }
+            base += self.mask.0[word].count_ones() as usize;
+        }
+        if mask.is_empty_mask() { return AlgebraicResult::None; }
+        match output {
+            None => AlgebraicResult::Identity(SELF_IDENT),
+            Some(values) => AlgebraicResult::Element(TrieNodeODRc::new_in(
+                Self::new_with_fields_in(mask, values, self.alloc.clone()), self.alloc.clone())),
+        }
+    }
 
     /// Internal method to subtract nodes of an abstract type from the node
     fn psubtract_abstract(&self, other: &dyn TrieNode<V, A>) -> AlgebraicResult<TrieNodeODRc<V, A>> where V: Clone + DistributiveLattice {

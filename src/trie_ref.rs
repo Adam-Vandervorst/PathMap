@@ -181,6 +181,15 @@ impl<V: Clone + Send + Sync, A: Allocator> Clone for TrieRefBorrowed<'_, V, A> {
 impl<V: Clone + Send + Sync, A: Allocator + Copy> Copy for TrieRefBorrowed<'_, V, A> {}
 
 impl<'a, V: Clone + Send + Sync + 'a, A: Allocator + 'a> TrieRefBorrowed<'a, V, A> {
+    /// Borrow the underlying node when the focus is exactly at its boundary.
+    /// The focus value is stored outside this node and is not included.
+    #[inline]
+    pub(crate) fn aligned_node(&self) -> Option<TaggedNodeRef<'a, V, A>> {
+        self.focus_node
+            .filter(|_| self.node_key().is_empty())
+            .map(|node| node.as_tagged())
+    }
+
     /// Makes a new TrieRefBorrowed from its parts
     #[inline(always)]
     fn new_from_parts(

@@ -1248,6 +1248,25 @@ impl<V: Clone + Send + Sync, A: Allocator> LineListNode<V, A> {
         }
     }
 
+    /// The two physical payload slots, in storage order. No token traversal.
+    pub(crate) fn convex_slots(&self) -> [(&[u8], PayloadRef<'_, V, A>); 2] {
+        let slot0 = if self.is_used::<0>() {
+            unsafe { (self.key_unchecked::<0>(), self.payload_in_slot::<0>()) }
+        } else { (&[][..], PayloadRef::None) };
+        let slot1 = if self.is_used::<1>() {
+            unsafe { (self.key_unchecked::<1>(), self.payload_in_slot::<1>()) }
+        } else { (&[][..], PayloadRef::None) };
+        [slot0, slot1]
+    }
+
+    /// Reuse the same direct slot reconstruction as ordinary subtract/restrict.
+    pub(crate) fn convex_rebuild(&self, slots: [AlgebraicResult<ValOrChild<V, A>>; 2])
+        -> AlgebraicResult<TrieNodeODRc<V, A>>
+    {
+        let [a, b] = slots;
+        self.combine_slot_results_into_node_result(a.map(Into::into), b.map(Into::into))
+    }
+
     /// Internal method to combine the result from separate **Non-Commutative** operations on individual slots into
     /// an AlgebraicResult for the whole node
     #[inline]
