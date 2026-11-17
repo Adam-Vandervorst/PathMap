@@ -8,7 +8,8 @@ change under test: building the sides at different paths or into different
 target dirs changes crate hashes and code layout, which alone moved cases by
 5-25% in an A/A run.  Then runs them for ROUNDS rounds.  Benches run in parallel, each on its own
 core from BENCH_CPUS (the base and head runs of a bench share that core, back
-to back, alternating which side goes first each round).  As soon as both
+to back, alternating which side goes first each round, after a short spin to
+bring the core up to speed).  As soon as both
 sides of a bench have run in a round, its compare table (per-round divan medians averaged over the rounds
 finished so far, via benches/divan_fmt.py) is printed and saved as
 $BENCH_OUT/cmp-<bench>.txt; $BENCH_OUT/compare.txt, the concatenation, is
@@ -17,10 +18,14 @@ per bench plus the cases that moved more than THRESH, which is what
 pr_comment.py posts to the PR) and summary.json.  Progress lines go to
 $BENCH_OUT/progress.txt.
 
+A bench target that only HEAD has (one the change adds) is run for HEAD alone
+and its numbers are reported without a comparison; one that only BASE has is
+skipped.  A target that neither side has is an error.
+
 usage: bench_ab.py <base-sha> <head-sha>
 
 env:  BENCH_ROUNDS       rounds per side                (default 3)
-      BENCHES            space separated bench targets  (default: the set used in BENCH_BUGFIXES)
+      BENCHES            space separated bench targets  (default: DEFAULT_BENCHES below)
       BENCH_CPUS         cores to pin to, e.g. "0,2,4-8"; one bench pair runs per core at a time
                          (default: one SMT thread per physical core, every other core, at most 16)
       BENCH_OUT          output directory               (default ./bench-out)
@@ -32,7 +37,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
 
-DEFAULT_BENCHES = 'shakespeare cities sparse_keys binary_keys superdense_keys act_paths zipper_head_owned product_zipper'
+# Every divan bench that runs on one core.  Left out: `parallel` (its cases spawn up to 256 threads,
+# and each bench here is pinned to one core), and `sla` and `multiplicities` (plain `main`s that
+# print no divan table).
+DEFAULT_BENCHES = ('shakespeare cities sparse_keys binary_keys superdense_keys act_paths zipper_head_owned product_zipper '
+                   'write_zipper graft_masked_branches restrict prune oeis byte_mask serde pointcloud')
 THRESH = 0.05          # a case is listed in the summary when |change| exceeds this
 
 
@@ -74,8 +83,8 @@ class Bench:
         self.out = Path(os.environ.get('BENCH_OUT', self.repo / 'bench-out')).resolve()
         self.target = Path(os.environ.get('CARGO_TARGET_DIR', self.repo / 'target')).resolve()
         self.src = self.out / 'src'          # one worktree for both sides
-        self.bins = {}
-        self.results = {}      # bench -> {'group/case': {'base': ns, 'head': ns, 'pct': float}}
+        self.bins = {}         # side -> {bench: executable}, for the requested benches that side has
+        self.results = {}      # bench -> {'group/case': {'base': ns, 'head': ns, 'pct': float}}; 'head' alone for a new bench
         os.environ.setdefault('DIVAN_SAMPLE_COUNT', '40')
         sys.path.insert(0, str(self.repo / 'benches'))
         import divan_fmt
@@ -92,6 +101,11 @@ class Bench:
         subprocess.run(['git', 'worktree', 'remove', '--force', str(self.src)], cwd=self.repo,
                        capture_output=True)
 
+    def bench_targets(self, src):
+        """The requested benches that the tree at `src` has: declared in Cargo.toml, or a file cargo discovers."""
+        declared = {b.get('name') for b in tomllib.loads((src / 'Cargo.toml').read_text()).get('bench', [])}
+        return [b for b in self.benches if b in declared or (src / 'benches' / f'{b}.rs').is_file()]
+
     def required_features(self, src):
         """Features the requested benches declare via required-features, limited to those the tree has."""
         t = tomllib.loads((src / 'Cargo.toml').read_text())
@@ -106,12 +120,17 @@ class Bench:
         """Check `sha` out in the shared worktree, build, and copy the bench executables to bins/<side>/."""
         src = self.src
         git('checkout', '--detach', '-f', sha, cwd=src)
+        benches = self.bench_targets(src)
+        self.bins[side] = {}
+        if not benches:
+            log(f'== {side} ({self.short(sha)}) has none of the requested benches')
+            return
         feats = self.required_features(src)
         target = self.target / 'ab'
         log(f'== building {side} ({self.short(sha)}) in {src} into {target}'
             + (f' with features {",".join(feats)}' if feats else ''))
         cmd = ['cargo', 'bench', '--no-run', '--message-format=json', '--target-dir', str(target)]
-        for b in self.benches:
+        for b in benches:
             cmd += ['--bench', b]
         if feats:
             cmd += ['--features', ','.join(feats)]
@@ -124,16 +143,15 @@ class Bench:
             m = json.loads(line)
             if m.get('reason') == 'compiler-artifact' and m.get('executable') and 'bench' in m['target']['kind']:
                 exes[m['target']['name']] = m['executable']
-        missing = [b for b in self.benches if b not in exes]
+        missing = [b for b in benches if b not in exes]
         if missing:
             sys.exit(f'no executable for bench(es) {missing} on {side}')
         bindir = self.out / 'bins' / side
         bindir.mkdir(parents=True, exist_ok=True)
-        self.bins[side] = {}
-        for b in self.benches:
+        for b in benches:
             shutil.copy2(exes[b], bindir / b)
             self.bins[side][b] = str(bindir / b)
-        (self.out / f'bins-{side}.txt').write_text(''.join(f'{b} {exes[b]}\n' for b in self.benches))
+        (self.out / f'bins-{side}.txt').write_text(''.join(f'{b} {exes[b]}\n' for b in benches))
 
     def run(self, side, bench, rnd, cpu):
         t0 = time.time()
@@ -142,11 +160,22 @@ class Bench:
                            cwd=self.repo, stdout=out, stderr=err, check=True)
         self.progress(f'round {rnd}/{self.rounds} {bench} {side} {time.time() - t0:.0f}s cpu {cpu}')
 
+    def warm_up(self, cpu, seconds=0.5):
+        """Spin on `cpu` so that it has left its idle state and is at speed when the first side starts.
+        On a cold core the side that goes first measures its first cases up to 50% slower, and a
+        bench that is over in under a second has no later samples to make up for it."""
+        spin = f'import time\nt = time.perf_counter()\nwhile time.perf_counter() - t < {seconds}: pass'
+        subprocess.run(['taskset', '-c', str(cpu), sys.executable, '-c', spin], check=True)
+
     def run_pair(self, bench, rnd, free):
-        """Both sides of one bench, back to back on one core taken from the pool, then its compare table."""
+        """Both sides of one bench, back to back on one core taken from the pool, then its compare table.
+        A bench that base lacks runs for head alone."""
         cpu = free.get()
         try:
+            self.warm_up(cpu)
             for side in (('base', 'head') if rnd % 2 else ('head', 'base')):
+                if bench not in self.bins[side]:
+                    continue
                 with self.lock:
                     log(f'== round {rnd}/{self.rounds} {bench} {side} (cpu {cpu})')
                 self.run(side, bench, rnd, cpu)
@@ -158,10 +187,21 @@ class Bench:
         """Average each side's rounds so far, compare medians, save and print the table."""
         avg = {}
         for side in ('base', 'head'):
+            if bench not in self.bins[side]:
+                continue
             files = sorted(self.out.glob(f'{side}-{bench}-r*.txt'))
             data = [self.fmt.parse_divan_output(f.read_text()) for f in files]
             avg[side] = self.fmt.average_fields(data)
             (self.out / f'{side}-{bench}-avg.txt').write_text(self.fmt.render_divan_table(avg[side]) + '\n')
+        if 'base' not in avg:
+            # a bench the change adds: nothing to compare against, so report what it measures
+            self.results[bench] = {f'{g}/{c}': {'head': r['median_ns']} for (g, c), r in avg['head'].items()}
+            text = (f'{bench}  (new in head {self.short(self.head_sha)}, not in base {self.short(self.base_sha)}'
+                    f'  rounds {rounds_so_far})\n{self.fmt.render_divan_table(avg["head"])}\n\n')
+            (self.out / f'cmp-{bench}.txt').write_text(text)
+            with self.lock:
+                log(text, end='')
+            return
         cmp = self.fmt.compare_fields(avg['base'], avg['head'], 'median_ns')
         self.results[bench] = {f'{g}/{c}': {'base': r['base'], 'head': r['other'], 'pct': r['pct']} for (g, c), r in cmp.items()}
         table = re.sub(r'\x1b\[[0-9;]*m', '', self.fmt.render_divan_table(cmp))
@@ -178,7 +218,7 @@ class Bench:
 
     def compare_rounds(self, rounds_so_far):
         tmp = self.out / 'compare.tmp'
-        tmp.write_text(''.join((self.out / f'cmp-{b}.txt').read_text() for b in self.benches))
+        tmp.write_text(''.join((self.out / f'cmp-{b}.txt').read_text() for b in self.benches if b in self.bins['head']))
         tmp.rename(self.out / 'compare.txt')
         (self.out / 'summary.json').write_text(json.dumps(
             {'base': self.short(self.base_sha), 'head': self.short(self.head_sha), 'rounds': rounds_so_far,
@@ -193,9 +233,16 @@ class Bench:
              f'median of each run averaged; negative is faster', '',
              '| bench | cases | geomean | largest gain | largest loss | >5% faster | >5% slower |',
              '|---|---:|---:|---|---|---:|---:|']
-        movers = []
+        movers, added = [], []
         for b in self.benches:
             cases = self.results.get(b, {})
+            if b not in self.bins['head']:
+                L.append(f'| {b} | | not in head, skipped | | | | |')
+                continue
+            if b not in self.bins['base']:
+                L.append(f'| {b} | {len(cases)} | new in head | | | | |')
+                added += [(b, name, r) for name, r in cases.items()]
+                continue
             if not cases:
                 L.append(f'| {b} | 0 | | | | | |')
                 continue
@@ -217,6 +264,13 @@ class Bench:
             if len(movers) > 60:
                 L.append(f'| | … and {len(movers) - 60} more, see compare.txt in the bench-out artifact | | | |')
             L += ['', '</details>']
+        if added:
+            L += ['', f'<details><summary>{len(added)} case(s) of benches new in head</summary>', '',
+                  '| bench | case | head |', '|---|---|---:|']
+            L += [f'| {b} | `{name}` | {self.fmt.format_ns(r["head"])} |' for b, name, r in added[:60]]
+            if len(added) > 60:
+                L.append(f'| | … and {len(added) - 60} more, see compare.txt in the bench-out artifact | |')
+            L += ['', '</details>']
         L += ['', 'Full tables per bench are in the job log and the bench-out artifact.']
         return '\n'.join(L) + '\n'
 
@@ -235,12 +289,21 @@ class Bench:
             self.build_side('base', self.base_sha)
             self.progress(f'building head {self.short(self.head_sha)}')
             self.build_side('head', self.head_sha)
+            unknown = [b for b in self.benches if b not in self.bins['base'] and b not in self.bins['head']]
+            if unknown:
+                sys.exit(f'no bench target named {" ".join(unknown)} at base or head')
+            runs = [b for b in self.benches if b in self.bins['head']]
+            for b in self.benches:
+                if b not in self.bins['base']:
+                    self.progress(f'{b} is new in head: running head alone')
+                elif b not in self.bins['head']:
+                    self.progress(f'{b} is not in head: skipped')
             free = Queue()
             for cpu in self.cpus:
                 free.put(cpu)
             for rnd in range(1, self.rounds + 1):
-                with ThreadPoolExecutor(min(len(self.cpus), len(self.benches))) as pool:
-                    for r in pool.map(lambda b: self.run_pair(b, rnd, free), self.benches):
+                with ThreadPoolExecutor(max(1, min(len(self.cpus), len(runs)))) as pool:
+                    for r in pool.map(lambda b: self.run_pair(b, rnd, free), runs):
                         pass                     # re-raises a worker's exception
                 self.compare_rounds(rnd)
                 self.progress(f'round {rnd}/{self.rounds} done, compare.txt refreshed')
