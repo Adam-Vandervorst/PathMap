@@ -12,3 +12,4 @@ import PathMapModel.PathSetLaws
 import PathMapModel.PathSetProofs
 import PathMapModel.PathSetChecks
 import PathMapModel.PathSetCertificates
+import PathMapModel.ConvexMap
