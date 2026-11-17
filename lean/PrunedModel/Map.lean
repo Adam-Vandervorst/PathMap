@@ -31,11 +31,8 @@ and `subtract` is pointwise.
 The claim this model makes is therefore stronger than the other one's.  Where
 `PathMapModel` says "here is what the crate does with dangling paths",
 `PrunedModel` says "these operations never create one", and a trace divergence
-is either a wrong value or a dangling path that should not be there.  The
-fuzzer that checks this claim against the crate (`PrunedModel/Fuzz.lean`,
-`differential/src/pruned.rs`) lives on branch `spec/zippy-laws-fvc` and is not
-carried here; "the fuzzer" in these files means that one.  On this branch the
-model is what `PrunedModel/Zippy.lean` proves Zippy's set algebra about.
+is either a wrong value or a dangling path that should not be there.  See
+`PrunedModel/Fuzz.lean` for which operations are in the subset and why.
 
 ## What is shared
 

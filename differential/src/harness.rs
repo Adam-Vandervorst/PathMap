@@ -62,6 +62,11 @@ impl<'a> Dec<'a> {
         };
         Some(Self { bytes, pos, op_count })
     }
+    /// A decoder with no header handling, for streams whose caller picks the
+    /// operation itself (the pruned fuzzer).
+    pub fn legacy(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0, op_count: LEGACY_NOPS }
+    }
     pub fn op(&mut self) -> Option<usize> {
         self.modn(self.op_count)
     }

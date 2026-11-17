@@ -165,9 +165,24 @@ zipper, and exporting those laws to the algebraic fuzzer.  A location exists iff
 some key has it as a prefix, so a dangling path is unrepresentable.  The model
 follows `focus_value_consistency` (issue #104: a subtrie includes its root
 value), which master's crate does not implement yet; the laws are about the
-model's zipper programs, and the fuzzer builds each operator from crate
-operations that agree on master.  The pruned differential fuzzer that checks
-this model against the crate lives on branch `spec/zippy-laws-fvc`.
+model's zipper programs, and the algebraic fuzzer builds each operator from
+crate operations that agree on master.
+
+`pruned_differential.py` drives this model (`pruned-oracle`) against
+`differential/src/pruned.rs` (`pruned_trace`), with the same resident-child
+driver as `differential.py`:
+
+    cargo build --release -p differential --bin pruned_trace
+    (cd lean && lake build)
+    ./lean/pruned_differential.py --random 2000 -j8
+    ./lean/pruned_differential.py lean/pruned-corpus/*
+
+What it found is in `PRUNED_FINDINGS.md`.  Until `focus_value_consistency`
+lands, it reports the #104 gaps on master as new divergences: `remove_prefix`
+(the model returns a count), and the focus value of `insert_prefix`,
+`join_into`, `meet_2`, `join_k_path_into`, `restrict` and `meet_k_path_into`.
+In 20000 random inputs on `de125bb`, 13721 diverged, all of them in those
+seven operations except one in `subtract_into`.
 
 | file | contents |
 | --- | --- |
@@ -179,6 +194,7 @@ this model against the crate lives on branch `spec/zippy-laws-fvc`.
 | `PrunedModel/Pointwise.lean` | `valAt` of every map operation |
 | `PrunedModel/Refine.lean` | each write op as `z.withTrie (z.trie.replaceAt z.focus M)` |
 | `PrunedModel/Zippy.lean` | each egg operator as a zipper program over `Space = PrunedMap Unit`, every `formal.egg` rule proved, `Fix` as a least post-fixpoint, the raw ops = egg ops under #104 (§10), the tour as `#guard`s |
+| `PrunedModel/Fuzz.lean`, `PrunedMain.lean` | the pruned fuzzer's wire format, op table and trace producer; the `pruned-oracle` binary |
 | `ZippyLaws.lean` | exports Zippy.lean's equational theorems as `differential/src/algebraic/zippy_laws.rs`: `lake build PrunedModel && lake env lean --run ZippyLaws.lean > ../differential/src/algebraic/zippy_laws.rs` |
 
 ## What is proved versus what is checked
