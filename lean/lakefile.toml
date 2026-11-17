@@ -1,5 +1,5 @@
 name = "pathmap-model"
-defaultTargets = ["PathMapModel", "pathmap-oracle"]
+defaultTargets = ["PathMapModel", "pathmap-oracle", "PrunedModel"]
 
 [[lean_lib]]
 name = "PathMapModel"
@@ -7,3 +7,9 @@ name = "PathMapModel"
 [[lean_exe]]
 name = "pathmap-oracle"
 root = "Main"
+
+# The dangling-path-free model, carried here for Zippy's set algebra: a space
+# is a `PrunedMap Unit`, and `PrunedModel/Zippy.lean` proves formal.egg's rules
+# about it.  `ZippyLaws.lean` exports those laws for the algebraic fuzzer.
+[[lean_lib]]
+name = "PrunedModel"

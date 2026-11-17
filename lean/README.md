@@ -156,6 +156,31 @@ focus, such that ..." — instead of as a node walk.
 | `PathMapModel/Fuzz.lean` | the wire format, the operation table, and the trace producer (including `--act` mode) |
 | `Main.lean` | the `pathmap-oracle` binary |
 
+### Zippy's set algebra (`PrunedModel/`)
+
+A second, dangling-path-free model, carried here for one purpose: proving
+[Zippy's `formal.egg`](https://github.com/Adam-Vandervorst/Zippy/blob/b/formal.egg)
+— the reference semantics of Zippy's space algebra — about `pathmap`'s write
+zipper, and exporting those laws to the algebraic fuzzer.  A location exists iff
+some key has it as a prefix, so a dangling path is unrepresentable.  The model
+follows `focus_value_consistency` (issue #104: a subtrie includes its root
+value), which master's crate does not implement yet; the laws are about the
+model's zipper programs, and the fuzzer builds each operator from crate
+operations that agree on master.  The pruned differential fuzzer that checks
+this model against the crate lives on branch `spec/zippy-laws-fvc`.
+
+| file | contents |
+| --- | --- |
+| `PrunedModel/Canon.lean` | canonical association lists: keys strictly sorted, hence distinct |
+| `PrunedModel/Map.lean` | `PrunedMap`: the map operations over the canonical form |
+| `PrunedModel/Zipper.lean`, `Write.lean` | the read and write zipper over a `PrunedMap`, issue-#104 semantics, no prune flag |
+| `PrunedModel/Spec.lean` | the model's one claim, `no_dangling`, and its consequences |
+| `PrunedModel/Lattice.lean`, `Nested.lean` | the lattice laws as equations (`unitOps` makes a map a set of paths); a trie as another trie's value |
+| `PrunedModel/Pointwise.lean` | `valAt` of every map operation |
+| `PrunedModel/Refine.lean` | each write op as `z.withTrie (z.trie.replaceAt z.focus M)` |
+| `PrunedModel/Zippy.lean` | each egg operator as a zipper program over `Space = PrunedMap Unit`, every `formal.egg` rule proved, `Fix` as a least post-fixpoint, the raw ops = egg ops under #104 (§10), the tour as `#guard`s |
+| `ZippyLaws.lean` | exports Zippy.lean's equational theorems as `differential/src/algebraic/zippy_laws.rs`: `lake build PrunedModel && lake env lean --run ZippyLaws.lean > ../differential/src/algebraic/zippy_laws.rs` |
+
 ## What is proved versus what is checked
 
 Honest accounting, because it matters for how much the model is worth:
