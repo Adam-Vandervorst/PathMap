@@ -8,8 +8,8 @@
 //!
 //! # Where the laws come from
 //!
-//! Not from this file.  They are the theorems of `lean/PrunedModel/Zippy.lean`
-//! (branch `spec/zippy-laws`), which proves Adam Vandervorst's `formal.egg` --
+//! Not from this file.  They are the theorems of `lean/PrunedModel/Zippy.lean`,
+//! which proves Adam Vandervorst's `formal.egg` --
 //! the reference semantics of Zippy's space algebra -- over the pruned model.
 //! `lean/ZippyLaws.lean` reads the *elaborated* theorems, keeps every equation
 //! between spaces whose operators the expression language has, and prints them

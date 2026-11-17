@@ -467,9 +467,10 @@ fn wrap<V: FuzzValue>(k: usize, p: &[u8], s: &PathMap<V>) -> PathMap<V> {
         }
         1 => materialize(PrefixZipper::new(p.to_vec(), s.read_zipper())),
         _ => {
-            // `insert_prefix` moves the node and, by its documentation, leaves
-            // the focus value where it is (Zippy §10, `rawWrap_ne_wrap`).  So
-            // that value is moved by hand, and what this tests is the node move.
+            // `insert_prefix` moves the node and, on master, leaves the focus
+            // value where it is (issue #104 moves it too; Zippy.lean §10,
+            // `insertPrefix_eq_wrap`).  So that value is moved by hand, and
+            // what this tests is the node move.
             let mut out = s.clone();
             {
                 let mut wz = out.write_zipper();

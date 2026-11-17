@@ -128,15 +128,15 @@ cannot catch a mistake they all share. Laws are the other half: each law is two
 visible even when every route computes it the same wrong way.
 
 The laws are **generated from Lean**, not written here. `lean/ZippyLaws.lean`
-(branch `spec/zippy-laws`) loads the elaborated `PrunedModel.Zippy` module, takes
+loads the elaborated `PrunedModel.Zippy` module, takes
 every theorem that is an equation between spaces over the operators above, checks
 its proof is `sorry`-free, and prints it as Rust:
 `src/algebraic/zippy_laws.rs`, 70 laws. A theorem may quantify over paths and
 bytes and carry hypotheses (`a ≠ b`, `p ∉ s`, `head x = empty`); each case
 carries a few paths and bytes for those, mostly prefixes and first bytes of the
 operands' own paths, and a law whose hypotheses are false for them is skipped.
-The 75 theorems it does not export are listed at the bottom of the generated
-file with the reason (membership lemmas, `≠` results, raw-zipper-op theorems,
+The 74 theorems it does not export are listed at the bottom of the generated
+file with the reason (membership lemmas, raw-zipper-op theorems,
 function-typed binders).
 
 ```sh
