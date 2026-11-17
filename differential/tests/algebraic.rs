@@ -558,3 +558,39 @@ fn zippy_laws_apply_to_the_set_type_only() {
     assert!(algebraic::laws::laws::<u64>().is_empty());
     assert!(algebraic::laws::laws::<Bits>().is_empty());
 }
+
+/// The wire header: optional, and invisible to decoding.  A headerless input is
+/// layout 1, so it and the same bytes after a header are the same case; random
+/// inputs carry the header, and seeds keep naming the cases they did before it.
+#[test]
+fn input_header_does_not_change_the_case() {
+    // Building the operands can panic (the known merkleize defect); then both
+    // forms must panic.  Decode under the quiet hook, assert outside it.
+    let shown = |b: &[u8]| {
+        std::panic::catch_unwind(|| algebraic::describe(&algebraic::decode::<u64>(b))).ok()
+    };
+    let mut rng = algebraic::Rng::for_job(20261117, 0);
+    let inputs: Vec<Vec<u8>> = (0..200).map(|_| rng.input()).collect();
+    let cut = algebraic::input_header()[..algebraic::ALG_MAGIC.len() + 1].to_vec();
+    let (pairs, cut_pair) = with_quiet_panics(|| {
+        let pairs: Vec<_> = inputs
+            .iter()
+            .map(|h| (shown(h), shown(algebraic::split_input(h).1)))
+            .collect();
+        (pairs, (shown(&cut), shown(&[])))
+    });
+
+    for (h, (a, b)) in inputs.iter().zip(&pairs) {
+        assert!(h.starts_with(&algebraic::input_header()));
+        assert_eq!(algebraic::split_input(h).0, algebraic::LAYOUT);
+        assert_eq!(a, b);
+    }
+    let decoded = pairs.iter().filter(|(a, _)| a.is_some()).count();
+    assert!(decoded > 100, "only {decoded} of 200 cases decoded");
+    // A header cut short decodes as an empty payload, not as data.
+    assert_eq!(algebraic::split_input(&cut), (algebraic::LAYOUT, &[][..]));
+    assert_eq!(cut_pair.0, cut_pair.1);
+    // The other harnesses' headers are not this one: they stay payload.
+    let main = differential::harness::input_header();
+    assert_eq!(algebraic::split_input(&main), (algebraic::LEGACY_LAYOUT, &main[..]));
+}

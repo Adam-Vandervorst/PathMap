@@ -485,8 +485,15 @@ fn do_shrink(path: &Path, want: Option<&str>) {
         sigs.join(" ")
     );
 
-    let holds = |b: &[u8]| signatures(b).iter().any(|s| *s == target);
-    let mut best = original;
+    // Only the bytes after the header shrink, and the result is written with
+    // the header of the layout it was decoded with -- a headerless input comes
+    // out headered, decoding the same way.
+    let (layout, payload) = algebraic::split_input(&original);
+    let mut header = algebraic::ALG_MAGIC.to_vec();
+    header.extend_from_slice(&layout.to_le_bytes());
+    let framed = |p: &[u8]| [header.as_slice(), p].concat();
+    let holds = |b: &[u8]| signatures(&framed(b)).iter().any(|s| *s == target);
+    let mut best = payload.to_vec();
 
     loop {
         let before = (best.len(), best.iter().map(|b| *b as u32).sum::<u32>());
@@ -526,6 +533,7 @@ fn do_shrink(path: &Path, want: Option<&str>) {
         }
     }
 
+    let best = framed(&best);
     let out = path.with_extension("min.bin");
     std::fs::write(&out, &best).unwrap();
     eprintln!("shrunk to {} bytes -> {}", best.len(), out.display());

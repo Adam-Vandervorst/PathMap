@@ -54,13 +54,48 @@ pub const MAX_ENTRIES: usize = 7;
 /// Upper bound on a generated path's length.
 pub const MAX_PATH_LEN: usize = 5;
 
+/// Input header marker, followed by a little-endian u16 layout version: the
+/// layout of [`crate::harness::WIRE_MAGIC`], with this fuzzer's own marker.
+///
+/// The main harness records a *selector count* there, because its decoding is
+/// one table that only grows.  This decoder has no such table -- operators,
+/// builds and law instances are drawn with hand-set weights -- so the field
+/// records which decoding the bytes after it were written for.
+pub const ALG_MAGIC: &[u8] = b"PMALGZ\x01\x00";
+/// Layout version of newly generated inputs.  Bump it, and keep the old
+/// decoding reachable, when a change to [`decode`] would give an existing
+/// input a different case.
+pub const LAYOUT: u16 = 1;
+/// Layout of an input with no header: every input written before the header
+/// existed.  It is the layout [`LAYOUT`] 1 decodes.
+pub const LEGACY_LAYOUT: u16 = 1;
+
+/// Header for new inputs.
+pub fn input_header() -> Vec<u8> {
+    let mut h = ALG_MAGIC.to_vec();
+    h.extend_from_slice(&LAYOUT.to_le_bytes());
+    h
+}
+
+/// Split an input into its layout version and the bytes [`decode`] reads.
+///
+/// Total, like `decode`: a header whose version is cut short reads as layout
+/// [`LAYOUT`] with nothing after it.
+pub fn split_input(bytes: &[u8]) -> (u16, &[u8]) {
+    match bytes.strip_prefix(ALG_MAGIC) {
+        None => (LEGACY_LAYOUT, bytes),
+        Some(rest) if rest.len() < 2 => (LAYOUT, &[]),
+        Some(rest) => (u16::from_le_bytes([rest[0], rest[1]]), &rest[2..]),
+    }
+}
+
 /// Byte decoding with the out-of-input behaviour this fuzzer wants.
 ///
 /// Not `harness::Dec`: that one returns `None` when the input runs out, because
-/// the Lean harness stops executing there, and it reads a wire header this
-/// format does not have.  Here every input has to decode to *some* case or
-/// shrinking would have to care about length, so exhaustion saturates to zero
-/// instead.
+/// the Lean harness stops executing there.  Here every input has to decode to
+/// *some* case or shrinking would have to care about length, so exhaustion
+/// saturates to zero instead.  The header is read the same way, though: see
+/// [`ALG_MAGIC`].
 pub struct Gen<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -70,8 +105,12 @@ pub struct Gen<'a> {
 }
 
 impl<'a> Gen<'a> {
+    /// A cursor over the input after its header.  Layout 1 is the only
+    /// decoding there is, so the version is not consulted yet; a newer one
+    /// decodes as layout 1.
     pub fn new(bytes: &'a [u8]) -> Self {
-        Gen { bytes, pos: 0, alphabet: 3 }
+        let (_layout, payload) = split_input(bytes);
+        Gen { bytes: payload, pos: 0, alphabet: 3 }
     }
     pub fn byte(&mut self) -> u8 {
         let b = self.bytes.get(self.pos).copied().unwrap_or(0);
@@ -1137,9 +1176,14 @@ impl Rng {
     /// An input long enough that the decoder rarely runs out mid-case -- which
     /// would saturate the rest to zeros and waste the draw -- and short enough
     /// to shrink quickly.
+    /// A random input: the current header, then the bytes [`decode`] reads.
+    /// The bytes after the header are the stream this produced before the
+    /// header existed, so a seed still names the same cases.
     pub fn input(&mut self) -> Vec<u8> {
         let n = 48 + (self.next() % 96) as usize;
-        (0..n).map(|_| (self.next() >> 24) as u8).collect()
+        let mut v = input_header();
+        v.extend((0..n).map(|_| (self.next() >> 24) as u8));
+        v
     }
 }
 
