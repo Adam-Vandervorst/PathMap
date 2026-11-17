@@ -49,6 +49,10 @@ The input is consumed one byte at a time; decoding stops, and the program ends,
 as soon as the input runs out.
 
 ```
+wire header (optional):
+  "PMPRUN" 0x01 0x00 ; count := u16 LE (1..=256)
+    -- the main harness's layout with its own marker; an input without it
+    -- decodes with 54 selectors, so pre-header inputs keep their meaning
 header:
   n         := u8 % 8            -- entries seeded into map0 (the write target)
   n × ( len := u8 % 6 ; len × pathbyte ; val := u8 )
@@ -57,7 +61,7 @@ header:
   r1        := u8 % 4 ; r1 × pathbyte    -- read zipper root, clamped to its
                                          -- longest existing prefix
 body:
-  repeated: op := u8 % 54 ; operands per op (see `step`)
+  repeated: op := u8 % count ; operands per op (see `step`)
 ```
 
 Every **path byte** is masked to `b % 4`, so generated tries share prefixes
@@ -153,6 +157,8 @@ def dumpAt (t : PrunedMap V) (root : Path) : String :=
 structure Dec where
   bytes : ByteArray
   pos : Nat
+  /-- Selector count, from the wire header (54 without one). -/
+  opCount : Nat := 54
 
 /-- Read one byte; `none` once the input is exhausted, which ends the program. -/
 def Dec.u8 (d : Dec) : Option (UInt8 × Dec) :=
@@ -213,13 +219,30 @@ def emit (s : St) (name : String) (ret : String) : St :=
 
 /-! ## The operation table
 
-`op % nops` selects the operation.  Ops `0`–`29` act on a target zipper chosen
-by a following `u8 % 2` byte (`0` = write zipper, `1` = read zipper); ops
+`op % count` selects the operation, `count` coming from the wire header (`nops`
+without one).  Ops `0`–`29` act on a target zipper chosen by a following
+`u8 % 2` byte (`0` = write zipper, `1` = read zipper); ops
 `30`–`53` are write-zipper operations. -/
 
 /-- Number of distinct operations.  Must match `NOPS` in
 `differential/src/pruned.rs`. -/
 def nops : Nat := 54
+
+/-- Input header marker, `"PMPRUN\x01\x00"`.  Must match `PRUNED_MAGIC` in
+`differential/src/pruned.rs`. -/
+def prunedMagic : List UInt8 := [80, 77, 80, 82, 85, 78, 1, 0]
+
+/-- Read the optional wire header.  `none` for a selector count outside
+`1..=256`, which the crate also rejects. -/
+def Dec.init (bytes : ByteArray) : Option Dec := do
+  if bytes.data.toList.take prunedMagic.length == prunedMagic then
+    let d : Dec := { bytes, pos := prunedMagic.length }
+    let (lo, d) ← d.u8
+    let (hi, d) ← d.u8
+    let count := lo.toNat + 256 * hi.toNat
+    if count == 0 || count > 256 then none
+    else some { d with opCount := count }
+  else some { bytes, pos := 0, opCount := nops }
 
 /-- A full `k`-path iteration: `descend_first_k_path` followed by
 `to_next_k_path` until it runs out (capped at 32 stops).  Returns the locations
@@ -253,7 +276,7 @@ def getTarget (s : St) (t : Nat) : PZip V := if t == 0 then s.wz else s.rz
 which ends the program. -/
 def step (s : St) (d : Dec) : Option (St × Dec) := do
   let (opRaw, d) ← d.u8
-  let op := opRaw.toNat % nops
+  let op := opRaw.toNat % d.opCount
   match op with
   -- ## Movement and reading, on either zipper
   | 0 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
@@ -536,7 +559,7 @@ def header (d : Dec) : Option (St × Dec) := do
 
 /-- Decode and run a fuzzer input, returning the trace lines. -/
 def run (bytes : ByteArray) (maxSteps : Nat := 256) : List String :=
-  match header { bytes, pos := 0 } with
+  match Dec.init bytes >>= header with
   | none => ["EMPTY"]
   | some (s0, d) =>
       let s := loop maxSteps s0 d

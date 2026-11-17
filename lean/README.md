@@ -177,6 +177,13 @@ driver as `differential.py`:
     ./lean/pruned_differential.py --random 2000 -j8
     ./lean/pruned_differential.py lean/pruned-corpus/*
 
+Inputs use the main harness's wire layout with their own marker:
+`"PMPRUN" 0x01 0x00`, a little-endian u16 selector count, then the program
+(`pruned_input_header` in `input_format.py`). An input without the header,
+such as everything in `pruned-corpus/`, decodes with 54 selectors, as it did
+before the header existed. The driver writes generated inputs and saved failures
+with this header, never with the main harness's.
+
 What it found is in `PRUNED_FINDINGS.md`.  Until `focus_value_consistency`
 lands, it reports the #104 gaps on master as new divergences: `remove_prefix`
 (the model returns a count), and the focus value of `insert_prefix`,

@@ -40,8 +40,26 @@ use crate::harness::{
 
 use core::fmt::Write as _;
 
-/// Number of distinct operations.  Must match `PrunedModel.Fuzz.nops`.
+/// Selector count for newly generated inputs.  Must match
+/// `PrunedModel.Fuzz.nops` and `PRUNED_NOPS` in `lean/input_format.py`.  Keep
+/// operation IDs permanently assigned: an input decodes with the count its
+/// header records, never with this one.
 pub const NOPS: usize = 54;
+/// Selector count for inputs with no header -- every input written before the
+/// header existed, including `lean/pruned-corpus/`.
+pub const LEGACY_NOPS: usize = 54;
+/// Input header marker, followed by a little-endian u16 selector count
+/// (1..=256): the layout of [`crate::harness::WIRE_MAGIC`], with its own marker
+/// so an input for one harness cannot pass as a program for the other.
+/// Must match `PrunedModel.Fuzz.prunedMagic`.
+pub const PRUNED_MAGIC: &[u8] = b"PMPRUN\x01\x00";
+
+/// Header for new inputs.
+pub fn input_header() -> Vec<u8> {
+    let mut header = PRUNED_MAGIC.to_vec();
+    header.extend_from_slice(&(NOPS as u16).to_le_bytes());
+    header
+}
 
 /// Why an operation was skipped.  Every `skip` in the trace carries one of
 /// these.  `lean/PrunedModel/Fuzz.lean` emits the same tokens; the two must
@@ -157,7 +175,9 @@ pub fn decode_header(d: &mut Dec) -> Option<(PathMap<u64>, PathMap<u64>, Vec<u8>
 
 /// Decode and execute a fuzzer input.
 pub fn run(bytes: &[u8], check: bool) -> String {
-    let mut d = Dec::legacy(bytes);
+    let Some(mut d) = Dec::with_format(bytes, PRUNED_MAGIC, LEGACY_NOPS) else {
+        return "EMPTY\n".to_string();
+    };
     let (mut map0, map1, root1) = match decode_header(&mut d) {
         Some(x) => x,
         None => return "EMPTY\n".to_string(),
@@ -225,7 +245,7 @@ pub fn run_ops(
         if step >= MAX_STEPS {
             break;
         }
-        let op = get!(d.u8()) as usize % NOPS;
+        let op = get!(d.op());
         let (name, ret): (&str, String) = match op {
             // ## Movement and reading, on either zipper
             0 => {
@@ -603,5 +623,57 @@ pub fn run_ops(
             fingerprint(rz, root1)
         );
         step += 1;
+    }
+}
+
+#[cfg(test)]
+mod input_format_tests {
+    use super::*;
+
+    fn payload() -> Vec<u8> {
+        // Two seeded maps, a read root, then a run of every operation.
+        let mut p = vec![3, 2, 0, 1, 10, 1, 2, 11, 3, 0, 1, 2, 12, 2, 1, 1, 20, 1, 3, 21, 1, 1];
+        for op in 0..NOPS as u8 {
+            p.extend_from_slice(&[op, 1, 2, 1, 0]);
+        }
+        p
+    }
+
+    // `check` is off: these are about decoding, and the payload is free to hit
+    // a known leak (PRUNED_FINDINGS.md #1) that `--check` asserts against.
+
+    #[test]
+    fn headerless_inputs_decode_as_the_current_header() {
+        assert_eq!(LEGACY_NOPS, NOPS, "a new op needs a legacy count of its own");
+        let p = payload();
+        let mut h = input_header();
+        h.extend_from_slice(&p);
+        assert_eq!(run(&h, false), run(&p, false));
+    }
+
+    #[test]
+    fn header_count_controls_decoding() {
+        let p = payload();
+        for count in [1u16, 7, 53, 54, 200, 256] {
+            let mut h = PRUNED_MAGIC.to_vec();
+            h.extend_from_slice(&count.to_le_bytes());
+            h.extend_from_slice(&p);
+            let trace = run(&h, false);
+            assert!(trace.contains("MAP0"), "count {count}: {trace}");
+            if count == 1 {
+                // Selector 0 only: every op is descend_to.
+                assert!(trace.lines().filter(|l| l.contains(" ret=")).all(|l| l.contains(" descend_to ")), "{trace}");
+            }
+        }
+        for count in [0u16, 257] {
+            let mut h = PRUNED_MAGIC.to_vec();
+            h.extend_from_slice(&count.to_le_bytes());
+            h.extend_from_slice(&p);
+            assert_eq!(run(&h, false), "EMPTY\n");
+        }
+        // The main harness's header is not this one: read as a legacy payload.
+        let mut other = crate::harness::input_header();
+        other.extend_from_slice(&p);
+        assert_ne!(run(&other, false), run(&p, false));
     }
 }

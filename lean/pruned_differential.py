@@ -33,10 +33,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import re
 
 import differential as D
+from input_format import pruned_input_header, pruned_versioned_input
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 D.ORACLE = os.path.join(ROOT, "lean", ".lake", "build", "bin", "pruned-oracle")
+# This harness has its own wire header (PRUNED_MAGIC + its selector count), so
+# generated inputs carry it and saved failures are rewritten into it, never
+# into the main harness's.  `differential.py` looks both names up at call time.
+D.input_header = lambda *_args, **_kw: pruned_input_header()
+D.versioned_input = pruned_versioned_input
 # PRUNED_TRACE overrides the search, for builds that live in another target dir.
 D.TRACE_CANDIDATES = [os.environ.get("PRUNED_TRACE", "")] + [
     os.path.join(ROOT, "target", "release", "pruned_trace"),
