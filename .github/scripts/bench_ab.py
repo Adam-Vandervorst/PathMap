@@ -41,7 +41,7 @@ from queue import Queue
 # and each bench here is pinned to one core), and `sla` and `multiplicities` (plain `main`s that
 # print no divan table).
 DEFAULT_BENCHES = ('shakespeare cities sparse_keys binary_keys superdense_keys act_paths zipper_head_owned product_zipper '
-                   'write_zipper graft_masked_branches restrict prune oeis byte_mask serde pointcloud')
+                   'write_zipper graft_masked_branches restrict convex prune oeis byte_mask serde pointcloud')
 THRESH = 0.05          # a case is listed in the summary when |change| exceeds this
 
 
