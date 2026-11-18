@@ -1,0 +1,1235 @@
+//! Equivalence fuzzer for the algebraic operations.
+//!
+//! The other two fuzzers in this crate ask *is the answer right?* -- the Lean
+//! model in `../lean` is an oracle, and `bin/pathmap_trace.rs` is diffed
+//! against it.  This one asks a different question: **does it matter which way
+//! you compute it?**  It should not, and `pathmap` offers enough different ways
+//! that the question has teeth.
+//!
+//! Each case is one algebraic expression over a few generated operand tries,
+//! evaluated by every route in `routes.rs` that applies to it -- eagerly on
+//! whole maps, in place through a write zipper, as a lockstep traversal of two
+//! read zippers, as a single n-ary traversal, through the DNF engine, through a
+//! lazy `OverlayZipper` over a virtual trie, and over a flat `BTreeMap` with no
+//! trie at all.  Then `laws.rs` evaluates pairs of expressions that must agree
+//! whatever the operands, which catches the mistakes every route shares.
+//!
+//! No Lean build is needed and there is no oracle: a divergence says the
+//! implementations disagree, not which one is wrong.
+//!
+//! The wire format here is **not** the one `harness.rs` shares with
+//! `PathMapModel.Fuzz`; this fuzzer has no model to stay in step with, so its
+//! inputs are free to be whatever generates interesting tries.
+//!
+//! See `../ALGEBRAIC_FUZZING.md`.
+
+pub mod expr;
+pub mod laws;
+pub mod model;
+pub mod routes;
+pub mod shape;
+pub mod value;
+pub mod zippy_laws;
+
+use pathmap::PathMap;
+use pathmap::zipper::{ZipperMoving, ZipperWriting};
+
+use expr::{Expr, Op, Un, MAX_VARS};
+use laws::{Binding, Ctx, Hyp, Instance};
+use routes::Route;
+use shape::{shape_of_map, show_shape, Shape, Values};
+use value::FuzzValue;
+
+/// Operand tries per case.  Fixed rather than generated so the expression
+/// generator can always name any of them, and so [`MAX_VARS`] is the only
+/// bound the const-generic route dispatch has to respect.
+pub const OPERANDS: usize = MAX_VARS;
+
+/// Upper bound on entries written into one operand.  Small on purpose: the
+/// interesting cases are the ones where operands overlap at a node boundary,
+/// and small tries over a small alphabet collide far more often than large
+/// ones.
+pub const MAX_ENTRIES: usize = 7;
+
+/// Upper bound on a generated path's length.
+pub const MAX_PATH_LEN: usize = 5;
+
+/// Input header marker, followed by a little-endian u16 layout version: the
+/// layout of [`crate::harness::WIRE_MAGIC`], with this fuzzer's own marker.
+///
+/// The main harness records a *selector count* there, because its decoding is
+/// one table that only grows.  This decoder has no such table -- operators,
+/// builds and law instances are drawn with hand-set weights -- so the field
+/// records which decoding the bytes after it were written for.
+pub const ALG_MAGIC: &[u8] = b"PMALGZ\x01\x00";
+/// Layout version of newly generated inputs.  Bump it, and keep the old
+/// decoding reachable, when a change to [`decode`] would give an existing
+/// input a different case.
+pub const LAYOUT: u16 = 1;
+/// Layout of an input with no header: every input written before the header
+/// existed.  It is the layout [`LAYOUT`] 1 decodes.
+pub const LEGACY_LAYOUT: u16 = 1;
+
+/// Header for new inputs.
+pub fn input_header() -> Vec<u8> {
+    let mut h = ALG_MAGIC.to_vec();
+    h.extend_from_slice(&LAYOUT.to_le_bytes());
+    h
+}
+
+/// Split an input into its layout version and the bytes [`decode`] reads.
+///
+/// Total, like `decode`: a header whose version is cut short reads as layout
+/// [`LAYOUT`] with nothing after it.
+pub fn split_input(bytes: &[u8]) -> (u16, &[u8]) {
+    match bytes.strip_prefix(ALG_MAGIC) {
+        None => (LEGACY_LAYOUT, bytes),
+        Some(rest) if rest.len() < 2 => (LAYOUT, &[]),
+        Some(rest) => (u16::from_le_bytes([rest[0], rest[1]]), &rest[2..]),
+    }
+}
+
+/// Byte decoding with the out-of-input behaviour this fuzzer wants.
+///
+/// Not `harness::Dec`: that one returns `None` when the input runs out, because
+/// the Lean harness stops executing there.  Here every input has to decode to
+/// *some* case or shrinking would have to care about length, so exhaustion
+/// saturates to zero instead.  The header is read the same way, though: see
+/// [`ALG_MAGIC`].
+pub struct Gen<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    /// Size of the path alphabet.  A small one makes operands share prefixes
+    /// and collide; the full 256 exercises wide nodes.
+    alphabet: u16,
+}
+
+impl<'a> Gen<'a> {
+    /// A cursor over the input after its header.  Layout 1 is the only
+    /// decoding there is, so the version is not consulted yet; a newer one
+    /// decodes as layout 1.
+    pub fn new(bytes: &'a [u8]) -> Self {
+        let (_layout, payload) = split_input(bytes);
+        Gen { bytes: payload, pos: 0, alphabet: 3 }
+    }
+    pub fn byte(&mut self) -> u8 {
+        let b = self.bytes.get(self.pos).copied().unwrap_or(0);
+        self.pos += 1;
+        b
+    }
+    pub fn modn(&mut self, m: usize) -> usize {
+        if m == 0 { 0 } else { self.byte() as usize % m }
+    }
+    pub fn boolean(&mut self) -> bool {
+        self.byte() % 2 == 1
+    }
+    /// True with probability `pct`/100.
+    pub fn chance(&mut self, pct: u8) -> bool {
+        (self.byte() as u16 * 100 / 256) < pct as u16
+    }
+    pub fn path_byte(&mut self) -> u8 {
+        (self.byte() as u16 % self.alphabet) as u8
+    }
+    pub fn path(&mut self, max_len: usize) -> Vec<u8> {
+        let n = self.modn(max_len + 1);
+        (0..n).map(|_| self.path_byte()).collect()
+    }
+}
+
+/// How one operand trie was built.  Recorded so a failure report can say
+/// whether the case depended on structural sharing or on node layout, which is
+/// the difference between a logic bug and a representation bug.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Build {
+    /// Entries written into a fresh map.
+    Fresh,
+    /// A clone of an earlier operand, then mutated.  Clones share nodes, so
+    /// this is how a case gets two operands whose subtries are the *same*
+    /// allocation rather than merely equal -- the distinction several of the
+    /// defects in `../lean/FINDINGS.md` turned on.
+    CloneOf(usize),
+    /// The same `(path, value)` entries as an earlier operand, rewritten into a
+    /// fresh map in a different order.  Equal content, possibly different node
+    /// layout and certainly no shared nodes: the counterpart to `CloneOf`, and
+    /// the shape that catches an operation whose answer depends on how its
+    /// input happens to be stored.
+    ReinsertOf(usize),
+    /// A clone of an earlier operand with `merkleize` run over it, which
+    /// factors equal subtries into one shared allocation.
+    MerkleizedOf(usize),
+}
+
+/// Paths a case offers for the path variables of a law (see `laws.rs`).
+pub const LAW_PATHS: usize = 3;
+/// Bytes a case offers for the byte variables of a law.
+pub const LAW_BYTES: usize = 2;
+
+pub struct Case<V: FuzzValue> {
+    pub expr: Expr,
+    pub operands: Vec<PathMap<V>>,
+    pub builds: Vec<Build>,
+    pub alphabet: u16,
+    /// What the laws' path and byte variables are bound to.  Mostly prefixes
+    /// and first bytes of the operands' own paths, so that `unwrap`, `wrap`
+    /// and the hypotheses land on structure that exists.
+    pub law_paths: Vec<Vec<u8>>,
+    pub law_bytes: Vec<u8>,
+    /// What each law's space variables stand for in the substitution
+    /// instance: `Var(i)` where space `i` is left alone, otherwise a small
+    /// expression.  See `laws.rs`.
+    pub law_spaces: Vec<Expr>,
+    /// The context the congruence instance puts both sides of each law in;
+    /// [`Ctx::Hole`] for none.
+    pub law_ctx: Ctx,
+}
+
+/// Decode a byte string into a case.  Total: every input decodes.
+pub fn decode<V: FuzzValue>(bytes: &[u8]) -> Case<V> {
+    let mut g = Gen::new(bytes);
+    // A 3-letter alphabet is the default because collisions are the point; the
+    // wider ones are sampled to keep node-type coverage honest, since `pathmap`
+    // switches node representation on child count.
+    g.alphabet = match g.modn(10) {
+        0 => 256,
+        1 => 16,
+        2 => 2,
+        _ => 3,
+    };
+    let alphabet = g.alphabet;
+
+    let mut operands: Vec<PathMap<V>> = Vec::with_capacity(OPERANDS);
+    let mut builds: Vec<Build> = Vec::with_capacity(OPERANDS);
+    for i in 0..OPERANDS {
+        let build = pick_build(&mut g, i);
+        operands.push(build_operand(&mut g, build, &operands));
+        builds.push(build);
+    }
+
+    let expr = gen_expr(&mut g, 3);
+
+    let keys: Vec<Vec<u8>> = operands
+        .iter()
+        .flat_map(|m| m.iter().map(|(k, _)| k).collect::<Vec<_>>())
+        .collect();
+    let law_paths: Vec<Vec<u8>> = (0..LAW_PATHS)
+        .map(|_| {
+            if !keys.is_empty() && g.chance(70) {
+                let k = &keys[g.modn(keys.len())];
+                k[..g.modn(k.len() + 1)].to_vec()
+            } else {
+                g.path(2)
+            }
+        })
+        .collect();
+    let law_bytes = (0..LAW_BYTES)
+        .map(|_| {
+            let firsts: Vec<u8> = keys.iter().filter_map(|k| k.first().copied()).collect();
+            if !firsts.is_empty() && g.chance(70) {
+                firsts[g.modn(firsts.len())]
+            } else {
+                g.path_byte()
+            }
+        })
+        .collect();
+    // Read last, so an input that ends before here -- every corpus input from
+    // before these existed -- decodes to the plain laws: a zero byte leaves a
+    // space alone and makes no context.
+    let law_spaces = (0..OPERANDS)
+        .map(|i| if g.modn(5) >= 3 { gen_expr(&mut g, 2) } else { Expr::Var(i) })
+        .collect();
+    let law_ctx = gen_ctx(&mut g, &law_paths, 2);
+    Case { expr, operands, builds, alphabet, law_paths, law_bytes, law_spaces, law_ctx }
+}
+
+/// A context for the congruence check: none half the time, otherwise one or
+/// two operators around the hole.  Its paths come from the law paths half the
+/// time, so an `unwrap` around the hole lands on structure that exists.
+fn gen_ctx(g: &mut Gen, paths: &[Vec<u8>], depth: usize) -> Ctx {
+    if depth == 0 || g.modn(2) == 0 {
+        return Ctx::Hole;
+    }
+    let path = |g: &mut Gen| {
+        if !paths.is_empty() && g.boolean() { paths[g.modn(paths.len())].clone() } else { g.path(2) }
+    };
+    match g.modn(8) {
+        0..=3 => {
+            let op = Op::ALL[g.modn(Op::ALL.len())];
+            let e = gen_expr(g, 1);
+            let c = Box::new(gen_ctx(g, paths, depth - 1));
+            if g.boolean() { Ctx::Right(op, e, c) } else { Ctx::Left(op, c, e) }
+        }
+        4 => {
+            let p = path(g);
+            Ctx::Wrap(p, Box::new(gen_ctx(g, paths, depth - 1)))
+        }
+        5 => {
+            let p = path(g);
+            Ctx::Unwrap(Box::new(gen_ctx(g, paths, depth - 1)), p)
+        }
+        _ => {
+            let u = Un::ALL[g.modn(Un::ALL.len())];
+            Ctx::Un(u, Box::new(gen_ctx(g, paths, depth - 1)))
+        }
+    }
+}
+
+fn pick_build(g: &mut Gen, i: usize) -> Build {
+    if i == 0 {
+        return Build::Fresh;
+    }
+    match g.modn(8) {
+        0 | 1 | 2 | 3 => Build::Fresh,
+        4 | 5 => Build::CloneOf(g.modn(i)),
+        6 => Build::ReinsertOf(g.modn(i)),
+        _ => Build::MerkleizedOf(g.modn(i)),
+    }
+}
+
+fn build_operand<V: FuzzValue>(g: &mut Gen, build: Build, prior: &[PathMap<V>]) -> PathMap<V> {
+    match build {
+        Build::Fresh => fresh(g),
+        Build::CloneOf(j) => {
+            let mut m = prior[j].clone();
+            mutate(g, &mut m);
+            m
+        }
+        Build::ReinsertOf(j) => {
+            // Collect the entries, then write them back in a rotated order.
+            // Rotation rather than a full shuffle because it is enough to
+            // change which insert splits which node, and it keeps the decoding
+            // cost one byte.
+            let entries: Vec<(Vec<u8>, V)> =
+                shape::values_of_shape(&shape_of_map(&prior[j])).into_iter().collect();
+            let mut out = PathMap::new();
+            if !entries.is_empty() {
+                let r = g.modn(entries.len());
+                let mut wz = out.write_zipper();
+                for off in 0..entries.len() {
+                    let (p, v) = &entries[(off + r) % entries.len()];
+                    wz.reset();
+                    wz.descend_to(p);
+                    wz.set_val(v.clone());
+                }
+            }
+            out
+        }
+        Build::MerkleizedOf(j) => {
+            let mut m = prior[j].clone();
+            m.merkleize();
+            mutate(g, &mut m);
+            m
+        }
+    }
+}
+
+fn fresh<V: FuzzValue>(g: &mut Gen) -> PathMap<V> {
+    let n = g.modn(MAX_ENTRIES + 1);
+    let mut out = PathMap::new();
+    {
+        let mut wz = out.write_zipper();
+        for _ in 0..n {
+            let p = g.path(MAX_PATH_LEN);
+            wz.reset();
+            wz.descend_to(&p);
+            // A path written with `create_path` and no value is a dangling
+            // path: structure with nothing under it.  Operations disagree about
+            // whether those survive, so they are generated on purpose and the
+            // comparison reports them as their own class.
+            if g.chance(20) {
+                wz.create_path();
+            } else {
+                wz.set_val(V::generate(g));
+            }
+        }
+    }
+    out
+}
+
+fn mutate<V: FuzzValue>(g: &mut Gen, m: &mut PathMap<V>) {
+    let n = g.modn(3);
+    let mut wz = m.write_zipper();
+    for _ in 0..n {
+        let p = g.path(MAX_PATH_LEN);
+        wz.reset();
+        wz.descend_to(&p);
+        match g.modn(4) {
+            0 => {
+                wz.remove_val(false);
+            }
+            1 => {
+                wz.create_path();
+            }
+            2 => {
+                wz.remove_branches(false);
+            }
+            _ => {
+                wz.set_val(V::generate(g));
+            }
+        }
+    }
+}
+
+fn gen_expr(g: &mut Gen, depth: usize) -> Expr {
+    // Leaf at depth 0, and otherwise often enough that the chain and DNF
+    // recognisers fire regularly -- a tree that is always maximally deep is
+    // never a chain of operands, so the whole-expression routes would almost
+    // never apply.
+    if depth == 0 || g.chance(35) {
+        // Mostly an operand.  Zippy's two constant spaces now and then, since
+        // the laws use both and a route has to cope with them mid-expression.
+        return match g.modn(20) {
+            0 => Expr::Empty,
+            1 | 2 => Expr::Singleton(g.path(3)),
+            _ => Expr::Var(g.modn(OPERANDS)),
+        };
+    }
+    // The crate's own algebra keeps three quarters of the interior nodes, so
+    // the chain and DNF recognisers still fire often; Zippy's operators take
+    // the rest.  Their paths are short, because a long one rarely meets
+    // anything in tries this small.
+    let op = match g.modn(16) {
+        0 | 1 | 2 | 3 => Op::Join,
+        4 | 5 | 6 => Op::Meet,
+        7 | 8 => Op::Subtract,
+        9 | 10 => Op::SymDiff,
+        11 => Op::Restrict,
+        12 => return Expr::wrap(g.path(2), gen_expr(g, depth - 1)),
+        13 => {
+            let e = gen_expr(g, depth - 1);
+            return Expr::unwrap(e, g.path(2));
+        }
+        14 => {
+            let u = Un::ALL[g.modn(Un::ALL.len())];
+            return Expr::un(u, gen_expr(g, depth - 1));
+        }
+        _ => {
+            if g.boolean() { Op::Compose } else { Op::IterC }
+        }
+    };
+    Expr::bin(op, gen_expr(g, depth - 1), gen_expr(g, depth - 1))
+}
+
+// ------------------------------------------------------------- comparison
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Class {
+    /// Two routes put different values on a path, or disagree about whether a
+    /// path carries one.  Settled semantics: one of them is wrong.
+    Values,
+    /// Two routes agree on every value and differ only in dangling paths --
+    /// structure with nothing under it.  Unsettled semantics (see
+    /// `../SPEC_WARTS.md`), so this is reported apart from `Values` rather than
+    /// mixed in with it.
+    Shape,
+    /// An identity that must hold whatever the operands are does not.
+    Law,
+}
+
+impl Class {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Class::Values => "values",
+            Class::Shape => "shape",
+            Class::Law => "law",
+        }
+    }
+}
+
+pub struct Divergence {
+    pub class: Class,
+    /// Stable short key for grouping findings across runs: the class and the
+    /// route, and nothing else.
+    ///
+    /// Coarse on purpose.  An earlier version appended the operators the
+    /// expression used, which looked more informative and was much worse: one
+    /// root cause in `meet` produced dozens of signatures because it surfaced
+    /// under every combination of operators that happened to contain a meet,
+    /// and a known-findings table over them was unmaintainable.  The operators,
+    /// the operands and the diff all live in `detail`; the signature's only job
+    /// is to collapse a million inputs onto a handful of lines.
+    pub signature: String,
+    pub detail: String,
+}
+
+/// Evaluate every applicable route and every law, and return what disagrees.
+///
+/// The baseline every route is compared against is `Pointwise(0)` -- the whole
+/// expression through `PathMap::join`/`meet`/`subtract`/`restrict`.  Those are
+/// the oldest and most heavily used entry points in the crate, which makes them
+/// the right thing to hold still, though the choice only affects which side of
+/// a disagreement gets named, not whether it is found.
+pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
+    let mut out = Vec::new();
+
+    let baseline_route = Route::Pointwise(0);
+    let baseline = routes::eval(baseline_route, &case.expr, &case.operands)
+        .expect("route 0 is the whole-map operations, which apply to everything");
+    let base_name = baseline_route.name(&case.expr);
+
+    // Too big to compare (see `Outcome::truncated`).  Rare -- it takes a
+    // composition of compositions -- and the laws evaluate other expressions,
+    // so they still run.
+    if baseline.truncated() {
+        return check_laws(case);
+    }
+
+    // The model is computed up front so every divergence can say which side it
+    // backs.  Worth the one extra evaluation: the baseline is `PathMap::join`
+    // and friends, which have defects of their own, so "route X disagrees with
+    // the baseline" on its own points at the wrong file about as often as the
+    // right one.  The model has no trie and no node layout, so when it sides
+    // with the route, the baseline is where to look.
+    let model = routes::eval(Route::Model, &case.expr, &case.operands)
+        .expect("the model route applies to every expression");
+
+    for route in Route::all() {
+        if route == baseline_route {
+            continue;
+        }
+        let Some(got) = routes::eval(route, &case.expr, &case.operands) else { continue };
+        let name = route.name(&case.expr);
+
+        if got.values != baseline.values {
+            out.push(Divergence {
+                class: Class::Values,
+                signature: signature::<V>("values", &route_key::<V>(route, &case.expr)),
+                detail: format!(
+                    "{} vs {name} evaluating {}: {}\n  {base_name}: {}\n  {name}: {}\n  {}",
+                    base_name,
+                    case.expr,
+                    shape::first_values_diff(&baseline.values, &got.values).unwrap_or_default(),
+                    shape::show_values(&baseline.values),
+                    shape::show_values(&got.values),
+                    model_sides_with(&model.values, &baseline.values, &got.values, &base_name, &name),
+                ),
+            });
+            // One class per route is enough; a value divergence will usually
+            // show up as a shape divergence too, and reporting both would
+            // double every finding.
+            continue;
+        }
+
+        if let (Some(bs), Some(gs)) = (&baseline.shape, &got.shape) {
+            if bs != gs {
+                out.push(Divergence {
+                    class: Class::Shape,
+                    signature: signature::<V>("shape", &route_key::<V>(route, &case.expr)),
+                    detail: format!(
+                        "{} vs {name} evaluating {}: {}\n  {base_name}: {}\n  {name}: {}",
+                        base_name,
+                        case.expr,
+                        shape::first_shape_diff(bs, gs).unwrap_or_default(),
+                        show_shape(bs),
+                        show_shape(gs),
+                    ),
+                });
+            }
+        }
+    }
+
+    out.extend(check_laws(case));
+    out
+}
+
+/// Evaluate each law's two sides and report the ones that disagree.
+///
+/// Laws run through the baseline route only.  A law that fails under one route
+/// and holds under another is already a route disagreement, which the loop
+/// above reports; running every law through every route would multiply the cost
+/// of a case by the number of laws for no new coverage.
+///
+/// A law's spaces are the case's operands in order, and its paths and bytes
+/// are [`Case::law_paths`] and [`Case::law_bytes`].  A law whose hypotheses
+/// are false for those is skipped for this case: the theorem says nothing.
+///
+/// Each law is then checked in up to three more forms, if the case asks
+/// (see `laws.rs`): with its spaces bound to [`Case::law_spaces`]
+/// (`+subst`), and the plain or substitution instance with both sides put in
+/// [`Case::law_ctx`] (`+ctx`, `+subst+ctx`) once its sides agree.
+pub fn check_laws<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
+    let plain: Vec<Expr> = (0..OPERANDS).map(Expr::Var).collect();
+    let bind = Binding { spaces: &plain, paths: &case.law_paths, bytes: &case.law_bytes };
+    let subst = Binding { spaces: &case.law_spaces, ..bind };
+    // `None` for a trie too big to compare (see `Outcome::truncated`): an
+    // instance that needs one is skipped, as if its hypotheses were false.
+    let eval = |e: &Expr| {
+        let o = routes::eval(Route::Pointwise(0), e, &case.operands)
+            .expect("route 0 applies to every expression");
+        (!o.truncated()).then_some(o)
+    };
+    let holds = |inst: &Instance| {
+        inst.pre.iter().all(|h| match h {
+            Hyp::Holds(b) => *b,
+            Hyp::Mem(p, e, want) => eval(e).is_some_and(|o| o.values.contains_key(p) == *want),
+            Hyp::Eq(l, r) => match (eval(l), eval(r)) {
+                (Some(l), Some(r)) => l.values == r.values,
+                _ => false,
+            },
+        })
+    };
+    // Both sides of an instance, or `None` when the law says nothing here:
+    // its hypotheses are false, or a side is too big to compare.
+    let sides = |inst: &Instance| {
+        if !holds(inst) {
+            return None;
+        }
+        Some((eval(&inst.lhs)?, eval(&inst.rhs)?))
+    };
+    let report = |name: String, lhs: &Expr, rhs: &Expr, l: &Values<V>, r: &Values<V>, note: String| {
+        Divergence {
+            class: Class::Law,
+            signature: signature::<V>("law", &name),
+            detail: format!(
+                "{name}: {}\n  lhs {lhs}: {}\n  rhs {rhs}: {}{note}",
+                shape::first_values_diff(l, r).unwrap_or_default(),
+                shape::show_values(l),
+                shape::show_values(r),
+            ),
+        }
+    };
+
+    // `C[lhs]` against `C[rhs]`, given the two sides already agreed on values.
+    // Skipped when both are empty and built the same: the context then sees
+    // two copies of nothing, and that is about half of all instances.
+    let congruence = |name: String, inst: &Instance, l: &routes::Outcome<V>, r: &routes::Outcome<V>| {
+        if case.law_ctx.is_hole() || (l.values.is_empty() && l.shape == r.shape) {
+            return None;
+        }
+        let (cl, cr) = (case.law_ctx.plug(inst.lhs.clone()), case.law_ctx.plug(inst.rhs.clone()));
+        let (Some(ol), Some(or)) = (eval(&cl), eval(&cr)) else { return None };
+        let (vl, vr) = (ol.values, or.values);
+        if vl == vr {
+            return None;
+        }
+        // Both sides held the same set before the context saw them, so
+        // whatever differs between them is not a set: say what it was, when
+        // the route reports structure.
+        let inner = match (&l.shape, &r.shape) {
+            (Some(ls), Some(rs)) if ls != rs => format!(
+                "differ only in structure: {}",
+                shape::first_shape_diff(ls, rs).unwrap_or_default()
+            ),
+            (Some(_), Some(_)) => "have the same paths, dangling ones included".to_string(),
+            _ => "agree on values".to_string(),
+        };
+        let note = format!("\n  context {}; inside it, {} and {} {inner}", case.law_ctx, inst.lhs, inst.rhs);
+        Some(report(name, &cl, &cr, &vl, &vr, note))
+    };
+
+    let mut out = Vec::new();
+    for law in laws::laws::<V>() {
+        let inst = laws::instantiate(law, &bind);
+        if let Some((l, r)) = sides(&inst) {
+            if l.values != r.values {
+                out.push(report(law.name.to_string(), &inst.lhs, &inst.rhs, &l.values, &r.values, String::new()));
+                continue;
+            }
+            out.extend(congruence(format!("{}+ctx", law.name), &inst, &l, &r));
+        }
+        if laws::substituted(law, &case.law_spaces) {
+            let inst = laws::instantiate(law, &subst);
+            if let Some((l, r)) = sides(&inst) {
+                if l.values != r.values {
+                    let name = format!("{}+subst", law.name);
+                    out.push(report(name, &inst.lhs, &inst.rhs, &l.values, &r.values, String::new()));
+                    continue;
+                }
+                out.extend(congruence(format!("{}+subst+ctx", law.name), &inst, &l, &r));
+            }
+        }
+    }
+    out
+}
+
+/// Which side of a value divergence the reference model backs, as one line for
+/// the report.
+///
+/// Neither side being backed is the interesting case: it means the model
+/// disagrees with both, so the defect is unlikely to be in either route's
+/// traversal and is more likely in a shared primitive -- or in the model, which
+/// is worth suspecting too.
+fn model_sides_with<V: FuzzValue>(
+    model: &Values<V>,
+    baseline: &Values<V>,
+    got: &Values<V>,
+    base_name: &str,
+    name: &str,
+) -> String {
+    match (model == baseline, model == got) {
+        (true, true) => "model: agrees with both (unreachable)".to_string(),
+        (true, false) => format!("model: sides with {base_name}, so {name} is the odd one out"),
+        (false, true) => format!("model: sides with {name}, so {base_name} is the odd one out"),
+        (false, false) => format!(
+            "model: agrees with neither -- {}",
+            shape::show_values(model)
+        ),
+    }
+}
+
+/// Signatures are prefixed with the value type, so the two instantiations never
+/// collide in one report and the difference between them is readable directly.
+pub fn signature<V: FuzzValue>(class: &str, rest: &str) -> String {
+    format!("{}:{class}:{rest}", V::NAME)
+}
+
+/// The route part of a signature.  `+zippy` when the expression uses one of
+/// Zippy's operators, so a defect in those cannot hide under a signature that
+/// `KNOWN` already attributes to a defect in the crate's own algebra.
+fn route_key<V: FuzzValue>(r: Route, e: &Expr) -> String {
+    let base = match r {
+        Route::Pointwise(k) => format!("pw{k}"),
+        _ => r.name(&Expr::Var(0)),
+    };
+    if e.has_zippy() { format!("{base}+zippy") } else { base }
+}
+
+// ---------------------------------------------------------------- known findings
+
+/// A finding that already reproduces on `master` and has a reproducer of its
+/// own, so a run that only hits these is not a regression.
+pub struct Known {
+    pub signature: &'static str,
+    /// Which defect it traces to.  Several signatures share one entry: a single
+    /// wrong value inside `join` surfaces on every route that reaches a join
+    /// and in every law that mentions one, so the table maps many signatures
+    /// onto few causes.
+    pub cause: &'static str,
+}
+
+/// Findings confirmed on `master`, with the defect each traces to.
+/// `bin/alg_bug_repros.rs` reproduces every cause in a dozen lines, without the
+/// fuzzer; run it to see which still stand.
+///
+/// This table decides the **exit status** and nothing else.  Counts are always
+/// printed, known and unknown alike, so a known defect that starts firing ten
+/// times more often is still visible even though it does not turn the run red.
+/// `--strict` ignores the table entirely.
+///
+/// # The causes
+///
+/// 1. **Value bias by node layout** (`bias`).  `pjoin` on `u64` is
+///    `left_biased_pjoin` and `pmeet` is `Identity(SELF_IDENT)`, so where both
+///    operands carry a value the *left* one must win.  `PathMap::join` and
+///    `PathMap::meet` take the right one when the two operands' nodes are laid
+///    out differently -- in the reproducer, because one side has a chain of
+///    dangling descendants below the shared path.  Every zipper route gets this
+///    right, so it shows up as *laws* failing and as the `model` route
+///    disagreeing, not as one route out of step with the others: the defect is
+///    in the baseline the others are compared against.
+///
+/// 2. **`join` loses a value across shared structure** (`loss`).  With `b` a
+///    clone of `a` plus one extra value, `a | b` drops that value and `b | a`
+///    keeps it.  A join is a least upper bound, so no ordering may lose a path;
+///    this is the one finding that needs no argument about value bias.  It
+///    needs the operands to *share nodes* -- rebuilding `b`'s entries into a
+///    fresh map makes it go away -- which is why the generator clones and
+///    merkleizes operands instead of only writing them fresh.
+///
+/// 3. **Root values lost by the write-zipper forms** (`root`).  `join_into`
+///    into an empty destination drops the source's root value, `meet_2`
+///    drops root values outright, and `meet_into` keeps the destination's
+///    instead of meeting it with the source's (repro 8, visible only with
+///    `bits`).  These are routes disagreeing with the
+///    baseline in the ordinary way.
+///
+/// 4. **Dangling paths** (`dangling`).  The lockstep traversals in
+///    `experimental::zipper_algebra` discard dangling structure; `PathMap`'s
+///    whole-map operations and the write-zipper forms preserve it.  Unsettled rather than
+///    wrong -- see `../SPEC_WARTS.md` -- hence its own class, `shape`, which
+///    does not fail a run unless `--shape` says so.
+///
+/// 5. **`merkleize` panics on dangling-only structure** (`merkleize`).  Not an
+///    algebraic defect: it fires while the operands are still being written,
+///    before any operation runs, which is what the `build` in its signature
+///    means.
+///
+/// 6. **`take_map` of a value-only focus** (`take_map`).  The map it returns
+///    holds the value at its root, and the first write below that root panics:
+///    "Attempted to make_unique on an empty sentinel node".  Fixed on
+///    `fix/fvc-leftovers` (f1bdca9), not on master.
+const BIAS: &str = "value bias by node layout, u64-only (repro 3)";
+const LOSS: &str = "join loses a value across shared structure (repro 4)";
+const ROOT: &str = "write-zipper forms lose root values (repros 1, 2, 8)";
+const DANGLING: &str = "zipper traversals drop dangling paths, map ops keep them (repro 7)";
+const MERKLEIZE: &str = "merkleize panics on dangling-only structure (repro 5)";
+const TAKE_MAP: &str = "take_map of a value-only focus returns a map that panics on write (repro 9)";
+/// Re-nesting a join moves which operand is on the left *and* which pair of
+/// tries meets a shared node first, so both cause 1 and cause 2 reach these.
+/// Under the lawful type only cause 2 survives, which is why the counts collapse.
+const BIAS_OR_LOSS: &str = "value bias or lost value (repros 3, 4)";
+pub const KNOWN: &[Known] = &[
+    // ---------------------------------------------------------------- u64
+    // Root values lost by the write-zipper forms.  Value-type-independent.
+    Known { signature: "u64:values:pw1", cause: ROOT },
+    Known { signature: "u64:values:pw2", cause: ROOT },
+    Known { signature: "u64:values:pw3", cause: ROOT },
+    // Everything below here on the u64 side is the bias, which the lawful type
+    // mostly cannot see: under a commutative join, picking the wrong operand
+    // only shows where one operand already contains the other.
+    Known { signature: "u64:values:pw4", cause: BIAS },
+    Known { signature: "u64:values:pw5", cause: BIAS },
+    Known { signature: "u64:values:ternary", cause: BIAS },
+    Known { signature: "u64:values:nary", cause: BIAS },
+    Known { signature: "u64:values:nary_poly", cause: BIAS },
+    Known { signature: "u64:values:dnf", cause: BIAS },
+    Known { signature: "u64:values:model", cause: BIAS },
+    Known { signature: "u64:shape:pw1", cause: DANGLING },
+    Known { signature: "u64:shape:pw2", cause: DANGLING },
+    Known { signature: "u64:shape:pw3", cause: DANGLING },
+    Known { signature: "u64:shape:pw4", cause: DANGLING },
+    Known { signature: "u64:shape:pw5", cause: DANGLING },
+    Known { signature: "u64:shape:ternary", cause: DANGLING },
+    Known { signature: "u64:shape:nary", cause: DANGLING },
+    Known { signature: "u64:shape:nary_poly", cause: DANGLING },
+    Known { signature: "u64:shape:dnf", cause: DANGLING },
+    // The subtract_zipper route's own subtraction agrees with PathMap::subtract
+    // on every path and value; it builds a different node layout, and the
+    // baseline join or meet that consumes it is what then goes wrong.
+    Known { signature: "u64:values:subtract_zipper", cause: BIAS_OR_LOSS },
+    Known { signature: "u64:shape:subtract_zipper", cause: DANGLING },
+    Known { signature: "u64:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
+    Known { signature: "u64:panic:eval:line_list_node.rs:2732", cause: LOSS },
+    Known { signature: "u64:panic:eval:line_list_node.rs:2783", cause: LOSS },
+    Known { signature: "u64:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
+
+    // ---------------------------------------------------------------- bits
+    // The lawful type.  Everything here is a real defect: there is no value
+    // bias to blame, because `a | b` does not depend on operand order.
+    Known { signature: "bits:values:pw1", cause: ROOT },
+    Known { signature: "bits:values:pw2", cause: ROOT },
+    Known { signature: "bits:values:pw3", cause: ROOT },
+    Known { signature: "bits:values:pw5", cause: ROOT },
+    // Rare under the lawful type, and cause 2 every time: the law residues all
+    // shrink to a value present on one side of an identity and absent on the
+    // other, which is a lost value rather than a misplaced one.
+    Known { signature: "bits:values:pw4", cause: LOSS },
+    // Fires about once per three million cases for each lawful type, and the
+    // model sides with the route, so it is the baseline that lost the value.
+    Known { signature: "bits:values:ternary", cause: LOSS },
+    Known { signature: "bits:values:nary", cause: LOSS },
+    Known { signature: "bits:values:nary_poly", cause: LOSS },
+    Known { signature: "bits:values:dnf", cause: LOSS },
+    Known { signature: "bits:values:model", cause: LOSS },
+    Known { signature: "bits:shape:pw1", cause: DANGLING },
+    Known { signature: "bits:shape:pw2", cause: DANGLING },
+    Known { signature: "bits:shape:pw3", cause: DANGLING },
+    Known { signature: "bits:shape:pw4", cause: DANGLING },
+    Known { signature: "bits:shape:pw5", cause: DANGLING },
+    Known { signature: "bits:shape:ternary", cause: DANGLING },
+    Known { signature: "bits:shape:nary", cause: DANGLING },
+    Known { signature: "bits:shape:nary_poly", cause: DANGLING },
+    Known { signature: "bits:shape:dnf", cause: DANGLING },
+    // About once per million: SubtractZipper's result is dangling-only and
+    // equal in shape to the baseline's, and the join after it loses the other
+    // operand's value (the debug assert behind cause 2 fires).
+    Known { signature: "bits:values:subtract_zipper", cause: LOSS },
+    Known { signature: "bits:shape:subtract_zipper", cause: DANGLING },
+    Known { signature: "bits:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
+    Known { signature: "bits:panic:eval:line_list_node.rs:2732", cause: LOSS },
+    Known { signature: "bits:panic:eval:line_list_node.rs:2783", cause: LOSS },
+    Known { signature: "bits:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
+    // ---------------------------------------------------------------- unit
+    // `PathMap<()>`: the set case, and lawful.  Nothing here can be a value
+    // bias, because there is no value to misplace -- so every entry is either a
+    // lost path or the dangling-path question.  It confirms the real defects
+    // independently of `bits`.
+    Known { signature: "unit:values:pw1", cause: ROOT },
+    Known { signature: "unit:values:pw2", cause: ROOT },
+    Known { signature: "unit:values:pw3", cause: ROOT },
+    Known { signature: "unit:values:pw5", cause: ROOT },
+    Known { signature: "unit:values:pw4", cause: LOSS },
+    Known { signature: "unit:values:nary", cause: LOSS },
+    Known { signature: "unit:values:nary_poly", cause: LOSS },
+    Known { signature: "unit:values:dnf", cause: LOSS },
+    Known { signature: "unit:values:model", cause: LOSS },
+    Known { signature: "unit:shape:pw1", cause: DANGLING },
+    Known { signature: "unit:shape:pw2", cause: DANGLING },
+    Known { signature: "unit:shape:pw3", cause: DANGLING },
+    Known { signature: "unit:shape:pw4", cause: DANGLING },
+    Known { signature: "unit:shape:pw5", cause: DANGLING },
+    Known { signature: "unit:shape:ternary", cause: DANGLING },
+    Known { signature: "unit:shape:nary", cause: DANGLING },
+    Known { signature: "unit:shape:nary_poly", cause: DANGLING },
+    Known { signature: "unit:shape:dnf", cause: DANGLING },
+    Known { signature: "unit:values:subtract_zipper", cause: LOSS },
+    Known { signature: "unit:shape:subtract_zipper", cause: DANGLING },
+    Known { signature: "unit:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
+    Known { signature: "unit:panic:eval:line_list_node.rs:2732", cause: LOSS },
+    Known { signature: "unit:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
+    // Fires roughly once per million random cases, and the corpus reproduces it
+    // for all three types.
+    Known { signature: "unit:panic:eval:line_list_node.rs:2783", cause: LOSS },
+    Known { signature: "unit:values:ternary", cause: LOSS },
+
+    // ---------------------------------------------------------------- Zippy
+    // Expressions using Zippy's operators (`+zippy`).  Triaged 2026-10-31 by
+    // shrinking one input per signature, and by a sweep with the crate's own
+    // operators pinned to their baseline strategy so that only the new
+    // operators' strategies varied: every residue is one of the causes above,
+    // or cause 6.  They fire far more often than their plain counterparts
+    // because `unwrap`, `singleton` and `tails_*` put values at the root, which
+    // is exactly where cause 3 lives.
+    Known { signature: "u64:values:pw1+zippy", cause: ROOT },
+    Known { signature: "u64:values:pw2+zippy", cause: ROOT },
+    Known { signature: "u64:values:pw3+zippy", cause: ROOT },
+    // `composition`'s `wrap_join` strategy goes through `PathMap::join`.
+    Known { signature: "u64:values:pw4+zippy", cause: BIAS },
+    Known { signature: "u64:values:pw5+zippy", cause: BIAS },
+    Known { signature: "u64:values:model+zippy", cause: BIAS },
+    Known { signature: "u64:values:subtract_zipper+zippy", cause: BIAS_OR_LOSS },
+    // Includes `meet_into` keeping the destination's focus value instead of
+    // meeting it (repro 8), which only a value type with a real meet can see.
+    Known { signature: "bits:values:pw1+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw2+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw3+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw5+zippy", cause: ROOT },
+    Known { signature: "bits:values:pw4+zippy", cause: LOSS },
+    Known { signature: "bits:values:model+zippy", cause: LOSS },
+    Known { signature: "bits:values:subtract_zipper+zippy", cause: LOSS },
+    Known { signature: "unit:values:pw1+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw2+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw3+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw5+zippy", cause: ROOT },
+    Known { signature: "unit:values:pw4+zippy", cause: LOSS },
+    Known { signature: "unit:values:model+zippy", cause: LOSS },
+    Known { signature: "unit:values:subtract_zipper+zippy", cause: LOSS },
+    // Includes `PrefixZipper` reporting the prefix of an empty source as
+    // existing, so `wrap p {}` materialises a dangling `p`.
+    Known { signature: "u64:shape:pw1+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw2+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw3+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw4+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:pw5+zippy", cause: DANGLING },
+    Known { signature: "u64:shape:subtract_zipper+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw1+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw2+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw3+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw4+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:pw5+zippy", cause: DANGLING },
+    Known { signature: "bits:shape:subtract_zipper+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw1+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw2+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw3+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw4+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:pw5+zippy", cause: DANGLING },
+    Known { signature: "unit:shape:subtract_zipper+zippy", cause: DANGLING },
+    // `unwrap`'s take_map strategy feeding `wrap`'s insert_prefix one.
+    Known { signature: "u64:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
+    Known { signature: "bits:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
+    Known { signature: "unit:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
+    // The laws from `Zippy.lean` that fail, all of them under `PathMap::join`
+    // losing a value: every shrunk case is `x | y` with `y` sharing nodes with
+    // `x` (a clone, or a join result that reuses `x`'s nodes) or carrying
+    // dangling structure, and the union dropping a path one side has.  One of
+    // them, `singleton_union_composition`, needs no clone at all:
+    // `{_, dangling 1, 2} | {_, 0000}` is `{_}` on master.  Both that and
+    // repro 4 are fixed on `fix/fvc-leftovers`.  Every other generated law has
+    // never failed, and is deliberately absent so that one failing is news.
+    Known { signature: "unit:law:union_comm", cause: LOSS },
+    Known { signature: "unit:law:union_assoc", cause: LOSS },
+    Known { signature: "unit:law:union_subtr_distrib", cause: LOSS },
+    Known { signature: "unit:law:unwrap_union", cause: LOSS },
+    Known { signature: "unit:law:head_union", cause: LOSS },
+    Known { signature: "unit:law:tailsUnion_union", cause: LOSS },
+    Known { signature: "unit:law:iterC_union", cause: LOSS },
+    Known { signature: "unit:law:composition_union", cause: LOSS },
+    Known { signature: "unit:law:union_composition", cause: LOSS },
+    Known { signature: "unit:law:singleton_union_composition", cause: LOSS },
+    Known { signature: "unit:law:union_inter_distrib", cause: LOSS },
+    Known { signature: "unit:law:restriction_union", cause: LOSS },
+    // The same laws with their spaces bound to expressions: the same loss,
+    // reached through operands the crate built.  Eight of these were seen in
+    // 2M cases; the rest are listed because they are the same law and cause.
+    // Congruence forms (`+ctx`) have never failed and are absent on purpose.
+    Known { signature: "unit:law:union_comm+subst", cause: LOSS },
+    Known { signature: "unit:law:union_assoc+subst", cause: LOSS },
+    Known { signature: "unit:law:union_subtr_distrib+subst", cause: LOSS },
+    Known { signature: "unit:law:unwrap_union+subst", cause: LOSS },
+    Known { signature: "unit:law:head_union+subst", cause: LOSS },
+    Known { signature: "unit:law:tailsUnion_union+subst", cause: LOSS },
+    Known { signature: "unit:law:iterC_union+subst", cause: LOSS },
+    Known { signature: "unit:law:composition_union+subst", cause: LOSS },
+    Known { signature: "unit:law:union_composition+subst", cause: LOSS },
+    Known { signature: "unit:law:singleton_union_composition+subst", cause: LOSS },
+    Known { signature: "unit:law:union_inter_distrib+subst", cause: LOSS },
+    Known { signature: "unit:law:restriction_union+subst", cause: LOSS },
+];
+
+pub fn known(signature: &str) -> Option<&'static Known> {
+    KNOWN.iter().find(|k| k.signature == signature)
+}
+
+// ------------------------------------------------------------------ running
+
+/// Which half of a case was running when it panicked.
+///
+/// Worth separating, because the two mean different things.  `Build` is a panic
+/// while *writing the operand tries* -- plain `set_val`, `create_path`,
+/// `remove_branches`, `merkleize` on a write zipper, before any algebra has
+/// run.  That is a crash in the write path and belongs to the crash fuzzer;
+/// this fuzzer just happens to reach it.  `Eval` is a panic inside an algebraic
+/// operation, which is this fuzzer's own business.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    Build,
+    Eval,
+}
+
+impl Phase {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Phase::Build => "build",
+            Phase::Eval => "eval",
+        }
+    }
+}
+
+/// What one input produced.  A panic is kept distinct from a divergence: it
+/// means a route never got as far as producing an answer, so there is nothing
+/// to compare and the finding is the crash itself.
+pub enum Outcome {
+    Clean,
+    Diverged(Vec<Divergence>),
+    Panicked(Phase, String, String),
+}
+
+std::thread_local! {
+    /// Where the last panic came from.  The payload of an `unwrap` on `None`
+    /// carries no location, and the location is the whole value of a crash
+    /// signature -- without it every distinct panic site collapses onto one
+    /// line called "panic".  A hook is the only way to see it.
+    static PANIC_SITE: core::cell::RefCell<String> =
+        const { core::cell::RefCell::new(String::new()) };
+    /// The input [`run_all`] is checking, so a panic that aborts the process
+    /// can still name its reproducer.
+    static CURRENT_INPUT: core::cell::RefCell<Vec<u8>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Replace the panic hook with one that records the panic site and prints
+/// nothing.
+///
+/// Both halves matter for a long run: the default hook would print a backtrace
+/// notice per panicking case and drown the output, and `catch_unwind` alone
+/// cannot see where the panic came from.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let site = info
+            .location()
+            .map(|l| {
+                // Just the file name and line: the absolute path would make
+                // signatures depend on where the checkout lives.
+                let f = l.file();
+                let f = f.rsplit('/').next().unwrap_or(f);
+                format!("{f}:{}", l.line())
+            })
+            .unwrap_or_else(|| "?".to_string());
+        // A panic that cannot unwind aborts the whole process, so it can never
+        // become a finding; say what and where before the abort, or the run just
+        // dies with "thread caused non-unwinding panic".  Stable Rust cannot ask
+        // `info` whether it unwinds, so match std's messages for the three cases:
+        // a debug-mode unsafe-precondition check, a panic in a destructor during
+        // unwinding, and a panic in a function that cannot unwind.
+        let msg = info.payload_as_str().unwrap_or("");
+        if msg.starts_with("unsafe precondition")
+            || msg.starts_with("panic in a destructor")
+            || msg.starts_with("panic in a function that cannot unwind")
+        {
+            let input: String = CURRENT_INPUT
+                .with(|c| c.try_borrow().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()))
+                .unwrap_or_default();
+            eprintln!(
+                "non-unwinding panic at {site}: {msg}\ninput (hex, replay with xxd -r -p): {input}\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        PANIC_SITE.with(|s| *s.borrow_mut() = site);
+    }));
+}
+
+fn panic_msg(e: Box<dyn core::any::Any + Send>) -> (String, String) {
+    let msg = e
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "<non-string panic>".to_string());
+    let site = PANIC_SITE.with(|s| s.borrow().clone());
+    (site, msg)
+}
+
+/// Decode an input, run every route and every law over it, and say what
+/// disagreed.
+///
+/// Two `catch_unwind`s rather than one, so a crash can say which phase it was
+/// in.  The case has to outlive the first, hence the separation.
+pub fn run<V: FuzzValue>(bytes: &[u8]) -> Outcome {
+    let case = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode::<V>(bytes))) {
+        Err(e) => {
+            let (site, msg) = panic_msg(e);
+            return Outcome::Panicked(Phase::Build, site, msg);
+        }
+        Ok(c) => c,
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(&case))) {
+        Err(e) => {
+            let (site, msg) = panic_msg(e);
+            Outcome::Panicked(Phase::Eval, site, msg)
+        }
+        Ok(divs) if divs.is_empty() => Outcome::Clean,
+        Ok(divs) => Outcome::Diverged(divs),
+    }
+}
+
+/// Signatures an input produces: the grouping keys, without the detail.  Also
+/// the invariant the shrinker preserves.
+/// Every value type the fuzzer runs, by name.
+///
+/// This list and [`run_all`] are the only two places that know which types
+/// exist; the driver stays generic over them and reads the type back off a
+/// signature's first field.
+pub const VALUE_TYPES: &[&str] = &[
+    <u64 as FuzzValue>::NAME,
+    <value::Bits as FuzzValue>::NAME,
+    <() as FuzzValue>::NAME,
+];
+
+/// Run one input under every value type.
+///
+/// Both, every time, and that is the point: a finding under `u64` and not under
+/// `bits` is an artefact of `u64`'s degenerate lattice instance, and one under
+/// both -- or under `bits` alone -- is a defect in the crate.  Checking only the
+/// lawful type would be cheaper and would lose the comparison.
+pub fn run_all(bytes: &[u8], f: &mut impl FnMut(&'static str, Outcome)) {
+    CURRENT_INPUT.with(|c| {
+        let mut c = c.borrow_mut();
+        c.clear();
+        c.extend_from_slice(bytes);
+    });
+    f(<u64 as FuzzValue>::NAME, run::<u64>(bytes));
+    f(<value::Bits as FuzzValue>::NAME, run::<value::Bits>(bytes));
+    f(<() as FuzzValue>::NAME, run::<()>(bytes));
+}
+
+/// Signatures of one outcome, which for a panic has to be built here because
+/// the phase and site are not a `Divergence`.
+pub fn outcome_signatures(type_name: &str, outcome: &Outcome) -> Vec<String> {
+    match outcome {
+        Outcome::Clean => Vec::new(),
+        Outcome::Diverged(d) => d.iter().map(|d| d.signature.clone()).collect(),
+        Outcome::Panicked(p, site, _) => vec![panic_signature(type_name, *p, site)],
+    }
+}
+
+pub fn panic_signature(type_name: &str, phase: Phase, site: &str) -> String {
+    format!("{type_name}:panic:{}:{site}", phase.tag())
+}
+
+/// Every signature an input produces, across all value types.  Also the
+/// invariant the shrinker preserves.
+pub fn signatures(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    run_all(bytes, &mut |name, outcome| {
+        out.extend(outcome_signatures(name, &outcome));
+    });
+    out
+}
+
+/// The value type named in a signature's first field.
+pub fn value_type_of(signature: &str) -> &str {
+    signature.split(':').next().unwrap_or("")
+}
+
+/// Render a case under the value type named by `type_name`.
+pub fn describe_as(type_name: &str, bytes: &[u8]) -> String {
+    if type_name == <value::Bits as FuzzValue>::NAME {
+        describe(&decode::<value::Bits>(bytes))
+    } else if type_name == <() as FuzzValue>::NAME {
+        describe(&decode::<()>(bytes))
+    } else {
+        describe(&decode::<u64>(bytes))
+    }
+}
+
+/// Reproducible input generation, so a seed names a run.
+///
+/// xorshift64*, rather than `rand`: this crate depends on nothing but `pathmap`
+/// and is worth keeping that way.
+pub struct Rng(pub u64);
+
+impl Rng {
+    /// Derive a stream for job `job` of a run seeded with `seed`.  The odd
+    /// multiplier keeps jobs from sharing a stream.
+    pub fn for_job(seed: u64, job: usize) -> Rng {
+        Rng((seed
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(job as u64 * 0x1234_5679))
+            | 1)
+    }
+
+    pub fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// An input long enough that the decoder rarely runs out mid-case -- which
+    /// would saturate the rest to zeros and waste the draw -- and short enough
+    /// to shrink quickly.
+    /// A random input: the current header, then the bytes [`decode`] reads.
+    /// The bytes after the header are the stream this produced before the
+    /// header existed, so a seed still names the same cases.
+    pub fn input(&mut self) -> Vec<u8> {
+        let n = 48 + (self.next() % 96) as usize;
+        let mut v = input_header();
+        v.extend((0..n).map(|_| (self.next() >> 24) as u8));
+        v
+    }
+}
+
+/// Human-readable rendering of a case, for a failure report and for replay.
+pub fn describe<V: FuzzValue>(case: &Case<V>) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("values:   {}\n", V::NAME));
+    s.push_str(&format!("expr:     {}\n", case.expr));
+    s.push_str(&format!("alphabet: {}\n", case.alphabet));
+    for (i, (m, b)) in case.operands.iter().zip(&case.builds).enumerate() {
+        let sh: Shape<V> = shape_of_map(m);
+        s.push_str(&format!(
+            "operand {}: {:?}\n  {}\n",
+            (b'a' + i as u8) as char,
+            b,
+            show_shape(&sh)
+        ));
+    }
+    if V::IS_SET {
+        let shown = |p: &Vec<u8>| expr::show_path(p);
+        s.push_str(&format!(
+            "law paths: {}  bytes: {:?}\n",
+            case.law_paths.iter().map(shown).collect::<Vec<_>>().join(" "),
+            case.law_bytes
+        ));
+        let sub: Vec<String> = case
+            .law_spaces
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| !matches!(e, Expr::Var(j) if j == i))
+            .map(|(i, e)| format!("{} := {e}", (b'a' + i as u8) as char))
+            .collect();
+        if !sub.is_empty() {
+            s.push_str(&format!("law subst: {}\n", sub.join(", ")));
+        }
+        if !case.law_ctx.is_hole() {
+            s.push_str(&format!("law ctx:   {}\n", case.law_ctx));
+        }
+    }
+    s
+}
+
+/// Values of each operand, for a report that only needs the settled part.
+pub fn operand_values<V: FuzzValue>(case: &Case<V>) -> Vec<Values<V>> {
+    case.operands
+        .iter()
+        .map(|m| shape::values_of_shape(&shape_of_map(m)))
+        .collect()
+}

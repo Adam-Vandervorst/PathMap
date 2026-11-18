@@ -52,13 +52,19 @@ pub struct Dec<'a> {
 
 impl<'a> Dec<'a> {
     pub fn new(bytes: &'a [u8]) -> Option<Self> {
-        let (pos, op_count) = if bytes.starts_with(WIRE_MAGIC) {
-            let count_bytes = bytes.get(WIRE_MAGIC.len()..WIRE_MAGIC.len() + 2)?;
+        Self::with_format(bytes, WIRE_MAGIC, LEGACY_NOPS)
+    }
+    /// Decode an input in this wire format with another marker and op table:
+    /// `magic`, then a little-endian u16 selector count (1..=256), or no header
+    /// at all, which selects among `legacy_ops`.  The pruned fuzzer uses it.
+    pub fn with_format(bytes: &'a [u8], magic: &[u8], legacy_ops: usize) -> Option<Self> {
+        let (pos, op_count) = if bytes.starts_with(magic) {
+            let count_bytes = bytes.get(magic.len()..magic.len() + 2)?;
             let count = u16::from_le_bytes([count_bytes[0], count_bytes[1]]) as usize;
             if !(1..=256).contains(&count) { return None; }
-            (WIRE_MAGIC.len() + 2, count)
+            (magic.len() + 2, count)
         } else {
-            (0, LEGACY_NOPS)
+            (0, legacy_ops)
         };
         Some(Self { bytes, pos, op_count })
     }

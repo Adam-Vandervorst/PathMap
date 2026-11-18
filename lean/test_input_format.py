@@ -52,5 +52,33 @@ class InputFormatTests(unittest.TestCase):
             self.assertEqual(sig, "DIFF remove_subtrie")
 
 
+class PrunedInputFormatTests(unittest.TestCase):
+    """The pruned harness's header: same layout, its own marker and table."""
+
+    def test_pruned_count_matches_rust(self):
+        from input_format import PRUNED_LEGACY_NOPS, PRUNED_NOPS
+        pruned = pathlib.Path(__file__).resolve().parents[1] / "differential/src/pruned.rs"
+        text = pruned.read_text()
+        self.assertEqual(PRUNED_NOPS, int(re.search(r"pub const NOPS: usize = (\d+);", text)[1]))
+        self.assertEqual(PRUNED_LEGACY_NOPS,
+                         int(re.search(r"pub const LEGACY_NOPS: usize = (\d+);", text)[1]))
+
+    def test_pruned_driver_generates_and_saves_pruned_headers(self):
+        import pruned_differential  # noqa: F401 -- installs the pruned format
+        import differential as D
+        from input_format import PRUNED_MAGIC, pruned_input_header
+        try:
+            source = D.RandomInputs(7, 5, 300)
+            for i in range(len(source)):
+                self.assertTrue(source.get(i).startswith(pruned_input_header()))
+            self.assertEqual(D.versioned_input(b"\x01\x02"), pruned_input_header() + b"\x01\x02")
+            blob = PRUNED_MAGIC + (7).to_bytes(2, "little") + b"\x09"
+            self.assertEqual(D.versioned_input(blob), blob)
+        finally:
+            # Other tests in this process use the main harness's format.
+            import importlib
+            importlib.reload(D)
+
+
 if __name__ == "__main__":
     unittest.main()

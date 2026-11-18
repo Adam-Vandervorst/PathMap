@@ -156,6 +156,54 @@ focus, such that ..." — instead of as a node walk.
 | `PathMapModel/Fuzz.lean` | the wire format, the operation table, and the trace producer (including `--act` mode) |
 | `Main.lean` | the `pathmap-oracle` binary |
 
+### Zippy's set algebra (`PrunedModel/`)
+
+A second, dangling-path-free model, carried here for one purpose: proving
+[Zippy's `formal.egg`](https://github.com/Adam-Vandervorst/Zippy/blob/b/formal.egg)
+— the reference semantics of Zippy's space algebra — about `pathmap`'s write
+zipper, and exporting those laws to the algebraic fuzzer.  A location exists iff
+some key has it as a prefix, so a dangling path is unrepresentable.  The model
+follows `focus_value_consistency` (issue #104: a subtrie includes its root
+value), which master's crate does not implement yet; the laws are about the
+model's zipper programs, and the algebraic fuzzer builds each operator from
+crate operations that agree on master.
+
+`pruned_differential.py` drives this model (`pruned-oracle`) against
+`differential/src/pruned.rs` (`pruned_trace`), with the same resident-child
+driver as `differential.py`:
+
+    cargo build --release -p differential --bin pruned_trace
+    (cd lean && lake build)
+    ./lean/pruned_differential.py --random 2000 -j8
+    ./lean/pruned_differential.py lean/pruned-corpus/*
+
+Inputs use the main harness's wire layout with their own marker:
+`"PMPRUN" 0x01 0x00`, a little-endian u16 selector count, then the program
+(`pruned_input_header` in `input_format.py`). An input without the header,
+such as everything in `pruned-corpus/`, decodes with 54 selectors, as it did
+before the header existed. The driver writes generated inputs and saved failures
+with this header, never with the main harness's.
+
+What it found is in `PRUNED_FINDINGS.md`.  Until `focus_value_consistency`
+lands, it reports the #104 gaps on master as new divergences: `remove_prefix`
+(the model returns a count), and the focus value of `insert_prefix`,
+`join_into`, `meet_2`, `join_k_path_into`, `restrict` and `meet_k_path_into`.
+In 20000 random inputs on `de125bb`, 13721 diverged, all of them in those
+seven operations except one in `subtract_into`.
+
+| file | contents |
+| --- | --- |
+| `PrunedModel/Canon.lean` | canonical association lists: keys strictly sorted, hence distinct |
+| `PrunedModel/Map.lean` | `PrunedMap`: the map operations over the canonical form |
+| `PrunedModel/Zipper.lean`, `Write.lean` | the read and write zipper over a `PrunedMap`, issue-#104 semantics, no prune flag |
+| `PrunedModel/Spec.lean` | the model's one claim, `no_dangling`, and its consequences |
+| `PrunedModel/Lattice.lean`, `Nested.lean` | the lattice laws as equations (`unitOps` makes a map a set of paths); a trie as another trie's value |
+| `PrunedModel/Pointwise.lean` | `valAt` of every map operation |
+| `PrunedModel/Refine.lean` | each write op as `z.withTrie (z.trie.replaceAt z.focus M)` |
+| `PrunedModel/Zippy.lean` | each egg operator as a zipper program over `Space = PrunedMap Unit`, every `formal.egg` rule proved, `Fix` as a least post-fixpoint, the raw ops = egg ops under #104 (§10), the tour as `#guard`s |
+| `PrunedModel/Fuzz.lean`, `PrunedMain.lean` | the pruned fuzzer's wire format, op table and trace producer; the `pruned-oracle` binary |
+| `ZippyLaws.lean` | exports Zippy.lean's equational theorems as `differential/src/algebraic/zippy_laws.rs`: `lake build PrunedModel && lake env lean --run ZippyLaws.lean > ../differential/src/algebraic/zippy_laws.rs` |
+
 ## What is proved versus what is checked
 
 Honest accounting, because it matters for how much the model is worth:
