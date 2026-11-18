@@ -201,7 +201,7 @@ jobs:
           if grep -n 'declaration uses .sorry.' lake.log; then
             echo "::error::a declaration uses sorry"; exit 1
           fi
-          if grep -rn "\bsorry\b\|^axiom " lean/PathMapModel lean/Main.lean; then
+          if grep -rn "\bsorry\b\|^axiom " lean/PathMapModel lean/PrunedModel lean/Main.lean lean/PrunedMain.lean; then
             echo "::error::sorry or axiom in the model sources"; exit 1
           fi
       - name: summary
@@ -212,9 +212,9 @@ jobs:
             echo
             echo "| file | theorems | guards |"
             echo "|---|---:|---:|"
-            for f in lean/PathMapModel/*.lean; do
+            for f in lean/PathMapModel/*.lean lean/PrunedModel/*.lean lean/PrunedModel/Convex/*.lean; do
               t=$(grep -c '^theorem\|^lemma' "$f" || true); g=$(grep -c '#guard' "$f" || true)
-              [ "$t$g" = "00" ] || echo "| $(basename "$f") | $t | $g |"
+              [ "$t$g" = "00" ] || echo "| ${f#lean/} | $t | $g |"
             done
             echo
             echo "$(grep -c 'declaration uses' lake.log || true) declaration(s) use sorry; $(grep -c '^warning' lake.log || true) warning(s) from lake build."

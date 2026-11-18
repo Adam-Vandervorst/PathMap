@@ -946,7 +946,7 @@ fn seeded_full_path_set_law_catalogue() {
     power_laws(&mut t, &map_from_set(&balanced));
     // Ensure every catalogue name is executed, with guarded laws counted only
     // when the guard is true. New Lean laws automatically require Rust coverage.
-    let catalog = include_str!("../../lean/PathMapModel/PathSetLaws.lean");
+    let catalog = include_str!("../../lean/PrunedModel/Convex/PathSetLaws.lean");
     let expected: BTreeSet<_> = catalog
         .lines()
         .filter_map(|line| {

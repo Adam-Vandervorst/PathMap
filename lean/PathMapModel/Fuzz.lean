@@ -1,5 +1,5 @@
 import PathMapModel.Spec
-import PathMapModel.ConvexMap
+import PrunedModel.Convex.Mixed
 
 /-!
 # Differential-fuzzing front end
