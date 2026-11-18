@@ -93,7 +93,10 @@ fn spaces() -> Vec<Space> {
         vec![1, 0],
         vec![1, 1],
     ];
-    (0..128)
+    // Keep roots, a chain, and a fork in the exhaustive Miri matrix.
+    #[cfg(miri)]
+    let ps = &ps[..4];
+    (0..1usize << ps.len())
         .map(|mask| {
             ps.iter()
                 .enumerate()
@@ -137,7 +140,11 @@ fn dangling_paths_are_not_tips() {
 }
 #[test]
 fn compressed_edges_dense_nodes_and_shared_subtrees() {
-    for width in [1usize, 2, 16, 80, 256] {
+    #[cfg(not(miri))]
+    let widths = [1usize, 2, 16, 80, 256];
+    #[cfg(miri)]
+    let widths = [2usize, 17];
+    for width in widths {
         let mut a = Space::new();
         let mut b = Space::new();
         a.insert(vec![]);
@@ -235,10 +242,11 @@ fn focused_zipper_restores_cursors_and_preserves_outside() {
 }
 #[test]
 fn deep_chain_prunes_to_stability() {
-    let a: Space = (0..1024).map(|n| vec![0; n]).collect();
+    let depth = if cfg!(miri) { 32 } else { 1024 };
+    let a: Space = (0..depth).map(|n| vec![0; n]).collect();
     let mut b = a.clone();
-    b.remove(&vec![0; 1023]);
-    b.insert([vec![0; 1022], vec![1]].concat());
+    b.remove(&vec![0; depth - 1]);
+    b.insert([vec![0; depth - 2], vec![1]].concat());
     let ma = map(&a);
     let mb = map(&b);
     assert_eq!(convex_meet(&ma, &mb).val_count(), 0);
@@ -256,10 +264,13 @@ fn deep_chain_prunes_to_stability() {
 fn randomized_shapes_and_partial_sharing() {
     use rand::{Rng, SeedableRng, rngs::StdRng};
     let mut rng = StdRng::seed_from_u64(0xC0A7E);
-    for _ in 0..300 {
+    let rounds = if cfg!(miri) { 4 } else { 300 };
+    let max_paths = if cfg!(miri) { 10 } else { 80 };
+    let max_len = if cfg!(miri) { 12 } else { 90 };
+    for _ in 0..rounds {
         let mut pool = Space::new();
-        for _ in 0..rng.random_range(1..80) {
-            let len = rng.random_range(0..90);
+        for _ in 0..rng.random_range(1..max_paths) {
+            let len = rng.random_range(0..max_len);
             let p: Vec<u8> = (0..len).map(|_| rng.random_range(0..6)).collect();
             pool.insert(p[..rng.random_range(0..=len)].to_vec());
             pool.insert(p);
@@ -308,7 +319,8 @@ fn subtree_reuse_does_not_clone_payloads() {
     let clones = Arc::new(AtomicUsize::new(0));
     let mut a = PathMap::new();
     let mut mask = PathMap::<()>::new();
-    for n in 0..2000u32 {
+    let count = if cfg!(miri) { 32u32 } else { 2000 };
+    for n in 0..count {
         let p = n.to_be_bytes();
         a.set_val_at(p, Counted(clones.clone()));
         a.set_val_at([p.as_slice(), &[0]].concat(), Counted(clones.clone()));
@@ -316,8 +328,8 @@ fn subtree_reuse_does_not_clone_payloads() {
     }
     let shared = a.clone();
     clones.store(0, Ordering::Relaxed);
-    assert_eq!(convex_meet(&a, &shared).val_count(), 4000);
-    assert_eq!(convex_subtract(&a, &mask).val_count(), 4000);
+    assert_eq!(convex_meet(&a, &shared).val_count(), 2 * count as usize);
+    assert_eq!(convex_subtract(&a, &mask).val_count(), 2 * count as usize);
     assert_eq!(convex_subtract(&a, &shared).val_count(), 0);
     assert_eq!(clones.load(Ordering::Relaxed), 0);
     let mut out = PathMap::new();
@@ -326,7 +338,7 @@ fn subtree_reuse_does_not_clone_payloads() {
         &mut shared.read_zipper(),
         &mut out.write_zipper(),
     );
-    assert_eq!(out.val_count(), 4000);
+    assert_eq!(out.val_count(), 2 * count as usize);
     assert_eq!(clones.load(Ordering::Relaxed), 0);
 }
 
@@ -362,17 +374,18 @@ fn extracted_subtries_and_empty_bare_shared_roots() {
 
 #[test]
 fn zipper_head_cell_nodes_match_dense_and_list_nodes() {
-    let a: Space = (0..=255u8)
+    let last = if cfg!(miri) { 17u8 } else { 255 };
+    let a: Space = (0..=last)
         .flat_map(|b| [vec![0, b], vec![0, b, 0], vec![0, b, 1]])
         .collect();
-    let b: Space = (0..=255u8)
+    let b: Space = (0..=last)
         .flat_map(|b| [vec![0, b], vec![0, b, b % 3]])
         .collect();
     let mut ma = map(&a);
     let mut mb = map(&b);
     for m in [&mut ma, &mut mb] {
         let head = m.zipper_head();
-        for b in 0..=255u8 {
+        for b in 0..=last {
             let path = [0, b, 255];
             let mut z = head.write_zipper_at_exclusive_path(path).unwrap();
             z.create_path();

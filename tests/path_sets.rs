@@ -50,7 +50,10 @@ fn spaces() -> Vec<Space> {
         vec![1, 0],
         vec![1, 1],
     ];
-    (0..128)
+    // Keep roots, a chain, and a fork in the exhaustive Miri matrix.
+    #[cfg(miri)]
+    let ps = &ps[..4];
+    (0..1usize << ps.len())
         .map(|mask| {
             ps.iter()
                 .enumerate()
@@ -176,7 +179,9 @@ fn focus_relative_replacement_and_restoration() {
 fn deep_compressed_stem_and_all_bytes() {
     // Match the core long-key test's dense-only depth limit: those nodes
     // expand every byte and use recursive teardown.
-    let depth = if cfg!(feature = "all_dense_nodes") {
+    let depth = if cfg!(miri) {
+        97
+    } else if cfg!(feature = "all_dense_nodes") {
         2048
     } else {
         20_000
@@ -278,7 +283,8 @@ impl ZipperMoving for Counted {
 
 #[test]
 fn linear_work_and_basis_cutoff() {
-    for h in 2..=9 {
+    let max_height = if cfg!(miri) { 4 } else { 9 };
+    for h in 2..=max_height {
         let n = (1 << (h + 1)) - 1;
         let mut a = Counted::new(h);
         let mut out = PathMap::new();

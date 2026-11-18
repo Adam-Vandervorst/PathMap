@@ -165,6 +165,11 @@ fn matrix<const SUBTRACT: bool>() {
         for rt in TAGS {
             for lp in 0..8 {
                 for rp in 0..8 {
+                    // Retain every tag pair and every pattern on each side;
+                    // the full Cartesian pattern matrix runs in native tests.
+                    if cfg!(miri) && rp != lp && rp != (lp + 1) % 8 {
+                        continue;
+                    }
                     let (l, lk) = fixture(lt, lp, 0);
                     let (r, rk) = fixture(rt, rp, 1);
                     let lr = reference(&l, &lk);
@@ -253,7 +258,8 @@ fn native_spines_use_bounded_call_depth() {
         .spawn(|| {
             let mut a = Node::new_in(list(vec![(vec![0], Payload::Val(7))]), global_alloc());
             let mut b = Node::new_in(list(vec![(vec![1], Payload::Val(9))]), global_alloc());
-            for i in 0..12000 {
+            let depth = if cfg!(miri) { 64 } else { 12000 };
+            for i in 0..depth {
                 if i % 2 == 0 {
                     a = Node::new_in(
                         list(vec![
