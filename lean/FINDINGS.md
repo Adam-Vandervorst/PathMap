@@ -560,3 +560,28 @@ so the empty prefix never validates and the source zipper's focus value is
 invisible.  The two disagree exactly when the source has a value at its focus.
 Both behaviours are modelled (`Map.restrict` versus `Zip.restrict`); it is the
 kind of divergence worth either documenting or unifying.
+
+---
+
+## 17. The recursive cached cata reads the refcount of the empty-node sentinel
+
+`case`: `morphisms::tests::recursive_cata_dangling_child_in_two_child_node` -- **memory unsafety;
+segfault in release, "misaligned pointer dereference ... 0xbaadf00d" in debug**
+
+Found by the `hash` / `merkleize` ops of the differential harness on the first run, fixed on the
+same branch (`CataCache::skips` for the ordinary cache, in `src/trie_node.rs`).
+
+```rust
+let mut map = PathMap::<()>::new();
+map.insert(&[0, 0], ());
+map.insert(&[0, 1], ());
+map.create_path(&[1]);        // root: two 1-byte keys, slot 1 holds the empty-node sentinel
+map.val_count();              // or CatamorphismCached::hash(&map), or merkleize()
+```
+
+A dangling path is a child slot holding the empty-node sentinel, whose pointer is a tag, not an
+address.  `LineListNode::node_recursive_cata_1b_keys` asks the cache whether the second child can
+be traversed directly, and the ordinary cache answered with `node.refcount() <= 1`, which
+dereferences the sentinel.  `caches` guarded the same read with `is_empty`; `skips` did not.  The
+fix makes `skips` accept the sentinel without reading it, documents that contract on the trait,
+and adds a `debug_assert` to `refcount` so any other caller shows up in debug builds.

@@ -4,5 +4,8 @@ import PathMapModel.Zipper
 import PathMapModel.Write
 import PathMapModel.Map
 import PathMapModel.Spec
+import PathMapModel.Hash
+import PathMapModel.HashSecurity
+import PathMapModel.GraftNoop
 import PathMapModel.Fuzz
 import PathMapModel.Check

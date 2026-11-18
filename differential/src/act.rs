@@ -10,6 +10,14 @@ use pathmap::zipper::*;
 use crate::harness::*;
 
 impl<'t, S: AsRef<[u8]>> ReadSource for ACTZipper<'t, S, u64> {
+    fn hash_probe(&self) -> Option<u128> {
+        Some(pathmap::morphisms::CatamorphismCached::<u64>::hash_with_scheme(
+            self, &pathmap::morphisms::trie_hash::Fnv1a64Scheme))
+    }
+    fn hash_iter_probe(&self) -> Option<u128> {
+        Some(pathmap::morphisms::CatamorphismCachedIterative::<u64>::hash_with_scheme(
+            self, &pathmap::morphisms::trie_hash::Fnv1a64Scheme))
+    }
     fn dump_fork(&self) -> String {
         dump_fork(self)
     }

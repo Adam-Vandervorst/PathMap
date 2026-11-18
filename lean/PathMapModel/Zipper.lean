@@ -146,7 +146,7 @@ def atRoot : Bool := z.path.isEmpty
 /-- `ZipperMoving::reset`. -/
 def reset : Zip V := { z with path := [] }
 
-/-- `ZipperMoving::val_count`: values at and below the focus. -/
+/-- Cached catamorphism `val_count`: values at and below the focus. -/
 def valCount : Nat := z.trie.valCount z.focus
 
 /-! ## `trait ZipperMoving` — descent -/

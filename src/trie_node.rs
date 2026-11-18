@@ -2,7 +2,6 @@
 use core::hint::unreachable_unchecked;
 use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
-use std::collections::HashMap;
 use dyn_clone::*;
 use local_or_heap::LocalOrHeap;
 use arrayvec::ArrayVec;
@@ -13,6 +12,8 @@ use crate::dense_byte_node::*;
 use crate::ring::*;
 use crate::tiny_node::TinyRefNode;
 use crate::line_list_node::LineListNode;
+
+use crate::gxhash::HashMap;
 
 #[cfg(feature = "bridge_nodes")]
 use crate::bridge_node::BridgeNode;
@@ -258,15 +259,9 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     ///   a subsequent call using that token reports exhaustion.
     fn next_items(&self, token: IterToken, after_focus: bool) -> (IterToken, &[u8], Option<&TrieNodeODRc<V, A>>, Option<&V>);
 
-    /// Returns the total number of leaves contained within the whole subtree defined by the node
-    /// GOAT, this should be deprecated
-    fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize;
-
     /// Returns the number of values contained within the node itself, irrespective of the positions within
     /// the node; does not include onward links
-    ///
-    /// GOAT, this should replace node_val_count
-    fn node_goat_val_count(&self) -> usize;
+    fn node_val_count(&self) -> usize;
 
     /// Returns the first downstream child of a node, and a token that can be used to access subsequent children
     ///
@@ -1377,23 +1372,12 @@ mod tagged_node_ref {
         }
 
         #[inline]
-        pub fn node_val_count(&self, cache: &mut HashMap<u64, usize>) -> usize {
+        pub fn node_val_count(&self) -> usize {
             match self {
-                Self::DenseByteNode(node) => node.node_val_count(cache),
-                Self::LineListNode(node) => node.node_val_count(cache),
-                Self::CellByteNode(node) => node.node_val_count(cache),
-                Self::TinyRefNode(node) => node.node_val_count(cache),
-                Self::EmptyNode => 0,
-            }
-        }
-
-        #[inline]
-        pub fn node_goat_val_count(&self) -> usize {
-            match self {
-                Self::DenseByteNode(node) => node.node_goat_val_count(),
-                Self::LineListNode(node) => node.node_goat_val_count(),
-                Self::CellByteNode(node) => node.node_goat_val_count(),
-                Self::TinyRefNode(node) => node.node_goat_val_count(),
+                Self::DenseByteNode(node) => node.node_val_count(),
+                Self::LineListNode(node) => node.node_val_count(),
+                Self::CellByteNode(node) => node.node_val_count(),
+                Self::TinyRefNode(node) => node.node_val_count(),
                 Self::EmptyNode => 0,
             }
         }
@@ -2545,89 +2529,115 @@ mod tagged_node_ref {
     }
 }
 
-/// Returns the count of values in the subtrie descending from the node, caching shared subtries
-pub(crate) fn val_count_below_root<V: Clone + Send + Sync, A: Allocator>(node: TaggedNodeRef<V, A>) -> usize {
-    let mut cache = std::collections::HashMap::new();
-    node.node_val_count(&mut cache)
+/// Storage for summaries at physical node boundaries in the recursive cached cata.
+///
+/// Ordinary algebras cache only summaries without a parent-slot value. Merkleization also
+/// records unshared nodes and can restore a slot value onto a cached value-free hash.
+///
+/// A subtrie's root value is conceptually part of the subtrie. The separation here accommodates
+/// the current physical storage of that value in the parent. When nodes own their root values,
+/// their complete summaries can be cached by node ID instead.
+pub(crate) trait CataCache<V: Clone + Send + Sync, A: Allocator, W> {
+    /// Whether to consult and fill the cache for this node. Must be false for the empty sentinel;
+    /// its refcount must never be read.
+    fn caches(&self, node: &TrieNodeODRc<V, A>) -> bool;
+    /// A summary computed without a value supplied by the parent.
+    fn get(&self, key: u64) -> Option<&W>;
+    /// Optionally restore a parent-slot value onto a cached summary. General algebras cannot
+    /// separate that value from their summary and must recompute instead.
+    fn get_with_value(&self, _key: u64, _value: &V) -> Option<W> { None }
+    /// Record a completed summary, together with the parent-slot value used to compute it.
+    fn insert(&mut self, key: u64, node: &TrieNodeODRc<V, A>, value: Option<&V>, w: &W);
 }
 
-pub(crate) fn val_count_below_node<V: Clone + Send + Sync, A: Allocator>(node: &TrieNodeODRc<V, A>, cache: &mut HashMap<u64, usize>) -> usize {
-    if node.is_empty() {
-        return 0
+impl<V: Clone + Send + Sync, A: Allocator, W: Clone> CataCache<V, A, W> for HashMap<u64, W> {
+    #[inline]
+    fn caches(&self, node: &TrieNodeODRc<V, A>) -> bool {
+        !node.is_empty() && node.refcount() > 1
     }
-    if node.refcount() > 1 {
-        let hash = node.shared_node_id();
-        match cache.get(&hash) {
-            Some(cached) => *cached,
+    #[inline]
+    fn get(&self, key: u64) -> Option<&W> {
+        self.get(&key)
+    }
+    #[inline]
+    fn insert(&mut self, key: u64, _node: &TrieNodeODRc<V, A>, value: Option<&V>, w: &W) {
+        if value.is_none() {
+            self.insert(key, w.clone());
+        }
+    }
+}
+
+/// Internal implementation of `CatamorphismCached::factored_cata_jumping`
+pub(crate) fn recursive_cata_cached<A, V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(
+    node: &TrieNodeODRc<V, A>,
+    passed_in_val: Option<&V>,
+    start_f: StartF,
+    fold_child_f: FoldChildF,
+    finalize_f: FinalizeF,
+    cache: &mut impl CataCache<V, A, W>,
+) -> Result<W, Err>
+where
+    V: Clone + Send + Sync,
+    A: Allocator,
+    W: Clone,
+    StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+    FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
+{
+    // NOTE: A caller-supplied value can make this trie-node boundary fall within a factored_cata callback,
+    // therefore the W is not cacheable based on node ID alone.
+    // FUTURE: When the node contract associates values at the root of nodes with the node and not with the parent,
+    // then the `passed_in_val.is_none()` check can be removed
+    //
+    // That guard is now split between the match below and the ordinary cache's `insert` method.
+    // Merkleization's `get_with_value` is a specialized workaround: it restores the supplied value
+    // onto a value-free hash. Once nodes own their root values, that workaround can be removed too.
+    if cache.caches(node) {
+        let key = node.shared_node_id();
+        match passed_in_val {
             None => {
-                let val = node.as_tagged().node_val_count(cache);
-                cache.insert(hash, val);
-                val
+                if let Some(w) = cache.get(key) {
+                    return Ok(w.clone());
+                }
+            },
+            Some(value) => {
+                if let Some(w) = cache.get_with_value(key, value) {
+                    return Ok(w);
+                }
             },
         }
+        let w = recursive_cata_dispatch::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)?;
+        cache.insert(key, node, passed_in_val, &w);
+        Ok(w)
     } else {
-        node.as_tagged().node_val_count(cache)
+        recursive_cata_dispatch::<_, _, _, _, _, _, _, _, COMPUTE_PATH>(node, passed_in_val, start_f, fold_child_f, finalize_f, cache)
     }
 }
 
-/// Recursively traverses a trie descending from `node`, visiting every physical non-empty node once
-pub(crate) fn traverse_physical<Ctx, NodeF, FoldF, V, A>(node: &TrieNodeODRc<V, A>, node_f: NodeF, fold_f: FoldF) -> Ctx
-    where
+#[inline(always)]
+fn recursive_cata_dispatch<A, V, Acc, W, Err, StartF, FoldChildF, FinalizeF, const COMPUTE_PATH: bool>(
+    node: &TrieNodeODRc<V, A>,
+    passed_in_val: Option<&V>,
+    start_f: StartF,
+    fold_child_f: FoldChildF,
+    finalize_f: FinalizeF,
+    cache: &mut impl CataCache<V, A, W>,
+) -> Result<W, Err>
+where
     V: Clone + Send + Sync,
     A: Allocator,
-    Ctx: Clone + Default,
-    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
-    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
+    W: Clone,
+    StartF: Copy + Fn(&ByteMask) -> Result<Acc, Err>,
+    FoldChildF: Copy + Fn(&ByteMask, W, &mut Acc) -> Result<(), Err>,
+    FinalizeF: Copy + Fn(&ByteMask, Option<&V>, Option<Acc>, &[u8]) -> Result<W, Err>,
 {
-    let mut cache = std::collections::HashMap::new();
-    traverse_physical_internal(node, node_f, fold_f, &mut cache)
-}
-
-fn traverse_physical_internal<Ctx, NodeF, FoldF, V, A>(node: &TrieNodeODRc<V, A>, node_f: NodeF, fold_f: FoldF, cache: &mut HashMap<u64, Ctx>) -> Ctx
-    where
-    V: Clone + Send + Sync,
-    A: Allocator,
-    Ctx: Clone + Default,
-    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
-    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
-{
-    if node.is_empty() {
-        return Ctx::default()
+    match node.as_tagged() {
+        TaggedNodeRef::DenseByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::LineListNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::CellByteNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::TinyRefNode(node) => { node.node_recursive_cata::<_, _, _, _, _, _, COMPUTE_PATH>(passed_in_val, start_f, fold_child_f, finalize_f, cache) }
+        TaggedNodeRef::EmptyNode => { finalize_f(&ByteMask::EMPTY, passed_in_val, None, &[]) }
     }
-
-    if node.refcount() > 1 {
-        let hash = node.shared_node_id();
-        match cache.get(&hash) {
-            Some(cached) => cached.clone(),
-            None => {
-                let ctx = traverse_physical_children_internal(node.as_tagged(), node_f, fold_f, cache);
-                cache.insert(hash, ctx.clone());
-                ctx
-            },
-        }
-    } else {
-        traverse_physical_children_internal(node.as_tagged(), node_f, fold_f, cache)
-    }
-}
-
-fn traverse_physical_children_internal<Ctx, NodeF, FoldF, V, A>(node: TaggedNodeRef<V, A>, node_f: NodeF, fold_f: FoldF, cache: &mut HashMap<u64, Ctx>) -> Ctx
-    where
-    V: Clone + Send + Sync,
-    A: Allocator,
-    Ctx: Clone + Default,
-    NodeF: Fn(TaggedNodeRef<V, A>, Ctx) -> Ctx + Copy,
-    FoldF: Fn(Ctx, Ctx) -> Ctx + Copy
-{
-    let mut ctx = Ctx::default();
-
-    let (mut tok, mut child) = node.node_child_iter_start();
-    while let Some(child_node) = child {
-        let child_ctx = traverse_physical_internal(child_node, node_f, fold_f, cache);
-        ctx = fold_f(ctx, child_ctx);
-        (tok, child) = node.node_child_iter_next(tok);
-    }
-
-    node_f(node, ctx)
 }
 
 /// Internal function to walk a mut TrieNodeODRc<V> ref along a path
@@ -2705,6 +2715,7 @@ pub(crate) fn make_cell_node<V: Clone + Send + Sync, A: Allocator>(node: &mut Tr
 //  module come from the visibility of the trait it is derived on.  In this case, `TrieNode`
 //Credit to QuineDot for his ideas on this pattern here: https://users.rust-lang.org/t/inferred-lifetime-for-dyn-trait/112116/7
 pub(crate) use opaque_dyn_rc_trie_node::TrieNodeODRc;
+
 #[cfg(not(feature = "slim_ptrs"))]
 mod opaque_dyn_rc_trie_node {
     use std::sync::Arc;
@@ -3195,6 +3206,7 @@ mod opaque_dyn_rc_trie_node {
         pub(crate) fn new_empty() -> Self {
             Self { ptr: SlimNodePtr::new_empty(), alloc: MaybeUninit::uninit() }
         }
+        #[inline(always)]
         pub(crate) fn is_empty(&self) -> bool {
             self.tag() == EMPTY_NODE_TAG
         }
@@ -3237,6 +3249,7 @@ mod opaque_dyn_rc_trie_node {
         }
         #[inline]
         pub(crate) fn refcount(&self) -> usize {
+            debug_assert!(!self.is_empty(), "refcount of the empty-node sentinel, which is not a real allocation");
             let (ptr, _tag) = self.ptr.get_raw_parts();
             unsafe{ &*ptr }.load(Acquire) as usize
         }
@@ -3503,5 +3516,4 @@ mod tests {
         node_ref.make_unique();
         drop(cloned);
     }
-
 }

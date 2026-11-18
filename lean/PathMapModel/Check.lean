@@ -1,5 +1,7 @@
 import PathMapModel.Spec
 import PathMapModel.Fuzz
+import PathMapModel.Hash
+import PathMapModel.GraftNoop
 
 /-!
 # Build-time checks
@@ -307,6 +309,57 @@ real `prestrict` bug: a location that both carries a value and branches. -/
          [([0], 0), ([0,1,2], 1), ([0,1,3], 2)],
          [([0], 0), ([0,1], 1), ([0,1,2], 2), ([0,1,3], 3), ([9,9], 4)] ].all
   (fun es => restrictSelf ops (mk es))
+
+/-! ## The logical hash
+
+`Hash.hashU64` is the model of the crate's `Fnv1a64Scheme` trie hash.  These pin the definition
+to the algebra the crate implements in `CatamorphismCached::hash_with_scheme`: a run steps one
+byte at a time, a leaf value sits on the empty node, a value with children is layered on the
+hash of the node below it, and the hash at a position sees nothing above it. -/
+
+-- The empty trie is the empty node.
+#guard Hash.hashU64 fEmpty [] == Hash.leaf
+
+-- A dangling position hashes as the empty node, exactly like the empty trie.
+#guard Hash.hashU64 (PathMap.empty.addPath [0,1]) [0,1] == Hash.leaf
+
+-- A single run: one `step` per byte above a leaf value.
+#guard Hash.hashU64 fRun [] ==
+  Hash.step 0 (Hash.step 0 (Hash.step 0 (Hash.step 0 (Hash.withValue (Hash.value 7) Hash.leaf))))
+
+-- The hash at a position is the hash of the subtrie below it, independent of what is above.
+#guard Hash.hashU64 fRun [0,0] == Hash.step 0 (Hash.step 0 (Hash.withValue (Hash.value 7) Hash.leaf))
+
+-- A value with children: layered on the node below, whose children fold in ascending order.
+#guard Hash.hashU64 fBranch [0] ==
+  Hash.withValue (Hash.value 1)
+    (Hash.node [0, 1] [Hash.withValue (Hash.value 2) Hash.leaf, Hash.withValue (Hash.value 3) Hash.leaf])
+
+-- The root value is layered on like any other.
+#guard Hash.hashU64 fBranch [] ==
+  Hash.withValue (Hash.value 0) (Hash.node [0, 1] [Hash.hashU64 fBranch [0], Hash.withValue (Hash.value 4) Hash.leaf])
+
+-- Different values, and a value present or absent at an interior position, change the hash.
+#guard Hash.hashU64 (mk [([0,0], 1)]) [] != Hash.hashU64 (mk [([0,0], 2)]) []
+#guard Hash.hashU64 (mk [([0,0], 1)]) [] != Hash.hashU64 (mk [([0], 1), ([0,0], 1)]) []
+#guard Hash.hashU64 (mk [([0,0], 1)]) [] != Hash.hashU64 (PathMap.empty.addPath [0,0]) []
+
+-- The mask bitmap: byte `b` sets bit `b % 8` of byte `b / 8`.
+#guard Hash.maskBytes [0, 9, 255] == [1, 2] ++ List.replicate 29 0 ++ [128]
+#guard Hash.maskBytes [] == List.replicate 32 0
+
+-- `GraftNoop.lean`, executed: grafting a hash-equal subtrie (here, the same contents built in a
+-- different order, at a focus inside the trie) leaves every entry as it was.
+def fBranchAgain : T := mk [([1], 4), ([0,1], 3), ([0,0], 2), ([0], 1), ([], 0)]
+#guard Hash.hashU64 fBranch [0] == Hash.hashU64 fBranchAgain [0]
+#guard ((zipAt fBranch [] [0]).graft (zipAt fBranchAgain [] [0])).trie.entries == fBranch.entries
+#guard ((zipAt fBranch [] []).graft (zipAt fBranchAgain [] [])).trie.entries == fBranch.entries
+-- and a graft that is not hash-equal does change it
+#guard ((zipAt fBranch [] [0]).graft (zipAt fRun [] [])).trie.entries != fBranch.entries
+
+-- Rendering matches `format!("{:016x}")`.
+#guard Hash.hex64 0 == "0000000000000000"
+#guard Hash.hex64 0xcbf29ce484222325 == "cbf29ce484222325"
 
 end Check
 end PathMapModel

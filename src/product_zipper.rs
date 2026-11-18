@@ -174,10 +174,6 @@ impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> Zipper
         self.factor_paths.clear();
         self.z.reset()
     }
-    fn val_count(&self) -> usize {
-        debug_assert!(self.focus_factor() == self.factor_count() - 1);
-        self.z.val_count()
-    }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, k: K) -> usize {
         let k = k.as_ref();
         let mut descended = 0;
@@ -391,6 +387,7 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperConcrete for ProductZip
 }
 
 impl<'trie, V: Clone + Send + Sync + Unpin + 'trie, A: Allocator + 'trie> ZipperPathBuffer for ProductZipper<'_, 'trie, V, A> {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.z.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.z.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.z.reserve_buffers(path_len, stack_depth) }
@@ -580,6 +577,7 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperPathBuffer
         PrimaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
         SecondaryZ: ZipperMoving + ZipperPath + ZipperPathBuffer,
 {
+    unsafe fn path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.path_assert_len(len) } }
     unsafe fn origin_path_assert_len(&self, len: usize) -> &[u8] { unsafe{ self.primary.origin_path_assert_len(len) } }
     fn prepare_buffers(&mut self) { self.primary.prepare_buffers() }
     fn reserve_buffers(&mut self, path_len: usize, stack_depth: usize) { self.primary.reserve_buffers(path_len, stack_depth) }
@@ -718,10 +716,6 @@ impl<'trie, PrimaryZ, SecondaryZ, V> ZipperMoving for ProductZipperG<'trie, Prim
             secondary.reset();
         }
         self.primary.reset();
-    }
-    #[inline]
-    fn val_count(&self) -> usize {
-        unimplemented!("method will probably get removed")
     }
     fn descend_to_existing<K: AsRef<[u8]>>(&mut self, path: K) -> usize {
         let mut path = path.as_ref();
@@ -963,7 +957,7 @@ mod tests {
     use crate::utils::ByteMask;
     use crate::zipper::*;
     use crate::PathMap;
-    use crate::morphisms::Catamorphism;
+    use crate::morphisms::CatamorphismSideEffecting;
 
     macro_rules! impl_product_zipper_tests {
         ($mod:ident, $ProductZipper:ident, $convert:ident) => {
@@ -1751,7 +1745,7 @@ mod tests {
         pz.reset();
         pz.descend_to(&full_path);
         assert!(pz.ascend_until() > 0);
-        assert_eq!(pz.path(), []);
+        assert!(pz.path().is_empty());
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 1);
         assert_eq!(pz.is_val(), false);
@@ -1759,7 +1753,7 @@ mod tests {
         // test ascend_until_branch
         pz.descend_to(&full_path);
         assert!(pz.ascend_until_branch() > 0);
-        assert_eq!(pz.path(), []);
+        assert!(pz.path().is_empty());
         assert_eq!(pz.path_exists(), true);
         assert_eq!(pz.child_count(), 1);
         assert_eq!(pz.is_val(), false);
