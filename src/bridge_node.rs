@@ -608,7 +608,7 @@ impl<V: Clone + Send + Sync> TrieNode<V> for BridgeNode<V> {
         // and we'd also need a code path for upgrading to another node type, e.g. dense node
         unimplemented!()
     }
-    fn drop_head_dyn(&mut self, _byte_cnt: usize) -> Option<TrieNodeODRc<V>> where V: Lattice {
+    fn drop_head_dyn(&mut self, _byte_cnt: usize, _root_val: &mut Option<V>) -> Option<TrieNodeODRc<V>> where V: Lattice {
         unimplemented!()
     }
     fn meet_dyn(&self, _other: &dyn TrieNode<V>) -> Option<TrieNodeODRc<V>> where V: Lattice {

@@ -340,9 +340,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefBorrowed<'_, V, A> {
     fn make_map(&self) -> PathMap<V, A> {
-        #[cfg(not(feature = "graft_root_vals"))]
-        let root_val = None;
-        #[cfg(feature = "graft_root_vals")]
         let root_val = self.val().cloned();
 
         let root_node = self.get_focus().into_option();
@@ -682,9 +679,6 @@ impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperSubtries<V, A> for Trie
 
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> ZipperInfallibleSubtries<V, A> for TrieRefOwned<V, A> {
     fn make_map(&self) -> PathMap<V, A> {
-        #[cfg(not(feature = "graft_root_vals"))]
-        let root_val = None;
-        #[cfg(feature = "graft_root_vals")]
         let root_val = self.val().cloned();
 
         let root_node = self.get_focus().into_option();

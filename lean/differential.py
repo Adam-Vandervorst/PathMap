@@ -380,6 +380,18 @@ def divergence_shape(a, b):
             and ta[1] == "meet_into" and "ret=None" in ta
             and diff[0] == ("e0", "e1")):
         return "DANGLING-FOCUS-KEPT"
+    if (keys == {"ret", "e", "c"} and len(diff) == 3
+            and ta[1] == "meet_into"
+            and ("ret=None", "ret=Identity") in diff
+            and ("e0", "e1") in diff
+            and any(x == "c0" and y[1:].isdigit() and int(y[1:]) > 0
+                    for x, y in diff)
+            and "v-" in a.split(" R=", 1)[0].split()
+            and "n0" in a.split(" R=", 1)[0].split()
+            and a.partition(" R=")[2] == b.partition(" R=")[2]):
+        # Keeping a dangling child also keeps a focus that pruning removed
+        # in the model.  No values survive, and the read zipper is unchanged.
+        return "DANGLING-KEPT"
     if keys <= {"ret", "c", "n"} and ({"c", "n"} & keys):
         # `c` (child_count) when it moved, else `n` (val_count): a dangling
         # child adds a child without adding a value, a dropped value the

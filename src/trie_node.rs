@@ -372,13 +372,14 @@ pub(crate) trait TrieNode<V: Clone + Send + Sync, A: Allocator>: TrieNodeDowncas
     fn join_into_dyn(&mut self, other: TrieNodeODRc<V, A>) -> (AlgebraicStatus, Result<(), TrieNodeODRc<V, A>>) where V: Lattice;
 
     /// Returns a node composed of the children of `self`, `byte_cnt` bytes downstream, all joined together,
-    /// or `None` if the node has no children at that depth
+    /// or `None` if the node has no children at that depth. Values at exactly that depth are
+    /// joined into `root_val`, consuming them during the same traversal.
     ///
     /// After this method, `self` will be invalid and/ or empty, and should be replaced with the result.
     ///
     /// QUESTION: Is there a value to a "copying" version of drop_head?  It has higher overheads but could
     /// be safely implemented by the [crate::zipper::ReadZipper].
-    fn drop_head_dyn(&mut self, byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice;
+    fn drop_head_dyn(&mut self, byte_cnt: usize, root_val: &mut Option<V>) -> Option<TrieNodeODRc<V, A>> where V: Lattice;
 
     /// Allows for the implementation of the Lattice trait on different node implementations, and
     /// the logic to promote nodes to other node types
@@ -1799,11 +1800,11 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn drop_head_dyn(&mut self, byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
+        pub fn drop_head_dyn(&mut self, byte_cnt: usize, root_val: &mut Option<V>) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
             match self {
-                Self::DenseByteNode(node) => node.drop_head_dyn(byte_cnt),
-                Self::LineListNode(node) => node.drop_head_dyn(byte_cnt),
-                Self::CellByteNode(node) => node.drop_head_dyn(byte_cnt),
+                Self::DenseByteNode(node) => node.drop_head_dyn(byte_cnt, root_val),
+                Self::LineListNode(node) => node.drop_head_dyn(byte_cnt, root_val),
+                Self::CellByteNode(node) => node.drop_head_dyn(byte_cnt, root_val),
             }
         }
 
@@ -2473,12 +2474,12 @@ mod tagged_node_ref {
             }
         }
 
-        pub fn drop_head_dyn(&mut self, byte_cnt: usize) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
+        pub fn drop_head_dyn(&mut self, byte_cnt: usize, root_val: &mut Option<V>) -> Option<TrieNodeODRc<V, A>> where V: Lattice {
             let (ptr, tag) = self.ptr.get_raw_parts();
             match tag {
-                DENSE_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<DenseByteNode<V, A>>() }.drop_head_dyn(byte_cnt),
-                LINE_LIST_NODE_TAG => unsafe{ &mut *ptr.cast::<LineListNode<V, A>>() }.drop_head_dyn(byte_cnt),
-                CELL_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<CellByteNode<V, A>>() }.drop_head_dyn(byte_cnt),
+                DENSE_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<DenseByteNode<V, A>>() }.drop_head_dyn(byte_cnt, root_val),
+                LINE_LIST_NODE_TAG => unsafe{ &mut *ptr.cast::<LineListNode<V, A>>() }.drop_head_dyn(byte_cnt, root_val),
+                CELL_BYTE_NODE_TAG => unsafe{ &mut *ptr.cast::<CellByteNode<V, A>>() }.drop_head_dyn(byte_cnt, root_val),
                 _ => unsafe{ unreachable_unchecked() }
             }
         }

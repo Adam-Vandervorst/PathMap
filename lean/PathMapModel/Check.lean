@@ -31,6 +31,20 @@ def zipAt (t : T) (root path : Path) : Zip UInt64 := { trie := t, root, path }
 
 /-! ## Fixtures -/
 
+/-- Moving a focused subtrie replaces both values and branches at its destination. -/
+def removePrefixT : T := mk [([], 11), ([0], 22), ([0,1], 77),
+  ([0,1,2], 88), ([0,3], 33), ([4], 99)]
+
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 2).1 == 2
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 2).2.trie.entries == (mk [([], 77), ([2], 88)]).entries
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 9).1 == 2
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 9).2.trie.entries == (mk [([], 77), ([2], 88)]).entries
+#guard ((zipAt removePrefixT [0] [1]).removePrefix 1).2.trie.entries ==
+  (mk [([], 11), ([0], 77), ([0,2], 88), ([4], 99)]).entries
+#guard ((zipAt removePrefixT [] [0,1]).removePrefix 0).2.trie.entries == removePrefixT.entries
+#guard ((zipAt (mk [([], 11), ([0], 77)]) [] [0]).removePrefix 1).2.trie.entries == (mk [([], 77)]).entries
+#guard ((zipAt (mk [([], 11), ([0,1], 88)]) [] [0]).removePrefix 1).2.trie.entries == (mk [([1], 88)]).entries
+
 /-- Branching at the root and at depth 1, with a value at an interior node. -/
 def fBranch : T := mk [([], 0), ([0], 1), ([0,0], 2), ([0,1], 3), ([1], 4)]
 /-- A single-child run: the shape `descend_until` / `ascend_until` care about. -/
@@ -121,14 +135,14 @@ def dropT3 : T := mk [([0,0], 0), ([0,1], 1), ([1,0], 2), ([1,1], 3)]
 #guard (((zipAt dropT3 [] []).joinKPathInto ops 1 true).2).valCount == 2
 
 /-- `write_zipper_drop_head_test6`: dropping 4 bytes from paths that are at most
-4 long annihilates everything, because values at depth exactly `k` are lost. -/
+4 long leaves a focus value joined from the values at depth exactly `k`. -/
 def dropT6 : T := mk [([193,191,193,193,191], 0), ([193,191,193,194,12,28], 1),
                       ([193,191,193,194,18,9], 2), ([193,191,194,193,191], 3),
                       ([193,191,194,194,12,28], 4), ([193,191,194,194,15,47], 5),
                       ([193,191,194,194,18,9], 6)]
 
-#guard !((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).1
-#guard (((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).2).valCount == 0
+#guard ((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).1
+#guard (((zipAt dropT6 [] [193,191]).joinKPathInto ops 4 true).2).valCount == 1
 
 /-- `write_zipper_drop_head_test1`: under the root `123:`, dropping 4 bytes
 rewrites `abc:Bob` to `Bob` and `dog:Bob:Fido` to `Bob:Fido`. -/
