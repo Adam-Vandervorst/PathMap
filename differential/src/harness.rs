@@ -18,6 +18,11 @@ use pathmap::ring::AlgebraicStatus;
 use pathmap::utils::ByteMask;
 use pathmap::zipper::*;
 
+pub(crate) const PATH_SET_NAMES: [&str; 10] = [
+    "basis", "hull", "retain", "divergence", "branches",
+    "zipper_basis", "zipper_hull", "zipper_retain", "zipper_divergence", "zipper_branches",
+];
+
 // The trace is written into one growable buffer rather than a `Vec<String>`.
 // It used to be ~260 separately allocated `String`s per input, thrown away as
 // soon as they were printed; only a divergence needs the individual lines, and
@@ -26,7 +31,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 65;
+pub const NOPS: usize = 75;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -272,6 +277,9 @@ pub trait ReadSource:
         None
     }
 
+    /// Binary path-set operations require a native read source, as convex ops do.
+    fn path_set(&mut self, _left: &PathMap<u64>, _op: usize) -> Option<PathMap<u64>> { None }
+
     fn do_graft<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> bool { false }
     fn do_graft_masked<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
     /// Currently unused: op 54 is quarantined (lean/FINDINGS.md #15).  Kept so
@@ -304,6 +312,25 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
             convex_subtract(left, &self.make_map())
         } else {
             convex_meet(left, &self.make_map())
+        })
+    }
+
+    fn path_set(&mut self, left: &PathMap<u64>, op: usize) -> Option<PathMap<u64>> {
+        use pathmap::experimental::path_sets::*;
+        Some(match op {
+            67 => retain(left, &self.make_map()),
+            68 => divergence(left, &self.make_map()).iter().map(|(p, ())| (p, 1)).collect(),
+            72 => {
+                let mut out = PathMap::new();
+                zipper_retain(&mut left.read_zipper(), self, &mut out.write_zipper());
+                out
+            }
+            73 => {
+                let mut out = PathMap::new();
+                zipper_divergence(&mut left.read_zipper(), self, &mut out.write_zipper());
+                out.iter().map(|(p, ())| (p, 1)).collect()
+            }
+            _ => unreachable!("not a binary path-set operation"),
         })
     }
 
@@ -1005,7 +1032,7 @@ pub fn run_ops<R: ReadSource>(
                     let ret = if let Some(result) = rz.convex(&wz.make_map(), op % 2 == 0, op >= 63) {
                         // Convex algebra specifies values, not bare structure.
                         // Rebuild the result's valued projection before grafting,
-                        // matching Map.selectConvexSupport in the Lean model.
+                        // matching the pruned Lean model.
                         // Do not truncate: subsequent ops observe the entire map.
                         let canonical: PathMap<u64> = result.iter().map(|(p, v)| (p, *v)).collect();
                         wz.graft_map(canonical);
@@ -1014,6 +1041,37 @@ pub fn run_ops<R: ReadSource>(
                         SKIP_ACT
                     };
                     (name, ret.to_string())
+                }
+                65..=74 => {
+                    use pathmap::experimental::path_sets::*;
+                    let left = wz.make_map();
+                    let result = match op {
+                        65 => Some(basis(&left)),
+                        66 => Some(hull(&left)),
+                        69 => Some(branches(&left).iter().map(|(p, ())| (p, 1)).collect()),
+                        70 | 71 => {
+                            let mut out = PathMap::new();
+                            if op == 70 {
+                                zipper_basis(&mut left.read_zipper(), &mut out.write_zipper());
+                            } else {
+                                zipper_hull(&mut left.read_zipper(), &mut out.write_zipper());
+                            }
+                            Some(out)
+                        }
+                        74 => {
+                            let mut out = PathMap::new();
+                            zipper_branches(&mut left.read_zipper(), &mut out.write_zipper());
+                            Some(out.iter().map(|(p, ())| (p, 1)).collect())
+                        }
+                        _ => rz.path_set(&left, op),
+                    };
+                    let ret = if let Some(result) = result {
+                        // The pruned model observes valued paths only. Branch
+                        // points carry 1 in this homogeneous u64 interpreter.
+                        wz.graft_map(result.iter().map(|(p, v)| (p, *v)).collect());
+                        "-"
+                    } else { SKIP_ACT };
+                    (PATH_SET_NAMES[op - 65], ret.to_string())
                 }
                 47 => {
                     let t = get!(d.modn(2));
@@ -1061,7 +1119,7 @@ mod input_format_tests {
 
     #[test]
     fn input_header_count_controls_decoding_independently_of_current_operation_count() {
-        for count in [1u16, 32, 56, 57, 58, 61, 65, 256] {
+        for count in [1u16, 32, 56, 57, 58, 61, 65, 75, 256] {
             let mut bytes = WIRE_MAGIC.to_vec();
             bytes.extend_from_slice(&count.to_le_bytes());
             bytes.extend(0..=255);
@@ -1166,6 +1224,42 @@ mod input_format_tests {
             assert!(trace.contains("4 set_val_at ret=- W=_ o01"), "{trace}");
             assert!(trace.contains("R=_ o02"), "{trace}");
         }
+    }
+
+    #[test]
+    fn path_set_programs_and_reproducers_preserve_the_wire_contract() {
+        for op in 65u8..75 {
+            let mut bytes = input_header();
+            bytes.extend_from_slice(&[
+                4, 0, 10, 1, 0, 11, 2, 0, 1, 12, 2, 0, 2, 13,
+                3, 0, 20, 1, 0, 21, 2, 0, 3, 22, 0, 0,
+                op,
+            ]);
+            let name = PATH_SET_NAMES[(op - 65) as usize];
+            let expected = match (op - 65) % 5 {
+                0 => "MAP0 _:10",
+                1 => "MAP0 _:-,00:-,0001:12,0002:13",
+                2 => "MAP0 _:10,00:11",
+                _ => "MAP0 _:-,00:1",
+            };
+            let trace = run(&bytes, true);
+            assert!(trace.lines().any(|line| line == expected), "{name}: {trace}");
+            assert!(trace.contains(&format!("0 {name} ret=-")), "{trace}");
+            let act = run_act(&bytes, false);
+            if matches!((op - 65) % 5, 2 | 3) {
+                assert!(act.contains(&format!("0 {name} ret=skip:act")), "{act}");
+                assert!(act.contains("MAP0 _:10,00:11,0001:12,0002:13"), "{act}");
+            } else {
+                assert!(act.lines().any(|line| line == expected), "{act}");
+            }
+            let repro = emit_repro(&bytes, 256);
+            assert!(repro.contains(&format!("::{name}(")), "{repro}");
+        }
+        // Previously recorded 65-selector programs still decode 65 as op 0.
+        let mut old = WIRE_MAGIC.to_vec();
+        old.extend_from_slice(&65u16.to_le_bytes());
+        old.extend_from_slice(&[0, 0, 0, 0, 65, 0, 1, 2]);
+        assert!(run(&old, true).contains("0 descend_to ret=02"));
     }
 
     #[test]

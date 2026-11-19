@@ -28,7 +28,7 @@ class InputFormatTests(unittest.TestCase):
             self.assertEqual(baseline.get(i)[:HEADER_SIZE], input_header(61))
             self.assertEqual(current.get(i)[HEADER_SIZE:], baseline.get(i)[HEADER_SIZE:])
 
-    def test_convex_programs_are_deterministic_and_cover_every_kernel(self):
+    def test_convex_and_path_set_programs_cover_every_kernel(self):
         source = ConvexInputs(7, 128)
         for i in range(len(source)):
             blob = source.get(i)
@@ -64,11 +64,13 @@ class InputFormatTests(unittest.TestCase):
                 elif op == 60:
                     skip_path()
                     pos += 1  # value
+                elif op == 56:
+                    pos += 1  # prune flag
                 else:
-                    self.assertIn(op, (29, 61, 62, 63, 64))
+                    self.assertIn(op, (29, *range(61, 75)))
             self.assertEqual(pos, len(blob))
             self.assertLessEqual(len(ops), 256)
-            for op in range(61, 65):
+            for op in range(61, 75):
                 self.assertEqual(ops.count(op), 2)
         self.assertNotEqual(source.get(7), ConvexInputs(8, 128).get(7))
 
@@ -77,7 +79,7 @@ class InputFormatTests(unittest.TestCase):
             self.assertEqual(versioned_input(payload), input_header(56) + payload)
 
     def test_versioned_inputs_keep_recorded_count(self):
-        for count in [1, 56, 57, 58, 61, 65, 256]:
+        for count in [1, 56, 57, 58, 61, 65, 75, 256]:
             blob = input_header(count) + bytes(range(256))
             self.assertEqual(versioned_input(blob), blob)
 

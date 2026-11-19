@@ -52,6 +52,9 @@ pub fn unary<V: FuzzValue>(u: Un, a: &Values<V>) -> Values<V> {
         Un::Head => head(a),
         Un::TailsUnion => tails_union(a),
         Un::TailsInter => tails_inter(a),
+        Un::Basis => basis(a),
+        Un::Hull => hull(a),
+        Un::Branches => divergence(a, a),
     }
 }
 
@@ -64,6 +67,10 @@ pub fn apply<V: FuzzValue>(op: Op, a: &Values<V>, b: &Values<V>) -> Values<V> {
         Op::Restrict => restrict(a, b),
         Op::Compose => compose(a, b),
         Op::IterC => iter_c(a, b),
+        Op::Retain => retain(a, b),
+        Op::Divergence => divergence(a, b),
+        Op::ConvexMeet => convex_meet(a, b),
+        Op::ConvexSubtract => convex_subtract(a, b),
     }
 }
 
@@ -185,4 +192,48 @@ pub fn compose<V: FuzzValue>(s: &Values<V>, t: &Values<V>) -> Values<V> {
 /// `p ∈ iterC src b ↔ (∃ h r, h :: r ∈ src) ∧ p ∈ b`.
 pub fn iter_c<V: FuzzValue>(src: &Values<V>, b: &Values<V>) -> Values<V> {
     if src.keys().any(|k| !k.is_empty()) { b.clone() } else { Values::new() }
+}
+
+// Path-set operations inspect valued keys and preserve selected left payloads.
+// These deliberately use flat key comparisons, independent of the trie walks.
+pub fn basis<V: FuzzValue>(a: &Values<V>) -> Values<V> {
+    a.iter().filter(|(p, _)| !a.keys().any(|q| q.len() < p.len() && p.starts_with(q)))
+        .map(|(p, v)| (p.clone(), v.clone())).collect()
+}
+
+pub fn hull<V: FuzzValue>(a: &Values<V>) -> Values<V> {
+    a.iter().filter(|(p, _)| !a.keys().any(|q| p.len() < q.len() && q.starts_with(p.as_slice())))
+        .map(|(p, v)| (p.clone(), v.clone())).collect()
+}
+
+pub fn retain<V: FuzzValue>(a: &Values<V>, b: &Values<V>) -> Values<V> {
+    a.iter().filter(|(p, _)| b.keys().any(|q| q.starts_with(p.as_slice())))
+        .map(|(p, v)| (p.clone(), v.clone())).collect()
+}
+
+pub fn divergence<V: FuzzValue>(a: &Values<V>, b: &Values<V>) -> Values<V> {
+    let mut out = Values::new();
+    for p in a.keys() {
+        for q in b.keys() {
+            let n = p.iter().zip(q).take_while(|(x, y)| x == y).count();
+            if n < p.len() && n < q.len() {
+                out.insert(p[..n].to_vec(), V::canonical());
+            }
+        }
+    }
+    out
+}
+
+pub fn convex_meet<V: FuzzValue>(a: &Values<V>, b: &Values<V>) -> Values<V> {
+    let common: Values<V> = a.iter().filter(|(p, _)| b.contains_key(*p))
+        .map(|(p, v)| (p.clone(), v.clone())).collect();
+    let ah = hull(a);
+    let bh = hull(b);
+    let tips = ah.into_iter().filter(|(p, _)| bh.contains_key(p)).collect();
+    retain(&common, &tips)
+}
+
+pub fn convex_subtract<V: FuzzValue>(a: &Values<V>, b: &Values<V>) -> Values<V> {
+    let tips = hull(a).into_iter().filter(|(p, _)| !b.contains_key(p)).collect();
+    retain(a, &tips)
 }

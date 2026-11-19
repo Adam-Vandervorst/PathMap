@@ -196,12 +196,16 @@ def showBool (b : Bool) : String := if b then "1" else "0"
 
 `op % selector_count` selects the operation (56 for headerless inputs). Ops `0`–`26`
 act on a target zipper chosen by a following `u8 % 2` byte (`0` = write zipper,
-`1` = read zipper); ops `27`–`46`, `56`, and `60`–`64` write at the focus.
+`1` = read zipper); ops `27`–`46`, `56`, and `60`–`74` write at the focus.
 Ops `61`/`62` apply native convex meet/subtract; `63`/`64` apply the zipper
 implementations. They take no operands and replace the write focus with the
 valued projection of the result, using the read focus as RHS. Bare result
 structure is unspecified by convex algebra, so both interpreters canonicalise
-it before later operations observe it. ACT skips these four operations. -/
+it before later operations observe it. ACT skips these four operations.
+Ops `65`–`69` apply basis, hull, retain, divergence and branches; `70`–`74`
+apply their zipper forms. Unary operations read the write focus; binary ones
+also read the read focus. Divergence and branches mark results with `1`.
+ACT skips the binary path-set operations but supports the unary ones. -/
 
 /-- Input header marker. Must match `WIRE_MAGIC` in the Rust harness. -/
 def wireMagic : List UInt8 := [80, 77, 70, 85, 90, 90, 1, 0]
@@ -559,6 +563,21 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              if s.act then some (emit s name skipAct, d) else
              let z := if op % 2 == 0 then s.wz.convexSubtract s.rz s.wz
                       else s.wz.convexMeet s.rz s.wz
+             some (emit { s with wz := z } name "-", d)
+  | 65 | 66 | 67 | 68 | 69 | 70 | 71 | 72 | 73 | 74 => do
+             let name := match op with
+               | 65 => "basis" | 66 => "hull" | 67 => "retain"
+               | 68 => "divergence" | 69 => "branches"
+               | 70 => "zipper_basis" | 71 => "zipper_hull" | 72 => "zipper_retain"
+               | 73 => "zipper_divergence" | _ => "zipper_branches"
+             let kind := (op - 65) % 5
+             if s.act && (kind == 2 || kind == 3) then some (emit s name skipAct, d) else
+             let z := match kind with
+               | 0 => s.wz.basis s.wz
+               | 1 => s.wz.hull s.wz
+               | 2 => s.wz.retain s.rz s.wz
+               | 3 => s.wz.divergence s.rz s.wz 1
+               | _ => s.wz.branches s.wz 1
              some (emit { s with wz := z } name "-", d)
   | _ => some (emit s "nop" "-", d)
 

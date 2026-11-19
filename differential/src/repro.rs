@@ -230,6 +230,21 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                 };
                 format!("{{ let left = wz.make_map(); {call} let canonical: PathMap<u64> = result.iter().map(|(p, v)| (p, *v)).collect(); wz.graft_map(canonical); }}")
             }
+            65..=74 => {
+                let operation = crate::harness::PATH_SET_NAMES[op - 65];
+                let binary = matches!(op, 67 | 68 | 72 | 73);
+                let marks = matches!(op, 68 | 69 | 73 | 74);
+                let call = if op >= 70 {
+                    let rhs = if binary { "&mut rz, " } else { "" };
+                    format!("let mut result = PathMap::new(); pathmap::experimental::path_sets::{operation}(&mut left.read_zipper(), {rhs}&mut result.write_zipper());")
+                } else {
+                    let rhs = if binary { ", &rz.make_map()" } else { "" };
+                    format!("let result = pathmap::experimental::path_sets::{operation}(&left{rhs});")
+                };
+                let value = if marks { "1" } else { "*v" };
+                let binding = if marks { "_" } else { "v" };
+                format!("{{ let left = wz.make_map(); {call} let canonical: PathMap<u64> = result.iter().map(|(p, {binding})| (p, {value})).collect(); wz.graft_map(canonical); }}")
+            }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

@@ -225,7 +225,7 @@ jobs:
     # Regression check: head and base run on identical inputs; an input on which head diverges
     # from the model but base did not is reported as a warning annotation (master has known
     # divergences).  Set FUZZ_STRICT=1 below to make that fail the job instead.
-    # Focused convex programs have no known-bug exemptions: every divergence fails.
+    # Focused convex and path-set programs have no known-bug exemptions: every divergence fails.
     # Ordered after the tests but not gated on them: baseline findings are warnings, and a PR whose
     # tests fail is exactly one whose divergences are worth seeing.
     needs: test
@@ -275,7 +275,7 @@ jobs:
         run: |
           cargo test --release -p differential --lib --target-dir "$CARGO_TARGET_DIR/fuzz-head"
           python3 -m unittest discover -s lean -p 'test_input_format.py'
-      - name: convex programs against Lean
+      - name: convex and path-set programs against Lean
         shell: bash
         env:
           PATHMAP_TRACE: ${{ env.CARGO_TARGET_DIR }}/fuzz-head/release/pathmap_trace
@@ -288,11 +288,11 @@ jobs:
             convex_status=$?
           fi
           {
-            printf '\n## Convex programs\n\n'
+            printf '\n## Convex and path-set programs\n\n'
             tail -n 1 "${{ runner.temp }}/fuzz-out/fuzz-convex-head.txt"
           } >> "${{ runner.temp }}/fuzz-out/summary.md"
           if [ "$convex_status" -ne 0 ]; then
-            printf 'Convex program check failed\n' >> "${{ runner.temp }}/fuzz-out/findings"
+            printf 'Convex and path-set program check failed\n' >> "${{ runner.temp }}/fuzz-out/findings"
           fi
           exit "$convex_status"
       - name: comment on the PR

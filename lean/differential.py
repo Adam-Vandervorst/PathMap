@@ -501,7 +501,7 @@ class RandomInputs(InputSource):
 class ConvexInputs(InputSource):
     """Stateful programs covering both kernels without unrelated known bugs.
 
-    All four convex selectors run in every program. Seeded shapes include
+    All convex and path-set selectors run in every program. Seeded shapes include
     shared chains, mismatched tips, root values and empty inputs; random shapes
     share a small path pool. Writes between operations restore values so an
     earlier empty result cannot make the rest of the program vacuous.
@@ -525,6 +525,7 @@ class ConvexInputs(InputSource):
             ([(0,)], [(0,), (0, 1)]),
             ([], [()]),
             ([(), (0,)], []),
+            ([(0,), (0, 1), (0, 2)], [(0,), (0, 3)]),
         ]
         if idx % 8 < len(shapes):
             left, right = shapes[idx % 8]
@@ -555,7 +556,10 @@ class ConvexInputs(InputSource):
         for target, focus in ((0, focus0), (1, focus1)):
             blob.extend([18, target])  # move_to_path
             path(focus)
-        for op in (61, 63, 62, 64):
+        for op in (61, 63, 62, 64, *range(65, 75)):
+            # Restore exactly the same valued input, including after branches
+            # introduces keys that were absent from the original left map.
+            blob.extend([56, 0])  # remove_subtrie without moving the focus
             for p, v in left:
                 blob.append(60)  # set_val_at, relative to the current focus
                 path(p)
@@ -654,7 +658,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="*")
     ap.add_argument("--random", type=int, default=0, help="generate N random inputs")
-    ap.add_argument("--convex", type=int, default=0, help="generate N focused convex programs")
+    ap.add_argument("--convex", type=int, default=0, help="generate N focused convex and path-set programs")
     ap.add_argument("--selectors", type=int, default=NOPS, choices=range(1, NOPS + 1),
                     metavar="N", help="selector count for random inputs (for baseline replay)")
     ap.add_argument("--strict", action="store_true", help="fail on known divergences too")

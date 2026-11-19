@@ -559,11 +559,10 @@ fn zippy_laws_apply_to_the_set_type_only() {
     assert!(algebraic::laws::laws::<Bits>().is_empty());
 }
 
-/// The wire header: optional, and invisible to decoding.  A headerless input is
-/// layout 1, so it and the same bytes after a header are the same case; random
-/// inputs carry the header, and seeds keep naming the cases they did before it.
+/// Headerless and explicit layout-1 inputs keep their original decoding.
+/// Newly generated inputs use layout 2, which adds the path-set operators.
 #[test]
-fn input_header_does_not_change_the_case() {
+fn legacy_input_layout_keeps_the_same_case() {
     // Building the operands can panic (the known merkleize defect); then both
     // forms must panic.  Decode under the quiet hook, assert outside it.
     let shown = |b: &[u8]| {
@@ -575,7 +574,13 @@ fn input_header_does_not_change_the_case() {
     let (pairs, cut_pair) = with_quiet_panics(|| {
         let pairs: Vec<_> = inputs
             .iter()
-            .map(|h| (shown(h), shown(algebraic::split_input(h).1)))
+            .map(|h| {
+                let payload = algebraic::split_input(h).1;
+                let mut old = algebraic::ALG_MAGIC.to_vec();
+                old.extend_from_slice(&1u16.to_le_bytes());
+                old.extend_from_slice(payload);
+                (shown(&old), shown(payload))
+            })
             .collect();
         (pairs, (shown(&cut), shown(&[])))
     });
@@ -593,4 +598,82 @@ fn input_header_does_not_change_the_case() {
     // The other harnesses' headers are not this one: they stay payload.
     let main = differential::harness::input_header();
     assert_eq!(algebraic::split_input(&main), (algebraic::LEGACY_LAYOUT, &main[..]));
+}
+
+#[test]
+fn convex_and_path_set_routes_match_flat_semantics() {
+    use algebraic::{expr::Un, model, routes::{self, Route}, shape::Values};
+    use pathmap::{PathMap, zipper::*};
+
+    // Endpoints do not branch; empty paths count as inclusive prefixes.
+    let a: Values<u64> = [(b"".to_vec(), 9), (b"foo".to_vec(), 10),
+        (b"food".to_vec(), 11), (b"four".to_vec(), 12)].into();
+    let b: Values<u64> = [(b"foo".to_vec(), 20), (b"food".to_vec(), 21)].into();
+    assert_eq!(model::basis(&a), [(vec![], 9)].into());
+    assert_eq!(model::hull(&a), [(b"food".to_vec(), 11), (b"four".to_vec(), 12)].into());
+    assert_eq!(model::retain(&a, &b), [(vec![], 9), (b"foo".to_vec(), 10), (b"food".to_vec(), 11)].into());
+    assert_eq!(model::divergence(&a, &b), [(b"fo".to_vec(), 1)].into());
+    assert!(model::divergence(&b, &b).is_empty());
+    assert_eq!(model::convex_meet(&a, &b), [(b"foo".to_vec(), 10), (b"food".to_vec(), 11)].into());
+    assert_eq!(model::convex_subtract(&a, &b), [(vec![], 9), (b"four".to_vec(), 12)].into());
+
+    fn check<V: FuzzValue>(maps: &[PathMap<V>]) {
+        let expressions = [
+            Expr::un(Un::Basis, Expr::Var(0)), Expr::un(Un::Hull, Expr::Var(0)),
+            Expr::un(Un::Branches, Expr::Var(0)),
+            Expr::bin(Op::Retain, Expr::Var(0), Expr::Var(1)),
+            Expr::bin(Op::Divergence, Expr::Var(0), Expr::Var(1)),
+            Expr::bin(Op::ConvexMeet, Expr::Var(0), Expr::Var(1)),
+            Expr::bin(Op::ConvexSubtract, Expr::Var(0), Expr::Var(1)),
+        ];
+        for e in expressions {
+            let expected = routes::eval(Route::Model, &e, maps).unwrap().values;
+            for k in 0..routes::POINTWISE_ROUTES {
+                let actual = routes::eval(Route::Pointwise(k), &e, maps).unwrap().values;
+                assert_eq!(actual, expected, "{e}, route {k}");
+            }
+        }
+    }
+    let maps: Vec<PathMap<u64>> = [&a, &b].into_iter().map(|m| m.iter().map(|(p, v)| (p, *v)).collect()).collect();
+    check(&maps);
+    // Exhaust every pair of small path sets, with unequal payloads and bare
+    // extensions. No known-finding exemptions apply to these comparisons.
+    let paths: &[&[u8]] = &[b"", b"a", b"ab", b"ac", b"b"];
+    for left in 0..32 {
+        for right in 0..32 {
+            let maps: Vec<PathMap<u64>> = [left, right].into_iter().enumerate().map(|(side, mask)| {
+                let mut m = PathMap::new();
+                for (i, p) in paths.iter().enumerate() {
+                    if mask & (1 << i) != 0 { m.set_val_at(p, (side * 10 + i + 1) as u64); }
+                }
+                let mut wz = m.write_zipper();
+                wz.descend_to(b"abc");
+                wz.create_path();
+                drop(wz);
+                m
+            }).collect();
+            check(&maps);
+            let sets: Vec<PathMap<()>> = maps.iter().map(|m| m.iter().map(|(p, _)| (p, ())).collect()).collect();
+            check(&sets);
+            let bits: Vec<PathMap<Bits>> = maps.iter().map(|m| m.iter().map(|(p, v)| (p, Bits(*v))).collect()).collect();
+            check(&bits);
+        }
+    }
+}
+
+#[test]
+fn current_layout_generates_every_expression_operator() {
+    let seen = with_quiet_panics(|| {
+        let mut rng = algebraic::Rng::for_job(7, 0);
+        let mut seen = Vec::new();
+        for _ in 0..20_000 {
+            if let Ok(case) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| algebraic::decode::<()>(&rng.input()))) {
+                for kind in case.expr.kinds() {
+                    if !seen.contains(&kind) { seen.push(kind); }
+                }
+            }
+        }
+        seen
+    });
+    for kind in Kind::ALL { assert!(seen.contains(&kind), "never generated {kind:?}"); }
 }

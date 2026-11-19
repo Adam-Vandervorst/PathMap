@@ -65,7 +65,7 @@ pub const ALG_MAGIC: &[u8] = b"PMALGZ\x01\x00";
 /// Layout version of newly generated inputs.  Bump it, and keep the old
 /// decoding reachable, when a change to [`decode`] would give an existing
 /// input a different case.
-pub const LAYOUT: u16 = 1;
+pub const LAYOUT: u16 = 2;
 /// Layout of an input with no header: every input written before the header
 /// existed.  It is the layout [`LAYOUT`] 1 decodes.
 pub const LEGACY_LAYOUT: u16 = 1;
@@ -102,15 +102,15 @@ pub struct Gen<'a> {
     /// Size of the path alphabet.  A small one makes operands share prefixes
     /// and collide; the full 256 exercises wide nodes.
     alphabet: u16,
+    layout: u16,
 }
 
 impl<'a> Gen<'a> {
-    /// A cursor over the input after its header.  Layout 1 is the only
-    /// decoding there is, so the version is not consulted yet; a newer one
-    /// decodes as layout 1.
+    /// Layout 1 preserves the original operator tables; layout 2 adds convex
+    /// and path-set expressions. Unknown later versions use the latest layout.
     pub fn new(bytes: &'a [u8]) -> Self {
-        let (_layout, payload) = split_input(bytes);
-        Gen { bytes: payload, pos: 0, alphabet: 3 }
+        let (layout, payload) = split_input(bytes);
+        Gen { bytes: payload, pos: 0, alphabet: 3, layout }
     }
     pub fn byte(&mut self) -> u8 {
         let b = self.bytes.get(self.pos).copied().unwrap_or(0);
@@ -253,7 +253,7 @@ fn gen_ctx(g: &mut Gen, paths: &[Vec<u8>], depth: usize) -> Ctx {
     };
     match g.modn(8) {
         0..=3 => {
-            let op = Op::ALL[g.modn(Op::ALL.len())];
+            let op = Op::ALL[g.modn(if g.layout < 2 { 7 } else { Op::ALL.len() })];
             let e = gen_expr(g, 1);
             let c = Box::new(gen_ctx(g, paths, depth - 1));
             if g.boolean() { Ctx::Right(op, e, c) } else { Ctx::Left(op, c, e) }
@@ -267,7 +267,7 @@ fn gen_ctx(g: &mut Gen, paths: &[Vec<u8>], depth: usize) -> Ctx {
             Ctx::Unwrap(Box::new(gen_ctx(g, paths, depth - 1)), p)
         }
         _ => {
-            let u = Un::ALL[g.modn(Un::ALL.len())];
+            let u = Un::ALL[g.modn(if g.layout < 2 { 3 } else { Un::ALL.len() })];
             Ctx::Un(u, Box::new(gen_ctx(g, paths, depth - 1)))
         }
     }
@@ -383,11 +383,10 @@ fn gen_expr(g: &mut Gen, depth: usize) -> Expr {
             _ => Expr::Var(g.modn(OPERANDS)),
         };
     }
-    // The crate's own algebra keeps three quarters of the interior nodes, so
-    // the chain and DNF recognisers still fire often; Zippy's operators take
-    // the rest.  Their paths are short, because a long one rarely meets
-    // anything in tries this small.
-    let op = match g.modn(16) {
+    // Keep the original algebra weighted heavily enough for chain and DNF
+    // routes. Layout 2 appends convex/path-set operators to the binary table
+    // and extends the unary table. Short paths encourage prefix collisions.
+    let op = match g.modn(if g.layout < 2 { 16 } else { 20 }) {
         0 | 1 | 2 | 3 => Op::Join,
         4 | 5 | 6 => Op::Meet,
         7 | 8 => Op::Subtract,
@@ -399,12 +398,16 @@ fn gen_expr(g: &mut Gen, depth: usize) -> Expr {
             return Expr::unwrap(e, g.path(2));
         }
         14 => {
-            let u = Un::ALL[g.modn(Un::ALL.len())];
+            let u = Un::ALL[g.modn(if g.layout < 2 { 3 } else { Un::ALL.len() })];
             return Expr::un(u, gen_expr(g, depth - 1));
         }
-        _ => {
+        15 => {
             if g.boolean() { Op::Compose } else { Op::IterC }
         }
+        16 => Op::ConvexMeet,
+        17 => Op::ConvexSubtract,
+        18 => Op::Retain,
+        _ => Op::Divergence,
     };
     Expr::bin(op, gen_expr(g, depth - 1), gen_expr(g, depth - 1))
 }
@@ -527,7 +530,62 @@ pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
         }
     }
 
+    out.extend(check_path_sets(case));
     out.extend(check_laws(case));
+    out
+}
+
+/// Check each new kernel against the flat semantics of its actual inputs.
+/// Whole-expression failures can inherit a known join/meet defect. These local
+/// signatures ensure that exemptions for those defects cannot mask a path-set
+/// regression, even when a faulty old operation produced one of its operands.
+fn check_path_sets<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
+    fn collect<'a>(e: &'a Expr, nodes: &mut Vec<(&'a Expr, &'static str)>) {
+        match e {
+            Expr::Bin(op, l, r) => {
+                collect(l, nodes);
+                collect(r, nodes);
+                if matches!(op, Op::ConvexMeet | Op::ConvexSubtract | Op::Retain | Op::Divergence) {
+                    nodes.push((e, op.sym()));
+                }
+            }
+            Expr::Un(u, child) => {
+                collect(child, nodes);
+                if matches!(u, Un::Basis | Un::Hull | Un::Branches) { nodes.push((e, u.name())); }
+            }
+            Expr::Wrap(_, child) | Expr::Unwrap(child, _) => collect(child, nodes),
+            _ => {}
+        }
+    }
+    let mut nodes = Vec::new();
+    collect(&case.expr, &mut nodes);
+    let mut out = Vec::new();
+    for (e, name) in nodes {
+        // Each new operator has two strategies: map and zipper.
+        for k in 0..2 {
+            let eval = |e: &Expr| routes::eval(Route::Pointwise(k), e, &case.operands)
+                .filter(|o| !o.truncated()).map(|o| o.values);
+            let expected = match e {
+                Expr::Bin(op, l, r) => {
+                    let (Some(l), Some(r)) = (eval(l), eval(r)) else { continue };
+                    model::apply(*op, &l, &r)
+                }
+                Expr::Un(u, child) => {
+                    let Some(child) = eval(child) else { continue };
+                    model::unary(*u, &child)
+                }
+                _ => unreachable!(),
+            };
+            let Some(actual) = eval(e) else { continue };
+            if actual != expected {
+                out.push(Divergence {
+                    class: Class::Values,
+                    signature: signature::<V>("values", &format!("path_set/{name}/pw{k}")),
+                    detail: format!("{e}, route {k}: {}", shape::first_values_diff(&actual, &expected).unwrap()),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -1188,8 +1246,7 @@ impl Rng {
     /// would saturate the rest to zeros and waste the draw -- and short enough
     /// to shrink quickly.
     /// A random input: the current header, then the bytes [`decode`] reads.
-    /// The bytes after the header are the stream this produced before the
-    /// header existed, so a seed still names the same cases.
+    /// The header fixes the operator layout used to replay the byte stream.
     pub fn input(&mut self) -> Vec<u8> {
         let n = 48 + (self.next() % 96) as usize;
         let mut v = input_header();

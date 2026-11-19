@@ -4,8 +4,8 @@
 //! deliberately small: the point is not to cover a rich language but to give
 //! each expression as many *distinct implementation routes* as possible, and a
 //! route only exists where the crate offers one.  So the operator set is
-//! exactly the crate's algebra -- join, meet, subtract, symmetric difference,
-//! restrict -- and the interesting structure is the shape of the tree, because
+//! the crate's algebra, convex meet/subtract and the valued path-set operators.
+//! The interesting structure is the shape of the tree, because
 //! that is what decides which routes apply:
 //!
 //! * any tree at all can be walked bottom-up with two-operand calls, so the
@@ -55,11 +55,16 @@ pub enum Op {
     /// Zippy's `IterC src b`: `b` if `src` has a value below its root, else
     /// nothing.
     IterC,
+    ConvexMeet,
+    ConvexSubtract,
+    Retain,
+    Divergence,
 }
 
 impl Op {
-    pub const ALL: [Op; 7] =
-        [Op::Join, Op::Meet, Op::Subtract, Op::SymDiff, Op::Restrict, Op::Compose, Op::IterC];
+    pub const ALL: [Op; 11] =
+        [Op::Join, Op::Meet, Op::Subtract, Op::SymDiff, Op::Restrict, Op::Compose, Op::IterC,
+         Op::ConvexMeet, Op::ConvexSubtract, Op::Retain, Op::Divergence];
 
     pub fn sym(self) -> &'static str {
         match self {
@@ -70,6 +75,10 @@ impl Op {
             Op::Restrict => "/",
             Op::Compose => ".",
             Op::IterC => "iter_c",
+            Op::ConvexMeet => "convex_meet",
+            Op::ConvexSubtract => "convex_subtract",
+            Op::Retain => "retain",
+            Op::Divergence => "divergence",
         }
     }
 
@@ -107,7 +116,7 @@ impl Op {
     }
 }
 
-/// Zippy's one-operand operators that take no path.
+/// Unary space and path-set operators that take no path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Un {
     /// `Head s`: the first byte of every path, as one-byte paths.
@@ -116,16 +125,22 @@ pub enum Un {
     TailsUnion,
     /// `TailsIntersection s`: their intersection; nothing when there are none.
     TailsInter,
+    Basis,
+    Hull,
+    Branches,
 }
 
 impl Un {
-    pub const ALL: [Un; 3] = [Un::Head, Un::TailsUnion, Un::TailsInter];
+    pub const ALL: [Un; 6] = [Un::Head, Un::TailsUnion, Un::TailsInter, Un::Basis, Un::Hull, Un::Branches];
 
     pub fn name(self) -> &'static str {
         match self {
             Un::Head => "head",
             Un::TailsUnion => "tails_union",
             Un::TailsInter => "tails_inter",
+            Un::Basis => "basis",
+            Un::Hull => "hull",
+            Un::Branches => "branches",
         }
     }
 }
@@ -141,7 +156,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 13] = [
+    pub const ALL: [Kind; 20] = [
         Kind::Op(Op::Join),
         Kind::Op(Op::Meet),
         Kind::Op(Op::Subtract),
@@ -149,12 +164,19 @@ impl Kind {
         Kind::Op(Op::Restrict),
         Kind::Op(Op::Compose),
         Kind::Op(Op::IterC),
+        Kind::Op(Op::ConvexMeet),
+        Kind::Op(Op::ConvexSubtract),
+        Kind::Op(Op::Retain),
+        Kind::Op(Op::Divergence),
         Kind::Singleton,
         Kind::Wrap,
         Kind::Unwrap,
         Kind::Un(Un::Head),
         Kind::Un(Un::TailsUnion),
         Kind::Un(Un::TailsInter),
+        Kind::Un(Un::Basis),
+        Kind::Un(Un::Hull),
+        Kind::Un(Un::Branches),
     ];
 
     pub fn sym(self) -> &'static str {

@@ -266,6 +266,25 @@ def convexProgram (op : UInt8) : ByteArray := ByteArray.mk <|
   (Fuzz.wireMagic ++ [61, 0, 0, 0, 0, 0, 61, 0, 1, 2]).toArray)).head!).startsWith
   "0 descend_to ret=02"
 
+/-- The new selector range shares the pruned model and marks branch points with 1. -/
+def pathSetProgram (op : UInt8) : ByteArray := ByteArray.mk <|
+  (Fuzz.wireMagic ++ [75, 0,
+    4, 0, 10, 1, 0, 11, 2, 0, 1, 12, 2, 0, 2, 13,
+    3, 0, 20, 1, 0, 21, 2, 0, 3, 22, 0, 0, op]).toArray
+
+#guard [65, 70].all (fun op => (Fuzz.run (pathSetProgram op)).contains "MAP0 _:10")
+#guard [66, 71].all (fun op =>
+  (Fuzz.run (pathSetProgram op)).contains "MAP0 _:-,00:-,0001:12,0002:13")
+#guard [67, 72].all (fun op => (Fuzz.run (pathSetProgram op)).contains "MAP0 _:10,00:11")
+#guard [68, 69, 73, 74].all (fun op => (Fuzz.run (pathSetProgram op)).contains "MAP0 _:-,00:1")
+#guard [67, 68, 72, 73].all (fun op =>
+  (Fuzz.run (pathSetProgram op) 256 true).contains "MAP0 _:10,00:11,0001:12,0002:13")
+#guard [65, 66, 69, 70, 71, 74].all (fun op =>
+  Fuzz.run (pathSetProgram op) 256 true == Fuzz.run (pathSetProgram op))
+#guard ((Fuzz.run (ByteArray.mk
+  (Fuzz.wireMagic ++ [65, 0, 0, 0, 0, 0, 65, 0, 1, 2]).toArray)).head!).startsWith
+  "0 descend_to ret=02"
+
 /-! ## Naive oracles
 
 `PathMap.join` / `meet` / `sub` are defined in terms of `ValOps`, which was

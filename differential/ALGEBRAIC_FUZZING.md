@@ -320,15 +320,17 @@ An input is the wire header, then the bytes `decode` reads:
 It is laid out like the main harness's (`harness::WIRE_MAGIC`, then a selector
 count) and the pruned harness's (`PMPRUN`, then its count), with this fuzzer's
 own marker. Where those two record how many operations their table had, this
-records a *layout version* (`algebraic::LAYOUT`, now 1): its decoding has no
+records a *layout version* (`algebraic::LAYOUT`, now 2): its decoding has no
 single table, so it is the version that says which decoding the payload was
 written for. Bump it, and keep the old decoding reachable, when a change to
 `decode` would give an existing input a different case.
 
 The header is optional. An input without one is layout 1, so every input written
 before it existed decodes as it did; a cut-short header decodes as an empty
-payload. `Rng::input` writes the header in front of the same random stream as
-before, so a seed still names the same cases. `--shrink` reduces only the
+payload. Layout 2 adds convex meet/subtract, basis, hull, retain, divergence
+and branches; layout 1 retains its original operator tables. `Rng::input`
+writes the current layout, so replaying older seeds requires their original
+layout header. `--shrink` reduces only the
 payload and writes the result with a header, so a legacy input comes out
 headered and decodes the same way.
 
