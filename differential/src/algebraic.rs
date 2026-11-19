@@ -30,6 +30,7 @@ pub mod routes;
 pub mod shape;
 pub mod value;
 pub mod zippy_laws;
+pub mod path_set_laws;
 
 use pathmap::PathMap;
 use pathmap::zipper::{ZipperMoving, ZipperWriting};
@@ -619,8 +620,8 @@ pub fn check_laws<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
         inst.pre.iter().all(|h| match h {
             Hyp::Holds(b) => *b,
             Hyp::Mem(p, e, want) => eval(e).is_some_and(|o| o.values.contains_key(p) == *want),
-            Hyp::Eq(l, r) => match (eval(l), eval(r)) {
-                (Some(l), Some(r)) => l.values == r.values,
+            Hyp::Eq(l, r) | Hyp::Ne(l, r) => match (eval(l), eval(r)) {
+                (Some(l), Some(r)) => (l.values == r.values) == matches!(h, Hyp::Eq(..)),
                 _ => false,
             },
         })

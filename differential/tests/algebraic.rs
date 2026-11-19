@@ -472,13 +472,13 @@ fn every_law_variable_has_something_to_bind_to() {
 /// Every generated law holds in the flat model, plain and in the substitution
 /// and congruence instances `check_laws` derives from it.
 ///
-/// The laws are theorems about Zippy's operators, and `model.rs` is those
+/// The laws are theorems about space and path-set operators, and `model.rs` is those
 /// operators' membership lemmas read as code, with no trie anywhere.  So a
 /// failure here is never the crate: it is the Lean-to-Rust translation, the
 /// variable binding, the derivation, or the model -- exactly the parts of the
 /// harness that, if wrong, would make every law finding a false one.
 #[test]
-fn zippy_laws_hold_in_the_model() {
+fn generated_laws_hold_in_the_model() {
     use algebraic::laws::{instantiate, laws, substituted, Binding, Hyp, Instance};
     use algebraic::routes::{eval, Route};
     const CASES: usize = 3_000;
@@ -501,6 +501,7 @@ fn zippy_laws_hold_in_the_model() {
                     Hyp::Holds(b) => *b,
                     Hyp::Mem(p, e, want) => model(e).contains_key(p) == *want,
                     Hyp::Eq(l, r) => model(l) == model(r),
+                    Hyp::Ne(l, r) => model(l) != model(r),
                 })
             };
             for (i, law) in laws::<()>().iter().enumerate() {
@@ -553,7 +554,7 @@ fn zippy_laws_hold_in_the_model() {
 
 /// Laws are checked for the set type only; see `laws.rs`.
 #[test]
-fn zippy_laws_apply_to_the_set_type_only() {
+fn generated_laws_apply_to_the_set_type_only() {
     assert!(!algebraic::laws::laws::<()>().is_empty());
     assert!(algebraic::laws::laws::<u64>().is_empty());
     assert!(algebraic::laws::laws::<Bits>().is_empty());
@@ -676,4 +677,17 @@ fn current_layout_generates_every_expression_operator() {
         seen
     });
     for kind in Kind::ALL { assert!(seen.contains(&kind), "never generated {kind:?}"); }
+}
+
+#[test]
+fn path_set_laws_are_registered_without_name_collisions() {
+    let all = algebraic::laws::laws::<()>();
+    let names: std::collections::BTreeSet<_> = all.iter().map(|law| law.name).collect();
+    assert_eq!(names.len(), all.len());
+    for name in ["basis_idempotent", "hull_idempotent", "divergence_comm",
+        "branches_union", "retain_self", "convexMeet_assoc", "convexSubtract_action",
+        "completion_idempotent", "lcp_associativity", "hull_of_antichain"] {
+        assert!(names.contains(format!("path_set/{name}").as_str()), "missing {name}");
+    }
+    assert_eq!(all.len(), algebraic::zippy_laws::laws().len() + algebraic::path_set_laws::laws().len());
 }

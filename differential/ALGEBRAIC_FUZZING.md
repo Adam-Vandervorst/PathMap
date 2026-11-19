@@ -140,8 +140,18 @@ file with the reason (membership lemmas, raw-zipper-op theorems,
 function-typed binders).
 
 ```sh
-cd lean && lake env lean --run ZippyLaws.lean > ../differential/src/algebraic/zippy_laws.rs
+cd lean
+lake build
+lake env lean --run ZippyLaws.lean > ../differential/src/algebraic/zippy_laws.rs
+lake env lean --run PathSetLaws.lean > ../differential/src/algebraic/path_set_laws.rs
 ```
+
+`PathSetLaws.lean` exports the convex and path-set theorems through the same
+translator. It also recognizes `Same`, inclusion and unrestricted membership
+equivalences, preserving conditional laws' hypotheses. The generated file lists
+every unsupported theorem and its reason. CI regenerates both files and rejects
+stale output. Derived completion and LCP product use the proved combinations of
+branches, divergence, retain and union; they have no separate Rust kernel.
 
 The theorems are about `PrunedMap Unit` — a set of paths — so they are checked
 for `unit` only. Under `u64` or `bits` several are false for reasons that have

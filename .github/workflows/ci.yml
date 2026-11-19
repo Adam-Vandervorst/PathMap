@@ -196,6 +196,14 @@ jobs:
           cd lean
           lake build 2>&1 | tee ../lake.log
           test "${PIPESTATUS[0]}" -eq 0
+      - name: generated algebraic laws are current
+        run: |
+          cd lean
+          lake build LawExport.Checks
+          lake env lean --run ZippyLaws.lean > "$RUNNER_TEMP/zippy_laws.rs"
+          lake env lean --run PathSetLaws.lean > "$RUNNER_TEMP/path_set_laws.rs"
+          diff -u ../differential/src/algebraic/zippy_laws.rs "$RUNNER_TEMP/zippy_laws.rs"
+          diff -u ../differential/src/algebraic/path_set_laws.rs "$RUNNER_TEMP/path_set_laws.rs"
       - name: no sorry, no unexpected axioms
         run: |
           if grep -n 'declaration uses .sorry.' lake.log; then
