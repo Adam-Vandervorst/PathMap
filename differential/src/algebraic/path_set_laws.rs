@@ -1749,7 +1749,7 @@ pub fn laws() -> Vec<ZippyLaw> {
             lhs: composition(s(0), empty()),
             rhs: empty(),
         },
-        // PrunedModel/Convex/PathSetProduct.lean:116
+        // PrunedModel/Convex/PathSetProduct.lean:122
         ZippyLaw {
             name: "path_set/equiv_members",
             spaces: 2,
@@ -1759,7 +1759,7 @@ pub fn laws() -> Vec<ZippyLaw> {
             lhs: s(0),
             rhs: s(1),
         },
-        // PrunedModel/Convex/PathSetProduct.lean:123
+        // PrunedModel/Convex/PathSetProduct.lean:129
         ZippyLaw {
             name: "path_set/prefixFree_antichain",
             spaces: 1,
@@ -1769,7 +1769,7 @@ pub fn laws() -> Vec<ZippyLaw> {
             lhs: basis(s(0)),
             rhs: s(0),
         },
-        // PrunedModel/Convex/PathSetProduct.lean:132
+        // PrunedModel/Convex/PathSetProduct.lean:138
         ZippyLaw {
             name: "path_set/prefix_free_product",
             spaces: 4,
@@ -1779,7 +1779,7 @@ pub fn laws() -> Vec<ZippyLaw> {
             lhs: divergence(composition(s(0), s(2)), composition(s(1), s(3))),
             rhs: union(divergence(s(0), s(1)), composition(inter(s(0), s(1)), divergence(s(2), s(3)))),
         },
-        // PrunedModel/Convex/PathSetProduct.lean:153
+        // PrunedModel/Convex/PathSetProduct.lean:159
         ZippyLaw {
             name: "path_set/common_prefix_code",
             spaces: 3,
@@ -2698,10 +2698,10 @@ pub fn laws() -> Vec<ZippyLaw> {
 //   PrunedModel/Convex/PathSetPowers.lean:32 path_set/powerSum_succ: binder n : Nat
 //   PrunedModel/Convex/PathSetPowers.lean:52 path_set/prefix_code_powers: binder m : Nat
 //   PrunedModel/Convex/PathSetPowers.lean:75 path_set/general_product: mentions ite
-//   PrunedModel/Convex/PathSetProduct.lean:16 path_set/mem_proper_overlap: binder f : PathMapModel.Path → PathMapModel.Path → PrunedModel.PathSpace
-//   PrunedModel/Convex/PathSetProduct.lean:37 path_set/mem_leftOverlap: conclusion is not an equation of spaces (Iff)
-//   PrunedModel/Convex/PathSetProduct.lean:45 path_set/mem_rightOverlap: conclusion is not an equation of spaces (Iff)
-//   PrunedModel/Convex/PathSetProduct.lean:53 path_set/divergence_product_nonempty: mentions PrunedModel.Convex.PathSetLaws.leftOverlap
+//   PrunedModel/Convex/PathSetProduct.lean:15 path_set/mem_proper_overlap: binder f : PathMapModel.Path → PathMapModel.Path → PrunedModel.PathSpace
+//   PrunedModel/Convex/PathSetProduct.lean:43 path_set/mem_leftOverlap: conclusion is not an equation of spaces (Iff)
+//   PrunedModel/Convex/PathSetProduct.lean:51 path_set/mem_rightOverlap: conclusion is not an equation of spaces (Iff)
+//   PrunedModel/Convex/PathSetProduct.lean:59 path_set/divergence_product_nonempty: mentions PrunedModel.Convex.leftOverlap
 //   PrunedModel/Convex/PathSetProofs.lean:7 path_set/basis_subset: conclusion is not an equation of spaces (Membership.mem)
 //   PrunedModel/Convex/PathSetProofs.lean:10 path_set/hull_subset: conclusion is not an equation of spaces (Membership.mem)
 //   PrunedModel/Convex/PathSetProofs.lean:29 path_set/basis_antichain: conclusion is not an equation of spaces (equation of Bool)

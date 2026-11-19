@@ -76,7 +76,7 @@ theorem general_product (a b x y : PathSpace) (p : Path) :
     p ∈ divergence (product a x) (product b y) ↔
     p ∈ (if x = ofPaths [] ∨ y = ofPaths [] then ofPaths [] else
       union (union (divergence a b) (product (inter a b) (divergence x y)))
-        (union (PathSetLaws.leftOverlap a b x y) (PathSetLaws.rightOverlap a b x y))) := by
+        (union (leftOverlap a b x y) (rightOverlap a b x y))) := by
   by_cases hx : x = ofPaths []
   · subst x; simp
   · by_cases hy : y = ofPaths []

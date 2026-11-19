@@ -1,6 +1,6 @@
 import PrunedModel.Convex.PathSetUpdates
 
-/-! Bridges between the universally quantified laws and the executable Boolean catalogue. -/
+/-! Boolean formulations of the path-set laws and their extensionality certificates. -/
 namespace PrunedModel.Convex
 open PathMapModel
 
@@ -69,7 +69,7 @@ theorem singleton_prefix_test (a b : PathSpace) :
     have hh := (hp q).mp hq
     subst q; exact he r hr
 
-/-- The exact Boolean zero criterion used by the executable catalogue. -/
+/-- Boolean criterion for divergence to be empty. -/
 theorem zero_criterion_check (a b : PathSpace) :
     ((divergence a b)).keys.isEmpty =
       (a.keys.isEmpty || b.keys.isEmpty ||

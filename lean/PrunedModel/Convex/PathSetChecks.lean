@@ -1,23 +1,8 @@
-import PrunedModel.Convex.PathSetLaws
 import PrunedModel.Convex.Map
 
-set_option maxRecDepth 4096
-set_option maxHeartbeats 0
 namespace PrunedModel.Convex.PathSetChecks
 open PathMapModel
 open PrunedModel.Convex
-
-def small : List PathSpace := [(ofPaths []), (ofPaths [[]]), (ofPaths [[0]]), (ofPaths [[1]]), (ofPaths [[],[0]]), (ofPaths [[],[1]]), (ofPaths [[0],[1]]), (ofPaths [[],[0],[1]])]
-def fixtures : List PathSpace := small ++
-  [(ofPaths [[0],[0,0],[0,1]]), (ofPaths [[0,0],[0,1]]), (ofPaths [[0],[1,0],[1,1,0],[1,1,1]]),
-   (ofPaths [[255,0],[255,255]]), (ofPaths [[0,0,0],[1],[0,1],[0,0,1]])]
-
-#guard (small.flatMap fun a => small.flatMap fun b => small.flatMap fun c =>
-  small.map fun f => (PathSetLaws.failures (PathSetLaws.all a b c f)).isEmpty).all id
-#guard (fixtures.flatMap fun a => fixtures.map fun b =>
-  (PathSetLaws.failures (PathSetLaws.unary a ++ PathSetLaws.binary a b)).isEmpty).all id
-#guard (fixtures.flatMap fun a => (List.range 4).flatMap fun m => (List.range 4).map fun n =>
-  (PathSetLaws.failures (PathSetLaws.powers a m n)).isEmpty).all id
 
 -- Counterexamples are positively checked: these are NOT proposed rewrite rules.
 #guard !equiv (divergence (divergence (ofPaths [[0,0]]) (ofPaths [[0,1]])) (ofPaths [[1]]))

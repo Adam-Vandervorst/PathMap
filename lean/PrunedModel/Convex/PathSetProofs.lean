@@ -72,7 +72,7 @@ theorem singleton_polarization (a b : Path) (p : Path) :
   simp [branches, mem_divergence, Path.divergence_comm b a]
 
 /-- A symmetric bilinear operation with this diagonal is uniquely determined.
-The empty laws are listed explicitly, as in the executable catalog. -/
+The hypotheses include both empty-space identities. -/
 theorem divergence_unique
     (f : PathSpace → PathSpace → Path → Prop)
     (he : ∀ a p, ¬ f (ofPaths []) a p ∧ ¬ f a (ofPaths []) p)

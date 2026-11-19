@@ -1,5 +1,4 @@
 import PrunedModel.Convex.PathSetRecursive
-import PrunedModel.Convex.PathSetLaws
 
 namespace PathMapModel.Path
 open PathMapModel
@@ -34,18 +33,25 @@ theorem mem_proper_overlap (a b : PathSpace) (f : Path → Path → PathSpace) (
     | nil => exact False.elim (hr rfl)
     | cons c rs => simpa [hs] using hp
 
+/-- The proper-prefix contributions in the full four-factor product expansion. -/
+def leftOverlap (a b x y : PathSpace) : PathSpace :=
+  properOverlap a b fun p r => wrap p (divergence x (wrap r y))
+
+def rightOverlap (a b x y : PathSpace) : PathSpace :=
+  properOverlap b a fun p r => wrap p (divergence (wrap r x) y)
+
 theorem mem_leftOverlap (a b x y : PathSpace) (p : Path) :
-    p ∈ PathSetLaws.leftOverlap a b x y ↔ ∃ u ∈ a, ∃ r, r ≠ [] ∧ u ++ r ∈ b ∧
+    p ∈ leftOverlap a b x y ↔ ∃ u ∈ a, ∃ r, r ≠ [] ∧ u ++ r ∈ b ∧
       ∃ q ∈ divergence x (wrap r y), u ++ q = p := by
-  simp only [PathSetLaws.leftOverlap,PathSetLaws.D]
+  simp only [leftOverlap]
   rw [mem_proper_overlap a b (fun u r => wrap u ((divergence x (wrap r y)))) p]
   change (∃ u ∈ a, ∃ r, r ≠ [] ∧ u ++ r ∈ b ∧ p ∈ wrap u ((divergence x (wrap r y)))) ↔ _
   simp only [mem_wrap]
 
 theorem mem_rightOverlap (a b x y : PathSpace) (p : Path) :
-    p ∈ PathSetLaws.rightOverlap a b x y ↔ ∃ v ∈ b, ∃ r, r ≠ [] ∧ v ++ r ∈ a ∧
+    p ∈ rightOverlap a b x y ↔ ∃ v ∈ b, ∃ r, r ≠ [] ∧ v ++ r ∈ a ∧
       ∃ q ∈ divergence (wrap r x) y, v ++ q = p := by
-  simp only [PathSetLaws.rightOverlap,PathSetLaws.D]
+  simp only [rightOverlap]
   rw [mem_proper_overlap b a (fun v r => wrap v ((divergence (wrap r x) y))) p]
   change (∃ v ∈ b, ∃ r, r ≠ [] ∧ v ++ r ∈ a ∧ p ∈ wrap v ((divergence (wrap r x) y))) ↔ _
   simp only [mem_wrap]
@@ -53,7 +59,7 @@ theorem mem_rightOverlap (a b x y : PathSpace) (p : Path) :
 theorem divergence_product_nonempty (a b x y : PathSpace) (hx : x ≠ ofPaths []) (hy : y ≠ ofPaths []) (p : Path) :
     p ∈ divergence (product a x) (product b y) ↔
     p ∈ divergence a b ∨ p ∈ product (inter a b) (divergence x y) ∨
-    p ∈ PathSetLaws.leftOverlap a b x y ∨ p ∈ PathSetLaws.rightOverlap a b x y := by
+    p ∈ leftOverlap a b x y ∨ p ∈ rightOverlap a b x y := by
   constructor
   · intro h
     obtain ⟨ux,hux,vy,hvy,hd⟩ := (mem_divergence _ _ _).mp h
@@ -134,14 +140,14 @@ theorem prefix_free_product {a b x y : PathSpace} (hf : Antichain (union a b))
     p ∈ divergence (product a x) (product b y) ↔
     p ∈ divergence a b ∨ p ∈ product (inter a b) (divergence x y) := by
   rw [divergence_product_nonempty a b x y hx hy]
-  have hl : p ∉ PathSetLaws.leftOverlap a b x y := by
+  have hl : p ∉ leftOverlap a b x y := by
     intro h
     obtain ⟨u,hu,r,hr,hv,_⟩ := (mem_leftOverlap _ _ _ _ _).mp h
     have he := hf u ((mem_union a b _).mpr (Or.inl hu)) (u++r) ((mem_union a b _).mpr (Or.inr hv))
       ((Path.prefix_iff_extension _ _).mpr ⟨r,rfl⟩)
     have hn : r = [] := by have hh := congrArg List.length he; simpa using hh
     exact hr hn
-  have hr : p ∉ PathSetLaws.rightOverlap a b x y := by
+  have hr : p ∉ rightOverlap a b x y := by
     intro h
     obtain ⟨v,hv,r,hr,hu,_⟩ := (mem_rightOverlap _ _ _ _ _).mp h
     have he := hf v ((mem_union a b _).mpr (Or.inr hv)) (v++r) ((mem_union a b _).mpr (Or.inl hu))
