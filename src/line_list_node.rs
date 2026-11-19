@@ -1801,7 +1801,9 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
         self.get_child_mut(key)
     }
     fn node_replace_child(&mut self, key: &[u8], new_node: TrieNodeODRc<V, A>) {
-        let (consumed_bytes, child_node) = self.get_child_mut(key).unwrap();
+        let (consumed_bytes, child_node) = self.get_child_mut(key).expect(
+            "[pathmap-panic:line_list_node.replace_child.missing_child] missing child while replacing node"
+        );
         debug_assert!(consumed_bytes == key.len());
         *child_node = new_node;
     }
@@ -2748,7 +2750,8 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 match new_node.merge_from_list_node(self) {
                     //Both nodes were empty so the join is empty too
                     AlgebraicStatus::None => {
-                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty());
+                        debug_assert!(self.node_is_empty() && other_dense_node.node_is_empty(),
+                            "[pathmap-panic:line_list_node.pjoin_dense.empty_result] join returned empty for nonempty operands");
                         AlgebraicResult::None
                     },
                     AlgebraicStatus::Identity => AlgebraicResult::Identity(COUNTER_IDENT),
@@ -2799,7 +2802,8 @@ impl<V: Clone + Send + Sync, A: Allocator> TrieNode<V, A> for LineListNode<V, A>
                 let other_dense_node = unsafe{ other_node.as_dense_unchecked() };
                 let mut new_node = other_dense_node.clone();
                 let status = new_node.merge_from_list_node(self);
-                debug_assert!(!status.is_none());
+                debug_assert!(!status.is_none(),
+                    "[pathmap-panic:line_list_node.join_into_dense.empty_result] join returned empty");
                 (AlgebraicStatus::Element, Err(TrieNodeODRc::new_in(new_node, self.alloc.clone())))
             },
             #[cfg(feature = "bridge_nodes")]

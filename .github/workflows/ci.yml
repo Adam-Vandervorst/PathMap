@@ -351,7 +351,7 @@ jobs:
           rustc --version && cargo --version
       - name: harness gate
         # recogniser invariants, a short sweep, and route coverage; no corpus in CI
-        run: cargo test --release -p differential --test algebraic
+        run: cargo test --release -p differential --lib --test algebraic
       - name: sweep (release)
         if: ${{ !cancelled() }}
         env:

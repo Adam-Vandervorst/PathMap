@@ -2131,7 +2131,9 @@ impl<V: Clone + Send + Sync, A: Allocator, Cf: CoFree<V=V, A=A>, OtherCf: CoFree
                     match arg_idx {
                         0 => self.rec().cloned(),
                         1 => other.rec().cloned(),
-                        _ => unreachable!()
+                        _ => unreachable!(
+                            "[pathmap-panic:cofree.combine_results.invalid_rec_identity] unexpected identity operand {arg_idx}"
+                        )
                     }
                 });
                 let val = val_el.flatten().map_into_option(|arg_idx| {

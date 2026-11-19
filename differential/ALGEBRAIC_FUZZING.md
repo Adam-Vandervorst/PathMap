@@ -219,7 +219,7 @@ by value type -- bits is lawful, u64 is not:
   law:join-distributes-over-meet               2077          1
   law:meet-distributes-over-join               1603          -
   law:sym-diff-is-join-minus-meet              6684          5
-  panic:build:line_list_node.rs:1745          13476      13476
+  panic:build:line_list_node.replace_child.missing_child          13476      13476
   values:model                                 1258          2
   values:pw1                                  30849      36071
   ...
