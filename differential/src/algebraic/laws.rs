@@ -14,7 +14,8 @@
 //! `lean/ZippyLaws.lean` reads the *elaborated* theorems, keeps every equation
 //! between spaces whose operators the expression language has, and prints them
 //! as [`zippy_laws`](super::zippy_laws).  So each law here is a theorem, not a
-//! belief, and adding one means proving it.
+//! belief, and adding one means proving it. `lean/PathSetLaws.lean` uses the
+//! same exporter for the convex and path-set theorems in `PrunedModel.Convex`.
 //!
 //! A theorem may quantify over paths and bytes as well as spaces, and may have
 //! hypotheses.  Hence [`ZippyLaw`] is a template: [`instantiate`] binds its
@@ -93,11 +94,12 @@ pub enum Pre {
     Mem(P, T),
     NotMem(P, T),
     EqSpace(T, T),
+    NeSpace(T, T),
 }
 
-/// One theorem of `Zippy.lean`, as generated.
+/// One theorem exported from the pruned Lean model.
 pub struct ZippyLaw {
-    /// The theorem's name in `PrunedModel.Zippy`.
+    /// The theorem name; path-set names have a `path_set/` prefix.
     pub name: &'static str,
     /// How many spaces, paths and bytes it quantifies over.
     pub spaces: usize,
@@ -108,7 +110,7 @@ pub struct ZippyLaw {
     pub rhs: T,
 }
 
-/// The builders `zippy_laws.rs` is written in.  Named after the Lean
+/// The builders the generated law files are written in.  Named after the Lean
 /// definitions, so the generated file reads like the theorems it came from.
 pub mod zippy {
     pub use super::{Pre, ZippyLaw, B, P, T};
@@ -166,6 +168,26 @@ pub mod zippy {
         T::Un(Un::TailsInter, Box::new(a))
     }
 
+    pub fn basis(a: T) -> T { T::Un(Un::Basis, Box::new(a)) }
+    pub fn hull(a: T) -> T { T::Un(Un::Hull, Box::new(a)) }
+    pub fn branches(a: T) -> T { T::Un(Un::Branches, Box::new(a)) }
+    pub fn retain(a: T, b: T) -> T { bin(Op::Retain, a, b) }
+    pub fn divergence(a: T, b: T) -> T { bin(Op::Divergence, a, b) }
+    pub fn convex_meet(a: T, b: T) -> T { bin(Op::ConvexMeet, a, b) }
+    pub fn convex_subtract(a: T, b: T) -> T { bin(Op::ConvexSubtract, a, b) }
+    pub fn sym_diff(a: T, b: T) -> T { bin(Op::SymDiff, a, b) }
+
+    // Derived operators have no separate Rust kernel. Expand their proved
+    // definitions in the primitive vocabulary, just as for raffination.
+    pub fn interior(a: T) -> T { subtr(a.clone(), hull(a)) }
+    pub fn completion(a: T) -> T { union(a.clone(), branches(a)) }
+    pub fn lcp_product(a: T, b: T) -> T {
+        union(divergence(a.clone(), b.clone()), union(retain(a.clone(), b.clone()), retain(b, a)))
+    }
+    pub fn convex_literal_subtract(a: T, b: T) -> T {
+        retain(subtr(a.clone(), b.clone()), subtr(hull(a), b))
+    }
+
     pub fn pv(i: usize) -> P {
         P::Var(i)
     }
@@ -200,6 +222,9 @@ pub mod zippy {
     }
     pub fn eq_space(a: T, b: T) -> Pre {
         Pre::EqSpace(a, b)
+    }
+    pub fn ne_space(a: T, b: T) -> Pre {
+        Pre::NeSpace(a, b)
     }
 }
 
@@ -263,6 +288,8 @@ pub enum Hyp {
     Mem(Vec<u8>, Expr, bool),
     /// `lhs = rhs` as spaces.
     Eq(Expr, Expr),
+    /// `lhs ≠ rhs` as spaces.
+    Ne(Expr, Expr),
 }
 
 pub fn instantiate(law: &ZippyLaw, bind: &Binding) -> Instance {
@@ -275,17 +302,23 @@ pub fn instantiate(law: &ZippyLaw, bind: &Binding) -> Instance {
             Pre::Mem(p, s) => Hyp::Mem(bind.path(p), bind.expr(s), true),
             Pre::NotMem(p, s) => Hyp::Mem(bind.path(p), bind.expr(s), false),
             Pre::EqSpace(a, b) => Hyp::Eq(bind.expr(a), bind.expr(b)),
+            Pre::NeSpace(a, b) => Hyp::Ne(bind.expr(a), bind.expr(b)),
         })
         .collect();
     Instance { lhs: bind.expr(&law.lhs), rhs: bind.expr(&law.rhs), pre }
 }
 
-/// The laws to check for value type `V`: all of `Zippy.lean`'s for the set
-/// type, none otherwise.  See the module comment.
+/// All generated laws for the set type, none otherwise. See the module comment.
 pub fn laws<V: FuzzValue>() -> &'static [ZippyLaw] {
     use std::sync::OnceLock;
     static LAWS: OnceLock<Vec<ZippyLaw>> = OnceLock::new();
-    if V::IS_SET { LAWS.get_or_init(super::zippy_laws::laws) } else { &[] }
+    if V::IS_SET {
+        LAWS.get_or_init(|| {
+            let mut laws = super::zippy_laws::laws();
+            laws.extend(super::path_set_laws::laws());
+            laws
+        })
+    } else { &[] }
 }
 
 /// Whether `spaces` binds any of `law`'s space variables to something other
@@ -347,7 +380,7 @@ impl std::fmt::Display for Ctx {
 /// The most of each kind of variable any generated law uses.  The case has to
 /// supply at least this many; `tests/algebraic.rs` checks the bound.
 pub fn arity() -> (usize, usize, usize) {
-    super::zippy_laws::laws()
+    laws::<()>()
         .iter()
         .fold((0, 0, 0), |(s, p, b), l| (s.max(l.spaces), p.max(l.paths), b.max(l.bytes)))
 }

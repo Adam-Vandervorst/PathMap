@@ -30,6 +30,7 @@ pub mod routes;
 pub mod shape;
 pub mod value;
 pub mod zippy_laws;
+pub mod path_set_laws;
 
 use pathmap::PathMap;
 use pathmap::zipper::{ZipperMoving, ZipperWriting};
@@ -65,7 +66,7 @@ pub const ALG_MAGIC: &[u8] = b"PMALGZ\x01\x00";
 /// Layout version of newly generated inputs.  Bump it, and keep the old
 /// decoding reachable, when a change to [`decode`] would give an existing
 /// input a different case.
-pub const LAYOUT: u16 = 1;
+pub const LAYOUT: u16 = 2;
 /// Layout of an input with no header: every input written before the header
 /// existed.  It is the layout [`LAYOUT`] 1 decodes.
 pub const LEGACY_LAYOUT: u16 = 1;
@@ -102,15 +103,15 @@ pub struct Gen<'a> {
     /// Size of the path alphabet.  A small one makes operands share prefixes
     /// and collide; the full 256 exercises wide nodes.
     alphabet: u16,
+    layout: u16,
 }
 
 impl<'a> Gen<'a> {
-    /// A cursor over the input after its header.  Layout 1 is the only
-    /// decoding there is, so the version is not consulted yet; a newer one
-    /// decodes as layout 1.
+    /// Layout 1 preserves the original operator tables; layout 2 adds convex
+    /// and path-set expressions. Unknown later versions use the latest layout.
     pub fn new(bytes: &'a [u8]) -> Self {
-        let (_layout, payload) = split_input(bytes);
-        Gen { bytes: payload, pos: 0, alphabet: 3 }
+        let (layout, payload) = split_input(bytes);
+        Gen { bytes: payload, pos: 0, alphabet: 3, layout }
     }
     pub fn byte(&mut self) -> u8 {
         let b = self.bytes.get(self.pos).copied().unwrap_or(0);
@@ -253,7 +254,7 @@ fn gen_ctx(g: &mut Gen, paths: &[Vec<u8>], depth: usize) -> Ctx {
     };
     match g.modn(8) {
         0..=3 => {
-            let op = Op::ALL[g.modn(Op::ALL.len())];
+            let op = Op::ALL[g.modn(if g.layout < 2 { 7 } else { Op::ALL.len() })];
             let e = gen_expr(g, 1);
             let c = Box::new(gen_ctx(g, paths, depth - 1));
             if g.boolean() { Ctx::Right(op, e, c) } else { Ctx::Left(op, c, e) }
@@ -267,7 +268,7 @@ fn gen_ctx(g: &mut Gen, paths: &[Vec<u8>], depth: usize) -> Ctx {
             Ctx::Unwrap(Box::new(gen_ctx(g, paths, depth - 1)), p)
         }
         _ => {
-            let u = Un::ALL[g.modn(Un::ALL.len())];
+            let u = Un::ALL[g.modn(if g.layout < 2 { 3 } else { Un::ALL.len() })];
             Ctx::Un(u, Box::new(gen_ctx(g, paths, depth - 1)))
         }
     }
@@ -383,11 +384,10 @@ fn gen_expr(g: &mut Gen, depth: usize) -> Expr {
             _ => Expr::Var(g.modn(OPERANDS)),
         };
     }
-    // The crate's own algebra keeps three quarters of the interior nodes, so
-    // the chain and DNF recognisers still fire often; Zippy's operators take
-    // the rest.  Their paths are short, because a long one rarely meets
-    // anything in tries this small.
-    let op = match g.modn(16) {
+    // Keep the original algebra weighted heavily enough for chain and DNF
+    // routes. Layout 2 appends convex/path-set operators to the binary table
+    // and extends the unary table. Short paths encourage prefix collisions.
+    let op = match g.modn(if g.layout < 2 { 16 } else { 20 }) {
         0 | 1 | 2 | 3 => Op::Join,
         4 | 5 | 6 => Op::Meet,
         7 | 8 => Op::Subtract,
@@ -399,12 +399,16 @@ fn gen_expr(g: &mut Gen, depth: usize) -> Expr {
             return Expr::unwrap(e, g.path(2));
         }
         14 => {
-            let u = Un::ALL[g.modn(Un::ALL.len())];
+            let u = Un::ALL[g.modn(if g.layout < 2 { 3 } else { Un::ALL.len() })];
             return Expr::un(u, gen_expr(g, depth - 1));
         }
-        _ => {
+        15 => {
             if g.boolean() { Op::Compose } else { Op::IterC }
         }
+        16 => Op::ConvexMeet,
+        17 => Op::ConvexSubtract,
+        18 => Op::Retain,
+        _ => Op::Divergence,
     };
     Expr::bin(op, gen_expr(g, depth - 1), gen_expr(g, depth - 1))
 }
@@ -527,7 +531,62 @@ pub fn check<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
         }
     }
 
+    out.extend(check_path_sets(case));
     out.extend(check_laws(case));
+    out
+}
+
+/// Check each new kernel against the flat semantics of its actual inputs.
+/// Whole-expression failures can inherit a known join/meet defect. These local
+/// signatures ensure that exemptions for those defects cannot mask a path-set
+/// regression, even when a faulty old operation produced one of its operands.
+fn check_path_sets<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
+    fn collect<'a>(e: &'a Expr, nodes: &mut Vec<(&'a Expr, &'static str)>) {
+        match e {
+            Expr::Bin(op, l, r) => {
+                collect(l, nodes);
+                collect(r, nodes);
+                if matches!(op, Op::ConvexMeet | Op::ConvexSubtract | Op::Retain | Op::Divergence) {
+                    nodes.push((e, op.sym()));
+                }
+            }
+            Expr::Un(u, child) => {
+                collect(child, nodes);
+                if matches!(u, Un::Basis | Un::Hull | Un::Branches) { nodes.push((e, u.name())); }
+            }
+            Expr::Wrap(_, child) | Expr::Unwrap(child, _) => collect(child, nodes),
+            _ => {}
+        }
+    }
+    let mut nodes = Vec::new();
+    collect(&case.expr, &mut nodes);
+    let mut out = Vec::new();
+    for (e, name) in nodes {
+        // Each new operator has two strategies: map and zipper.
+        for k in 0..2 {
+            let eval = |e: &Expr| routes::eval(Route::Pointwise(k), e, &case.operands)
+                .filter(|o| !o.truncated()).map(|o| o.values);
+            let expected = match e {
+                Expr::Bin(op, l, r) => {
+                    let (Some(l), Some(r)) = (eval(l), eval(r)) else { continue };
+                    model::apply(*op, &l, &r)
+                }
+                Expr::Un(u, child) => {
+                    let Some(child) = eval(child) else { continue };
+                    model::unary(*u, &child)
+                }
+                _ => unreachable!(),
+            };
+            let Some(actual) = eval(e) else { continue };
+            if actual != expected {
+                out.push(Divergence {
+                    class: Class::Values,
+                    signature: signature::<V>("values", &format!("path_set/{name}/pw{k}")),
+                    detail: format!("{e}, route {k}: {}", shape::first_values_diff(&actual, &expected).unwrap()),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -561,8 +620,8 @@ pub fn check_laws<V: FuzzValue>(case: &Case<V>) -> Vec<Divergence> {
         inst.pre.iter().all(|h| match h {
             Hyp::Holds(b) => *b,
             Hyp::Mem(p, e, want) => eval(e).is_some_and(|o| o.values.contains_key(p) == *want),
-            Hyp::Eq(l, r) => match (eval(l), eval(r)) {
-                (Some(l), Some(r)) => l.values == r.values,
+            Hyp::Eq(l, r) | Hyp::Ne(l, r) => match (eval(l), eval(r)) {
+                (Some(l), Some(r)) => (l.values == r.values) == matches!(h, Hyp::Eq(..)),
                 _ => false,
             },
         })
@@ -787,10 +846,10 @@ pub const KNOWN: &[Known] = &[
     // baseline join or meet that consumes it is what then goes wrong.
     Known { signature: "u64:values:subtract_zipper", cause: BIAS_OR_LOSS },
     Known { signature: "u64:shape:subtract_zipper", cause: DANGLING },
-    Known { signature: "u64:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
-    Known { signature: "u64:panic:eval:line_list_node.rs:2732", cause: LOSS },
-    Known { signature: "u64:panic:eval:line_list_node.rs:2783", cause: LOSS },
-    Known { signature: "u64:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
+    Known { signature: "u64:panic:build:line_list_node.replace_child.missing_child", cause: MERKLEIZE },
+    Known { signature: "u64:panic:eval:line_list_node.pjoin_dense.empty_result", cause: LOSS },
+    Known { signature: "u64:panic:eval:line_list_node.join_into_dense.empty_result", cause: LOSS },
+    Known { signature: "u64:panic:eval:cofree.combine_results.invalid_rec_identity", cause: LOSS },
 
     // ---------------------------------------------------------------- bits
     // The lawful type.  Everything here is a real defect: there is no value
@@ -824,10 +883,10 @@ pub const KNOWN: &[Known] = &[
     // operand's value (the debug assert behind cause 2 fires).
     Known { signature: "bits:values:subtract_zipper", cause: LOSS },
     Known { signature: "bits:shape:subtract_zipper", cause: DANGLING },
-    Known { signature: "bits:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
-    Known { signature: "bits:panic:eval:line_list_node.rs:2732", cause: LOSS },
-    Known { signature: "bits:panic:eval:line_list_node.rs:2783", cause: LOSS },
-    Known { signature: "bits:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
+    Known { signature: "bits:panic:build:line_list_node.replace_child.missing_child", cause: MERKLEIZE },
+    Known { signature: "bits:panic:eval:line_list_node.pjoin_dense.empty_result", cause: LOSS },
+    Known { signature: "bits:panic:eval:line_list_node.join_into_dense.empty_result", cause: LOSS },
+    Known { signature: "bits:panic:eval:cofree.combine_results.invalid_rec_identity", cause: LOSS },
     // ---------------------------------------------------------------- unit
     // `PathMap<()>`: the set case, and lawful.  Nothing here can be a value
     // bias, because there is no value to misplace -- so every entry is either a
@@ -853,12 +912,12 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "unit:shape:dnf", cause: DANGLING },
     Known { signature: "unit:values:subtract_zipper", cause: LOSS },
     Known { signature: "unit:shape:subtract_zipper", cause: DANGLING },
-    Known { signature: "unit:panic:build:line_list_node.rs:1785", cause: MERKLEIZE },
-    Known { signature: "unit:panic:eval:line_list_node.rs:2732", cause: LOSS },
-    Known { signature: "unit:panic:eval:dense_byte_node.rs:2088", cause: LOSS },
+    Known { signature: "unit:panic:build:line_list_node.replace_child.missing_child", cause: MERKLEIZE },
+    Known { signature: "unit:panic:eval:line_list_node.pjoin_dense.empty_result", cause: LOSS },
+    Known { signature: "unit:panic:eval:cofree.combine_results.invalid_rec_identity", cause: LOSS },
     // Fires roughly once per million random cases, and the corpus reproduces it
     // for all three types.
-    Known { signature: "unit:panic:eval:line_list_node.rs:2783", cause: LOSS },
+    Known { signature: "unit:panic:eval:line_list_node.join_into_dense.empty_result", cause: LOSS },
     Known { signature: "unit:values:ternary", cause: LOSS },
 
     // ---------------------------------------------------------------- Zippy
@@ -914,9 +973,9 @@ pub const KNOWN: &[Known] = &[
     Known { signature: "unit:shape:pw5+zippy", cause: DANGLING },
     Known { signature: "unit:shape:subtract_zipper+zippy", cause: DANGLING },
     // `unwrap`'s take_map strategy feeding `wrap`'s insert_prefix one.
-    Known { signature: "u64:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
-    Known { signature: "bits:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
-    Known { signature: "unit:panic:eval:trie_node.rs:3247", cause: TAKE_MAP },
+    Known { signature: "u64:panic:eval:trie_node.make_unique.empty_sentinel", cause: TAKE_MAP },
+    Known { signature: "bits:panic:eval:trie_node.make_unique.empty_sentinel", cause: TAKE_MAP },
+    Known { signature: "unit:panic:eval:trie_node.make_unique.empty_sentinel", cause: TAKE_MAP },
     // The laws from `Zippy.lean` that fail, all of them under `PathMap::join`
     // losing a value: every shrunk case is `x | y` with `y` sharing nodes with
     // `x` (a clone, or a join result that reuses `x`'s nodes) or carrying
@@ -994,16 +1053,36 @@ pub enum Outcome {
 }
 
 std::thread_local! {
-    /// Where the last panic came from.  The payload of an `unwrap` on `None`
-    /// carries no location, and the location is the whole value of a crash
-    /// signature -- without it every distinct panic site collapses onto one
-    /// line called "panic".  A hook is the only way to see it.
+    /// The explicit panic-site identifier, or a diagnostic location for an
+    /// untagged panic. Only explicit identifiers belong in the known table.
     static PANIC_SITE: core::cell::RefCell<String> =
         const { core::cell::RefCell::new(String::new()) };
     /// The input [`run_all`] is checking, so a panic that aborts the process
     /// can still name its reproducer.
     static CURRENT_INPUT: core::cell::RefCell<Vec<u8>> =
         const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// An explicit marker identifies an assertion independently of checkout paths,
+/// line shifts, and compiler-generated assertion text. Untagged panics keep
+/// their location for diagnosis, but never match an allowlisted panic site.
+fn panic_site(message: &str, location: Option<&std::panic::Location<'_>>) -> String {
+    if let Some((_, tagged)) = message.split_once("[pathmap-panic:") {
+        if let Some((id, _)) = tagged.split_once(']') {
+            if !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._".contains(&b))
+            {
+                return id.to_owned();
+            }
+        }
+    }
+    match location {
+        Some(l) => {
+            let file = l.file().rsplit(['/', '\\']).next().unwrap_or(l.file());
+            format!("unidentified:{file}:{}:{}", l.line(), l.column())
+        }
+        None => "unidentified".to_owned(),
+    }
 }
 
 /// Replace the panic hook with one that records the panic site and prints
@@ -1014,23 +1093,14 @@ std::thread_local! {
 /// cannot see where the panic came from.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        let site = info
-            .location()
-            .map(|l| {
-                // Just the file name and line: the absolute path would make
-                // signatures depend on where the checkout lives.
-                let f = l.file();
-                let f = f.rsplit('/').next().unwrap_or(f);
-                format!("{f}:{}", l.line())
-            })
-            .unwrap_or_else(|| "?".to_string());
+        let msg = info.payload_as_str().unwrap_or("");
+        let site = panic_site(msg, info.location());
         // A panic that cannot unwind aborts the whole process, so it can never
         // become a finding; say what and where before the abort, or the run just
         // dies with "thread caused non-unwinding panic".  Stable Rust cannot ask
         // `info` whether it unwinds, so match std's messages for the three cases:
         // a debug-mode unsafe-precondition check, a panic in a destructor during
         // unwinding, and a panic in a function that cannot unwind.
-        let msg = info.payload_as_str().unwrap_or("");
         if msg.starts_with("unsafe precondition")
             || msg.starts_with("panic in a destructor")
             || msg.starts_with("panic in a function that cannot unwind")
@@ -1177,8 +1247,7 @@ impl Rng {
     /// would saturate the rest to zeros and waste the draw -- and short enough
     /// to shrink quickly.
     /// A random input: the current header, then the bytes [`decode`] reads.
-    /// The bytes after the header are the stream this produced before the
-    /// header existed, so a seed still names the same cases.
+    /// The header fixes the operator layout used to replay the byte stream.
     pub fn input(&mut self) -> Vec<u8> {
         let n = 48 + (self.next() % 96) as usize;
         let mut v = input_header();
@@ -1232,4 +1301,48 @@ pub fn operand_values<V: FuzzValue>(case: &Case<V>) -> Vec<Values<V>> {
         .iter()
         .map(|m| shape::values_of_shape(&shape_of_map(m)))
         .collect()
+}
+
+#[cfg(test)]
+mod panic_site_tests {
+    use super::{known, panic_signature, panic_site, Phase};
+
+    #[track_caller]
+    fn site(message: &str) -> String {
+        panic_site(message, Some(std::panic::Location::caller()))
+    }
+
+    #[test]
+    fn identified_panics_survive_location_and_wrapper_changes() {
+        let a = site("[pathmap-panic:line_list_node.replace_child.missing_child] missing child");
+        let b = site("internal error: entered unreachable code: [pathmap-panic:line_list_node.replace_child.missing_child] changed detail");
+        assert_eq!(a, b);
+        assert!(known(&panic_signature("u64", Phase::Build, &a)).is_some());
+        assert!(known(&panic_signature("u64", Phase::Eval, &a)).is_none());
+        assert!(known(&panic_signature("other_type", Phase::Build, &a)).is_none());
+    }
+
+    #[test]
+    fn untagged_panics_stay_distinct_and_unexpected() {
+        let a = site("called `Option::unwrap()` on a `None` value");
+        let b = site("called `Option::unwrap()` on a `None` value");
+        assert_ne!(a, b);
+        for id in [a, b, site("[pathmap-panic:new_site] missing child")] {
+            assert!(known(&panic_signature("u64", Phase::Build, &id)).is_none());
+        }
+        for message in ["[pathmap-panic:]", "[pathmap-panic:unfinished", "[pathmap-panic:bad:id]"] {
+            assert!(site(message).starts_with("unidentified:"));
+        }
+    }
+
+    #[test]
+    fn panic_allowlist_uses_only_explicit_identifiers() {
+        for known in super::KNOWN {
+            if let Some((_, suffix)) = known.signature.split_once(":panic:") {
+                let (_, id) = suffix.split_once(':').expect("panic phase and site");
+                assert!(!id.contains(':'), "location in allowlist: {}", known.signature);
+                assert!(!id.starts_with("unidentified"));
+            }
+        }
+    }
 }

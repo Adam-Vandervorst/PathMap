@@ -25,6 +25,7 @@
 //! and why dangling-path divergence is reported separately.
 
 use pathmap::PathMap;
+use pathmap::experimental::{convex, path_sets};
 use pathmap::experimental::zipper_algebra::{
     Clause, zipper_join, zipper_join3, zipper_meet, zipper_meet3, zipper_merge_dnf,
     zipper_n_join, zipper_n_meet, zipper_n_subtract, zipper_n_sym_diff, zipper_subtract,
@@ -50,6 +51,7 @@ pub const SUBTRACT_STRATEGIES: &[&str] = &["map", "subtract_into", "zipper_subtr
 pub const SYM_DIFF_STRATEGIES: &[&str] = &["zipper_sym_diff", "join_minus_meet"];
 pub const RESTRICT_STRATEGIES: &[&str] = &["map", "wz_restrict"];
 pub const COMPOSE_STRATEGIES: &[&str] = &["join_map_into", "wrap_join"];
+pub const PATH_SET_STRATEGIES: &[&str] = &["map", "zipper"];
 pub const ITER_C_STRATEGIES: &[&str] = &["val_count", "iter"];
 pub const SINGLETON_STRATEGIES: &[&str] = &["single", "set_val"];
 pub const WRAP_STRATEGIES: &[&str] = &["graft_map", "prefix_zipper", "insert_prefix"];
@@ -77,6 +79,7 @@ pub fn strategies(op: Op) -> &'static [&'static str] {
         Op::Restrict => RESTRICT_STRATEGIES,
         Op::Compose => COMPOSE_STRATEGIES,
         Op::IterC => ITER_C_STRATEGIES,
+        Op::ConvexMeet | Op::ConvexSubtract | Op::Retain | Op::Divergence => PATH_SET_STRATEGIES,
     }
 }
 
@@ -90,6 +93,7 @@ pub fn kind_strategies(kind: Kind) -> &'static [&'static str] {
         Kind::Un(Un::Head) => HEAD_STRATEGIES,
         Kind::Un(Un::TailsUnion) => TAILS_UNION_STRATEGIES,
         Kind::Un(Un::TailsInter) => TAILS_INTER_STRATEGIES,
+        Kind::Un(Un::Basis | Un::Hull | Un::Branches) => PATH_SET_STRATEGIES,
     }
 }
 
@@ -429,8 +433,36 @@ pub fn apply<V: FuzzValue>(op: Op, k: usize, a: &PathMap<V>, b: &PathMap<V>) -> 
             if below { b.clone() } else { PathMap::new() }
         }
 
+        (Op::ConvexMeet, 0) => convex::convex_meet(a, b),
+        (Op::ConvexSubtract, 0) => convex::convex_subtract(a, b),
+        (Op::Retain, 0) => path_sets::retain(a, b),
+        (Op::Divergence, 0) => marks(path_sets::divergence(a, b)),
+        (Op::ConvexMeet | Op::ConvexSubtract | Op::Retain, _) => {
+            let mut out = PathMap::new();
+            let mut lz = a.read_zipper();
+            let mut rz = b.read_zipper();
+            let mut wz = out.write_zipper();
+            match op {
+                Op::ConvexMeet => convex::zipper_convex_meet(&mut lz, &mut rz, &mut wz),
+                Op::ConvexSubtract => convex::zipper_convex_subtract(&mut lz, &mut rz, &mut wz),
+                _ => path_sets::zipper_retain(&mut lz, &mut rz, &mut wz),
+            }
+            drop(wz);
+            out
+        }
+        (Op::Divergence, _) => {
+            let mut out = PathMap::new();
+            path_sets::zipper_divergence(&mut a.read_zipper(), &mut b.read_zipper(), &mut out.write_zipper());
+            marks(out)
+        }
+
         _ => unreachable!("strategy index out of range for {op:?}"),
     })
+}
+
+/// Lift unit-valued branch points into the expression's payload type.
+fn marks<V: FuzzValue>(map: PathMap<()>) -> PathMap<V> {
+    map.iter().map(|(p, ())| (p, V::canonical())).collect()
 }
 
 // ---------------------------------------------------------------- Zippy
@@ -527,6 +559,25 @@ fn heads<V: FuzzValue>(k: usize, s: &PathMap<V>) -> Vec<u8> {
 
 fn unary<V: FuzzValue>(u: Un, k: usize, s: &PathMap<V>) -> PathMap<V> {
     match u {
+        Un::Basis | Un::Hull => {
+            if k % 2 == 0 {
+                return if u == Un::Basis { path_sets::basis(s) } else { path_sets::hull(s) };
+            }
+            let mut out = PathMap::new();
+            if u == Un::Basis {
+                path_sets::zipper_basis(&mut s.read_zipper(), &mut out.write_zipper());
+            } else {
+                path_sets::zipper_hull(&mut s.read_zipper(), &mut out.write_zipper());
+            }
+            out
+        }
+        Un::Branches => {
+            if k % 2 == 0 { return marks(path_sets::branches(s)); }
+            let mut out = PathMap::new();
+            path_sets::zipper_branches(&mut s.read_zipper(), &mut out.write_zipper());
+            marks(out)
+        }
+
         Un::Head => {
             let hs = heads(k % HEAD_STRATEGIES.len(), s);
             let mut out = PathMap::new();
@@ -685,7 +736,7 @@ fn ternary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>]) -> Option<PathMap<V>
             Op::Meet => zipper_meet3(&mut za, &mut zb, &mut zc, &mut wz),
             Op::Subtract => zipper_subtract3(&mut za, &mut zb, &mut zc, &mut wz),
             Op::SymDiff => zipper_sym_diff3(&mut za, &mut zb, &mut zc, &mut wz),
-            Op::Restrict | Op::Compose | Op::IterC => return None,
+            _ => return None,
         }
     }
     Some(out)
@@ -717,7 +768,7 @@ fn nary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>], poly: bool) -> Option<P
                     Op::Meet => zipper_n_meet(&mut zs, &mut wz),
                     Op::Subtract => zipper_n_subtract(&mut zs, &mut wz),
                     Op::SymDiff => zipper_n_sym_diff(&mut zs, &mut wz),
-                    Op::Restrict | Op::Compose | Op::IterC => unreachable!(),
+                    _ => unreachable!("operator has no n-ary route"),
                 }
             }};
         }
@@ -729,7 +780,7 @@ fn nary<V: FuzzValue>(e: &Expr, operands: &[PathMap<V>], poly: bool) -> Option<P
                     Op::Meet => t.meet_n(&mut wz),
                     Op::Subtract => t.subtract_n(&mut wz),
                     Op::SymDiff => t.sym_diff_n(&mut wz),
-                    Op::Restrict | Op::Compose | Op::IterC => unreachable!(),
+                    _ => unreachable!("operator has no n-ary route"),
                 }
             }};
         }

@@ -157,6 +157,10 @@ name = "restrict"
 harness = false
 
 [[bench]]
+name = "convex"
+harness = false
+
+[[bench]]
 name = "write_zipper"
 harness = false
 

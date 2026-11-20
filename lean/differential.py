@@ -29,10 +29,10 @@ import subprocess
 import sys
 import tempfile
 
-from input_format import input_header, versioned_input
+from input_format import NOPS, input_header, versioned_input
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ORACLE = os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
+ORACLE = os.environ.get("PATHMAP_ORACLE") or os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
 # PATHMAP_TRACE / PATHMAP_ACT_TRACE override the search, for builds that live
 # in another target dir (CI builds two commits side by side).
 TRACE_CANDIDATES = [os.environ.get("PATHMAP_TRACE", "")] + [
@@ -483,8 +483,9 @@ class RandomInputs(InputSource):
     `randbytes` alone is ~39x faster than that loop.
     """
 
-    def __init__(self, seed, count, maxlen):
+    def __init__(self, seed, count, maxlen, selectors=NOPS):
         self.seed, self.count, self.maxlen = seed, count, maxlen
+        self.header = input_header(selectors)
 
     def __len__(self):
         return self.count
@@ -494,7 +495,84 @@ class RandomInputs(InputSource):
 
     def get(self, idx):
         rng = random.Random((self.seed << 32) ^ idx)
-        return input_header() + rng.randbytes(rng.randrange(8, self.maxlen))
+        return self.header + rng.randbytes(rng.randrange(8, self.maxlen))
+
+
+class ConvexInputs(InputSource):
+    """Stateful programs covering both kernels without unrelated known bugs.
+
+    All convex and path-set selectors run in every program. Seeded shapes include
+    shared chains, mismatched tips, root values and empty inputs; random shapes
+    share a small path pool. Writes between operations restore values so an
+    earlier empty result cannot make the rest of the program vacuous.
+    """
+
+    def __init__(self, seed, count):
+        self.seed, self.count = seed, count
+
+    def __len__(self):
+        return self.count
+
+    def name(self, idx):
+        return "convex#%05d" % idx
+
+    def get(self, idx):
+        rng = random.Random((self.seed << 32) ^ idx)
+        shapes = [
+            ([(), (0,), (0, 1)], [(), (0,), (0, 2)]),
+            ([(), (0,)], [()]),
+            ([()], [()]),
+            ([(0,)], [(0,), (0, 1)]),
+            ([], [()]),
+            ([(), (0,)], []),
+            ([(0,), (0, 1), (0, 2)], [(0,), (0, 3)]),
+        ]
+        if idx % 8 < len(shapes):
+            left, right = shapes[idx % 8]
+        else:
+            pool = list(dict.fromkeys(tuple(rng.randrange(3) for _ in range(rng.randrange(4)))
+                                      for _ in range(12)))
+            left = rng.sample(pool, rng.randrange(min(7, len(pool)) + 1))
+            right = rng.sample(pool, rng.randrange(min(7, len(pool)) + 1))
+        layout = idx // 8  # Vary roots/focuses independently of the shape.
+        root0, root1 = ([3] if layout & 1 else []), ([2] if layout & 2 else [])
+        focus0, focus1 = ([1] if layout & 4 else []), ([0] if layout & 8 else [])
+        left = [(list(p), rng.randrange(128)) for p in left]
+        right = [(root1 + focus1 + list(p), rng.randrange(128, 256)) for p in right]
+        blob = bytearray(input_header())
+
+        def path(p):
+            blob.extend([len(p), *p])
+
+        # Outside the write focus, so every operation must preserve this value.
+        outside = [([0], 255)] if root0 or focus0 else []
+        for entries in (outside, right):
+            blob.append(len(entries))
+            for p, v in entries:
+                path(p)
+                blob.append(v)
+        path(root0)
+        path(root1)
+        for target, focus in ((0, focus0), (1, focus1)):
+            blob.extend([18, target])  # move_to_path
+            path(focus)
+        for op in (61, 63, 62, 64, *range(65, 75)):
+            # Restore exactly the same valued input, including after branches
+            # introduces keys that were absent from the original left map.
+            blob.extend([56, 0])  # remove_subtrie without moving the focus
+            for p, v in left:
+                blob.append(60)  # set_val_at, relative to the current focus
+                path(p)
+                blob.append(v)
+            # A dangling path must not turn an ancestor into an interior value.
+            blob.extend([0, 0])
+            path((rng.choice(left)[0] if left else []) + [3])
+            blob.extend([29, 18, 0])
+            path(focus0)
+            blob.append(op)
+            # Compose the operation with itself, checking stable results.
+            blob.append(op)
+        return bytes(blob)
 
 
 class FileInputs(InputSource):
@@ -580,6 +658,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="*")
     ap.add_argument("--random", type=int, default=0, help="generate N random inputs")
+    ap.add_argument("--convex", type=int, default=0, help="generate N focused convex and path-set programs")
+    ap.add_argument("--selectors", type=int, default=NOPS, choices=range(1, NOPS + 1),
+                    metavar="N", help="selector count for random inputs (for baseline replay)")
+    ap.add_argument("--strict", action="store_true", help="fail on known divergences too")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--maxlen", type=int, default=300)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -608,7 +690,9 @@ def main():
     if args.files:
         sources.append(FileInputs(args.files))
     if args.random:
-        sources.append(RandomInputs(args.seed, args.random, args.maxlen))
+        sources.append(RandomInputs(args.seed, args.random, args.maxlen, args.selectors))
+    if args.convex:
+        sources.append(ConvexInputs(args.seed, args.convex))
     source = ChainInputs(sources)
     n_inputs = len(source)
 
@@ -640,7 +724,7 @@ def main():
             if args.verbose:
                 print("ok   %s" % name)
             return False
-        note = classify(msg)
+        note = None if args.strict else classify(msg)
         if note:
             known[note] = known.get(note, 0) + 1
             if args.verbose:

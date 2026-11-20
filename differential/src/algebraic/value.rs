@@ -81,8 +81,8 @@ pub trait FuzzValue:
 
     fn generate(g: &mut Gen) -> Self;
 
-    /// The value a constructed path carries: Zippy's `Singleton` and `Head`
-    /// make paths, not values, so they need one fixed value to put there.
+    /// The value a constructed path carries. Singleton, head, divergence and
+    /// branches create paths, so they need one fixed value to put there.
     fn canonical() -> Self;
 
     fn show(&self) -> String;

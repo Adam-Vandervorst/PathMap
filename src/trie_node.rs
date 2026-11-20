@@ -3244,7 +3244,7 @@ mod opaque_dyn_rc_trie_node {
         #[inline]
         pub(crate) fn make_unique(&mut self) {
             // Empty nodes are sentinels and cannot be made unique/mutable
-            assert!(!self.is_empty(), "Attempted to make_unique on an empty sentinel node");
+            assert!(!self.is_empty(), "[pathmap-panic:trie_node.make_unique.empty_sentinel] Attempted to make_unique on an empty sentinel node");
 
             let (ptr, _tag) = self.ptr.get_raw_parts();
 

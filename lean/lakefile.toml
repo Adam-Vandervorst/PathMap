@@ -1,5 +1,5 @@
 name = "pathmap-model"
-defaultTargets = ["PathMapModel", "pathmap-oracle", "PrunedModel", "pruned-oracle"]
+defaultTargets = ["PathMapModel", "pathmap-oracle", "PrunedModel", "pruned-oracle", "LawExport"]
 
 [[lean_lib]]
 name = "PathMapModel"
@@ -20,3 +20,7 @@ name = "PrunedModel"
 [[lean_exe]]
 name = "pruned-oracle"
 root = "PrunedMain"
+
+# Shared translation used by the two standalone law generators.
+[[lean_lib]]
+name = "LawExport"

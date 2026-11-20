@@ -201,6 +201,7 @@ seven operations except one in `subtract_into`.
 | `PrunedModel/Pointwise.lean` | `valAt` of every map operation |
 | `PrunedModel/Refine.lean` | each write op as `z.withTrie (z.trie.replaceAt z.focus M)` |
 | `PrunedModel/Zippy.lean` | each egg operator as a zipper program over `Space = PrunedMap Unit`, every `formal.egg` rule proved, `Fix` as a least post-fixpoint, the raw ops = egg ops under #104 (§10), the tour as `#guard`s |
+| [`PrunedModel/Convex/CompletionGaps.lean`](PrunedModel/Convex/CompletionGaps.lean) | exact completion laws for retain, raffinate, convex meet, and convex subtraction |
 | `PrunedModel/Fuzz.lean`, `PrunedMain.lean` | the pruned fuzzer's wire format, op table and trace producer; the `pruned-oracle` binary |
 | `ZippyLaws.lean` | exports Zippy.lean's equational theorems as `differential/src/algebraic/zippy_laws.rs`: `lake build PrunedModel && lake env lean --run ZippyLaws.lean > ../differential/src/algebraic/zippy_laws.rs` |
 
