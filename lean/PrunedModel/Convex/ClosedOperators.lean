@@ -1,5 +1,5 @@
 import PrunedModel.Convex.ClosedGeometry
-
+/-! The exact corrections to the four completion bounds are proved in `CompletionGaps.lean`. -/
 namespace PrunedModel.Convex
 open PathMapModel
 

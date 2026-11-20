@@ -3,7 +3,7 @@
 //   cd lean && lake env lean --run PathSetLaws.lean > ../differential/src/algebraic/path_set_laws.rs
 //
 // Every entry is a theorem of PrunedModel.Convex, checked sorry-free when generated.
-// 249 exported, 321 not exported (listed at the end).
+// 254 exported, 321 not exported (listed at the end).
 
 use super::laws::zippy::*;
 
@@ -1028,6 +1028,56 @@ pub fn laws() -> Vec<ZippyLaw> {
             pre: vec![eq_space(completion(s(0)), s(0))],
             lhs: completion(union(s(0), empty())),
             rhs: s(0),
+        },
+        // PrunedModel/Convex/CompletionGaps.lean:9
+        ZippyLaw {
+            name: "path_set/completion_retain_gap",
+            spaces: 2,
+            paths: 0,
+            bytes: 0,
+            pre: vec![],
+            lhs: subtr(retain(completion(s(0)), s(1)), completion(retain(s(0), s(1)))),
+            rhs: subtr(retain(subtr(branches(s(0)), s(0)), s(1)), branches(retain(s(0), s(1)))),
+        },
+        // PrunedModel/Convex/CompletionGaps.lean:18
+        ZippyLaw {
+            name: "path_set/completion_raffinate_correction",
+            spaces: 2,
+            paths: 0,
+            bytes: 0,
+            pre: vec![],
+            lhs: raffination(completion(s(0)), s(1)),
+            rhs: subtr(completion(union(raffination(s(0), s(1)), retain(basis(s(1)), s(0)))), retain(basis(s(1)), s(0))),
+        },
+        // PrunedModel/Convex/CompletionGaps.lean:127
+        ZippyLaw {
+            name: "path_set/completion_convexSubtract_correction",
+            spaces: 2,
+            paths: 0,
+            bytes: 0,
+            pre: vec![],
+            lhs: convex_subtract(completion(s(0)), s(1)),
+            rhs: union(completion(convex_subtract(s(0), s(1))), divergence(subtr(hull(s(0)), s(1)), inter(hull(s(0)), s(1)))),
+        },
+        // PrunedModel/Convex/CompletionGaps.lean:143
+        ZippyLaw {
+            name: "path_set/completion_convexSubtract_gap",
+            spaces: 2,
+            paths: 0,
+            bytes: 0,
+            pre: vec![],
+            lhs: subtr(convex_subtract(completion(s(0)), s(1)), completion(convex_subtract(s(0), s(1)))),
+            rhs: subtr(divergence(subtr(hull(s(0)), s(1)), inter(hull(s(0)), s(1))), union(s(0), branches(subtr(hull(s(0)), s(1))))),
+        },
+        // PrunedModel/Convex/CompletionGaps.lean:157
+        ZippyLaw {
+            name: "path_set/completion_convexMeet_correction",
+            spaces: 2,
+            paths: 0,
+            bytes: 0,
+            pre: vec![],
+            lhs: convex_meet(completion(s(0)), completion(s(1))),
+            rhs: union(completion(convex_meet(s(0), s(1))), union(inter(divergence(inter(hull(s(0)), hull(s(1))), subtr(hull(s(0)), hull(s(1)))), completion(s(1))), inter(completion(s(0)), divergence(inter(hull(s(0)), hull(s(1))), subtr(hull(s(1)), hull(s(0))))))),
         },
         // PrunedModel/Convex/Geometry.lean:38
         ZippyLaw {

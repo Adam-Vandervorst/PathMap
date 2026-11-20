@@ -686,7 +686,9 @@ fn path_set_laws_are_registered_without_name_collisions() {
     assert_eq!(names.len(), all.len());
     for name in ["basis_idempotent", "hull_idempotent", "divergence_comm",
         "branches_union", "retain_self", "convexMeet_assoc", "convexSubtract_action",
-        "completion_idempotent", "lcp_associativity", "hull_of_antichain"] {
+        "completion_idempotent", "lcp_associativity", "hull_of_antichain",
+        "completion_retain_gap", "completion_raffinate_correction", "completion_convexMeet_correction",
+        "completion_convexSubtract_correction", "completion_convexSubtract_gap"] {
         assert!(names.contains(format!("path_set/{name}").as_str()), "missing {name}");
     }
     assert_eq!(all.len(), algebraic::zippy_laws::laws().len() + algebraic::path_set_laws::laws().len());
