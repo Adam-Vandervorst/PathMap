@@ -146,6 +146,18 @@ pub const MAGIC_LENGTH: usize = 8;
 // ACTree02 -> ACTree03: Branchless varint
 pub const COMPACT_TREE_MAGIC: [u8; MAGIC_LENGTH] = *b"ACTree03";
 
+/// Checks that `data` starts with [`COMPACT_TREE_MAGIC`] and is long enough to
+/// hold the root pointer that follows it.
+fn check_header(data: &[u8]) -> std::io::Result<()> {
+    if data.get(..MAGIC_LENGTH) != Some(&COMPACT_TREE_MAGIC[..]) {
+        return Err(std::io::Error::other("Invalid file magic"));
+    }
+    if data.len() < MAGIC_LENGTH + U64_SIZE {
+        return Err(std::io::Error::other("File too short for the root pointer"));
+    }
+    Ok(())
+}
+
 const VARINT_LEN_BIAS: u8 = u8::MAX - 8;
 /// Decodes a variable-length encoded `u64` integer from a byte slice.
 ///
@@ -1030,9 +1042,7 @@ impl ArenaCompactTree<Mmap> {
     pub fn open_mmap(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let file = std::fs::File::open(&path)?;
         let memmap = unsafe { Mmap::map(&file) }?;
-        if &memmap[..MAGIC_LENGTH] != &COMPACT_TREE_MAGIC {
-            return Err(std::io::Error::other("Invalid file magic"));
-        }
+        check_header(&memmap)?;
         Ok(Self {
             position: memmap.as_ref().len() as u64,
             storage: memmap,
@@ -1074,9 +1084,7 @@ impl ArenaCompactTree<Mmap> {
         let arena = dump_arena_tree(zipper, map_val, path)?;
         let file = arena.storage.buf_writer.into_inner()?;
         let memmap = unsafe { Mmap::map(&file) }?;
-        if &memmap[..MAGIC_LENGTH] != &COMPACT_TREE_MAGIC {
-            return Err(std::io::Error::other("Invalid file magic"));
-        }
+        check_header(&memmap)?;
         Ok(Self {
             position: memmap.as_ref().len() as u64,
             storage: memmap,
@@ -4063,6 +4071,26 @@ mod tests {
             format!("('{path}' {val:?} {bm:?}\n{children})")
         });
         assert_eq!(btm_value, act_value);
+        Ok(())
+    }
+
+    #[test]
+    fn test_act_mmap_short_file() -> Result<(), std::io::Error> {
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+        let act = ArenaCompactTree::from_zipper(PathMap::<()>::new().read_zipper(), |_| 0);
+        let full = act.get_data();
+        for len in 0..super::MAGIC_LENGTH + super::U64_SIZE {
+            let mut tmp = NamedTempFile::new()?;
+            tmp.write_all(&full[..len.min(full.len())])?;
+            assert!(ArenaCompactTree::open_mmap(tmp.path()).is_err(), "len {len}");
+        }
+        let mut tmp = NamedTempFile::new()?;
+        tmp.write_all(b"ACT")?;
+        assert!(ArenaCompactTree::open_mmap(tmp.path()).is_err());
+        let mut tmp = NamedTempFile::new()?;
+        tmp.write_all(full)?;
+        assert_eq!(ArenaCompactTree::open_mmap(tmp.path())?.get_data(), full);
         Ok(())
     }
 
