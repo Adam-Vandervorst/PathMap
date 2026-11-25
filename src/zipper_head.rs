@@ -343,11 +343,17 @@ impl<'trie, Z, V: 'trie + Clone + Send + Sync + Unpin, A: Allocator + 'trie> Zip
             //Sometimes people call `cleanup_write_zipper` in a drop method on a WZ wrapper, and the ZipperHead
             // has already been dismantled... So we are checking here in order to handle that situation gracefully
             if inner_z.focus_stack.top().is_some() {
-                inner_z.move_to_path(origin_path);
-                if inner_z.try_borrow_focus().unwrap().0.as_tagged().node_is_empty() {
-                    inner_z.prune_path();
+                //The child's path is relative to the head's root, which is the inner zipper's focus (not
+                // necessarily its root, for a head made with `WriteZipper::zipper_head`).  Go there and back,
+                // pruning no higher than the head's root: readers in this head may hold the node there.
+                let head_root_len = inner_z.key.origin_path.len() + inner_z.path().len();
+                inner_z.descend_to(&origin_path);
+                let is_empty = inner_z.try_borrow_focus()
+                    .map_or(false, |focus| focus.0.as_tagged().node_is_empty());
+                if is_empty {
+                    inner_z.prune_path_with_floor(head_root_len);
                 }
-                inner_z.reset();
+                inner_z.ascend(origin_path.len());
             }
         })
     }
@@ -1556,6 +1562,81 @@ mod tests {
 
         assert!(!zh.read_zipper_at_path(&[0u8, 0]).unwrap().path_exists());
         assert_eq!(zh.read_zipper_at_path(&[0u8]).unwrap().val(), Some(&1));
+    }
+
+    /// `cleanup_write_zipper` in a head made from a write zipper whose focus is below its root: the
+    /// child's path is relative to the parent's focus, and the parent stays where it was
+    #[test]
+    fn cleanup_write_zipper_off_root_head() {
+        //Resolving [0] against the parent's root lands inside a node
+        let mut map = PathMap::<u64>::new();
+        let mut wz = map.write_zipper();
+        wz.descend_to(&[0u8, 0]);
+        let zh = wz.zipper_head();
+        let w = zh.write_zipper_at_exclusive_path(&[0u8]).unwrap();
+        zh.cleanup_write_zipper(w);
+        drop(zh);
+        assert_eq!(wz.path(), &[0u8, 0]);
+        drop(wz);
+        assert!(!map.path_exists_at(&[0u8, 0, 0]));
+
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[0u8, 1], 1);
+        let mut wz = map.write_zipper();
+        wz.descend_to(&[0u8, 0]);
+        let zh = wz.zipper_head();
+        let w = zh.write_zipper_at_exclusive_path(&[0u8]).unwrap(); //at [0, 0, 0]
+        zh.cleanup_write_zipper(w);
+        let mut w = zh.write_zipper_at_exclusive_path(&[7u8]).unwrap();
+        w.set_val(7);
+        zh.cleanup_write_zipper(w);
+        drop(zh);
+        assert_eq!(wz.path(), &[0u8, 0]);
+        drop(wz);
+        assert!(!map.path_exists_at(&[0u8, 0, 0]));
+        assert_eq!(map.val_at(&[0u8, 0, 7]), Some(&7));
+        assert_eq!(map.val_at(&[0u8, 1]), Some(&1));
+
+        //Nothing at or above the head's root is pruned, so a reader holding the head's root stays valid
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(&[1u8], 1);
+        let mut wz = map.write_zipper();
+        wz.descend_to(&[0u8, 0]);
+        let zh = wz.zipper_head();
+        let rz = zh.read_zipper_at_path(&[5u8]).unwrap();
+        let mut w = zh.write_zipper_at_exclusive_path(&[2u8, 3]).unwrap();
+        w.set_val(2);
+        w.remove_val(false);
+        zh.cleanup_write_zipper(w);
+        assert!(!rz.path_exists());
+        assert_eq!(rz.val(), None);
+        drop(rz);
+        let rz = zh.read_zipper_at_path(&[]).unwrap();
+        assert_eq!(rz.child_count(), 0);
+        drop(rz);
+        drop(zh);
+        assert_eq!(wz.path(), &[0u8, 0]);
+        drop(wz);
+        assert!(!map.path_exists_at(&[0u8, 0, 2]));
+        assert_eq!(map.val_at(&[1u8]), Some(&1));
+
+        //A nested head on a child writer that moved off its root
+        let mut map = PathMap::<u64>::new();
+        let zh = map.zipper_head();
+        let mut w = zh.write_zipper_at_exclusive_path(&[0u8]).unwrap();
+        w.descend_to(&[1u8]);
+        w.set_val(1);
+        {
+            let zh2 = w.zipper_head();
+            let w2 = zh2.write_zipper_at_exclusive_path(&[2u8, 2]).unwrap();
+            zh2.cleanup_write_zipper(w2);
+        }
+        assert_eq!(w.path(), &[1u8]);
+        assert_eq!(w.val(), Some(&1));
+        zh.cleanup_write_zipper(w);
+        drop(zh);
+        assert!(!map.path_exists_at(&[0u8, 1, 2]));
+        assert_eq!(map.val_at(&[0u8, 1]), Some(&1));
     }
 
     /// A ZipperHead turns the parent node into a CellByteNode; joining a list node with it must not
