@@ -75,6 +75,8 @@ enum DrawCmd {
     Value(u64, *const (), SmallVec<[u8; 8]>),
     /// (idx of map arg, root_node)
     Map(usize, u64),
+    /// idx of a map arg with no root node (empty, or holding only a root value)
+    EmptyMap(usize),
 }
 
 struct DrawState {
@@ -98,7 +100,9 @@ fn viz_maps_mermaid<V: TrieValue + Debug + Hash, A: Allocator, W: Write>(btms: &
 
     if dc.logical {
         for btm in btms.iter() {
-            pre_init_node_hashes(btm.root().unwrap(), &mut ds);
+            if let Some(root) = btm.root() {
+                pre_init_node_hashes(root, &mut ds);
+            }
             ds.root += 1;
         }
     }
@@ -124,6 +128,9 @@ fn viz_maps_mermaid<V: TrieValue + Debug + Hash, A: Allocator, W: Write>(btms: &
                     writeln!(out, "m{map_idx}@{{ shape: cylinder, label: \"PathMap[{map_idx}]\"}}")?;
                     writeln!(out, "m{map_idx} --> g{root_node_addr}")?;
                 }
+            },
+            DrawCmd::EmptyMap(map_idx) => {
+                writeln!(out, "m{map_idx}@{{ shape: cylinder, label: \"PathMap[{map_idx}]\"}}")?;
             },
             DrawCmd::Node(address, ntype) => {
                 if !dc.logical {
@@ -194,7 +201,9 @@ fn viz_maps_ascii<V: TrieValue + Debug + Hash, A: Allocator, W: Write>(btms: &[P
 
     let mut ds = DrawState{ root: 0, nodes: HashMap::new(), cmds: vec![] };
     for map in btms.iter() {
-        pre_init_node_hashes(map.root().unwrap(), &mut ds);
+        if let Some(root) = map.root() {
+            pre_init_node_hashes(root, &mut ds);
+        }
         ds.root += 1;
     }
 
@@ -239,7 +248,18 @@ fn build_ascii_graph_logical<V: TrieValue + Debug, A: Allocator, Z: ZipperInfall
     ds: &mut DrawState,
 ) -> (u64, HashMap<u64, AsciiGraphNode<V>>) {
     let root_focus = z.get_focus();
-    let root_node = root_focus.borrow().unwrap();
+    let Some(root_node) = root_focus.borrow() else {
+        //No root node: the map is empty, or holds only a root value
+        let root_id = hash_pair(0, &[]);
+        let mut graph: HashMap<u64, AsciiGraphNode<V>> = HashMap::new();
+        ensure_ascii_graph_node(&mut graph, root_id, None);
+        if !dc.hide_value_paths {
+            if let (Some(v), Some(node)) = (z.val(), graph.get_mut(&root_id)) {
+                node.inline_value = Some(v as *const V);
+            }
+        }
+        return (root_id, graph)
+    };
     let root_addr = root_node.shared_node_id();
     let root_id = hash_pair(root_addr, &[]);
 
@@ -513,7 +533,12 @@ fn color_for_bitmask(mask: u64) -> &'static str {
         0b101 => { "#a0a" }
         0b110 => { "#aa0" }
         0b111 => { "gray" }
-        _ => todo!()
+        //More than 3 maps: a node in one map gets that map's colour from a palette, a shared node is gray
+        _ if mask.count_ones() == 1 => {
+            const PALETTE: [&str; 8] = ["blue", "green", "red", "orange", "purple", "brown", "teal", "olive"];
+            PALETTE[mask.trailing_zeros() as usize % PALETTE.len()]
+        }
+        _ => { "gray" }
     }
 }
 
@@ -531,17 +556,22 @@ fn pre_init_node_hashes<V : TrieValue + Debug + Hash, A : Allocator>(node: &Trie
     }
 }
 
+/// The bit for map `map_idx` in [NodeMeta::shared].  Maps beyond the 64th get no bit
+fn map_bit(map_idx: usize) -> u64 {
+    1u64.checked_shl(map_idx as u32).unwrap_or(0)
+}
+
 /// Updates the node hash table for a single node.  Returns `true` if a new hash entry was
 /// created, indicating the calling code should descend the subtrie recursively
 fn update_node_hash<V : TrieValue + Debug + Hash, A : Allocator>(node: &TrieNodeODRc<V, A>, ds: &mut DrawState) -> bool {
     let node_addr = node.shared_node_id();
     match ds.nodes.get_mut(&node_addr) {
         None => {
-            ds.nodes.insert(node_addr, NodeMeta{ shared: 1 << ds.root, ref_cnt: 1, taken: false });
+            ds.nodes.insert(node_addr, NodeMeta{ shared: map_bit(ds.root), ref_cnt: 1, taken: false });
             true
         }
         Some(meta) => {
-            meta.shared |= 1 << ds.root;
+            meta.shared |= map_bit(ds.root);
             meta.ref_cnt += 1;
             false
         }
@@ -550,7 +580,10 @@ fn update_node_hash<V : TrieValue + Debug + Hash, A : Allocator>(node: &TrieNode
 
 fn viz_zipper_logical<V : TrieValue + Debug + Hash, A: Allocator, Z: ZipperInfallibleSubtries<V, A> + ZipperMoving + ZipperPath + ZipperIteration + ZipperValues<V>>(mut z: Z, dc: &DrawConfig, ds: &mut DrawState) {
     let root_focus = z.get_focus();
-    let root_node = root_focus.borrow().unwrap();
+    let Some(root_node) = root_focus.borrow() else {
+        ds.cmds.push(DrawCmd::EmptyMap(ds.root));
+        return
+    };
     let root_node_id = hash_pair(root_node.shared_node_id(), &[]);
     ds.cmds.push(DrawCmd::Map(ds.root, root_node_id));
 
@@ -641,7 +674,10 @@ fn hash_pair(addr: u64, key: &[u8]) -> u64 {
 }
 
 fn viz_map_physical<V : TrieValue + Debug + Hash, A : Allocator>(map: &PathMap<V, A>, dc: &DrawConfig, ds: &mut DrawState) {
-    let root_node = map.root().unwrap();
+    let Some(root_node) = map.root() else {
+        ds.cmds.push(DrawCmd::EmptyMap(ds.root));
+        return
+    };
     ds.cmds.push(DrawCmd::Map(ds.root, root_node.shared_node_id()));
     update_node_hash(root_node, ds);
     viz_node_physical(root_node, dc, ds);
@@ -923,6 +959,40 @@ mod test {
         let mut out_buf = Vec::new();
         viz_maps(&[space], &DrawConfig{ mode: VizMode::Mermaid, ascii_path: false, hide_value_paths: true, minimize_values: true, logical: false, color: false }, &mut out_buf).unwrap();
         // println!("{}", String::from_utf8_lossy(&out_buf));
+    }
+
+    /// Maps with no root node (empty, or holding only a root value) render in every mode
+    #[test]
+    fn viz_maps_without_root_node() {
+        let empty = PathMap::<u64>::new();
+        let mut root_val = PathMap::<u64>::new();
+        root_val.set_val_at([], 7);
+        let render = |maps: &[PathMap<u64>], mode: VizMode, logical: bool| {
+            let mut out_buf = Vec::new();
+            viz_maps(maps, &DrawConfig{ mode, ascii_path: true, hide_value_paths: false, minimize_values: false, logical, color: false }, &mut out_buf).unwrap();
+            String::from_utf8(out_buf).unwrap()
+        };
+        assert_eq!(render(&[empty.clone()], VizMode::Ascii, true), "PathMap[0]\n(empty)\n");
+        assert!(render(&[root_val.clone()], VizMode::Ascii, true).starts_with("PathMap[0]"));
+        assert!(!render(&[root_val.clone()], VizMode::Ascii, true).contains("(empty)"));
+        for logical in [true, false] {
+            for map in [&empty, &root_val] {
+                assert!(render(&[map.clone()], VizMode::Mermaid, logical).contains("PathMap[0]"));
+            }
+        }
+    }
+
+    /// Mermaid rendering of more than 3 maps
+    #[test]
+    fn viz_mermaid_many_maps() {
+        let mut maps: Vec<PathMap<u64>> = (0..5).map(|i| PathMap::from_iter([([b'a' + i as u8], i)])).collect();
+        let shared = maps[0].clone();
+        maps.push(shared);
+        for logical in [true, false] {
+            let mut out_buf = Vec::new();
+            viz_maps(&maps, &DrawConfig{ mode: VizMode::Mermaid, ascii_path: true, hide_value_paths: false, minimize_values: false, logical, color: false }, &mut out_buf).unwrap();
+            assert!(String::from_utf8(out_buf).unwrap().contains("PathMap[5]"));
+        }
     }
 
     #[test]

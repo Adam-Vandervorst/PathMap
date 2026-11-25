@@ -97,6 +97,8 @@ pub fn weave_to_indices<const NUM_SIZE: usize, R: PathInteger<NUM_SIZE>>(weave: 
 
 /// Creates a map that represents an encoded integer range specified by `start`, `stop`, and `step`,
 /// with copies of the provided `value` at every path
+///
+/// Panics if `step` is zero, like [`Iterator::step_by`].
 pub fn gen_int_range<V, const NUM_SIZE: usize, R>(start: R, stop: R, step: R, value: V) -> PathMap<V>
 where
 V: Clone + Send + Sync + Unpin,
@@ -106,11 +108,15 @@ R: PathInteger<NUM_SIZE>,
 }
 
 /// Creates a range as described by [gen_int_range], using the allocator provided
+///
+/// Panics if `step` is zero, like [`Iterator::step_by`].
 pub fn gen_int_range_in<V, const NUM_SIZE: usize, R, A: Allocator>(start: R, stop: R, step: R, value: V, alloc: A) -> PathMap<V, A>
 where
 V: Clone + Send + Sync + Unpin,
 R: PathInteger<NUM_SIZE>,
 {
+    //Without this the u8 loop below never ends, and the wider types divide by zero
+    assert!(!step.is_zero(), "gen_int_range: step must be non-zero");
     //Special case for u8s
     if NUM_SIZE == 1 {
         let mut map = PathMap::<V, A>::new_in(alloc);
@@ -310,6 +316,18 @@ fn int_range_generator_2() {
 mod test {
     use super::*;
     use crate::zipper::ZipperValuesAt;
+
+    #[test]
+    #[should_panic(expected = "step must be non-zero")]
+    fn int_range_step_zero_u8() {
+        gen_int_range::<(), 1, u8>(0, 10, 0, ());
+    }
+
+    #[test]
+    #[should_panic(expected = "step must be non-zero")]
+    fn int_range_step_zero_u16() {
+        gen_int_range::<(), 2, u16>(0, 10, 0, ());
+    }
 
     #[cfg(not(miri))]
     #[test]

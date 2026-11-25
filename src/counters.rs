@@ -100,7 +100,10 @@ impl Counters {
     pub fn count_ocupancy<V: Clone + Send + Sync + Unpin>(map: &PathMap<V>) -> Self {
         let mut counters = Counters::new();
 
-        counters.count_node(map.root().unwrap().as_tagged(), 0);
+        //A map with nothing below its root has no root node
+        if let Some(root) = map.root() {
+            counters.count_node(root.as_tagged(), 0);
+        }
 
         let mut zipper = map.read_zipper();
         while zipper.to_next_step() {
@@ -252,9 +255,18 @@ pub(crate) fn record_make_unique(cloned: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cow_counters, reset_cow_counters};
+    use super::{cow_counters, reset_cow_counters, Counters};
     use crate::PathMap;
     use crate::zipper::ZipperValuesAt;
+
+    /// A map with nothing below its root has no root node
+    #[test]
+    fn count_ocupancy_without_root_node() {
+        Counters::count_ocupancy(&PathMap::<u64>::new());
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at([], 7);
+        Counters::count_ocupancy(&map);
+    }
 
     #[test]
     fn cow_counters_split_unshared_and_shared_writes() {

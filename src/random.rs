@@ -77,7 +77,12 @@ impl <T : TrieValue> Distribution<(Vec<u8>, T)> for FairTrieValue<T> {
     let mut rz = self.source.read_zipper();
     let size = rz.val_count();
     let target = rng.random_range(0..size);
+    //`val_count` counts the root value, which `to_next_get_val` never visits
     let mut i = 0;
+    if let Some(t) = rz.get_val() {
+      if target == 0 { return (vec![], t.clone()) }
+      i = 1;
+    }
     while let Some(t) = rz.to_next_get_val() {
       if i == target { return (rz.path().to_vec(), t.clone()) }
       i += 1;
@@ -234,6 +239,25 @@ mod tests {
     // println!("{:?}", trie.iter().map(|(p, _)| String::from_utf8(p).unwrap()).collect::<Vec<_>>());
     let res = ["aa", "acbdddacbcbdbad", "bbddad", "bd", "caccb", "cba", "cbcdbccb", "dadbcdbcaaadb", "dbabbdaabc", "dbb"];
     trie.iter().zip(res).for_each(|(x, y)| assert_eq!(x.0.as_slice(), y.as_bytes()));
+  }
+
+  /// `FairTrieValue` can return the root value, and doesn't fall off the end when it draws it
+  #[test]
+  fn fair_trie_value_root_value() {
+    let mut rng = StdRng::from_seed([0; 32]);
+    let mut root_only = PathMap::<u64>::new();
+    root_only.set_val_at([], 7);
+    let stv = FairTrieValue{ source: root_only };
+    for _ in 0..20 {
+      assert_eq!(stv.sample(&mut rng), (vec![], 7));
+    }
+    let mut map = PathMap::<u64>::new();
+    map.set_val_at([], 7);
+    map.set_val_at(b"a", 8);
+    let stv = FairTrieValue{ source: map };
+    let samples: Vec<_> = (0..200).map(|_| stv.sample(&mut rng)).collect();
+    assert!(samples.contains(&(vec![], 7)));
+    assert!(samples.contains(&(b"a".to_vec(), 8)));
   }
 
   #[test]
