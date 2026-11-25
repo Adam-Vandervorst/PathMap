@@ -977,7 +977,7 @@ pub(crate) fn new_map_from_ana_in<V, W, AlgF, A: Allocator>(w: W, mut alg_f: Alg
                 },
                 // Path from a graft, we shouldn't descend
                 WOrNode::Node(node) => {
-                    z.core().graft_internal(Some(node));
+                    z.core().graft_internal(node);
                     z.ascend(child_path_len);
                 }
             }
@@ -1015,7 +1015,8 @@ pub struct TrieBuilder<V: Clone + Send + Sync, W, A: Allocator> {
 /// Internal structure 
 enum WOrNode<V: Clone + Send + Sync, W, A: Allocator> {
     W(W),
-    Node(TrieNodeODRc<V, A>)
+    /// A grafted subtrie; `None` when there is nothing below the source focus
+    Node(Option<TrieNodeODRc<V, A>>)
 }
 
 impl<V: Clone + Send + Sync, W: Default, A: Allocator> Default for WOrNode<V, W, A> {
@@ -1219,6 +1220,9 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
     }
     /// Grafts the subtrie below the focus of the `read_zipper` at the specified `byte`
     ///
+    /// The value at the focus is not grafted.  If nothing is below the focus (it is a leaf, or does not
+    /// exist), nothing is grafted.
+    ///
     /// WARNING: This method is incompatible with [Self::set_child_mask] and must follow the same
     /// rules as [Self::push_byte]
     pub fn graft_at_byte<Z: ZipperInfallibleSubtries<V, A>>(&mut self, byte: u8, read_zipper: &Z) {
@@ -1233,9 +1237,10 @@ impl<V: Clone + Send + Sync, W: Default, A: Allocator> TrieBuilder<V, W, A> {
         }
         self.child_mask[mask_word] |= mask_delta;
 
-        //Clone the read_zipper's focus and push it
+        //Clone the read_zipper's focus and push it.  A leaf or a nonexistent path has nothing below it,
+        // so that graft places nothing
         let node = read_zipper.get_focus().into_option();
-        self.child_structs.push_val(WOrNode::Node(node.unwrap())); //GOAT!! Currently we panic if the read_zipper is at an nonexistent path
+        self.child_structs.push_val(WOrNode::Node(node));
     }
     //GOAT, feature removed.  See below
     // /// Returns an [`Iterator`] type to iterate over the `(sub_path, w)` pairs that have been pushed
@@ -2246,5 +2251,38 @@ mod tests {
             // todo write out useful print function, that shows the count submaps
             println!("v: {}, p: {}", v, std::str::from_utf8(rz.path()).unwrap());
         }
+    }
+
+    /// `graft_at_byte` from a zipper with nothing below its focus (a leaf, or a nonexistent path)
+    /// grafts nothing, rather than panicking
+    #[test]
+    fn ana_graft_at_byte_empty_focus() {
+        let mut src = PathMap::<u64>::new();
+        src.set_val_at(&[1u8], 7);
+        src.set_val_at(&[2u8, 3], 8);
+        let leaf = src.read_zipper_at_path(&[1u8]);
+        assert!(leaf.path_exists());
+        let missing = src.read_zipper_at_path(&[9u8]);
+        let subtrie = src.read_zipper_at_path(&[2u8]);
+        let map: PathMap<u64> = PathMap::new_from_ana(true, |top, val, builder, _path| {
+            if top {
+                *val = Some(1);
+                builder.graft_at_byte(4, &leaf);
+                builder.graft_at_byte(5, &missing);
+                builder.graft_at_byte(6, &subtrie);
+                builder.push_byte(7, false);
+            } else {
+                *val = Some(2);
+            }
+        });
+        let mut paths: Vec<(Vec<u8>, u64)> = vec![];
+        let mut rz = map.read_zipper();
+        if let Some(v) = rz.val() { paths.push((vec![], *v)) }
+        while let Some(v) = rz.to_next_get_val() {
+            paths.push((rz.path().to_vec(), *v));
+        }
+        assert_eq!(paths, vec![(vec![], 1), (vec![6, 3], 8), (vec![7], 2)]);
+        assert!(!map.path_exists_at(&[4u8]));
+        assert!(!map.path_exists_at(&[5u8]));
     }
 }
