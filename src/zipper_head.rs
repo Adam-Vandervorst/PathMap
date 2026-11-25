@@ -964,6 +964,25 @@ mod tests {
         drop(rz)
     }
 
+    /// `into_read_zipper` on an `_unchecked` writer, which has no tracker in release builds
+    #[test]
+    fn zipper_head_unchecked_writer_into_read_zipper() {
+        let mut map = PathMap::<u64>::new();
+        map.set_val_at(b"ab", 1);
+        let zh = map.zipper_head();
+        let mut wz = unsafe{ zh.write_zipper_at_exclusive_path_unchecked(b"a") };
+        wz.descend_to(b"c");
+        wz.set_val(2);
+        let mut rz = wz.into_read_zipper();
+        assert_eq!(rz.path(), b"c");
+        assert_eq!(rz.val(), Some(&2));
+        rz.reset();
+        assert_eq!(rz.val_at(b"b"), Some(&1));
+        drop(rz);
+        drop(zh);
+        assert_eq!(map.val_at(b"ac"), Some(&2));
+    }
+
     /// Test if causing a node to upgrade within a ZipperHead breaks anything
     #[test]
     fn zipper_headc() {
