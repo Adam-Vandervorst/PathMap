@@ -2546,12 +2546,17 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
 
     /// See [ZipperWriting::prune_path]
     pub(crate) fn prune_path(&mut self) -> usize {
+        self.prune_path_with_floor(0)
+    }
+
+    /// [Self::prune_path] that removes nothing at or above `floor`; see [Self::prune_path_internal_with_floor]
+    pub(crate) fn prune_path_with_floor(&mut self, floor: usize) -> usize {
         let key = self.key.node_key();
         if key.len() > 0 {
-            let min_keep_len = self.key.origin_path.len().saturating_sub(self.key.node_key_start());
+            let min_keep_len = self.key.origin_path.len().max(floor).saturating_sub(self.key.node_key_start());
             let node_pruned_bytes = self.focus_stack.top_mut().unwrap().node_remove_dangling(key, min_keep_len);
             let trie_pruned_bytes = if node_pruned_bytes > 0 {
-                let pruned = self.prune_path_internal(false);
+                let pruned = self.prune_path_internal_with_floor(false, floor);
                 //Removing the dangling path can restructure the node, so that the focus key now runs
                 // through a child node the stack has not descended into
                 self.descend_to_internal();
@@ -2729,6 +2734,13 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
     /// to return `false`.  If `should_ascend` is `true`, this method will move the zipper in an identical way
     /// to [`ZipperMoving::ascend_until`]
     pub(crate) fn prune_path_internal(&mut self, should_ascend: bool) -> usize {
+        self.prune_path_internal_with_floor(should_ascend, 0)
+    }
+
+    /// [Self::prune_path_internal] that also stops at `floor`, a path length counted from the start of
+    /// the origin path (as `prefix_buf` is).  Nothing at or above `floor` is removed, and the node that
+    /// begins at `floor`, if any, stays in place.
+    pub(crate) fn prune_path_internal_with_floor(&mut self, should_ascend: bool, floor: usize) -> usize {
 
         //We need to make sure we're at the end of a dangling path
         if !self.focus_stack.top().unwrap().node_is_empty() {
@@ -2741,7 +2753,7 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
         } else {
             &self.key.prefix_buf[..]
         };
-        let root_len = self.key.origin_path.len();
+        let root_len = self.key.origin_path.len().max(floor);
         let mut temp_path = path_buf;
         let mut ascended = false;
         let mut just_popped = false;
@@ -2771,7 +2783,8 @@ impl <'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperC
             //This mirrors the logic of `ascend_across_nodes`
             let node_key = &temp_path[node_key_start..];
             if node_key.len() == 0 {
-                if self.key.prefix_idx.len() == 0 {
+                //Stop at the bottom of the stack, and at a node that begins at the floor
+                if self.key.prefix_idx.len() == 0 || node_key_start == floor {
                     break;
                 }
                 self.focus_stack.try_backtrack_node();
