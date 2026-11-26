@@ -556,14 +556,14 @@ impl<'a, 'path, V: Clone + Send + Sync + Unpin, A: Allocator + 'a> WriteZipperTr
     ///
     /// The returned read zipper will have the same root and focus as the the consumed write zipper.
     pub fn into_read_zipper(mut self) -> ReadZipperTracked<'a, 'static, V, A> {
-        let tracker = self._tracker.take().unwrap().into_reader();
+        let tracker = self._tracker.take().map(|tracker| tracker.into_reader());
         let root_node = self.z.focus_stack.take_root().unwrap();
         let root_path = &self.z.key.prefix_buf[..self.z.key.origin_path.len()];
         let descended_path = &self.z.key.prefix_buf[self.z.key.origin_path.len()..];
         let root_val = core::mem::take(&mut self.z.root_val);
         let root_val = root_val.and_then(|root_val| unsafe{ (&*root_val).as_ref() });
 
-        let mut new_zipper = ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, false, root_path, root_path.len(), self.z.key.root_key_start, root_val, self.z.alloc.clone(), Some(tracker));
+        let mut new_zipper = ReadZipperTracked::new_with_node_and_cloned_path_in(root_node, false, root_path, root_path.len(), self.z.key.root_key_start, root_val, self.z.alloc.clone(), tracker);
         new_zipper.descend_to(descended_path);
         new_zipper
     }
