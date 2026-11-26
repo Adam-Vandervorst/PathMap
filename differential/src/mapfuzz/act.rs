@@ -88,12 +88,10 @@ pub fn step(op: usize, d: &mut Dec, st: &mut MapState) -> StepResult {
             let same = o.get_data() == b.get_data();
             let k = k.min(b.get_data().len());
             std::fs::write(&short, &b.get_data()[..k]).expect("write ACT prefix");
-            // `skip:act_open_short`: a file shorter than the magic (empty
-            // included) makes `open_mmap` panic slicing it
-            // (`lean/findings/map-serial.md`); see `MapFuzz/Act.lean`.
-            let trunc = if k < 8 {
-                "skip:act_open_short"
-            } else if ArenaCompactTree::open_mmap(&short).is_ok() { "ok" } else { "err" };
+            // A file shorter than the header (magic + root offset, 16 bytes;
+            // empty included) is an `Err`; it used to panic (PathMap #200,
+            // `lean/findings/map-serial.md` 4).  See `MapFuzz/Act.lean`.
+            let trunc = if ArenaCompactTree::open_mmap(&short).is_ok() { "ok" } else { "err" };
             ("act_open", format!("{};same={};trunc={}",
                 dump(&mut o.read_zipper_u64()), show_bool(same), trunc))
         }

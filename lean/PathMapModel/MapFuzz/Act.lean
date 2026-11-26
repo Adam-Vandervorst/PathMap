@@ -121,10 +121,12 @@ def stepAct (op : Nat) (s : MSt) (d : Dec) : Option (Res × Dec) :=
       let (i, d) ← d.map; let (p, d) ← d.path; let (mode, d) ← d.mod 3
       let (k, d) ← d.mod 20
       let t := actOf mode ((s.get i).subtrie p)
-      -- A file shorter than the magic (empty included) should be an `Err`, but
-      -- makes `open_mmap` panic (finding `act_open_short_panics`); it is skipped
-      -- by name so the panic does not take the rest of the input with it.
-      let trunc := if k < 8 then "skip:act_open_short" else "ok"
+      -- A file shorter than the header (the 8-byte magic and the 8-byte root
+      -- offset; empty included) is an `Err` (finding `act_open_short_panics`,
+      -- fixed by PathMap #200).  A longer prefix opens: `open_mmap` reads only
+      -- the header.  Every ACT file is at least 16 bytes, so `k < 16` is always
+      -- a truncation.
+      let trunc := if k < 16 then "err" else "ok"
       some (("act_open", dumpAt t [] ++ ";same=1;trunc=" ++ trunc, s), d)
   | 42 => do -- `merge_zipper_into_file` once
       let (i, d) ← d.map; let (p, d) ← d.path; let (j, d) ← d.map; let (q, d) ← d.path

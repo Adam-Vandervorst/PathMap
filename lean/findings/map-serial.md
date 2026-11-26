@@ -130,10 +130,12 @@ file panics ("range end index 8 out of range for slice of length N").  The same
 unchecked slice is in `dump_from_zipper`'s re-open (not reachable with a
 well-formed dump).
 
-* Corpus: `lean/corpus/act-open_mmap-short-file-panics.bin` — reproduces only
-  with the skip removed, see below.
-* Named skip `skip:act_open_short` on both sides (op 41's `trunc=` field for
-  `k < 8`), so the panic does not end the input.  `k ≥ 8` is checked (`ok`).
+* Corpus: `lean/corpus/act-open_mmap-short-file-panics.bin` (agrees since the fix).
+* Fixed by PathMap #200: `open_mmap` (and `dump_from_zipper`'s re-open) now
+  return `Err` for a file shorter than the 16-byte header.  Op 41's `trunc=`
+  field checks it directly: `err` below 16 bytes, `ok` from 16 on.  (Before the
+  fix a named skip `skip:act_open_short` covered `k < 8`, and 8–15-byte prefixes
+  opened, then panicked on the first root read.)
 * Standalone:
   ```rust
   std::fs::write(&f, b"ACT")?;

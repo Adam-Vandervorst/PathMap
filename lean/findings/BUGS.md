@@ -11,7 +11,7 @@ and the reasoning.  Found on `fix/fvc-leftovers` (ad250b9) via
 | | bug | # | file |
 |---|---|---|---|
 | 1 | `ProductZipper::val_at` panics (`zipper.rs:3353`, `focus_parent` unwrap) with the focus on a joint or in the first node of a secondary factor | 10 | product |
-| 2 | `ArenaCompactTree::open_mmap` panics on a file shorter than 8 bytes (empty included) instead of returning `Err` | 28 | map-serial |
+| 2 | `ArenaCompactTree::open_mmap` panics on a file shorter than 8 bytes (empty included) instead of returning `Err` (fixed by #200, which also rejects 8–15-byte files) | 28 | map-serial |
 | 3 | `cleanup_write_zipper` on a `ZipperHead` taken from a write zipper whose focus is below its root resolves the path against the parent's root: panics at `zipper_head.rs:347`, can prune the wrong location, resets the parent | 30 | map-morph |
 | 4 | `into_read_zipper` on an `_unchecked` writer panics (`write_zipper.rs:541`, missing tracker) | 31 | map-morph |
 | 5 | `TrieBuilder::graft_at_byte` panics (`morphisms.rs:1238`) when the zipper's focus is an existing leaf | 37 | ptree |
