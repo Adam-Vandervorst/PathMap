@@ -73,7 +73,7 @@ whose shape is not decided by "edges are maximal".
 * `AnaKid`, `anaGo`, `ana`: the model's `new_from_ana`, and `PTree.unfold`, the
   closure that pushes a tree's edges.
 
-## Theorems (no `sorry`)
+## Theorems (all fully proved)
 
 | | byte level | line level |
 |---|---|---|
