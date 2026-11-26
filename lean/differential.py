@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 
-from input_format import NOPS, input_header, versioned_input
+from input_format import MAP_NOPS, NOPS, UTIL_NOPS, input_header, versioned_input
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORACLE = os.environ.get("PATHMAP_ORACLE") or os.path.join(ROOT, "lean", ".lake", "build", "bin", "pathmap-oracle")
@@ -198,6 +198,107 @@ class Child:
 # and message.  See lean/FINDINGS.md for the write-up of each, and
 # `cargo run -p differential --bin zipper_bug_repros -- <case>` for a reproducer.
 KNOWN = [
+    # ProductZipper (differential/src/sources/product.rs), lean/findings/product.md.
+    # First: every entry is keyed on a product source name, and the generic
+    # op-name entries below would otherwise swallow the -full sources' bugs.
+    # `\n` ends the source name, so `src:product` does not match productg.
+    (["src:product\n", "descend_to_check ret=1 "],
+     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
+     "[product_descend_to_check_empty]"),
+    (["src:product-full\n", "descend_to_check ret=1 "],
+     "ProductZipper::descend_to_check(&[]) returns true at a non-existent focus "
+     "[product_descend_to_check_empty]"),
+    # product-full / productg-full: the same zippers without the product skips,
+    # to reproduce what the skips hold back (lean/corpus/product-*.bin).
+    (["src:product-full\n", "src/zipper.rs:3353"],
+     "ProductZipper::val_at() panics (focus_parent unwrap) with the focus "
+     "inside the first node of a secondary factor [product_val_at_joint_panic]"),
+    (["src:product-full\n", "val_at ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:productg-full\n", "val_at ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:product-full\n", "get_val_agrees ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    (["src:productg-full\n", "get_val_agrees ret="],
+     "ProductZipper(G)::val_at() does not follow a path across a joint into the "
+     "next factor [product_val_at_crosses_joint]"),
+    # Everything else these two sources add over product/productg comes from
+    # inputs product/productg skip whole: a factor with no children at its root.
+    (["src:product-full\n"],
+     "a factor with no children at its root (childless primary root, empty "
+     "map0 snapshot) is not entered / not transparent, or only after some "
+     "moves and until reset [product_empty_factor]"),
+    (["src:productg-full\n"],
+     "a factor with no children at its root (childless primary root, empty "
+     "map0 snapshot) is not entered / not transparent, or only after some "
+     "moves and until reset [product_empty_factor]"),
+    # Source-specific entries first (keyed on `src:<source>`), so a
+    # generic op-name entry below cannot claim them.
+    (["src:prefix", "READ-SIDE", "DANGLING-KEPT", " e0 v- c0 n"],
+     "PrefixZipper::val_count() at a focus that has left the prefix reports "
+     "the source's whole value count instead of 0 "
+     "[prefix: val_count_off_prefix, lean/findings/prefix.md]"),
+    (["src:prefix", "make_map_val_count ret=0"],
+     "PrefixZipper::make_map() at a focus that has left the prefix returns the "
+     "whole source trie instead of an empty map "
+     "[prefix: make_map_off_prefix, lean/findings/prefix.md]"),
+    # join_map_into reads the read zipper's make_map().  Off the prefix the
+    # crate joins in the whole source (more locations than the model: only
+    # reaches the first divergence when the source holds no values, else the
+    # val_count entry above fires first); inside the prefix over an empty
+    # source it joins in nothing (fewer).
+    (["src:prefix", "join_map_into", "WRITE-SIDE", "DANGLING-KEPT"],
+     "PrefixZipper::make_map() at a focus that has left the prefix returns the "
+     "whole source trie, which join_map_into() then joins "
+     "[prefix: make_map_off_prefix, lean/findings/prefix.md]"),
+    (["src:prefix", "join_map_into", "CONTENT-DROPPED"],
+     "PrefixZipper::make_map() from inside the prefix drops the (dangling) rest "
+     "of the prefix when the source's trie is empty, so join_map_into() adds "
+     "nothing [prefix: make_map_drops_empty_stem, lean/findings/prefix.md]"),
+    (["src:prefix", "join_map_into ret=Element", "join_map_into ret=None"],
+     "PrefixZipper::make_map() from inside the prefix drops the (dangling) rest "
+     "of the prefix when the source's trie is empty, so join_map_into() adds "
+     "nothing [prefix: make_map_drops_empty_stem, lean/findings/prefix.md]"),
+    (["src:prefix", "descend_until", "READ-SIDE"],
+     "PrefixZipper::descend_until() crosses the seam: after consuming the "
+     "prefix it keeps descending into the source past the source's root value "
+     "[prefix: descend_until_crosses_seam_value, lean/findings/prefix.md]"),
+    (["src:prefix", "sibling_byte", "READ-SIDE"],
+     "PrefixZipper::to_next/prev_sibling_byte() return None one byte off the "
+     "prefix, where the prefix byte is a sibling "
+     "[prefix: sibling_off_prefix, lean/findings/prefix.md]"),
+    (["src:prefix", "_step", "READ-SIDE"],
+     "PrefixZipper::to_next/prev_sibling_byte() return None one byte off the "
+     "prefix, where the prefix byte is a sibling, so to_next/prev_step stop "
+     "[prefix: sibling_off_prefix, lean/findings/prefix.md]"),
+    (["src:empty", "to_next_val", "READ-SIDE"],
+     "EmptyZipper::to_next_val() returns false without rewinding to the root "
+     "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
+    (["src:empty", "witness_next_val", "READ-SIDE"],
+     "EmptyZipper::to_next_get_val_with_witness(_observed)() returns None without "
+     "rewinding to the root [empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
+    # PrefixZipper's ZipperInfallibleSubtries internals forward to the source
+    # zipper unadjusted, like its trie_ref_at_path (prefix P6); lean/findings/ops.md.
+    (["src:prefix", "focus_probe ret=Rg"],
+     "PrefixZipper::get_focus_at()/try_borrow_focus() forward to the source "
+     "zipper without accounting for the prefix: no node inside the prefix, "
+     "Some off it [ops: prefix_focus_ignores_prefix]"),
+    (["src:empty", "to_next_get_val", "READ-SIDE"],
+     "EmptyZipper::to_next_get_val() returns None without rewinding to the root "
+     "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
+    # --source dependent-lazy exists to replay two DependentProductZipperG
+    # entry defects (lean/findings/dependent.md D1, D2) that make what the
+    # zipper presents depend on its history; they surface under any op and
+    # would otherwise be credited to whatever generic entry matches first
+    # (CONTENT-DROPPED, in practice).  The campaign source is `dependent`.
+    (["src:dependent-lazy\n"],
+     "DependentProductZipperG enters a root joint only on a descend (D1) / a "
+     "factor stacked after an empty one only on a later call (D2); reproducers "
+     "lean/corpus/dependent-{root-joint-entered-only-on-descend,"
+     "empty-factor-stacks-only-on-later-call}.bin [dependent_lazy_entry]"),
     # Tested first: this one is keyed on a shape, and an ACT val_count-only
     # difference can land on a line whose op name matches an entry below.
     (["ACT-VALCOUNT-ONLY"],
@@ -217,7 +318,20 @@ KNOWN = [
     (["join_into"],
      "join_into() drops the source subtrie when the destination map is empty "
      "[join_into_empty_dst]"),
-    (["ascend_until"],
+    # OverlayZipper (differential/src/sources/overlay.rs).  Before the generic
+    # `ascend_until` entry below, which would otherwise swallow them.  See
+    # lean/findings/overlay-exp.md.
+    (["src:overlay", "ascend_until", "READ-SIDE"],
+     "OverlayZipper::ascend_until()/ascend_until_branch() stop only where a "
+     "*source* branches or has a value: they climb past a branch formed by the "
+     "union, and stop at a value the mapping filtered out "
+     "[overlay_ascend_until_union_branch]"),
+    (["src:overlay-filter", "descend_until"],
+     "OverlayZipper::descend_until() stops at a source value that the mapping "
+     "filtered out [overlay_descend_until_filtered_value]"),
+    # WRITE-SIDE: this is a write-zipper bug; without the tag it would also
+    # swallow a read source's own ascend_until divergence.
+    (["ascend_until", "WRITE-SIDE"],
      "ascend_until()/ascend_until_branch() corrupt a write zipper rooted at a "
      "node boundary [ascend_until_wz]"),
     (["remove_branches"],
@@ -267,10 +381,60 @@ KNOWN = [
     (["src/trie_node.rs", "make_unique"],
      "copy-on-write cannot make a shared dangling path unique (finding 16) "
      "[shared_dangling_cow]"),
+    (["remove_val", "e0 v- c0 n0", "e1 v- c0 n0"],
+     "remove_val(prune=true) keeps the path when an empty graft_masked_branches "
+     "left an empty node at the focus; reproducer "
+     "lean/corpus/remove_val-prune-after-empty-graft-masked.bin "
+     "[remove_val_prune_empty_node]"),
     # ArenaCompactTree read source (differential.py --act).
     (["descend_last_path"],
      "ACTZipper::descend_last_path() runs one byte past the end of the trie "
      "[act: last_path_overshoots]"),
+    # DependentProductZipperG (--source dependent / dependent-lazy):
+    # lean/findings/dependent.md.
+    # Keyed on `ret=`, not READ-SIDE: a divergence in `ret` alone is tagged
+    # WRITE-SIDE by `divergence_side` even when the op ran on the read zipper.
+    # "src:dependent" covers dependent-lazy too.
+    (["src:dependent", " val_at ret="],
+     "DependentProductZipperG::val_at() looks only in the focus factor, not in "
+     "the factors grafted below it; reproducer "
+     "lean/corpus/dependent-val_at-ignores-later-factors.bin [dependent_val_at]"),
+    (["src:dependent", "get_val_agrees ret="],
+     "DependentProductZipperG::get_val_at() looks only in the focus factor; "
+     "reproducer lean/corpus/dependent-get_val_at-ignores-later-factors.bin "
+     "[dependent_val_at]"),
+    # Map fuzzer, serialization (lean/findings/map-serial.md).  `;r=` is the
+    # ret field saying whether the `.paths` stream carried the focus value.
+    (["src:map", ";r=1 n=", ";r=0 n="],
+     "serialize_paths() never writes the value at the read zipper's focus "
+     "[map-serial: serialize_paths_drops_focus_value]"),
+    (["src:map", "write_trie ret=err:tag"],
+     "write_trie() rolls back a duplicate final record without truncating the "
+     "file; the stale tail makes deserialize_file() reject it "
+     "[map-serial: write_trie_stale_tail_after_rollback]"),
+    (["src:map", "write_trie_at"],
+     "write_trie() from a zipper below the map root drops path bytes "
+     "(origin_path is absolute) [map-serial: write_trie_below_root_drops_prefix_bytes]"),
+    # Map fuzzer (--source map), map-core group; lean/findings/map-core.md.
+    (["src:map", "join_into ret=Identity/", "join_into ret=Element=SELF/"],
+     "PathMap::join_into reports Element for an unchanged map when the source's "
+     "node layout differs (a dangling path at a valued key, structure left by a "
+     "removal); reproducers lean/corpus/map-join_into-status-*.bin "
+     "[map_join_into_layout_status]"),
+    # Util fuzzer (--source util), u-mask group; lean/findings/u-mask.md.
+    # `ret=x ` is op 20's tag for a RangeInclusive iterated to its end.
+    (["src:util\n", "bm_incl_range ret=x "],
+     "ByteMask::set_/clear_/toggle_inclusive_bit_range read start()/end() of "
+     "an exhausted (empty) RangeInclusive and act on bit `end` "
+     "[u-mask M2: incl_range_exhausted]"),
+    # Util fuzzer, u-lattice group; lean/findings/u-lattice.md.  `ring_pmeet!`
+    # is the meet op with its skip turned off (full byte 255), only there to
+    # reproduce what `skip:setlattice-meet-swap` holds back.
+    (["src:util\n", " ring_pmeet! ret="],
+     "SetLattice (HashMap/HashSet) pmeet calls the value pmeet with the "
+     "operands swapped when self is not the smaller map, so a non-symmetric "
+     "value meet answers from the wrong operand "
+     "[u-lattice L1: setlattice_meet_swap]"),
     # Shape classes, from `divergence_shape`.  Last on purpose: every entry
     # above is more specific, and these are meant to catch only what none of
     # them explain.
@@ -282,6 +446,10 @@ KNOWN = [
      "an algebraic op keeps a dangling child the spec drops: an empty child "
      "node meets/subtracts to itself rather than disappearing "
      "[meet_keeps_dangling]"),
+    (["DANGLING-FOCUS-KEPT", "meet_2"],
+     "meet_2() of sources holding only dangling paths creates the destination "
+     "focus and copies the dangling paths [meet_keeps_dangling, "
+     "lean/findings/prefix.md]"),
     (["DANGLING-FOCUS-KEPT"],
      "meet_into() keeps an empty materialized focus that the spec removes "
      "[meet_keeps_dangling]"),
@@ -292,9 +460,38 @@ KNOWN = [
      "which value survives a collision follows node layout rather than the "
      "left-biased spec (join/meet and everything that later reads the "
      "location) [value_bias_by_node_layout]"),
+    # ops workstream (lean/findings/ops.md).
+    (["focus_probe ret=Wg", ";kTBF W="],
+     "WriteZipperCore::try_borrow_focus() returns the (empty) node of a dangling "
+     "path above the focus when the focus lies below it: Some at a non-existent "
+     "focus (debug: assertion at write_zipper.rs:1435) "
+     "[ops: wz_try_borrow_focus_below_dangling]"),
     (["FOCUS-VALUE-FOR-DANGLING"],
      "val_at()/get_val_at() return the focus value for a dangling child path "
      "[val_at_dangling]"),
+    # head-owned workstream (lean/findings/head-owned.md).  The model says the
+    # location exists; the crate's trie ref is invalid at both levels.
+    (["trie_ref_probe ret=e1;", "ret=e0;v-;c0;m_;a-;g0;kok;d[_=-];mm=|e0;v-;c0;m_;a-;g0;kok;d[_=-];mm= W="],
+     "TrieRefOwned::new_with_node_and_val_in drops the location and its value "
+     "when the node below it is empty (TrieRefOwned::from(PathMap), "
+     "write zippers' get_trie_ref) [trie_ref_owned_empty_node]"),
+    # After the generic TrieRefOwned entry: an empty map's owned trie ref is
+    # that bug, not PrefixZipper's.
+    # Op 75 is ret-only (no side tag).  Mode 0 is PrefixZipper's own
+    # trie_ref_at_path, which hands `p` to the source unadjusted; modes 1-3
+    # go through make_map/get_trie_ref and inherit the make_map entries above.
+    (["src:prefix", "trie_ref_probe"],
+     "PrefixZipper::trie_ref_at_path() passes the path to the source zipper "
+     "without stripping the rest of the prefix (and from a focus off the "
+     "prefix reads the source anyway); the make_map-based trie refs inherit "
+     "make_map's off-prefix / empty-stem bugs "
+     "[prefix: trie_ref_ignores_prefix, lean/findings/prefix.md]"),
+    (["src:owned", "crate: RCLONE _;"],
+     "ReadZipperOwned::clone() returns a zipper at the root, not at the "
+     "original's focus [owned_clone_resets_focus]"),
+    (["src:owned", "crate: WCLONE _;"],
+     "WriteZipperOwned::clone() returns a zipper at the root, not at the "
+     "original's focus [owned_clone_resets_focus]"),
 ]
 
 
@@ -345,7 +542,18 @@ def divergence_shape(a, b):
     defect out of the known buckets, so each shape below is deliberately narrow.
     """
     ta, tb = a.split(), b.split()
+    # `i`/`m`/`d` (is_val, child_mask, depth) restate `v`/`c`/the path; leave
+    # them out of the shape unless they are all that differs (then the shape
+    # is None and the divergence is new).
+    restated = lambda t: re.match(r"[imd][0-9a-f_]*$", t) is not None and not t.startswith("ret")
+    if any(x != y for x, y in zip(ta, tb) if not restated(x)):
+        ta = [t for t in ta if not restated(t)]
+        tb = [t for t in tb if not restated(t)]
     if len(ta) != len(tb):
+        return None
+    # The map fuzzer (`--source map`: `... n=a,b,c` step lines, `M0` dumps) has
+    # its own trace format; these zipper-trace shapes do not describe it.
+    if (ta and re.fullmatch(r"M\d", ta[0])) or any(t.startswith("n=") for t in ta):
         return None
     diff = [(x, y) for x, y in zip(ta, tb) if x != y]
     if not diff:
@@ -357,6 +565,11 @@ def divergence_shape(a, b):
     if keys == {"ret"}:
         ra, rb = diff[0][0].split("=", 1)[1], diff[0][1].split("=", 1)[1]
         if ra in STATUSES and rb in STATUSES:
+            return "STATUS-ONLY"
+        # `<status>;<report>` (op 77 `join_take`): only the status differs.
+        sa, sb = ra.split(";", 1), rb.split(";", 1)
+        if (len(sa) == 2 and len(sb) == 2 and sa[1] == sb[1]
+                and sa[0] in STATUSES and sb[0] in STATUSES):
             return "STATUS-ONLY"
         # `-` on the model side against the focus value on the crate side, in
         # a bare return (`val_at`) or a component of one (`get_val_agrees`).
@@ -377,9 +590,21 @@ def divergence_shape(a, b):
             return "VALUE-ONLY"
         return None
     if (keys == {"e"} and len(diff) == 1 and len(ta) > 2
-            and ta[1] == "meet_into" and "ret=None" in ta
+            and ta[1] in ("meet_into", "meet_2") and "ret=None" in ta
             and diff[0] == ("e0", "e1")):
         return "DANGLING-FOCUS-KEPT"
+    if (keys == {"ret", "e", "c"} and len(diff) == 3
+            and ta[1] == "meet_into"
+            and ("ret=None", "ret=Identity") in diff
+            and ("e0", "e1") in diff
+            and any(x == "c0" and y[1:].isdigit() and int(y[1:]) > 0
+                    for x, y in diff)
+            and "v-" in a.split(" R=", 1)[0].split()
+            and "n0" in a.split(" R=", 1)[0].split()
+            and a.partition(" R=")[2] == b.partition(" R=")[2]):
+        # Keeping a dangling child also keeps a focus that pruning removed
+        # in the model.  No values survive, and the read zipper is unchanged.
+        return "DANGLING-KEPT"
     if keys <= {"ret", "c", "n"} and ({"c", "n"} & keys):
         # `c` (child_count) when it moved, else `n` (val_count): a dangling
         # child adds a child without adding a value, a dropped value the
@@ -408,10 +633,37 @@ def act_valcount_only(a, b):
 
 
 def classify(msg):
+    # The map fuzzer (--source map) is a different op table: the entries above
+    # were written for zipper traces, and their op-name keys can match map ops
+    # (`remove_branches_at`, `restrict`, ...).  Only `src:map` entries apply.
+    map_src = msg.startswith("src:map\n")
+    # Likewise the util fuzzer (--source util): only `src:util` entries apply.
+    util_src = msg.startswith("src:util\n")
+    keyed = lambda keys, src: any(k.startswith(src) for k in keys)   # "src:map" or "src:map\n"
     for keys, note in KNOWN:
+        if map_src and not keyed(keys, "src:map"):
+            continue
+        if util_src and not keyed(keys, "src:util"):
+            continue
         if all(k in msg for k in keys):
             return note
     return None
+
+
+def divergence_side(a, b):
+    """`WRITE-SIDE` when an op line differs only in its write-zipper
+    fingerprint (`W=...`, and possibly `ret=`), `READ-SIDE` when the read
+    zipper's (`R=...`) differs; None for other lines.  Lets a KNOWN entry for a
+    write-zipper bug avoid swallowing a read source's bug in the same op."""
+    if " R=" not in a or " R=" not in b or " W=" not in a or " W=" not in b:
+        return None
+    wa, ra = a.split(" W=", 1)[1].split(" R=", 1)
+    wb, rb = b.split(" W=", 1)[1].split(" R=", 1)
+    if ra != rb:
+        return "READ-SIDE"
+    if wa != wb:
+        return "WRITE-SIDE"
+    return None     # only `ret=` differs: the line alone cannot say which zipper
 
 
 def compare(blob, oracle, other, other_label, act=False):
@@ -433,6 +685,9 @@ def compare(blob, oracle, other, other_label, act=False):
     for i, (a, b) in enumerate(zip(lean, real)):
         if a != b:
             tags = ["ACT-VALCOUNT-ONLY"] if act and act_valcount_only(a, b) else []
+            side = divergence_side(a, b)
+            if side:
+                tags.append(side)
             shape = divergence_shape(a, b)
             if shape:
                 tags.append(shape)
@@ -659,14 +914,18 @@ def main():
     ap.add_argument("files", nargs="*")
     ap.add_argument("--random", type=int, default=0, help="generate N random inputs")
     ap.add_argument("--convex", type=int, default=0, help="generate N focused convex and path-set programs")
-    ap.add_argument("--selectors", type=int, default=NOPS, choices=range(1, NOPS + 1),
-                    metavar="N", help="selector count for random inputs (for baseline replay)")
+    ap.add_argument("--selectors", type=int, default=None, choices=range(1, 257),
+                    metavar="N", help="selector count for random inputs (for baseline replay; "
+                                      "default: the --source's current count)")
     ap.add_argument("--strict", action="store_true", help="fail on known divergences too")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--maxlen", type=int, default=300)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--act", action="store_true",
-                    help="use an ArenaCompactTree as the read source")
+                    help="use an ArenaCompactTree as the read source (= --source act)")
+    ap.add_argument("--source", default="native",
+                    help="read source / write target, see differential/src/sources "
+                         "(native, act, tracker, ...)")
     ap.add_argument("-j", "--jobs", type=int, default=1,
                     help="run this many worker processes in parallel "
                          "(each owns its own pair of children)")
@@ -676,6 +935,9 @@ def main():
                     help="stop after this many new divergences (0 = never stop)")
     args = ap.parse_args()
     TIMEOUT = args.timeout
+    if args.act:
+        args.source = "act"
+    args.act = args.source == "act"
 
     trace_bin = find_trace_bin(args.act)
     other_label = "crate"
@@ -690,14 +952,17 @@ def main():
     if args.files:
         sources.append(FileInputs(args.files))
     if args.random:
-        sources.append(RandomInputs(args.seed, args.random, args.maxlen, args.selectors))
+        selectors = args.selectors or {"map": MAP_NOPS, "util": UTIL_NOPS}.get(args.source, NOPS)
+        sources.append(RandomInputs(args.seed, args.random, args.maxlen, selectors))
     if args.convex:
         sources.append(ConvexInputs(args.seed, args.convex))
     source = ChainInputs(sources)
     n_inputs = len(source)
 
-    oracle_argv = [ORACLE] + (["--act"] if args.act else [])
+    oracle_argv = [ORACLE, "--source", args.source]
     other_argv = [trace_bin]
+    if args.source not in ("native", "act"):
+        other_argv += ["--source", args.source]
     faildir = []          # created on first failure only
 
     def save(idx):
@@ -724,7 +989,10 @@ def main():
             if args.verbose:
                 print("ok   %s" % name)
             return False
-        note = None if args.strict else classify(msg)
+        # Prefixed with the source name so a KNOWN entry for a virtual read
+        # source's own defect can be keyed on `src:<name>` and never hide
+        # the same-looking divergence of another source.
+        note = None if args.strict else classify("src:%s\n%s" % (args.source, msg))
         if note:
             known[note] = known.get(note, 0) + 1
             if args.verbose:

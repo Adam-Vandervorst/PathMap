@@ -807,11 +807,17 @@ impl<V: Clone + Send + Sync + Unpin + DistributiveLattice, A: Allocator> Distrib
 impl<V: Clone + Send + Sync + Unpin, A: Allocator> Quantale for PathMap<V, A> {
     fn prestrict(&self, other: &Self) -> AlgebraicResult<Self> {
         if other.root_val().is_some() {
-            return AlgebraicResult::Identity(SELF_IDENT)
+            return if self.is_empty() {
+                AlgebraicResult::None
+            } else {
+                AlgebraicResult::Identity(SELF_IDENT)
+            }
         }
-        match (self.root(), other.root()) {
+        match (self.root().filter(|n| !n.as_tagged().node_is_empty()),
+            other.root().filter(|n| !n.as_tagged().node_is_empty())) {
             (Some(self_root), Some(other_root)) => {
                 match self_root.prestrict(other_root) {
+                    AlgebraicResult::Element(new_root) if new_root.as_tagged().node_is_empty() => AlgebraicResult::None,
                     AlgebraicResult::Element(new_root) => AlgebraicResult::Element(Self::new_with_root_in(Some(new_root), None, self.alloc.clone())),
                     AlgebraicResult::Identity(mask) => {
                         debug_assert_eq!(mask, SELF_IDENT);
@@ -1328,10 +1334,7 @@ mod tests {
         wz.graft(&map1.read_zipper());
         drop(wz);
 
-        #[cfg(feature = "graft_root_vals")]
         assert_eq!(map0.val_at([]), Some(&0));
-        #[cfg(not(feature = "graft_root_vals"))]
-        assert_eq!(map0.get_val_at([]), None);
     }
 
     #[test]
@@ -1620,6 +1623,69 @@ mod tests {
 
         assert_eq!(a.join(&b).val_at([1u8, 0, 0, 0]), Some(&1));
         assert_eq!(b.join(&a).val_at([1u8, 0, 0, 0]), Some(&1));
+    }
+
+    /// A meet where a list node holds a value and a child under one key, and the child meets an
+    /// empty node: the result must not keep an empty child beside the value
+    #[test]
+    fn map_meet_value_beside_emptied_child() {
+        let mut x = PathMap::<u64>::new();
+        x.create_path([2u8]);
+        let mut big = PathMap::<u64>::new();
+        big.set_val_at([1u8], 2);
+        big.create_path([1u8, 2, 1, 2, 1]);
+        big.set_val_at([2u8], 1);
+        let mut c = PathMap::<u64>::new();
+        c.set_val_at([2u8], 1);
+        c.set_val_at([2u8, 0], 2);
+        c.set_val_at([2u8, 2], 2);
+
+        let met = x.join(&big).meet(&x.join(&c));
+        assert_eq!(met.val_at([2u8]), Some(&1));
+        assert_eq!(met.val_count(), 1);
+    }
+
+    /// A join with a map holding only dangling paths the other side also has keeps everything
+    #[test]
+    fn map_join_with_shared_dangling_paths_keeps_values() {
+        let mut l = PathMap::<u64>::new();
+        l.set_val_at([0u8], 1);
+        l.create_path([1u8]);
+        l.create_path([3u8]);
+        let mut d = PathMap::<u64>::new();
+        d.create_path([1u8]);
+        d.create_path([3u8]);
+        for joined in [l.join(&d), d.join(&l), { let mut j = l.clone(); j.write_zipper().join_into(&d.read_zipper()); j }] {
+            assert_eq!(joined.val_at([0u8]), Some(&1));
+            assert!(joined.path_exists_at([1u8]) && joined.path_exists_at([3u8]));
+        }
+    }
+
+    /// Joining a byte node with a list node whose only contents are dangling paths the byte node
+    /// also has.  Each list slot joins to nothing, which must not make the whole join empty
+    #[test]
+    fn map_join_with_dangling_only_list_node_fresh_and_cloned() {
+        let mut a = PathMap::<u64>::new();
+        a.set_val_at([0u8, 1, 2, 2, 2], 1);
+        a.set_val_at([1u8, 0], 1);
+        a.create_path([2u8, 0]);
+        a.create_path([2u8, 1]);
+        let mut b = a.clone();
+        a.set_val_at([2u8, 2], 2);
+        //Rebuilt rather than cloned, so the two share no nodes
+        let mut b_fresh = PathMap::<u64>::new();
+        b_fresh.set_val_at([0u8, 1, 2, 2, 2], 1);
+        b_fresh.set_val_at([1u8, 0], 1);
+        b_fresh.create_path([2u8, 0]);
+        b_fresh.create_path([2u8, 1]);
+        b.remove_val_at([2u8, 2], false);
+
+        for b in [&b, &b_fresh] {
+            for joined in [a.join(b), b.join(&a)] {
+                assert_eq!(joined.val_at([2u8, 2]), Some(&2));
+                assert_eq!(joined.val_count(), 3);
+            }
+        }
     }
 }
 

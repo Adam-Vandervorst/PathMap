@@ -68,7 +68,7 @@ the model reproduces it exactly rather than assuming a "real" lattice. -/
 def u64Ops : ValOps UInt64 where
   pjoin _ _ := .identity true false
   pmeet _ _ := .identity true false
-  psub a b := if a == b then .none else .elem a
+  psub a b := if a == b then .none else .identity true false
   beq a b := a == b
 
 /-- The instance `pathmap` provides for `()` (see `impl Lattice for ()` in `src/ring.rs`).

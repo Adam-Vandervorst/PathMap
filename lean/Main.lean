@@ -73,7 +73,7 @@ def hexDecode (s : String) : Option ByteArray :=
     go cs ByteArray.empty
 
 /-- The resident command loop. -/
-partial def serve (act : Bool) : IO Unit := do
+partial def serve (runner : ByteArray → List String) : IO Unit := do
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
   let rec loop : IO Unit := do
@@ -89,7 +89,7 @@ partial def serve (act : Bool) : IO Unit := do
           -- "Why there is no in-process timeout here" above.
           match ms.toNat?, hexDecode (String.intercalate " " rest) with
           | some _, some bytes => do
-              for line in Fuzz.run bytes 256 act do
+              for line in runner bytes do
                 stdout.putStrLn line
               pure "!DONE"
           | _, _ => pure "!PANIC bad run-input arguments"
@@ -99,13 +99,34 @@ partial def serve (act : Bool) : IO Unit := do
     loop
   loop
 
-def main (args : List String) : IO Unit := do
-  let act := args.contains "--act"
+/-- `--source NAME` (or the older `--act`, meaning `--source act`). -/
+def sourceArg : List String → Option String
+  | "--source" :: n :: _ => some n
+  | "--act" :: _ => some "act"
+  | _ :: rest => sourceArg rest
+  | [] => none
+
+def main (args : List String) : IO UInt32 := do
+  let name := (sourceArg args).getD "native"
+  -- `map` is the map-level fuzzer (`MapFuzz.lean`); every other name is a read
+  -- source for the zipper fuzzer.
+  let runner? : Option (ByteArray → List String) :=
+    if name == "map" then some (MapFuzz.run · 256)
+    else if name == "util" then some (UtilFuzz.run · 256)
+    else (Source.byName name).map (fun src => (Fuzz.run · 256 src))
+  let some runner := runner?
+    | IO.eprintln s!"unknown --source {name}; known: map util {String.intercalate " " (Source.all.map (·.name))}"
+      return 2
   if args.contains "--server" then
-    return ← serve act
-  let files := args.filter (fun a => a != "--act" && a != "--server")
-  let bytes ← match files with
+    serve runner
+    return 0
+  let rec files : List String → List String
+    | "--source" :: _ :: rest => files rest
+    | a :: rest => if a == "--act" || a == "--server" then files rest else a :: files rest
+    | [] => []
+  let bytes ← match files args with
     | [] => (← IO.getStdin).readBinToEnd
     | path :: _ => IO.FS.readBinFile path
-  for line in Fuzz.run bytes 256 act do
+  for line in runner bytes do
     IO.println line
+  return 0

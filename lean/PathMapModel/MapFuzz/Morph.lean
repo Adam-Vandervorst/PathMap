@@ -1,0 +1,372 @@
+import PathMapModel.MapFuzz.Base
+import PathMapModel.PrefixTree
+
+/-!
+# Map fuzzer, ops 50–59: catamorphisms, anamorphisms
+
+`src/morphisms.rs`: the `Catamorphism` trait in all its flavours and the
+anamorphism `PathMap::new_from_ana(_in)` with its `TrieBuilder`.  The Rust side
+is `differential/src/mapfuzz/morph.rs`.
+
+## What a catamorphism visits
+
+Everything here is stated on the **view**: the trie `T` the folded object
+presents, relative to its root, plus the root's absolute path `r` (the `path`
+argument is `ZipperAbsolutePath::origin_path`, so it carries `r`).  `T` includes
+the root's value and every *existing* location below it, dangling ones
+included — a dangling leaf is a location with an empty mask and no value, and is
+visited like any other leaf.  The zipper's focus is ignored (the doc: "it will be
+immediately reset to the root").
+
+* **Stepping** (`into_cata_side_effect`, `into_cata_cached`): the closure runs
+  once at every location of `T`, the root included ("exactly once for each
+  unique path in the trie").  Its `children` are the results for `q ++ [b]`, one
+  per bit `b` of its child mask, in ascending byte order.
+* **Jumping** (`into_cata_jumping_*`): the closure runs only at *features* —
+  locations with a value or a child count other than 1 (forks and leaves) —
+  and "jumps over" the single-child, valueless locations between them.  A
+  feature's `children` are, for each child byte `b`, the result at the first
+  feature on the chain starting at `q ++ [b]`; its `jump` is the number of
+  jumped bytes between it and the feature above it, *not counting* the byte
+  that the parent's mask names (`|F| - |q| - 1`).  The root is visited iff it
+  is a feature; when it is not (one child, no value) the result is its only
+  child's, whose jump then counts from the root and includes that first byte
+  (`|F|`).  This is the documented `combo/comet/comfort` example: four calls,
+  the last with sub-path `com`.  The cached jumping flavour hands the closure
+  the jumped bytes themselves, `sub_path = path[|path| - jump ..]`.
+* **Side-effecting** flavours run in a deterministic post-order: all of a
+  location's children (ascending byte order), then the location.  The closure
+  here stamps each call with its sequence number, so the result records the
+  order.  A `_fallible` run stops at the first `Err`: the result is that `Err`
+  and no further call happens.
+* **Cached** flavours see no path, may skip a shared subtrie whose result they
+  already have, and promise nothing about order; their result must still be
+  exactly the uncached fold of the same closure.  Their `_fallible` predicate
+  here is order-independent (every `Err` is the same), so the answer is `Err`
+  iff some visited location satisfies it.
+* `hash` / `hash_with` are cached folds over (mask, children's hashes, value
+  hash), so they are compared as an equivalence: two views hash equal iff they
+  are the same trie (dangling paths included, through the masks) with equal
+  values under `val_hash`.
+
+## Anamorphisms
+
+`new_from_ana(w, alg)` runs `alg(w, &mut val, builder, path)` at the root, then,
+depth-first in push order, at `path ++ sub` for every child `(sub, w')` pushed
+into the builder (`push_byte`, `push`, `set_child_mask`).  `graft_at_byte(b, rz)`
+instead places the subtrie strictly *below* `rz`'s focus at `path ++ [b]` and
+does not recurse (the value at `rz`'s focus is not part of that node).  The
+result holds exactly: the values set, the grafted content (dangling paths
+included), and their prefixes.  A location that got neither a value nor
+anything below it does not exist.  `ana` (in `PrefixTree.lean`) is that rule for any closure;
+`copyAlg` and `repAlg` are the two closures the fuzzer runs.
+
+## Ops
+
+| op | name | operands | result |
+|---|---|---|---|
+| 50 | `cata_side` | csrc, `e` | stepping side-effect fold; `e` odd: `_fallible`, `Err` at call `(e >> 1) % 32` |
+| 51 | `cata_jump_side` | csrc, `e` | the same, jumping |
+| 52 | `cata_cached` | csrc, `pred`, `v` | stepping cached fold; `pred % 4 ≠ 0`: `_fallible` (see `cachedFails`) |
+| 53 | `cata_jump_cached` | csrc, `pred`, `v` | the same, jumping |
+| 54 | `hash` | csrc, csrc | `eq=` hashes equal, `eqw=` `hash_with(v % 3)` equal |
+| 55 | `ana_copy` | `i`, `p`, `dst`, `s`, `in` | `m[dst] := new_from_ana(_in)(p, copyAlg m[i] s)`; each call reported as `<path>#<len>.<mask>`, the builder's `len()` and `child_mask()` after it |
+| 56 | `ana_replicate` | `i`, `p`, `dst`, `lv`, `mb` | `m[dst] :=` a `lv`-level tree grafting `m[i]`'s node at `p` (see `repAlg`) |
+| 57 | `tree_bytes` | csrc, `fl`, `dst`, `g`, `in` | the view's byte tree from a stepping fold (`fl % 4`: side-effect, side-effect `_fallible`, cached, cached `_fallible`, the fallible ones never failing); `m[dst] :=` its deserialization (`treeRoundTrip`) |
+| 58 | `tree_lines` | csrc, `fl`, `dst`, `g`, `in` | the same with the line tree and the jumping flavours |
+| 59 | `split_cata` | csrc, `mode` | the deprecated shims: `mode` even, `SplitCata` building the byte tree (`toBytes`); odd, `SplitCataJumping` counting and summing the values |
+
+A *csrc* is `i : map, kind : u8 % 3, p : path(4), f : path(4), q : path(6)`: a
+clone of `m[i]` with `q` created as a (possibly dangling) path, folded as the
+map itself (`kind 0`, root `[]`), as `read_zipper_at_path(p)` (`kind 1`) or as
+`into_read_zipper(p)` (`kind 2`), the zippers first moved to `f`.
+-/
+
+namespace PathMapModel
+namespace MapFuzz
+
+open Fuzz (V Dec hexPath showVal showBool)
+
+namespace Morph
+
+/-! ## The folded view -/
+
+structure CSrc where
+  i : Nat
+  kind : Nat
+  p : Path
+  f : Path
+  q : Path
+
+def decCSrc (d : Dec) : Option (CSrc × Dec) := do
+  let (i, d) ← d.map
+  let (kind, d) ← d.mod 3
+  let (p, d) ← d.path 4
+  let (f, d) ← d.path 4
+  let (q, d) ← d.path 6
+  some ({ i, kind, p, f, q }, d)
+
+/-- The trie a csrc presents, relative to its root, and the root's absolute path. -/
+def CSrc.view (s : MSt) (c : CSrc) : PathMap V × Path :=
+  let t := s.get c.i
+  let t := if c.q.isEmpty then t else t.addPath c.q
+  if c.kind == 0 then (t, []) else (t.subtrie c.p, c.p)
+
+open PathMap (isFeature follow fuel)
+
+def showJump : Option Nat → String
+  | none => ""
+  | some j => ":" ++ toString j
+
+/-- One side-effecting call's result and its `Err` (when it is the failing call). -/
+def encSide (i : Nat) (path : Path) (jump : Option Nat) (v : Option V) (mask : ByteMask)
+    (ws : List String) : String :=
+  "(" ++ toString i ++ ":" ++ hexPath path ++ showJump jump ++ ":" ++ showVal v ++ ":" ++
+    hexPath mask ++ String.join ws ++ ")"
+
+def errSide (i : Nat) (path : Path) (jump : Option Nat) (v : Option V) (mask : ByteMask) : String :=
+  "E" ++ toString i ++ ":" ++ hexPath path ++ showJump jump ++ ":" ++ showVal v ++ ":" ++
+    hexPath mask ++ ":" ++ toString mask.length
+
+/-! ## Side-effecting folds: post-order, numbered
+
+`PathMap.sideFold` with the closure the fuzzer runs: each call's result is its
+encoding, its `Err` the `errSide` line.  Returns `(result, next call number,
+the Err each call would return, in call order)`. -/
+
+def sideFold (T : PathMap V) (r : Path) (jumping : Bool) : String × Nat × List String :=
+  T.sideFold jumping (fun i q j v m ws => encSide i (r ++ q) j v m ws)
+    (fun i q j v m => errSide i (r ++ q) j v m) ""
+
+/-- Ops 50/51: the result, `Err` at call `k` if there are that many calls. -/
+def sideResult (T : PathMap V) (r : Path) (jumping : Bool) (errAt : Option Nat) : String :=
+  let (w, n, log) := sideFold T r jumping
+  match errAt with
+  | some k =>
+      match log[k]? with
+      | some e => "Err:" ++ e ++ " calls=" ++ toString (k + 1)
+      | none => w ++ " calls=" ++ toString n
+  | none => w ++ " calls=" ++ toString n
+
+/-! ## Cached folds: pure, no path -/
+
+def encCached (sub : Option Path) (v : Option V) (mask : ByteMask) (ws : List String) : String :=
+  "(" ++ (match sub with | some s => hexPath s ++ ":" | none => "") ++ showVal v ++ ":" ++
+    hexPath mask ++ String.join ws ++ ")"
+
+/-- `PathMap.cataStep` / `cataJump` with the closure the fuzzer runs. -/
+def cachedFold (T : PathMap V) (jumping : Bool) : String :=
+  if !jumping then T.cataStep (encCached none) ""
+  else T.cataJump (fun sub => encCached (some sub)) ""
+
+/-- The `_fallible` predicate, `pred % 4`: 1 the value is `v`; 2 the child count
+is `(pred >> 2) % 4`; 3 one child and no value (a location only a *stepping*
+fold visits). -/
+def cachedFails (pred : Nat) (v : V) (T : PathMap V) (q : Path) : Bool :=
+  match pred % 4 with
+  | 1 => T.valAt q == some v
+  | 2 => T.childCount q == (pred / 4) % 4
+  | 3 => T.childCount q == 1 && (T.valAt q).isNone
+  | _ => false
+
+/-- Ops 52/53.  The visited set: every location (stepping) or every feature
+(jumping; the root only when it is one). -/
+def cachedResult (T : PathMap V) (jumping : Bool) (pred : Nat) (v : V) : String :=
+  let visited := if jumping then T.paths.filter (isFeature T) else T.paths
+  if pred % 4 != 0 && visited.any (cachedFails pred v T) then "Err:E"
+  else cachedFold T jumping
+
+/-! ## Hashing -/
+
+def mapVals (f : V → V) (T : PathMap V) : PathMap V :=
+  PathMap.mk' (T.vals.map fun (p, x) => (p, f x)) T.paths
+
+def sameTrie (a b : PathMap V) : Bool := a.entries == b.entries
+
+/-! ## Anamorphisms
+
+`AnaKid`, `anaGo` and `ana` are in `PrefixTree.lean`, generic in the value type.
+-/
+
+/-- Op 55's closure.  `W` is a path in `src`.  The value at `w` is kept unless
+`(v + depth) % 4 = (s >> 2) % 4`, and is increased by `s >> 6`.  If
+`((s >> 1) + depth) % 3 = 0` every child is set at once with `set_child_mask`;
+otherwise child `b` is, by `((s >> 4) % 4 + b + depth) % 4`: 0 `push_byte`,
+1 `push` of `b` and the single-child chain after it, 2 `graft_at_byte` of
+`src` at `w ++ [b]` (`push_byte` when that has nothing below), 3 dropped. -/
+def copyAlg (src : PathMap V) (s : Nat) (w : Path) (path : Path) : Option V × List (AnaKid V Path) :=
+  let depth := path.length
+  let v := match src.valAt w with
+    | some x => if (x.toNat + depth) % 4 != (s / 4) % 4 then some (x + UInt64.ofNat (s / 64)) else none
+    | none => none
+  let mask := src.childMask w
+  if ((s / 2) + depth) % 3 == 0 then (v, mask.map fun b => .w [b] (w ++ [b]))
+  else (v, mask.filterMap fun b =>
+    let wc := w ++ [b]
+    match ((s / 16) % 4 + b.toNat + depth) % 4 with
+    | 0 => some (.w [b] wc)
+    | 1 => let ch := (follow src (fuel src) wc).drop wc.length
+           some (.w (b :: ch) (wc ++ ch))
+    | 2 => if src.childCount wc > 0 then some (.graft b (src.subtrie wc)) else some (.w [b] wc)
+    | _ => none)
+
+/-- Op 56's closure.  `W` is the remaining level count: level 0 grafts `node`
+at each byte of `bytes` (if it has anything below its root), higher levels
+`push_byte` each byte with one level less; with `setVals` every call sets the
+value `|path|`. -/
+def repAlg (node : PathMap V) (has : Bool) (bytes : List UInt8) (setVals : Bool) (lvl : Nat)
+    (path : Path) : Option V × List (AnaKid V Nat) :=
+  (if setVals then some (UInt64.ofNat path.length) else none,
+   if lvl == 0 then (if has then bytes.map (fun x => .graft x node) else [])
+   else bytes.map (fun x => .w [x] (lvl - 1)))
+
+/-- Location bound for `ana_replicate`; `REP_CAP` in morph.rs. -/
+def repCap : Nat := 256
+
+/-! ## Prefix trees: serialize with a catamorphism, deserialize with an anamorphism
+
+Ops 57/58 fold the view into a prefix tree (`PrefixTree.lean`): byte-level with
+a stepping flavour (`toBytes`), line-level with a jumping one (`toLines`).  The
+crate's closures render each node as `PTree.render` does, so the string is
+compared exactly.  Then the crate's `new_from_ana(_in)` rebuilds a map from that
+same string, pushing each edge (`push_byte` for one byte unless `g & 8`, `push`
+otherwise) or, where `grafts` says so, grafting the edge's subtrie from the
+source with `graft_at_byte`.  `PTree.ana_unfold` proves that with no grafts the
+result is the view minus its dangling locations (which no push can create), so
+`same=1` exactly when nothing dangled. -/
+
+/-- One-byte edges only, with `g` odd: `grafts` in morph.rs. -/
+def grafts (g : Nat) (path e : Path) : Bool :=
+  e.length == 1 && g % 2 == 1 && ((g / 2) + path.length + (e.headD 0).toNat) % 3 == 0
+
+/-- The deserializing closure: set the node's value, push or graft each edge.
+`src` is the view; a graft at `path ++ e` takes its node there. -/
+def treeAlg (src : PathMap V) (g : Nat) (t : PTree V) (path : Path) :
+    Option V × List (AnaKid V (PTree V)) :=
+  (t.val, t.kids.map fun (e, c) =>
+    -- Only where the source has something below: `graft_at_byte` panics on a
+    -- leaf (finding PT1 in `lean/findings/ptree.md`).
+    if grafts g path e && src.childCount (path ++ e) > 0 then .graft (e.headD 0) (src.subtrie (path ++ e))
+    else .w e c)
+
+def renderTree (t : PTree V) : String := PTree.render showVal hexPath t
+
+/-- Ops 57/58: the rendered tree, the anamorphism's call count, whether it
+rebuilt the view exactly; and the rebuilt map. -/
+def treeRoundTrip (T : PathMap V) (lines : Bool) (g : Nat) : String × PathMap V :=
+  let t := if lines then T.toLines else T.toBytes
+  let (m, calls) := ana (treeAlg T g) t (t.height + 1)
+  (renderTree t ++ " calls=" ++ toString calls.length ++ " same=" ++ showBool (sameTrie m T), m)
+
+/-! ### Fixtures -/
+
+/-- The `combo/comet/comfort` example from `into_cata_jumping_cached`'s doc
+(`c o m` = `1 2 3`, `b o` = `0 4`, `e t` = `5 6`, `f o r t` = `7 8 9 10`):
+four calls, sub-paths `o`, `t`, `ort`, `com`. -/
+private def combo : PathMap V :=
+  PathMap.mk' [([1, 2, 3, 0, 4], 0), ([1, 2, 3, 5, 6], 0), ([1, 2, 3, 7, 8, 9, 10], 0)] []
+
+#guard cachedFold combo true == "(010203:-:000507(04:0:_)(06:0:_)(08090a:0:_))"
+
+/-- `cata_test9`: the root jumps to `[0]` with jump 1 (the first byte counts,
+the root being no feature), the fork `[0,1]` below it with jump 0. -/
+private def test9 : PathMap V := PathMap.mk' [([0], 0), ([0, 1, 2], 1), ([0, 1, 3], 2)] []
+
+#guard sideResult test9 [] true none ==
+  "(3:00:1:0:01(2:0001:0:-:0203(0:000102:0:1:_)(1:000103:0:2:_))) calls=4"
+-- Stepping visits every location, post-order; `Err` at call 2 stops there.
+#guard sideResult test9 [] false (some 2) == "Err:E2:0001:-:0203:2 calls=3"
+-- A dangling leaf is visited like any leaf.
+#guard sideResult (PathMap.empty.addPath [1]) [] false none == "(1:_:-:01(0:01:-:_)) calls=2"
+-- Predicate 3 (one child, no value) fails a stepping fold but never a jumping one.
+#guard cachedResult test9 false 3 0 == "Err:E"
+#guard cachedResult test9 true 3 0 != "Err:E"
+
+-- `graft_at_byte` places only what is strictly below the source focus (here
+-- the root, so everything but a root value).
+#guard (ana (fun (_ : Nat) _ => (none, [AnaKid.graft 2 test9])) 0 3).1.entries ==
+  (PathMap.mk' [([2, 0], 0), ([2, 0, 1, 2], 1), ([2, 0, 1, 3], 2)] [] : PathMap V).entries
+-- Each call records the first bytes it pushed (`TrieBuilder::len` = their
+-- number, `child_mask` = their set): a `push` of `[1, 2]` counts as byte 1, a
+-- graft at 3 as byte 3; the recursion below `[1, 2]` pushes nothing.
+#guard (ana (fun (n : Nat) _ => (none, if n == 0 then [AnaKid.w [1, 2] 1, AnaKid.graft 3 test9] else []))
+  0 3).2 == [([], [1, 3]), ([1, 2], [])]
+
+end Morph
+
+open Morph in
+def stepMorph (op : Nat) (s : MSt) (d : Dec) : Option (Res × Dec) :=
+  match op with
+  | 50 | 51 => do
+      let (c, d) ← decCSrc d
+      let (e, d) ← d.u8
+      let errAt := if e.toNat % 2 == 0 then none else some ((e.toNat / 2) % 32)
+      let (T, r) := c.view s
+      some (((if op == 50 then "cata_side" else "cata_jump_side"),
+        sideResult T r (op == 51) errAt, s), d)
+  | 52 | 53 => do
+      let (c, d) ← decCSrc d
+      let (pred, d) ← d.u8
+      let (v, d) ← d.val
+      let (T, _) := c.view s
+      some (((if op == 52 then "cata_cached" else "cata_jump_cached"),
+        cachedResult T (op == 53) pred.toNat v, s), d)
+  | 54 => do
+      let (a, d) ← decCSrc d
+      let (b, d) ← decCSrc d
+      let (ta, _) := a.view s
+      let (tb, _) := b.view s
+      let m3 := mapVals (fun x => x % 3)
+      some (("hash", "eq=" ++ showBool (sameTrie ta tb) ++ " eqw=" ++
+        showBool (sameTrie (m3 ta) (m3 tb)), s), d)
+  | 55 => do
+      let (i, d) ← d.map
+      let (p, d) ← d.path 4
+      let (dst, d) ← d.map
+      let (sb, d) ← d.u8
+      let (_useIn, d) ← d.bool
+      let src := s.get i
+      let (m, calls) := ana (copyAlg src sb.toNat) p (PathMap.fuel src + 1)
+      let showCall := fun (c : Path × List UInt8) =>
+        hexPath c.1 ++ "#" ++ toString c.2.length ++ "." ++ hexPath (Path.sortDedup (c.2.map ([·]))).flatten
+      some (("ana_copy", "calls=" ++ String.intercalate "," (calls.map showCall), s.set dst m), d)
+  | 56 => do
+      let (i, d) ← d.map
+      let (p, d) ← d.path 4
+      let (dst, d) ← d.map
+      let (lv, d) ← d.mod 3
+      let (mb, d) ← d.u8
+      let src := s.get i
+      let bytes0 := [0, 1, 2, 3].filter (fun x => (mb.toNat / 2 ^ x) % 2 == 1)
+      let bytes := (if bytes0.isEmpty then [0] else bytes0).map UInt8.ofNat
+      let setVals := (mb.toNat / 16) % 2 == 1
+      let node := src.subtrie p
+      -- `skip:too-big` (`SKIP_TOO_BIG` in morph.rs): repeated replication would
+      -- otherwise grow a map exponentially, past what this list model handles
+      -- quickly.  Bound: node locations × |bytes|^(lv+1) ≤ `repCap`.
+      if (if src.pathExists p then node.paths.length else 1) * bytes.length ^ (lv + 1) > repCap then
+        some (("ana_replicate", "skip:too-big", s), d)
+      else
+      let (m, calls) := ana (repAlg node (src.childCount p > 0) bytes setVals) lv (lv + 2)
+      some (("ana_replicate", "calls=" ++ toString calls.length, s.set dst m), d)
+  | 57 | 58 => do
+      let (c, d) ← decCSrc d
+      let (_fl, d) ← d.u8
+      let (dst, d) ← d.map
+      let (g, d) ← d.u8
+      let (_useIn, d) ← d.bool
+      let (T, _) := c.view s
+      let (r, m) := treeRoundTrip T (op == 58) g.toNat
+      some (((if op == 57 then "tree_bytes" else "tree_lines"), r, s.set dst m), d)
+  | 59 => do
+      let (c, d) ← decCSrc d
+      let (mode, d) ← d.u8
+      let (T, _) := c.view s
+      let r := if mode.toNat % 2 == 0 then renderTree T.toBytes
+        else "n=" ++ toString T.vals.length ++ " s=" ++
+          toString (T.vals.foldl (fun (a : V) (pv : Path × V) => a + pv.2) 0).toNat
+      some (("split_cata", r, s), d)
+  | _ => some (("nop", "-", s), d)
+
+end MapFuzz
+end PathMapModel

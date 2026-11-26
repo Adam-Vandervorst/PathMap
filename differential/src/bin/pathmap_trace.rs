@@ -12,8 +12,20 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let check = args.iter().any(|a| a == "--check");
     // Resident mode: one process, many inputs over stdin.  See `serve`.
+    // `--source NAME` picks the read source / write target (see `sources`).
+    let source = args
+        .iter()
+        .position(|a| a == "--source")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "native".to_string());
+    let runner = sources::runner(&source).unwrap_or_else(|| {
+        let names: Vec<&str> = sources::SOURCES.iter().map(|(n, _)| *n).collect();
+        eprintln!("unknown --source {source}; known: {}", names.join(" "));
+        std::process::exit(2)
+    });
     if args.iter().any(|a| a == "--server") {
-        serve(check, run);
+        serve(check, runner);
         return;
     }
     // `--repro [--upto N] FILE` prints a standalone Rust program for the input
@@ -28,6 +40,9 @@ fn main() {
         .unwrap_or(MAX_STEPS);
     let file = args
         .iter()
+        .enumerate()
+        .filter(|(i, _)| *i == 0 || args[i - 1] != "--source")
+        .map(|(_, a)| a)
         .filter(|a| !a.starts_with("--"))
         .find(|a| a.parse::<usize>().is_err())
         .cloned();
@@ -43,7 +58,7 @@ fn main() {
     if repro {
         print!("{}", emit_repro(&bytes, upto));
     } else {
-        print!("{}", run(&bytes, check));
+        print!("{}", runner(&bytes, check));
     }
 }
 

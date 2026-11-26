@@ -613,8 +613,8 @@ pub fn run_ops(
             _ => ("nop", "-".to_string()),
         };
         if check {
-            check_zipper(&wz, "write zipper", root0);
-            check_zipper(rz, "read zipper", root1);
+            check_zipper(&wz, "write zipper", root0, true);
+            check_zipper(rz, "read zipper", root1, true);
         }
         let _ = writeln!(
             out,

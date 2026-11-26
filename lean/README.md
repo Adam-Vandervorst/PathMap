@@ -132,7 +132,7 @@ Two distinctions the model keeps explicit because `pathmap` depends on them:
   lives in its parent's cell.  `get_focus`, `graft_internal` and every `*_dyn`
   algebraic primitive operate on nodes, so they never touch the focus value;
   `PathMap.subtrie` includes it, `Zip.focusNode` does not.
-* **The `graft_root_vals` feature is on by default**, so `graft`, `graft_map`,
+* **Focus values are part of subtrie operations**, so `graft`, `graft_map`,
   `make_map`, `take_map`, `join_map_into`, `meet_into` and `subtract_into` handle
   the focus value in a separate step — while `join_into` does not.  The model
   reproduces that asymmetry rather than smoothing it over.
@@ -267,6 +267,60 @@ Readers detect the version header by its magic bytes and reject truncated
 headers or invalid selector counts. Headerless inputs use 56 selectors.
 Each input's selector count controls decoding independently of the running
 software's operation table.
+
+Operation 75 is `trie_ref_probe`, with a target byte, a mode byte (`u8 % 4`)
+and two paths `p` and `q`. It takes a `TrieRef` at `p` below the target's
+focus -- mode 0: the read zipper's own `trie_ref_at_path` (a `TrieRefBorrowed`
+from an untracked read zipper, a `TrieRefOwned` from a tracked or owned one);
+modes 0/1 on the write side and mode 1 on the read side:
+`get_trie_ref().trie_ref_at_path(p)`; mode 2: `TrieRefOwned::from(make_map())`;
+mode 3: `TrieRef::from(make_map())` -- and reports its existence, value, child
+count and mask, `val_at(q)`, a dump of its `fork_read_zipper` (taken only where
+the path exists; GOAT issue #96) and of its `make_map`, and a set of
+internal-consistency checks (`get_trie_ref`, `trie_ref`, `try_borrow_focus`,
+conversion into `TrieRef`, `get_val_with_witness`), then the same for the
+reference `trie_ref_at_path(q)` hands out. The model reads the zipper's trie at
+`focus ++ p` (modes 0/1) or the made map at `p` (modes 2/3); see
+`Fuzz.trieRefReport`. The write side always serves it; a read source does only
+if it opts in (`trie_ref_source!()` in its `ReadSource` impl, `Caps.trieRef` in
+its Lean `Source`), and otherwise reads `skip:<source>`.
+
+Operations 76-81 drive the public functions no earlier op reached (the
+2026-11-09 coverage re-measurement; lean/findings/ops.md):
+
+* 76 `drop_head` (`k := u8 % 4`, a via byte): the deprecated alias of
+  `join_k_path_into(k, true)`, called on the write zipper or through the
+  `&mut Z` forwarding impl.
+* 77 `join_take` (target byte, `via := u8 % 4`, path `p`, prune byte):
+  `join_into_take`.  Its source must be a write zipper, so the op takes a
+  *snapshot* of the target's focus subtrie -- `wz.make_map()`, or the read
+  source grafted into a fresh map (a merge source only; otherwise
+  `skip:<source>`) -- and joins into `wz` from a write zipper at `p` in it
+  (`via` bit 0: through `&mut Z`; bit 1: a `WriteZipperOwned` source).  It
+  reports the status and the snapshot afterwards, which must have lost the
+  taken subtrie (and, with prune, the dangling path to it).  A `wz` snapshot
+  shares its nodes with map0, so this is also a copy-on-write check.
+* 78 `focus_probe` (target byte, path `p`): `get_focus_at(p)` must return a
+  node wherever something lies below `focus ++ p` (`g`; the opaque result is
+  observed through `Debug`), and `try_borrow_focus()` must be `None` at a
+  missing focus (`k`).  The read side is served with op 75 (`Caps.trieRef`).
+  Op 75's report gained the same `g` field for every trie reference.
+* 79 `witness_next_val` (observed byte): `to_next_get_val_with_witness` or its
+  `_observed` form, as op 52 (`Caps.witnessIter`).
+* 80 `k_path_overrun` (`j := u8 % 4`, observed byte): `to_next_k_path(k)` with
+  `k = depth + 1 + j`, which the trait specifies as `false` plus a reset to the
+  root (`k_path_depth_exceeded`); the observer must follow.
+* 81 `path_iter` (target byte, path `p`): on a snapshot as in 77, a read
+  zipper descended to `p`: `into_path` (the origin path) and `into_path_iter`
+  (every leaf after the focus in depth-first order, with
+  `ReadZipperPathIter::val`).
+
+Deprecated aliases are checked inside existing ops rather than as ops of their
+own: odd steps of op 7 call `descend_indexed_branch` and of op 20
+`descend_to_value`; op 51's agreement bit covers `value`/`is_value` (and on
+the native source `get_value`); op 52 on the native source rotates through
+`to_next_get_val`, `to_next_get_value`, `to_next_get_value_observed` and
+`to_next_get_val_observed` by depth.
 
 Generators always write the current header, using `NOPS` in
 `lean/input_format.py`, which must match `differential/src/harness.rs`.
@@ -414,7 +468,10 @@ skips diverges:
 | `skip:empty-path` | `insert_prefix("")` — should be the identity, destroys the subtrie. |
 | `skip:at-root` | `to_next_sibling_byte` / `to_prev_sibling_byte` at the zipper root — the native read zipper leaves its own root there. |
 | `skip:quarantined` | `graft_child_maps` (op 54), disabled outright: it is broken three ways (FINDINGS.md #15) and the node representations it leaves behind degrade the `AlgebraicStatus` that *later* operations report. |
+| `skip:k-path-borrowed` | op 80 `k_path_overrun` at the root of a `--source head` read zipper, which may come from `read_zipper_at_borrowed_path`: a cold `to_next_k_path` there underflows `path_len()` (known `to_next_k_path_borrowed`) and corrupts later iteration (findings/ops.md). |
 | `skip:act` | ACT mode only — the read source cannot be a merge source (`ZipperInfallibleSubtries` is not implemented for it) or does not implement the trait the op needs. |
+| `skip:join-all-empty` | util op 25 (`--source util`): `Lattice::join_all` on byte masks when every argument is empty and the crate answers `None` or an in-range `Identity` -- both allowed by `AlgebraicResult`'s contract; the crate picks by argument-count parity (findings/u-mask.md M1).  Defined in `utilfuzz/mask.rs` / `UtilFuzz/Mask.lean`, not the harness vocabulary.  The u-lattice ops' `ring_join_all` applies the same token and rule to every value type (all arguments a bottom: self-join `None`), in `utilfuzz/lattice.rs` / `UtilFuzz/Lattice.lean`. |
+| `skip:setlattice-meet-swap` | util `ring_pmeet` / `ring_lref` (`--source util`): a `HashMap` meet whose value type's `pmeet` is not symmetric, with a shared key, when the crate's `set_lattice!` would pass that key's values in swapped order (`self` not the smaller map) -- findings/u-lattice.md L1.  `ring_pmeet!` (full byte 255) is the same op without the skip; corpus `util-setlattice-meet-swapped-operands.bin`. |
 
 Naming these turned up an ordering bug the bare token had hidden: for
 `restricting` the model tested ACT mode first and the harness tested the empty
@@ -632,6 +689,51 @@ programs), `descend_first_k_path()` only walks the leftmost chain, and
 round-trips faithfully, and `merge_zipper_into_file` -- ACT's one write-shaped
 operation -- matches its specification on all 300 cases of
 `differential/src/bin/act_merge_check.rs`.
+
+## Read sources, write targets and the map fuzzer
+
+The ACT mode above was the first instance of a general mechanism.  The
+operation table (`harness::run_ops`) is generic over the read zipper (trait
+`ReadSource`) and the write zipper (`WriteTarget`), and `--source NAME` picks
+both, on `pathmap_trace`, `pathmap-oracle`, `differential.py` and `shrink.py`:
+
+| source | read zipper / write zipper | model |
+|---|---|---|
+| `native` | `ReadZipperUntracked` / `WriteZipperUntracked` | the original |
+| `act` | `ACTZipper` | `Source.act` |
+| `tracker` | `PathTracker` (`new` or `with_origin`) | `Sources/Tracker.lean` (the template) |
+| `overlay`, `overlay-filter` | `OverlayZipper` (map1 over a map0 snapshot) | `Sources/Overlay.lean` |
+| `diff` | `DiffZipper` over two copies of map1 | `Sources/Diff.lean` |
+| `dependent`, `dependent-lazy` | `DependentProductZipperG` | `Sources/Dependent.lean` |
+| `product`, `productg` (+ `-full`) | `ProductZipper`, `ProductZipperG` | `Sources/Product.lean` |
+| `prefix`, `empty` | `PrefixZipper`, `EmptyZipper` | `Sources/Prefix.lean`, `Sources/Empty.lean` |
+| `empty-new` | `EmptyZipper::new()` inside `PathTracker::with_origin` | `Sources/Empty.lean` |
+| `diff-product` | `DiffZipper` over two `ProductZipper` constructions | `Sources/Product.lean` |
+| `head` | `ReadZipperTracked` / `WriteZipperTracked` from a `ZipperHead` | `Sources/Head.lean` |
+| `owned` | `ReadZipperOwned` / `WriteZipperOwned` | `Sources/Owned.lean` |
+
+On the Lean side a source (`Source.lean`) is a **view** (the trie the read
+zipper presents, computed from the seeded maps) plus **capabilities**
+(forking, `make_map`, merges, read-only values and iteration, `val_count`,
+trie refs).  Every read, movement and iteration operation is the ordinary
+`Zip` specification applied to the view, so a virtual zipper is held to
+exactly what a native read zipper is.  A missing capability turns the ops that
+need it into `skip:<source>` on both sides.  The trace ends with a `SRC` line,
+the source reset and walked from its root.  Adding a source: see the header of
+`differential/src/sources/mod.rs`.
+
+`--source map` is a second op table (`MapFuzz*.lean`,
+`differential/src/mapfuzz/`) over three `PathMap`s, for what is not a zipper
+walking a trie: the `PathMap` surface and whole-map lattice ops (0–28),
+`.paths` / `write_trie` serialization and ACT files, merge and stream
+(30–48), catamorphisms and anamorphisms (50–56), and `ZipperHead` sessions
+with conflict checking (60).  Its inputs carry `MAP_NOPS` in the header.
+
+KNOWN entries can be keyed per source: `classify` sees `src:<source>` on the
+first line of every report, and op-line divergences are tagged `READ-SIDE` or
+`WRITE-SIDE`, so an entry for a write-zipper bug cannot absorb a read source's
+bug in the same op.  What these sources found is indexed in
+[findings/README.md](findings/README.md).
 
 ## Sharing
 

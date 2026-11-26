@@ -6,7 +6,7 @@ crate panic) while deleting bytes, so the result is a minimal reproducer.
 
     ./lean/shrink.py <input-file> [-o out.bin]
 """
-import argparse, os, re, subprocess, sys
+import argparse, atexit, os, re, shutil, subprocess, sys, tempfile
 
 from input_format import HEADER_SIZE, versioned_input
 
@@ -23,7 +23,12 @@ ACT_RELEASE = os.environ.get("PATHMAP_ACT_TRACE") or os.path.join(ROOT, "target"
 ACT_DEBUG = os.path.join(ROOT, "target", "debug", "act_trace")
 TRACE = TRACE_RELEASE
 ORACLE_ARGS = []
-TMP = os.path.join(ROOT, "lean", ".shrink.bin")
+TRACE_ARGS = []
+# One scratch file per shrink process, so several shrinks can run at once
+# (a single shared `lean/.shrink.bin` made parallel shrinks corrupt each other).
+_TMPDIR = tempfile.mkdtemp(prefix="pathmap-shrink-")
+atexit.register(shutil.rmtree, _TMPDIR, True)
+TMP = os.path.join(_TMPDIR, "candidate.bin")
 
 
 def signature(blob):
@@ -32,7 +37,7 @@ def signature(blob):
         f.write(blob)
     try:
         m = subprocess.run([ORACLE, *ORACLE_ARGS, TMP], capture_output=True, timeout=20)
-        c = subprocess.run([TRACE, TMP], capture_output=True, timeout=20)
+        c = subprocess.run([TRACE, *TRACE_ARGS, TMP], capture_output=True, timeout=20)
     except subprocess.TimeoutExpired:
         return "TIMEOUT"
     if c.returncode != 0:
@@ -104,16 +109,22 @@ def main():
     ap.add_argument("input")
     ap.add_argument("-o", "--out", default=None)
     ap.add_argument("--act", action="store_true",
-                    help="ArenaCompactTree read source")
+                    help="ArenaCompactTree read source (= --source act)")
+    ap.add_argument("--source", default="native",
+                    help="read source / write target (see differential/src/sources)")
     ap.add_argument("--debug", action="store_true",
                     help="use the debug build, to shrink toward a panic")
     args = ap.parse_args()
-    global TRACE, ORACLE_ARGS
+    global TRACE, ORACLE_ARGS, TRACE_ARGS
     if args.act:
+        args.source = "act"
+    ORACLE_ARGS = ["--source", args.source]
+    if args.source == "act":
         TRACE = ACT_DEBUG if args.debug else ACT_RELEASE
-        ORACLE_ARGS = ["--act"]
     else:
         TRACE = TRACE_DEBUG if args.debug else TRACE_RELEASE
+        if args.source != "native":
+            TRACE_ARGS = ["--source", args.source]
     blob = open(args.input, "rb").read()
     small, sig = shrink(blob)
     out = args.out or (args.input + ".min")
@@ -126,7 +137,7 @@ def main():
     print("--- model ---")
     sys.stdout.write(subprocess.run([ORACLE, *ORACLE_ARGS, out], capture_output=True).stdout.decode())
     print("--- crate ---")
-    r = subprocess.run([TRACE, out], capture_output=True)
+    r = subprocess.run([TRACE, *TRACE_ARGS, out], capture_output=True)
     sys.stdout.write(r.stdout.decode())
     sys.stderr.write(r.stderr.decode())
 

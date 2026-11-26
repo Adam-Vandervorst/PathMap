@@ -31,7 +31,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 75;
+pub const NOPS: usize = 82;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -72,6 +72,11 @@ impl<'a> Dec<'a> {
             (0, legacy_ops)
         };
         Some(Self { bytes, pos, op_count })
+    }
+    /// A decoder with no header handling, for streams whose caller picks the
+    /// operation itself (the pruned fuzzer).
+    pub fn legacy(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0, op_count: LEGACY_NOPS }
     }
     pub fn op(&mut self) -> Option<usize> {
         self.modn(self.op_count)
@@ -124,10 +129,10 @@ pub fn show_val(v: Option<&u64>) -> String {
 ///
 /// Only the default `ReadSource` impls return `None`, and only the ACT zipper
 /// uses them, so the reason is always ACT mode.  See `SKIP_REASONS`.
-pub fn show_status_opt(s: Option<AlgebraicStatus>) -> String {
+pub fn show_status_opt<R: ReadSource>(s: Option<AlgebraicStatus>) -> String {
     match s {
         Some(s) => show_status(s).to_string(),
-        None => SKIP_ACT.to_string(),
+        None => R::SKIP.to_string(),
     }
 }
 
@@ -162,17 +167,32 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
     z: &Z,
     expected_root: &[u8],
 ) -> String {
+    fingerprint_with(z, expected_root, true)
+}
+
+/// [`fingerprint`], with `val_count` rendered as `?` when `val_count` is false
+/// (the read source does not implement it; see `ReadSource::VAL_COUNT`).
+pub fn fingerprint_with<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath>(
+    z: &Z,
+    expected_root: &[u8],
+    val_count: bool,
+) -> String {
     format!(
-        "{}{} o{} e{} v{} c{} n{} f{}",
+        "{}{} o{} e{} v{} c{} n{} f{} i{} m{} d{}",
         if z.root_prefix_path() == expected_root { "" } else { "ESCAPED-ROOT " },
         hex_path(z.path()),
         hex_path(z.origin_path()),
         show_bool(z.path_exists()),
         show_val(z.val()),
         z.child_count(),
-        z.val_count(),
+        if val_count { z.val_count().to_string() } else { "?".to_string() },
         // `focus_byte` is unspecified at the root, so it is only compared below it.
-        if z.at_root() { "?".to_string() } else { show_byte_opt(z.focus_byte()) }
+        if z.at_root() { "?".to_string() } else { show_byte_opt(z.focus_byte()) },
+        // `is_val`, `child_mask` and `depth` are separate methods from `val`,
+        // `child_count` and `path`, and virtual zippers implement them separately.
+        show_bool(z.is_val()),
+        hex_path(&z.child_mask().iter().collect::<Vec<u8>>()),
+        z.depth()
     )
 }
 
@@ -186,19 +206,23 @@ pub fn fingerprint<Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbso
 ///   implement the trait the op needs.
 /// * `skip:at-root` — `to_next`/`to_prev_sibling_byte` at the zipper root,
 ///   where the native read zipper escapes its own root.
-/// * `skip:k0` — a degenerate `k = 0` on `join`/`meet_k_path_into`.
 /// * `skip:empty-focus` — the focus has nothing below it, where the op's
 ///   behaviour is a function of node materialisation rather than trie state.
-/// * `skip:empty-path` — `insert_prefix("")`, which destroys the subtrie.
 /// * `skip:quarantined` — the op is disabled outright (op 54).
 ///
 /// Each is recorded in lean/FINDINGS.md and commented at its site.
 pub const SKIP_ACT: &str = "skip:act";
 pub const SKIP_AT_ROOT: &str = "skip:at-root";
-pub const SKIP_K0: &str = "skip:k0";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
-pub const SKIP_EMPTY_PATH: &str = "skip:empty-path";
 pub const SKIP_QUARANTINED: &str = "skip:quarantined";
+/// `skip:k-path-borrowed` -- op 80 at the root of a `--source head` read
+/// zipper, which may have been made by `read_zipper_at_borrowed_path`: a cold
+/// `to_next_k_path` there underflows `path_len()` before the path buffer is
+/// prepared (known bug `to_next_k_path_borrowed`), and in a release build the
+/// wrapped state corrupts later iteration.  Only the root is affected (any
+/// descent prepares the buffer).  `ReadSource::k_path_cold_skip`,
+/// `Caps.coldKPath` in the model; lean/findings/ops.md.
+pub const SKIP_K_PATH_BORROWED: &str = "skip:k-path-borrowed";
 
 /// Does the focus have no descendants at all?
 ///
@@ -237,6 +261,11 @@ pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
     }
 }
 
+/// The values at and below the focus, from [dump_fork], without the dangling locations
+pub fn fork_values<Z: ZipperForking<u64>>(z: &Z) -> Vec<String> {
+    dump_fork(z).split(',').filter(|e| !e.ends_with(":-")).map(str::to_string).collect()
+}
+
 /// The read side of the harness: whatever the write zipper is reading *from*.
 ///
 /// Two implementations exist.  A `PathMap` read zipper supports everything.  An
@@ -252,15 +281,25 @@ pub fn dump_fork<Z: ZipperForking<u64>>(z: &Z) -> String {
 pub trait ReadSource:
     Zipper + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperAbsolutePath + ZipperIteration
 {
-    /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk).
-    fn dump_fork(&self) -> String;
+    /// The skip token emitted when this source cannot serve an operation (a
+    /// method below returned `None`/`false`).  `skip:<source name>`; the Lean
+    /// model's `Source.skip` must produce the same string.
+    const SKIP: &'static str = SKIP_ACT;
+    /// Whether `ZipperMoving::val_count` is implemented.  Several virtual
+    /// zippers leave it `todo!()`/`unimplemented!()`; their per-step
+    /// fingerprint then prints `n?` (the model's `Caps.valCount`).
+    const VAL_COUNT: bool = true;
+    /// Depth-first dump of everything below the focus (`fork_read_zipper` + walk),
+    /// or `None` if the source does not implement `ZipperForking`.
+    fn dump_fork(&self) -> Option<String>;
     /// `make_map().val_count()`, or `None` if subtries cannot be materialised.
     fn make_map_val_count(&self) -> Option<usize>;
 
     /// `ZipperReadOnlyValues::get_val` / `get_val_at`, paired with whether they
     /// agree with `val` / `val_at`.  The two differ only in the lifetime of the
     /// reference returned, so a disagreement is a defect.
-    fn get_val_probe(&self, path: &[u8]) -> (Option<u64>, Option<u64>, bool);
+    /// `None` when the source does not implement `ZipperReadOnlyValues`.
+    fn get_val_probe(&self, path: &[u8]) -> Option<(Option<u64>, Option<u64>, bool)>;
 
     /// `ZipperReadOnlyIteration::to_next_get_val`: advance and hand back the
     /// value, with whether it agrees with `to_next_val` followed by `val`.
@@ -279,6 +318,35 @@ pub trait ReadSource:
 
     /// Binary path-set operations require a native read source, as convex ops do.
     fn path_set(&mut self, _left: &PathMap<u64>, _op: usize) -> Option<PathMap<u64>> { None }
+
+    /// Op 75 `trie_ref_probe` on the read side: a `TrieRef` taken at `p` below
+    /// the focus (how, `mode` says; see [`trie_ref_probe_ro`]) and reported with
+    /// [`trie_ref_report`].  `None` when the source cannot hand out trie refs
+    /// (no `ZipperReadOnlySubtries`), which the Lean model's `Caps.trieRef`
+    /// mirrors.  Opt in with `trie_ref_source!()` inside the impl.
+    fn trie_ref_probe(&self, _mode: usize, _p: &[u8], _q: &[u8]) -> Option<String> { None }
+
+    /// Op 78 `focus_probe` on the read side: [`focus_probe_subtries`] at `p`.
+    /// Served with op 75 (`trie_ref_source!()`, `Caps.trieRef`): it needs
+    /// `ZipperInfallibleSubtries`, which every trie-ref source has.
+    fn focus_probe(&self, _p: &[u8]) -> Option<String> { None }
+    /// Op 79 `witness_next_val`: `ZipperReadOnlyConditionalIteration`'s
+    /// `to_next_get_val_with_witness(_observed)`, as [`witness_next_val`]
+    /// reports it.  `None` when the zipper does not implement the trait (the
+    /// model's `Caps.witnessIter`).  Opt in with `witness_iter_source!()`.
+    fn witness_iter_probe(&mut self, _observed: bool) -> Option<(bool, Option<u64>, bool)> { None }
+    /// A named skip for op 80 `k_path_overrun` at the current focus (see
+    /// [`SKIP_K_PATH_BORROWED`]); the model's `Caps.coldKPath`.
+    fn k_path_cold_skip(&self) -> Option<&'static str> { None }
+    /// An optional per-step report, appended to the read zipper's fingerprint
+    /// (the model's `Source.info`).  The product zippers report
+    /// `ZipperProduct` through it; every other source prints nothing.
+    fn source_info(&self) -> Option<String> { None }
+
+    /// A named skip for `val_at` (op 24) and `get_val_agrees` (op 51) on the
+    /// read side: the token when the source declines `val_at(path)` at the
+    /// current focus (the model's `Source.valAtSkip`).  `None`: answer it.
+    fn val_at_skip(&self, _path: &[u8]) -> Option<&'static str> { None }
 
     fn do_graft<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> bool { false }
     fn do_graft_masked<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
@@ -334,22 +402,44 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
         })
     }
 
-    fn dump_fork(&self) -> String {
-        dump_fork(self)
+
+    const SKIP: &'static str = "skip:native";
+    crate::trie_ref_source!();
+    crate::witness_iter_source!();
+    fn dump_fork(&self) -> Option<String> {
+        Some(dump_fork(self))
     }
     fn make_map_val_count(&self) -> Option<usize> {
         Some(self.make_map().val_count())
     }
-    fn get_val_probe(&self, path: &[u8]) -> (Option<u64>, Option<u64>, bool) {
+    #[allow(deprecated)]
+    fn get_val_probe(&self, path: &[u8]) -> Option<(Option<u64>, Option<u64>, bool)> {
         let (g, ga) = (self.get_val().copied(), self.get_val_at(path).copied());
-        let agree = g == self.val().copied() && ga == self.val_at(path).copied();
-        (g, ga, agree)
+        // The deprecated aliases (`get_value`, `value`, `is_value`) must agree
+        // with what they alias.
+        let agree = g == self.val().copied() && ga == self.val_at(path).copied()
+            && self.get_value().copied() == g && self.value().copied() == g
+            && self.is_value() == self.is_val();
+        Some((g, ga, agree))
     }
+    #[allow(deprecated)]
     fn to_next_get_val_probe(&mut self) -> Option<(bool, Option<u64>, bool)> {
-        let got = self.to_next_get_val().copied();
+        // Four spellings of the same advance, picked by the depth so a run
+        // exercises all of them: `to_next_get_val`, the deprecated
+        // `to_next_get_value(_observed)` aliases, and `to_next_get_val_observed`
+        // with a path observer, which must end up holding the new path.
+        let mut obs = self.path().to_vec();
+        let (got, observed) = match self.path().len() % 4 {
+            0 => (self.to_next_get_val().copied(), false),
+            1 => (self.to_next_get_value().copied(), false),
+            2 => (self.to_next_get_value_observed(&mut obs).copied(), true),
+            // Through the `&mut Z` forwarding impl.
+            _ => (ZipperReadOnlyIteration::to_next_get_val_observed(&mut &mut *self, &mut obs).copied(), true),
+        };
         // `to_next_get_val` is specified as `to_next_val` followed by reading the
         // value, so `Some` must mean it moved and must equal what `val` reports.
-        let agree = got == self.val().copied() || (got.is_none() && self.at_root());
+        let agree = (got == self.val().copied() || (got.is_none() && self.at_root()))
+            && (!observed || obs == self.path());
         Some((got.is_some(), got, agree))
     }
     fn do_graft<W: ZipperWriting<u64>>(&self, wz: &mut W) -> bool {
@@ -403,6 +493,225 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     }
 }
 
+/// Everything op 75 reads from a trie reference: `TrieRefBorrowed`,
+/// `TrieRefOwned` and the `TrieRef` enum all qualify.
+pub trait TrieRefLike<'a>:
+    Zipper + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+    + ZipperReadOnlySubtries<'a, u64> + Clone + Into<TrieRef<'a, u64>>
+{
+}
+impl<'a, T> TrieRefLike<'a> for T where
+    T: Zipper + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+        + ZipperReadOnlySubtries<'a, u64> + Clone + Into<TrieRef<'a, u64>>
+{
+}
+
+/// Op 75's rendering of a trie dump: `,` and `:` would let `differential.py`'s
+/// shape rules mistake a trie-ref divergence for a `dump` one, so they become
+/// `/` and `=`.  `Fuzz.squash` does the same.
+pub fn squash(s: &str) -> String {
+    s.replace(',', "/").replace(':', "=")
+}
+
+/// One trie reference, as op 75 reports it:
+/// `e<exists>;v<val>;c<child_count>;m<child_mask>;a<val_at(q)>;k<checks>;d[<fork dump>];mm<make_map>`.
+///
+/// * `d` is the depth-first dump of `fork_read_zipper()`.  The fork is taken
+///   only where the path exists: on a missing path it used to panic (GOAT,
+///   issue #96; it returns `None` now), and the model's answer there is the
+///   empty dump either way.
+/// * `mm` is `=` when `make_map()` dumps the same as the fork, else its dump.
+/// * `k` is `ok`, or the internal-consistency checks that failed (the model
+///   prints `ok`): `IV` is_val/val, `CNT` child_count/|child_mask|, `GTR`
+///   `get_trie_ref()` reports the same location, `TR` `trie_ref()` likewise,
+///   `TBF` `try_borrow_focus()` is `Some` on a missing path, `INTO` the
+///   `TrieRef` it converts into reports the same location, `WIT` that
+///   `TrieRef`'s `get_val_with_witness` disagrees with `val`.
+pub fn trie_ref_level<'a, T: TrieRefLike<'a>>(t: &T, q: &[u8]) -> String {
+    let e = t.path_exists();
+    let mask: Vec<u8> = t.child_mask().iter().collect();
+    let d = if e { dump_fork(t) } else { "_:-".to_string() };
+    let mm = dump(&mut t.make_map().read_zipper());
+    let mut bad: Vec<&str> = Vec::new();
+    if t.is_val() != t.val().is_some() { bad.push("IV"); }
+    if t.child_count() != mask.len() { bad.push("CNT"); }
+    let same = |e2: bool, v2: Option<&u64>, m2: ByteMask| e2 == e && v2 == t.val() && m2 == t.child_mask();
+    {
+        let g = t.get_trie_ref();
+        if !same(g.path_exists(), g.val(), g.child_mask()) { bad.push("GTR"); }
+    }
+    match t.trie_ref() {
+        Some(r) if same(r.path_exists(), r.val(), r.child_mask()) => {}
+        _ => bad.push("TR"),
+    }
+    if t.try_borrow_focus().is_some() && !e { bad.push("TBF"); }
+    let tr: TrieRef<'a, u64> = t.clone().into();
+    if !same(tr.path_exists(), tr.val(), tr.child_mask()) { bad.push("INTO"); }
+    {
+        let w = tr.witness();
+        if tr.get_val_with_witness(&w) != t.val() { bad.push("WIT"); }
+    }
+    let k = if bad.is_empty() { "ok".to_string() } else { bad.join("+") };
+    let mm = if mm == d { "=".to_string() } else { mm };
+    squash(&format!(
+        "e{};v{};c{};m{};a{};g{};k{};d[{}];mm{}",
+        show_bool(e),
+        show_val(t.val()),
+        t.child_count(),
+        hex_path(&mask),
+        show_val(t.val_at(q)),
+        show_bool(has_focus_node_at(t, q, || t.make_map().read_zipper_at_path(q).child_count() == 0)),
+        k,
+        d,
+        mm
+    ))
+}
+
+/// `ZipperInfallibleSubtries::get_focus_at(p)`, rendered as the one thing it
+/// specifies that the public API can see: whether a node comes back.  The
+/// returned `OpaqueAbstractNodeRef` has no public methods, so its `Debug` form
+/// is the only observation (`AbstractNodeRef::None`, or the node).
+///
+/// The answer must be a node wherever something lies below `focus ++ p`.  An
+/// empty node standing in for "nothing below" (at a node boundary, e.g. the
+/// root of an empty map) is representation, so a node at a location with no
+/// children (`childless`, from the zipper's own trie) reads as `0`, as `None`
+/// does.  The model prints `1` exactly when the location has children.
+pub fn has_focus_node_at<Z: ZipperInfallibleSubtries<u64>>(z: &Z, p: &[u8], childless: impl FnOnce() -> bool) -> bool {
+    let none = format!("{:?}", z.get_focus_at(p)).starts_with("OpaqueAbstractNodeRef(AbstractNodeRef::None");
+    !none && !childless()
+}
+
+/// Op 78 `focus_probe`: `<side>g<get_focus_at(p) has a node>;k<checks>`, see
+/// [`has_focus_node_at`]; `side` is `W` (write zipper) or `R` (read source),
+/// so KNOWN entries can tell the two apart.  `k` is `ok`, or `TBF` when
+/// `try_borrow_focus()` is `Some` at a focus that does not exist (it may be
+/// `None` anywhere: it only borrows a node the focus sits exactly on).
+pub fn focus_probe_subtries<Z: ZipperInfallibleSubtries<u64>>(z: &Z, p: &[u8], side: &str) -> String {
+    let g = has_focus_node_at(z, p, || z.make_map().read_zipper_at_path(p).child_count() == 0);
+    let k = if z.try_borrow_focus().is_some() && !z.path_exists() { "TBF" } else { "ok" };
+    format!("{side}g{};k{}", show_bool(g), k)
+}
+
+/// Op 79 `witness_next_val` on a zipper with `ZipperReadOnlyConditionalIteration`:
+/// advance with `to_next_get_val_with_witness` (or its `_observed` form, with a
+/// path observer seeded with the path, which must end up holding the new path)
+/// and report `(moved, value, agree)` as op 52 does.
+pub fn witness_next_val<'a, Z: ZipperReadOnlyConditionalIteration<'a, u64> + ZipperPath>(z: &mut Z, observed: bool) -> (bool, Option<u64>, bool) {
+    let w = z.witness();
+    let (got, obs_ok) = if observed {
+        let mut obs = z.path().to_vec();
+        let got = z.to_next_get_val_with_witness_observed(&w, &mut obs).copied();
+        (got, obs == z.path())
+    } else {
+        (z.to_next_get_val_with_witness(&w).copied(), true)
+    };
+    let agree = obs_ok && (got == z.val().copied() || (got.is_none() && z.at_root()));
+    (got.is_some(), got, agree)
+}
+
+/// Opt a [`ReadSource`] impl into op 79 (`witness_next_val`); the Lean source
+/// must set `Caps.witnessIter := true`.
+#[macro_export]
+macro_rules! witness_iter_source {
+    () => {
+        // The observed form goes through the `&mut Z` forwarding impl.
+        fn witness_iter_probe(&mut self, observed: bool) -> Option<(bool, Option<u64>, bool)> {
+            if observed {
+                Some($crate::harness::witness_next_val(&mut &mut *self, true))
+            } else {
+                Some($crate::harness::witness_next_val(self, false))
+            }
+        }
+    };
+}
+
+/// Op 75's whole answer: the trie reference, then the one `trie_ref_at_path(q)`
+/// takes from it (nested once), as `<outer>|<inner>`.
+pub fn trie_ref_report<'a, T: TrieRefLike<'a>>(t: &T, q: &[u8]) -> String
+where
+    T::TrieRefT: TrieRefLike<'a>,
+{
+    let n = t.trie_ref_at_path(q);
+    format!("{}|{}", trie_ref_level(t, q), trie_ref_level(&n, q))
+}
+
+/// Op 75 on any zipper with infallible subtries (every write zipper, and the
+/// read side for modes 1-3).  `mode`:
+///
+/// * 0, 1 — `get_trie_ref()` (a `TrieRef` at the focus), then
+///   `trie_ref_at_path(p)`.  (Mode 0 on the read side is the zipper's own
+///   `ZipperReadOnlySubtries::trie_ref_at_path`, see [`trie_ref_probe_ro`].)
+/// * 2 — `TrieRefOwned::from(make_map())`, then `trie_ref_at_path(p)`.
+/// * 3 — `TrieRef::from(make_map())`, then `trie_ref_at_path(p)`.
+///
+/// Modes 0/1 read the zipper's trie at `focus ++ p`; modes 2/3 read the
+/// materialised map at `p`, whose root exists even where the focus does not.
+pub fn trie_ref_probe_subtries<Z: ZipperInfallibleSubtries<u64>>(z: &Z, mode: usize, p: &[u8], q: &[u8]) -> String {
+    match mode {
+        2 => {
+            let t = TrieRefOwned::from(z.make_map()).trie_ref_at_path(p);
+            trie_ref_report(&t, q)
+        }
+        3 => {
+            let t: TrieRef<'_, u64> = TrieRef::from(z.make_map()).trie_ref_at_path(p);
+            trie_ref_report(&t, q)
+        }
+        _ => {
+            let t = z.get_trie_ref().trie_ref_at_path(p);
+            trie_ref_report(&t, q)
+        }
+    }
+}
+
+/// Op 75 on a read zipper with `ZipperReadOnlySubtries`: mode 0 is the
+/// zipper's own `trie_ref_at_path(p)` (a `TrieRefBorrowed` from an untracked
+/// read zipper, a `TrieRefOwned` from a tracked or owned one).
+pub fn trie_ref_probe_ro<'a, Z>(z: &Z, mode: usize, p: &[u8], q: &[u8]) -> String
+where
+    Z: ZipperReadOnlySubtries<'a, u64> + ZipperInfallibleSubtries<u64>,
+    Z::TrieRefT: TrieRefLike<'a>,
+    <Z::TrieRefT as ZipperReadOnlySubtries<'a, u64>>::TrieRefT: TrieRefLike<'a>,
+{
+    if mode == 0 {
+        trie_ref_report(&z.trie_ref_at_path(p), q)
+    } else {
+        trie_ref_probe_subtries(z, mode, p, q)
+    }
+}
+
+/// Opt a [`ReadSource`] impl into op 75 (`trie_ref_probe`) and op 78
+/// (`focus_probe`).  The zipper must
+/// implement `ZipperReadOnlySubtries` and `ZipperInfallibleSubtries`; the Lean
+/// source must set `Caps.trieRef := true`.
+#[macro_export]
+macro_rules! trie_ref_source {
+    () => {
+        fn trie_ref_probe(&self, mode: usize, p: &[u8], q: &[u8]) -> Option<String> {
+            Some($crate::harness::trie_ref_probe_ro(self, mode, p, q))
+        }
+        fn focus_probe(&self, p: &[u8]) -> Option<String> {
+            Some($crate::harness::focus_probe_subtries(self, p, "R"))
+        }
+    };
+}
+
+/// The write side of the harness: any write zipper over a `PathMap<u64>`.
+///
+/// `WriteZipperUntracked` (the default), `WriteZipperTracked` (from a
+/// `ZipperHead`) and `WriteZipperOwned` all qualify, and the Lean model does not
+/// distinguish them: they are three implementations of one specification.
+pub trait WriteTarget:
+    ZipperWriting<u64> + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64>
+    + ZipperAbsolutePath + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+{
+}
+impl<T> WriteTarget for T where
+    T: ZipperWriting<u64> + ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperValuesAt<u64>
+        + ZipperAbsolutePath + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+{
+}
+
 /// Bind `$z` to the write zipper (`t == 0`) or the read zipper, then run `$e`.
 macro_rules! tgt {
     ($t:expr, $wz:expr, $rz:expr, $z:ident, $e:expr) => {
@@ -422,7 +731,7 @@ macro_rules! tgt {
 /// These need no oracle, so `--check` can assert them on every step.
 /// Violations are `pathmap` bugs by construction: each is either stated in the
 /// trait documentation or forced by the meaning of the accessors.
-pub fn check_zipper<Z>(z: &Z, label: &str, expected_root: &[u8])
+pub fn check_zipper<Z>(z: &Z, label: &str, expected_root: &[u8], val_count: bool)
 where
     Z: ZipperMoving + ZipperPath + ZipperValues<u64> + ZipperAbsolutePath,
 {
@@ -470,11 +779,11 @@ where
         assert!(z.path_exists(), "{label}: children under a non-existent path");
     }
     // `val_count` counts the focus itself.
-    if z.is_val() {
+    if val_count && z.is_val() {
         assert!(z.val_count() >= 1, "{label}: val_count omits the focus value");
     }
     // Nothing below means nothing to count except the focus.
-    if z.child_count() == 0 {
+    if val_count && z.child_count() == 0 {
         assert_eq!(
             z.val_count(),
             z.is_val() as usize,
@@ -531,12 +840,14 @@ pub fn run(bytes: &[u8], check: bool) -> String {
     };
     let mut out = String::new();
     {
-        // NOTE: `read_zipper_at_borrowed_path` would panic (release: wrap) in
-        // `to_next_k_path`, whose `path_len()` underflows before the path buffer
-        // is prepared.  Use the owned-path constructor so that known bug does
-        // not abort every run.
+        // NOTE: `read_zipper_at_borrowed_path` panics (release: wraps) in a
+        // *cold* `to_next_k_path`, whose `path_len()` underflows before the path
+        // buffer is prepared.  The op table only runs whole k-path walks, which
+        // work on a borrowed path (`--source head` uses one for half its
+        // inputs; lean/findings/head-owned.md); this keeps the owned path.
         let mut rz = map1.read_zipper_at_path(&root1);
-        run_ops(&mut d, &mut out, &mut map0, &root0, &mut rz, &root1, check);
+        let mut wz = map0.write_zipper_at_path(&root0);
+        run_ops(&mut d, &mut out, &mut wz, &root0, &mut rz, &root1, check);
     }
     let _ = writeln!(out, "MAP0 {}", dump(&mut map0.read_zipper()));
     let _ = writeln!(out, "MAP1 {}", dump(&mut map1.read_zipper()));
@@ -545,19 +856,110 @@ pub fn run(bytes: &[u8], check: bool) -> String {
     out
 }
 
+/// The target's focus subtrie as a map of its own: `make_map()` on the write
+/// zipper (`t == 0`), or the read source grafted into a fresh map, which only a
+/// merge source can do (`None`: the op reports `R::SKIP`, `St.canMerge` in the
+/// model).  Ops 77 and 81 work on it, so they mean the same on every source.
+pub fn snapshot<W: WriteTarget, R: ReadSource>(t: usize, wz: &W, rz: &R) -> Option<PathMap<u64>> {
+    if t == 0 {
+        Some(wz.make_map())
+    } else {
+        let mut m = PathMap::<u64>::new();
+        let ok = {
+            let mut tz = m.write_zipper();
+            rz.do_graft(&mut tz)
+        };
+        ok.then_some(m)
+    }
+}
+
+/// Op 77: `wz.join_into_take(src, prune)` with `src` a write zipper over `m`,
+/// descended to `p`.  `via` bit 0 calls it through the `&mut Z` forwarding
+/// impl; bit 1 makes `src` a `WriteZipperOwned` (`into_write_zipper`) instead of
+/// a `WriteZipperUntracked`.  Returns the status and `m` afterwards: the taken
+/// subtrie must be gone from it (and with `prune`, the dangling path to it).
+/// With `t == 0` `m` shares its nodes with map0, so the take also checks that
+/// copy-on-write keeps the two apart.
+pub fn join_take<W: WriteTarget>(wz: &mut W, mut m: PathMap<u64>, p: &[u8], via: usize, pr: bool) -> (AlgebraicStatus, PathMap<u64>) {
+    fn call<W: ZipperWriting<u64>, S: ZipperInfallibleSubtries<u64> + ZipperWriting<u64>>(wz: &mut W, sz: &mut S, fwd: bool, pr: bool) -> AlgebraicStatus {
+        if fwd {
+            <&mut W as ZipperWriting<u64>>::join_into_take(&mut &mut *wz, sz, pr)
+        } else {
+            wz.join_into_take(sz, pr)
+        }
+    }
+    if via & 2 == 0 {
+        let st = {
+            let mut sz = m.write_zipper();
+            sz.descend_to(p);
+            call(wz, &mut sz, via & 1 == 1, pr)
+        };
+        (st, m)
+    } else {
+        let mut sz = m.into_write_zipper::<&[u8]>(&[]);
+        sz.descend_to(p);
+        let st = call(wz, &mut sz, via & 1 == 1, pr);
+        (st, sz.into_map())
+    }
+}
+
+/// Op 81: `ReadZipperUntracked::into_path` and `into_path_iter` on a read
+/// zipper over `m` descended to `p`:
+/// `ip<into_path>;k<ok|VAL>;<path=val>/...` (at most 32 paths, `-` for none).
+/// The iterator yields every leaf (existing, childless location, valued or
+/// not) after the focus in depth-first order, each with
+/// `ReadZipperPathIter::val()`; `VAL` means `val()` was still `Some` once it
+/// was exhausted.  `into_path` must be the origin path, `p`.
+pub fn path_iter_report(m: &PathMap<u64>, p: &[u8]) -> String {
+    let ip = {
+        let mut z = m.read_zipper();
+        z.descend_to(p);
+        z.into_path()
+    };
+    let mut z = m.read_zipper();
+    z.descend_to(p);
+    let mut it = z.into_path_iter();
+    let mut items: Vec<String> = Vec::new();
+    let mut done = false;
+    while items.len() < 32 {
+        match it.next() {
+            Some(q) => items.push(format!("{}={}", hex_path(&q), show_val(it.val()))),
+            None => { done = true; break; }
+        }
+    }
+    let k = if done && it.val().is_some() { "VAL" } else { "ok" };
+    format!("ip{};k{};{}", hex_path(&ip), k, if items.is_empty() { "-".to_string() } else { items.join("/") })
+}
+
 /// Run the operation table.  This is the single shared body: the two front ends
 /// differ only in what they hand in as `rz`.
-pub fn run_ops<R: ReadSource>(
+/// Drops every dangling path below the focus, keeping the values and the focus
+/// itself.  A meet with `prune = false` may leave some dangling paths, and which
+/// ones is unspecified (see `PathMap.meet` in the model), so they are dropped
+/// before anything can observe them.
+pub fn drop_dangling_below<W: ZipperWriting<u64>>(wz: &mut W) {
+    if let Some(m) = wz.take_map(false) {
+        let mut fresh = PathMap::<u64>::new();
+        if let Some(v) = m.val_at::<&[u8]>(&[]) {
+            fresh.set_val_at::<&[u8]>(&[], *v);
+        }
+        for (k, v) in m.iter() {
+            fresh.set_val_at(&k, *v);
+        }
+        wz.graft_map(fresh);
+    }
+}
+
+pub fn run_ops<W: WriteTarget, R: ReadSource>(
     d: &mut Dec,
     out: &mut String,
-    map0: &mut PathMap<u64>,
+    wz: &mut W,
     root0: &[u8],
     rz: &mut R,
     root1: &[u8],
     check: bool,
 ) {
     {
-        let mut wz = map0.write_zipper_at_path(root0);
         let mut step = 0usize;
         // Run pruning at every zipper root so layout-dependent defects remain
         // visible to the differential comparison.
@@ -580,85 +982,95 @@ pub fn run_ops<R: ReadSource>(
                 0 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    tgt!(t, wz, *rz, z, z.descend_to(&p));
+                    tgt!(t, *wz, *rz, z, z.descend_to(&p));
                     ("descend_to", hex_path(&p))
                 }
                 1 => {
                     let t = get!(d.modn(2));
                     let b = get!(d.path_byte());
-                    tgt!(t, wz, *rz, z, z.descend_to_byte(b));
+                    tgt!(t, *wz, *rz, z, z.descend_to_byte(b));
                     ("descend_to_byte", format!("{b:02x}"))
                 }
                 2 => {
                     let t = get!(d.modn(2));
                     let n = get!(d.modn(8));
-                    let r = tgt!(t, wz, *rz, z, z.ascend(n));
+                    let r = tgt!(t, *wz, *rz, z, z.ascend(n));
                     ("ascend", format!("{r}"))
                 }
                 3 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.ascend_byte());
+                    let r = tgt!(t, *wz, *rz, z, z.ascend_byte());
                     ("ascend_byte", show_bool(r).to_string())
                 }
                 4 => {
                     let t = get!(d.modn(2));
-                    tgt!(t, wz, *rz, z, z.reset());
+                    tgt!(t, *wz, *rz, z, z.reset());
                     ("reset", "-".to_string())
                 }
                 5 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.descend_first_byte());
+                    let r = tgt!(t, *wz, *rz, z, z.descend_first_byte());
                     ("descend_first_byte", show_byte_opt(r))
                 }
                 6 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.descend_last_byte());
+                    let r = tgt!(t, *wz, *rz, z, z.descend_last_byte());
                     ("descend_last_byte", show_byte_opt(r))
                 }
                 7 => {
                     let t = get!(d.modn(2));
                     let i = get!(d.modn(6));
-                    let r = tgt!(t, wz, *rz, z, z.descend_indexed_byte(i));
+                    // Odd steps call the deprecated alias `descend_indexed_branch`,
+                    // whose `bool` is rendered as the byte it moved to (the
+                    // fingerprint compares the path as well).
+                    let r = if step % 2 == 0 {
+                        tgt!(t, *wz, *rz, z, z.descend_indexed_byte(i))
+                    } else {
+                        #[allow(deprecated)]
+                        let moved = tgt!(t, *wz, *rz, z, z.descend_indexed_branch(i));
+                        let last = tgt!(t, *wz, *rz, z, z.path().last().copied());
+                        if moved { last } else { None }
+                    };
                     ("descend_indexed_byte", show_byte_opt(r))
                 }
                 8 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.descend_until());
+                    let r = tgt!(t, *wz, *rz, z, z.descend_until());
                     ("descend_until", show_bool(r).to_string())
                 }
                 9 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.ascend_until());
+                    let r = tgt!(t, *wz, *rz, z, z.ascend_until());
                     ("ascend_until", format!("{r}"))
                 }
                 10 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.ascend_until_branch());
+                    let r = tgt!(t, *wz, *rz, z, z.ascend_until_branch());
                     ("ascend_until_branch", format!("{r}"))
                 }
                 11 => {
                     let t = get!(d.modn(2));
                     // Skipped at the zipper root: the native ReadZipper escapes
                     // its own root there. See `Zip.toNextSiblingByte`.
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
+                    if false {
                         ("to_next_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_next_sibling_byte());
+                        let r = tgt!(t, *wz, *rz, z, z.to_next_sibling_byte());
                         ("to_next_sibling_byte", show_byte_opt(r))
                     }
                 }
                 12 => {
                     let t = get!(d.modn(2));
-                    if tgt!(t, wz, *rz, z, z.at_root()) {
+                    if false {
                         ("to_prev_sibling_byte", SKIP_AT_ROOT.to_string())
                     } else {
-                        let r = tgt!(t, wz, *rz, z, z.to_prev_sibling_byte());
+                        let r = tgt!(t, *wz, *rz, z, z.to_prev_sibling_byte());
                         ("to_prev_sibling_byte", show_byte_opt(r))
                     }
                 }
                 13 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.to_next_step());
+                    let r = tgt!(t, *wz, *rz, z, z.to_next_step());
                     ("to_next_step", show_bool(r).to_string())
                 }
                 14 => {
@@ -699,43 +1111,52 @@ pub fn run_ops<R: ReadSource>(
                 18 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let n = tgt!(t, wz, *rz, z, z.move_to_path(&p));
+                    let n = tgt!(t, *wz, *rz, z, z.move_to_path(&p));
                     ("move_to_path", format!("{n}"))
                 }
                 19 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let n = tgt!(t, wz, *rz, z, z.descend_to_existing(&p));
+                    let n = tgt!(t, *wz, *rz, z, z.descend_to_existing(&p));
                     ("descend_to_existing", format!("{n}"))
                 }
                 20 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let n = tgt!(t, wz, *rz, z, z.descend_to_val(&p));
+                    // Odd steps call the deprecated alias `descend_to_value`.
+                    #[allow(deprecated)]
+                    let n = if step % 2 == 0 {
+                        tgt!(t, *wz, *rz, z, z.descend_to_val(&p))
+                    } else {
+                        tgt!(t, *wz, *rz, z, z.descend_to_value(&p))
+                    };
                     ("descend_to_val", format!("{n}"))
                 }
                 21 => {
                     let t = get!(d.modn(2));
                     let b = get!(d.path_byte());
-                    let r = tgt!(t, wz, *rz, z, z.descend_to_existing_byte(b));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_to_existing_byte(b));
                     ("descend_to_existing_byte", show_bool(r).to_string())
                 }
                 22 => {
                     let t = get!(d.modn(2));
                     let n = get!(d.modn(8));
-                    let r = tgt!(t, wz, *rz, z, z.descend_until_max_bytes(n));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_until_max_bytes(n));
                     ("descend_until_max_bytes", show_bool(r).to_string())
                 }
                 23 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let r = tgt!(t, wz, *rz, z, z.descend_to_check(&p));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_to_check(&p));
                     ("descend_to_check", show_bool(r).to_string())
                 }
                 24 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let v = tgt!(t, wz, *rz, z, show_val(z.val_at(&p)));
+                    let v = match (t == 1).then(|| rz.val_at_skip(&p)).flatten() {
+                        Some(why) => why.to_string(),
+                        None => tgt!(t, *wz, *rz, z, show_val(z.val_at(&p))),
+                    };
                     ("val_at", v)
                 }
                 25 => {
@@ -747,17 +1168,17 @@ pub fn run_ops<R: ReadSource>(
                     };
                     match n {
                         Some(n) => ("make_map_val_count", format!("{n}")),
-                        None => ("make_map_val_count", SKIP_ACT.to_string()),
+                        None => ("make_map_val_count", R::SKIP.to_string()),
                     }
                 }
                 26 => {
                     let t = get!(d.modn(2));
                     let s = if t == 0 {
-                        dump_fork(&wz)
+                        Some(dump_fork(&*wz))
                     } else {
                         (*rz).dump_fork()
                     };
-                    ("dump", s)
+                    ("dump", s.unwrap_or_else(|| R::SKIP.to_string()))
                 }
                 27 => {
                     let v = get!(d.u8()) as u64;
@@ -772,9 +1193,9 @@ pub fn run_ops<R: ReadSource>(
                 31 => ("prune_ascend", format!("{}", wz.prune_ascend())),
                 32 => {
                     let pr = get!(d.boolean());
-                    let leaky = focus_node_empty(&wz);
+                    let leaky = focus_node_empty(&*wz);
                     let r = wz.remove_branches(pr);
-                    let s = if leaky { "?".to_string() } else { show_bool(r).to_string() };
+                    let s = if false && leaky { "?".to_string() } else { show_bool(r).to_string() };
                     ("remove_branches", s)
                 }
                 33 => {
@@ -789,92 +1210,90 @@ pub fn run_ops<R: ReadSource>(
                     ("remove_unmasked_branches", hex_path(&canon))
                 }
                 34 => {
-                    let s = if (*rz).do_graft(&mut wz) { "-" } else { SKIP_ACT };
+                    let s = if (*rz).do_graft(&mut *wz) { "-" } else { R::SKIP };
                     ("graft", s.to_string())
                 }
                 35 => {
                     let p = get!(d.path(6));
-                    let s = if (*rz).do_graft_src_at(&mut wz, &p) {
+                    let s = if (*rz).do_graft_src_at(&mut *wz, &p) {
                         hex_path(&p)
                     } else {
-                        SKIP_ACT.to_string()
+                        R::SKIP.to_string()
                     };
                     ("graft_src_at", s)
                 }
-                36 => ("join_into", show_status_opt((*rz).do_join_into(&mut wz))),
+                36 => ("join_into", show_status_opt::<R>((*rz).do_join_into(&mut *wz))),
                 37 => {
-                    let leaky = focus_node_empty(&wz);
-                    let st = (*rz).do_join_map_into(&mut wz);
-                    let s = if leaky && st.is_some() {
+                    let leaky = focus_node_empty(&*wz);
+                    let st = (*rz).do_join_map_into(&mut *wz);
+                    let s = if false && leaky && st.is_some() {
                         "?".to_string()
                     } else {
-                        show_status_opt(st)
+                        show_status_opt::<R>(st)
                     };
                     ("join_map_into", s)
                 }
                 38 => {
                     let pr = get!(d.boolean());
-                    ("meet_into", show_status_opt((*rz).do_meet_into(&mut wz, pr)))
+                    let before = fork_values(&*wz);
+                    let mut st = (*rz).do_meet_into(&mut *wz, pr);
+                    // A meet that leaves the values alone may report `Element` as well as
+                    // `Identity`: it is allowed to drop dangling paths, which is a change
+                    if st == Some(AlgebraicStatus::Element) && fork_values(&*wz) == before {
+                        st = Some(AlgebraicStatus::Identity);
+                    }
+                    if st.is_some() && !pr { drop_dangling_below(&mut *wz); }
+                    ("meet_into", show_status_opt::<R>(st))
                 }
                 39 => {
                     let pr = get!(d.boolean());
-                    ("subtract_into", show_status_opt((*rz).do_subtract_into(&mut wz, pr)))
+                    ("subtract_into", show_status_opt::<R>((*rz).do_subtract_into(&mut *wz, pr)))
                 }
                 40 => {
-                    let leaky = focus_node_empty(&wz);
-                    let st = (*rz).do_restrict(&mut wz);
-                    let s = if leaky && st.is_some() {
+                    let leaky = focus_node_empty(&*wz);
+                    let st = (*rz).do_restrict(&mut *wz);
+                    let s = if false && leaky && st.is_some() {
                         "?".to_string()
                     } else {
-                        show_status_opt(st)
+                        show_status_opt::<R>(st)
                     };
                     ("restrict", s)
                 }
                 41 => {
                     // Skipped when either side has nothing below its focus; see
                     // Fuzz.lean and lean/FINDINGS.md #8.
-                    if focus_node_empty(&wz) || focus_node_empty(rz) {
+                    if false {
                         ("restricting", SKIP_EMPTY_FOCUS.to_string())
                     } else {
-                        match (*rz).do_restricting(&mut wz) {
+                        match (*rz).do_restricting(&mut *wz) {
                             Some(b) => ("restricting", show_bool(b).to_string()),
-                            None => ("restricting", SKIP_ACT.to_string()),
+                            None => ("restricting", R::SKIP.to_string()),
                         }
                     }
                 }
                 42 => {
                     let k = get!(d.modn(4));
                     let pr = get!(d.boolean());
-                    // `join_k_path_into(0)` destroys the subtrie in pathmap 0.3.1.
-                    if k == 0 {
-                        ("join_k_path_into", SKIP_K0.to_string())
+                    // The bool leaks node materialisation; see FINDINGS.md #8.
+                    let r = wz.join_k_path_into(k, pr);
+                    let s = if false {
+                        "?".to_string()
                     } else {
-                        // The bool leaks node materialisation; see FINDINGS.md #8.
-                        let r = wz.join_k_path_into(k, pr);
-                        let s = if focus_node_empty(&wz) {
-                            "?".to_string()
-                        } else {
-                            show_bool(r).to_string()
-                        };
-                        ("join_k_path_into", s)
-                    }
+                        show_bool(r).to_string()
+                    };
+                    ("join_k_path_into", s)
                 }
                 43 => {
                     let p = get!(d.path(6));
-                    // `insert_prefix("")` destroys the subtrie in pathmap 0.3.1.
-                    if p.is_empty() {
-                        ("insert_prefix", SKIP_EMPTY_PATH.to_string())
-                    } else {
-                        ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
-                    }
+                    ("insert_prefix", show_bool(wz.insert_prefix(&p)).to_string())
                 }
                 44 => {
                     let n = get!(d.modn(6));
-                    ("remove_prefix", show_bool(wz.remove_prefix(n)).to_string())
+                    ("remove_prefix", wz.remove_prefix(n).to_string())
                 }
                 45 => {
                     let pr = get!(d.boolean());
-                    let leaky = focus_node_empty(&wz) && wz.val().is_none();
+                    let leaky = focus_node_empty(&*wz) && wz.val().is_none();
                     let r = match wz.take_map(pr) {
                         Some(m) => {
                             wz.graft_map(m);
@@ -882,24 +1301,14 @@ pub fn run_ops<R: ReadSource>(
                         }
                         None => "0",
                     };
-                    ("take_map_restore", if leaky { "?".to_string() } else { r.to_string() })
+                    ("take_map_restore", if false && leaky { "?".to_string() } else { r.to_string() })
                 }
                 46 => {
                     let k = get!(d.modn(4));
                     let pr = get!(d.boolean());
-                    // `meet_k_path_into` spins forever when the focus has no
-                    // children, and escapes the focus subtree when k == 0.
-                    // See `Zip.meetKPathUnspecified`.
-                    if k == 0 {
-                        ("meet_k_path_into", SKIP_K0.to_string())
-                    } else if wz.child_count() == 0 {
-                        ("meet_k_path_into", SKIP_EMPTY_FOCUS.to_string())
-                    } else {
-                        (
-                            "meet_k_path_into",
-                            show_bool(wz.meet_k_path_into(k, pr)).to_string(),
-                        )
-                    }
+                    let r = wz.meet_k_path_into(k, pr);
+                    if !pr { drop_dangling_below(&mut *wz); }
+                    ("meet_k_path_into", show_bool(r).to_string())
                 }
                 48 => {
                     let v = get!(d.u8()) as u64;
@@ -938,21 +1347,31 @@ pub fn run_ops<R: ReadSource>(
                     let p = get!(d.path(6));
                     // `get_val`/`get_val_at` must agree with `val`/`val_at`; they
                     // differ only in the lifetime of the reference returned.
-                    let (g, ga, agree) = if t == 0 {
+                    let skip = (t == 1).then(|| rz.val_at_skip(&p)).flatten();
+                    let probe = if skip.is_some() {
+                        None
+                    } else if t == 0 {
                         let (g, ga) = (wz.val().copied(), wz.val_at(&p).copied());
-                        (g, ga, true) // a write zipper has no ZipperReadOnlyValues
+                        // A write zipper has no ZipperReadOnlyValues; the deprecated
+                        // `value`/`is_value` aliases must agree with `val`/`is_val`.
+                        #[allow(deprecated)]
+                        let agree = wz.value().copied() == g && wz.is_value() == wz.is_val();
+                        Some((g, ga, agree))
                     } else {
                         rz.get_val_probe(&p)
                     };
-                    (
-                        "get_val_agrees",
-                        format!(
-                            "{}:{}:{}",
-                            show_val(g.as_ref()),
-                            show_val(ga.as_ref()),
-                            show_bool(agree)
+                    match probe {
+                        Some((g, ga, agree)) => (
+                            "get_val_agrees",
+                            format!(
+                                "{}:{}:{}",
+                                show_val(g.as_ref()),
+                                show_val(ga.as_ref()),
+                                show_bool(agree)
+                            ),
                         ),
-                    )
+                        None => ("get_val_agrees", skip.unwrap_or(R::SKIP).to_string()),
+                    }
                 }
                 52 => match rz.to_next_get_val_probe() {
                     Some((moved, v, agree)) => (
@@ -964,7 +1383,7 @@ pub fn run_ops<R: ReadSource>(
                             show_bool(agree)
                         ),
                     ),
-                    None => ("to_next_get_val", SKIP_ACT.to_string()),
+                    None => ("to_next_get_val", R::SKIP.to_string()),
                 },
                 53 => {
                     let n = get!(d.modn(4));
@@ -974,10 +1393,10 @@ pub fn run_ops<R: ReadSource>(
                     let mut canon: Vec<u8> = m.clone();
                     canon.sort_unstable();
                     canon.dedup();
-                    let s = if (*rz).do_graft_masked(&mut wz, mask, ru) {
+                    let s = if (*rz).do_graft_masked(&mut *wz, mask, ru) {
                         format!("{}:{}", hex_path(&canon), show_bool(ru))
                     } else {
-                        SKIP_ACT.to_string()
+                        R::SKIP.to_string()
                     };
                     ("graft_masked_branches", s)
                 }
@@ -993,12 +1412,16 @@ pub fn run_ops<R: ReadSource>(
                     // (lean/FINDINGS.md #15) and the node representations it
                     // leaves behind degrade the AlgebraicStatus that *later*
                     // operations report, contaminating the rest of the run.
-                    let _ = (mask, ru, &canon);
-                    ("graft_child_maps", SKIP_QUARANTINED.to_string())
+                    let _ = SKIP_QUARANTINED;
+                    let s = if (*rz).do_graft_child_maps(&mut *wz, mask, ru) { format!("{}:{}", hex_path(&canon), show_bool(ru)) } else { R::SKIP.to_string() };
+                    ("graft_child_maps", s)
                 }
                 55 => {
                     let p = get!(d.path(6));
-                    ("meet_2", show_status_opt((*rz).do_meet_2(&mut wz, &p)))
+                    // `meet_2` has no prune flag: it may leave dangling paths, like `prune = false`
+                    let st = (*rz).do_meet_2(&mut *wz, &p);
+                    if st.is_some() { drop_dangling_below(&mut *wz); }
+                    ("meet_2", show_status_opt::<R>(st))
                 }
                 56 => {
                     let pr = get!(d.boolean());
@@ -1010,7 +1433,7 @@ pub fn run_ops<R: ReadSource>(
                 }
                 58 => {
                     let t = get!(d.modn(2));
-                    let r = tgt!(t, wz, *rz, z, z.to_prev_step());
+                    let r = tgt!(t, *wz, *rz, z, z.to_prev_step());
                     ("to_prev_step", show_bool(r).to_string())
                 }
                 59 => {
@@ -1038,7 +1461,7 @@ pub fn run_ops<R: ReadSource>(
                         wz.graft_map(canonical);
                         "-"
                     } else {
-                        SKIP_ACT
+                        R::SKIP
                     };
                     (name, ret.to_string())
                 }
@@ -1070,8 +1493,96 @@ pub fn run_ops<R: ReadSource>(
                         // points carry 1 in this homogeneous u64 interpreter.
                         wz.graft_map(result.iter().map(|(p, v)| (p, *v)).collect());
                         "-"
-                    } else { SKIP_ACT };
+                    } else { R::SKIP };
                     (PATH_SET_NAMES[op - 65], ret.to_string())
+                }
+                75 => {
+                    let t = get!(d.modn(2));
+                    let m = get!(d.modn(4));
+                    let p = get!(d.path(6));
+                    let q = get!(d.path(6));
+                    // A trie reference at `p` below the focus, and the one it
+                    // hands out at `q`: see `trie_ref_probe_subtries`.  The write
+                    // side always can; a read source without trie refs skips.
+                    let r = if t == 0 {
+                        Some(trie_ref_probe_subtries(&*wz, m, &p, &q))
+                    } else {
+                        rz.trie_ref_probe(m, &p, &q)
+                    };
+                    ("trie_ref_probe", r.unwrap_or_else(|| R::SKIP.to_string()))
+                }
+                76 => {
+                    let k = get!(d.modn(4));
+                    let via = get!(d.boolean());
+                    // The deprecated alias of `join_k_path_into(k, true)`: called on
+                    // the write zipper itself, or through the `&mut Z` forwarding impl.
+                    #[allow(deprecated)]
+                    let r = if via {
+                        <&mut W as ZipperWriting<u64>>::drop_head(&mut &mut *wz, k)
+                    } else {
+                        wz.drop_head(k)
+                    };
+                    ("drop_head", show_bool(r).to_string())
+                }
+                77 => {
+                    let t = get!(d.modn(2));
+                    let via = get!(d.modn(4));
+                    let p = get!(d.path(6));
+                    let pr = get!(d.boolean());
+                    // `join_into_take` from a write zipper at `p` in a snapshot of
+                    // the target's focus subtrie; see [`join_take`].
+                    match snapshot(t, &*wz, &*rz) {
+                        None => ("join_take", R::SKIP.to_string()),
+                        Some(m) => {
+                            let (st, m) = join_take(&mut *wz, m, &p, via, pr);
+                            ("join_take", format!("{};{}", show_status(st), squash(&dump(&mut m.read_zipper()))))
+                        }
+                    }
+                }
+                78 => {
+                    let t = get!(d.modn(2));
+                    let p = get!(d.path(6));
+                    let r = if t == 0 { Some(focus_probe_subtries(&*wz, &p, "W")) } else { rz.focus_probe(&p) };
+                    ("focus_probe", r.unwrap_or_else(|| R::SKIP.to_string()))
+                }
+                79 => {
+                    let o = get!(d.boolean());
+                    match rz.witness_iter_probe(o) {
+                        Some((moved, v, agree)) => (
+                            "witness_next_val",
+                            format!("{}:{}:{}", show_bool(moved), show_val(v.as_ref()), show_bool(agree)),
+                        ),
+                        None => ("witness_next_val", R::SKIP.to_string()),
+                    }
+                }
+                80 => {
+                    let j = get!(d.modn(4));
+                    let o = get!(d.boolean());
+                    // `to_next_k_path(k)` with `k` deeper than the focus: specified to
+                    // return `false` and reset to the root.  (At `k <= depth` it
+                    // continues a k-path iteration, which op 16 covers.)  The
+                    // observed form's observer must follow the reset.
+                    let k = rz.path().len() + 1 + j;
+                    if let Some(why) = rz.k_path_cold_skip() {
+                        ("k_path_overrun", why.to_string())
+                    } else {
+                    let (r, ok) = if o {
+                        let mut obs = rz.path().to_vec();
+                        let r = rz.to_next_k_path_observed(k, &mut obs);
+                        (r, obs == rz.path())
+                    } else {
+                        (rz.to_next_k_path(k), true)
+                    };
+                    ("k_path_overrun", format!("{};{}", show_bool(r), show_bool(ok)))
+                    }
+                }
+                81 => {
+                    let t = get!(d.modn(2));
+                    let p = get!(d.path(6));
+                    match snapshot(t, &*wz, &*rz) {
+                        None => ("path_iter", R::SKIP.to_string()),
+                        Some(m) => ("path_iter", path_iter_report(&m, &p)),
+                    }
                 }
                 47 => {
                     let t = get!(d.modn(2));
@@ -1080,7 +1591,7 @@ pub fn run_ops<R: ReadSource>(
                     // zipper's only account of where it went, so it is compared
                     // byte for byte.
                     let mut obs: Vec<u8> = Vec::new();
-                    let r = tgt!(t, wz, *rz, z, z.descend_until_observed(&mut obs));
+                    let r = tgt!(t, *wz, *rz, z, z.descend_until_observed(&mut obs));
                     (
                         "descend_until_observed",
                         format!("{}:{}", show_bool(r), hex_path(&obs)),
@@ -1089,17 +1600,21 @@ pub fn run_ops<R: ReadSource>(
                 _ => ("nop", "-".to_string()),
             };
             if check {
-                check_zipper(&wz, "write zipper", root0);
-                check_zipper(rz, "read zipper", root1);
+                check_zipper(&*wz, "write zipper", root0, true);
+                check_zipper(rz, "read zipper", root1, R::VAL_COUNT);
             }
             let _ = writeln!(out, 
-                "{step} {name} ret={ret} W={} R={}",
-                fingerprint(&wz, root0),
-                fingerprint(rz, root1)
+                "{step} {name} ret={ret} W={} R={}{}",
+                fingerprint(&*wz, root0),
+                fingerprint_with(rz, root1, R::VAL_COUNT),
+                rz.source_info().map(|i| format!(" {i}")).unwrap_or_default()
             );
             step += 1;
         }
     }
+    // The read source walked from its own root after the program: `reset` and a
+    // full depth-first traversal, through the source itself.
+    let _ = writeln!(out, "SRC {}", dump(rz));
 
 }
 

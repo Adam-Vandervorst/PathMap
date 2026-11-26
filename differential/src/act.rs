@@ -10,8 +10,9 @@ use pathmap::zipper::*;
 use crate::harness::*;
 
 impl<'t, S: AsRef<[u8]>> ReadSource for ACTZipper<'t, S, u64> {
-    fn dump_fork(&self) -> String {
-        dump_fork(self)
+    const SKIP: &'static str = SKIP_ACT;
+    fn dump_fork(&self) -> Option<String> {
+        Some(dump_fork(self))
     }
     /// ACT implements `ZipperSubtries` only for `Value = ()`, and
     /// `ZipperInfallibleSubtries` not at all, so a subtrie cannot be
@@ -20,10 +21,10 @@ impl<'t, S: AsRef<[u8]>> ReadSource for ACTZipper<'t, S, u64> {
         None
     }
     /// ACT does implement `ZipperReadOnlyValues`, so this probe applies.
-    fn get_val_probe(&self, path: &[u8]) -> (Option<u64>, Option<u64>, bool) {
+    fn get_val_probe(&self, path: &[u8]) -> Option<(Option<u64>, Option<u64>, bool)> {
         let (g, ga) = (self.get_val().copied(), self.get_val_at(path).copied());
         let agree = g == self.val().copied() && ga == self.val_at(path).copied();
-        (g, ga, agree)
+        Some((g, ga, agree))
     }
     /// ACT does *not* implement `ZipperReadOnlyIteration`, so this one is
     /// unavailable and the harness emits `skip`.
@@ -46,7 +47,8 @@ pub fn run_act(bytes: &[u8], check: bool) -> String {
     let mut out = String::new();
     {
         let mut rz = act.read_zipper_at_path_u64(&root1);
-        run_ops(&mut d, &mut out, &mut map0, &root0, &mut rz, &root1, check);
+        let mut wz = map0.write_zipper_at_path(&root0);
+        run_ops(&mut d, &mut out, &mut wz, &root0, &mut rz, &root1, check);
     }
     let _ = writeln!(out, "MAP0 {}", dump(&mut map0.read_zipper()));
     // Dumped from the ACT, not from map1, so `from_zipper` is under test too.
