@@ -268,6 +268,23 @@ headers or invalid selector counts. Headerless inputs use 56 selectors.
 Each input's selector count controls decoding independently of the running
 software's operation table.
 
+Operation 75 is `trie_ref_probe`, with a target byte, a mode byte (`u8 % 4`)
+and two paths `p` and `q`. It takes a `TrieRef` at `p` below the target's
+focus -- mode 0: the read zipper's own `trie_ref_at_path` (a `TrieRefBorrowed`
+from an untracked read zipper, a `TrieRefOwned` from a tracked or owned one);
+modes 0/1 on the write side and mode 1 on the read side:
+`get_trie_ref().trie_ref_at_path(p)`; mode 2: `TrieRefOwned::from(make_map())`;
+mode 3: `TrieRef::from(make_map())` -- and reports its existence, value, child
+count and mask, `val_at(q)`, a dump of its `fork_read_zipper` (taken only where
+the path exists; GOAT issue #96) and of its `make_map`, and a set of
+internal-consistency checks (`get_trie_ref`, `trie_ref`, `try_borrow_focus`,
+conversion into `TrieRef`, `get_val_with_witness`), then the same for the
+reference `trie_ref_at_path(q)` hands out. The model reads the zipper's trie at
+`focus ++ p` (modes 0/1) or the made map at `p` (modes 2/3); see
+`Fuzz.trieRefReport`. The write side always serves it; a read source does only
+if it opts in (`trie_ref_source!()` in its `ReadSource` impl, `Caps.trieRef` in
+its Lean `Source`), and otherwise reads `skip:<source>`.
+
 Generators always write the current header, using `NOPS` in
 `lean/input_format.py`, which must match `differential/src/harness.rs`.
 Saved failures and shrunken inputs also carry a header, preserving the original

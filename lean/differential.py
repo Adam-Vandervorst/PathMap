@@ -354,6 +354,18 @@ KNOWN = [
     (["FOCUS-VALUE-FOR-DANGLING"],
      "val_at()/get_val_at() return the focus value for a dangling child path "
      "[val_at_dangling]"),
+    # head-owned workstream (lean/findings/head-owned.md).  The model says the
+    # location exists; the crate's trie ref is invalid at both levels.
+    (["trie_ref_probe ret=e1;", "ret=e0;v-;c0;m_;a-;kok;d[_=-];mm=|e0;v-;c0;m_;a-;kok;d[_=-];mm= W="],
+     "TrieRefOwned::new_with_node_and_val_in drops the location and its value "
+     "when the node below it is empty (TrieRefOwned::from(PathMap), "
+     "write zippers' get_trie_ref) [trie_ref_owned_empty_node]"),
+    (["src:owned", "crate: RCLONE _;"],
+     "ReadZipperOwned::clone() returns a zipper at the root, not at the "
+     "original's focus [owned_clone_resets_focus]"),
+    (["src:owned", "crate: WCLONE _;"],
+     "WriteZipperOwned::clone() returns a zipper at the root, not at the "
+     "original's focus [owned_clone_resets_focus]"),
 ]
 
 

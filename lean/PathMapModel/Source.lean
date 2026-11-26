@@ -49,6 +49,19 @@ structure Caps where
   it `todo!()`).  Without it the read side's per-step fingerprint prints
   `n?`. -/
   valCount : Bool := true
+  /-- `ZipperReadOnlySubtries` (+ `ZipperInfallibleSubtries`): op 75
+  `trie_ref_probe` on the read side.  Off by default, because the Rust side
+  opts in per source (`trie_ref_source!()` in its `ReadSource` impl); a source
+  without it reads `skip:<name>` there.  The write side always serves it. -/
+  trieRef : Bool := false
+
+/-- What a source's own trailer lines are rendered with; `Fuzz.run` passes
+its renderers (a source module cannot import `Fuzz`, which imports it). -/
+structure Render where
+  fingerprint : Zip UInt64 → String
+  dumpAt : PathMap UInt64 → Path → String
+  hexPath : Path → String
+  showVal : Option UInt64 → String
 
 /-- A read source: its name, what it presents, and what it can serve. -/
 structure Source where
@@ -61,12 +74,23 @@ structure Source where
   view : PathMap UInt64 → PathMap UInt64 → Path → Path → PathMap UInt64 × Path :=
     fun _ m1 _ r1 => (m1, r1)
   caps : Caps := {}
+  /-- Source-specific trailer lines, printed last, after `ROOT1` (so a
+  difference in them never stops `MAP0`/`MAP1` from being compared):
+  `trailer render hdr wz rz`.  `hdr` is the decoder position after the header
+  (both front ends derive per-input constructor variants from it), `wz` the
+  write zipper at the end of the program, `rz` the read zipper reset to its
+  root.  Default: none. -/
+  trailer : Render → Nat → Zip UInt64 → Zip UInt64 → List String := fun _ _ _ _ => []
+  /-- map0 as the `MAP0` line shows it, from `hdr`, the write zipper's root and
+  map0 at the end of the program, for a source whose teardown changes map0.
+  Default: unchanged. -/
+  finalMap0 : Nat → Path → PathMap UInt64 → PathMap UInt64 := fun _ _ m => m
 
 /-- The skip token for an operation this source cannot serve. -/
 def Source.skip (s : Source) : String := "skip:" ++ s.name
 
 /-- The original read source: a `PathMap` read zipper over map1 at root1. -/
-def Source.native : Source := { name := "native", caps := { convex := true } }
+def Source.native : Source := { name := "native", caps := { convex := true, trieRef := true } }
 
 /-- An `ArenaCompactTree` built from map1.  ACT does not implement
 `ZipperInfallibleSubtries` (and `ZipperSubtries` only for `Value = ()`) or

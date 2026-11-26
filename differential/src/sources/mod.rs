@@ -27,6 +27,8 @@ pub mod tracker;
 pub mod overlay;
 pub mod diff;
 pub mod dependent;
+pub mod head;
+pub mod owned;
 
 /// A runner: decode and execute one input, return the trace.
 pub type Runner = fn(&[u8], bool) -> String;
@@ -42,6 +44,8 @@ pub const SOURCES: &[(&str, Runner)] = &[
     ("diff", diff::run),
     ("dependent", dependent::run),
     ("dependent-lazy", dependent::run_lazy),
+    ("head", head::run),
+    ("owned", owned::run),
     // Not a read source: the map-level fuzzer, a different op table.
     ("map", crate::mapfuzz::run),
 ];

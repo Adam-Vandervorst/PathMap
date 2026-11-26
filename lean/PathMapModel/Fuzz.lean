@@ -230,6 +230,36 @@ where
         let (moved, z') := z.toNextKPath k
         if moved then go n z' (z'.path :: acc) else (acc.reverse, z')
 
+/-! ## `TrieRef` (op 75)
+
+A trie reference is a read zipper that cannot move, so everything it reports is
+the trie it reads at one location.  `trieRefLevel t a q` is what one reference
+at `a` reports (see `trie_ref_level` in `differential/src/harness.rs` for the
+fields); `trieRefReport` adds the reference `trie_ref_at_path(q)` hands out,
+at `a ++ q`.  The fork dump of a missing location is the empty dump, which is
+also what `dumpAt` gives there. -/
+
+/-- `,` → `/` and `:` → `=`, so a trie-ref divergence cannot be mistaken for a
+`dump` one by `differential.py`'s shape rules (`squash` in the harness). -/
+def squash (s : String) : String :=
+  String.map (fun c => if c == ',' then '/' else if c == ':' then '=' else c) s
+
+def trieRefLevel (t : PathMap V) (a q : Path) : String :=
+  squash ("e" ++ showBool (t.pathExists a) ++ ";v" ++ showVal (t.valAt a) ++
+    ";c" ++ toString (t.childCount a) ++ ";m" ++ hexPath (t.childMask a) ++
+    ";a" ++ showVal (t.valAt (a ++ q)) ++ ";kok;d[" ++ dumpAt t a ++ "];mm=")
+
+def trieRefReport (t : PathMap V) (a q : Path) : String :=
+  trieRefLevel t a q ++ "|" ++ trieRefLevel t (a ++ q) q
+
+/-- Op 75: the trie and location a trie reference taken by `mode` reads.
+Modes 0 and 1 (`trie_ref_at_path` / `get_trie_ref().trie_ref_at_path`) read
+the zipper's own trie at `focus ++ p`; modes 2 and 3 build the reference from
+`make_map()` (`TrieRefOwned::from`, `TrieRef::from`), a map of its own whose
+root exists even when the focus does not. -/
+def trieRefAt (z : Zip V) (mode : Nat) (p : Path) : PathMap V × Path :=
+  if mode < 2 then (z.trie, z.focus ++ p) else (z.makeMap, p)
+
 /-- Apply `f` to the zipper selected by `t`. -/
 def onTarget (s : St) (t : Nat) (f : Zip V → α × Zip V) : α × St :=
   if t == 0 then let (a, z) := f s.wz; (a, { s with wz := z })
@@ -562,6 +592,14 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
                | 3 => s.wz.divergence s.rz s.wz 1
                | _ => s.wz.branches s.wz 1
              some (emit { s with wz := z } name "-", d)
+  | 75 => do let (t, d) ← d.mod 2; let (m, d) ← d.mod 4
+             let (p, d) ← d.path; let (q, d) ← d.path
+             -- A trie reference at `p` below the focus, and the one it hands out
+             -- at `q`.  The write side always serves it; a read source without
+             -- `ZipperReadOnlySubtries` skips.
+             if t == 1 && !s.src.caps.trieRef then some (emit s "trie_ref_probe" s.src.skip, d) else
+             let (tr, a) := trieRefAt (getTarget s t) m p
+             some (emit s "trie_ref_probe" (trieRefReport tr a q), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/
@@ -610,13 +648,14 @@ def run (bytes : ByteArray) (maxSteps : Nat := 256) (src : Source := Source.nati
   | none => ["EMPTY"]
   | some (s0, d) =>
       let s := loop maxSteps s0 d
+      let render : Render := { fingerprint := (fingerprint ·), dumpAt, hexPath, showVal }
       let final :=
         -- The read source walked from its own root (`reset` + depth-first).
         ("SRC " ++ dumpAt s.rz.trie s.rz.root) ::
-        ("MAP0 " ++ dumpAt s.wz.trie []) ::
+        (("MAP0 " ++ dumpAt (src.finalMap0 d.pos s.wz.root s.wz.trie) []) ::
         ("MAP1 " ++ dumpAt s.map1 []) ::
         ("ROOT0 " ++ hexPath s.wz.root) ::
-        ("ROOT1 " ++ hexPath s.rz.root) :: []
+        ("ROOT1 " ++ hexPath s.rz.root) :: src.trailer render d.pos s.wz s.rz.reset)
       s.out.reverse ++ final
 
 end Fuzz

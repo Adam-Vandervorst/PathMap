@@ -243,6 +243,17 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                 let binding = if marks { "_" } else { "v" };
                 format!("{{ let left = wz.make_map(); {call} let canonical: PathMap<u64> = result.iter().map(|(p, {binding})| (p, {value})).collect(); wz.graft_map(canonical); }}")
             }
+            75 => { let t = g!(d.modn(2)); let m = g!(d.modn(4)); let p = g!(d.path(6)); let q = g!(d.path(6));
+                    let (p, q) = (rs_bytes(&p), rs_bytes(&q));
+                    let tr = match (m, t) {
+                        (0, 1) => format!("rz.trie_ref_at_path({p})"),
+                        (2, _) => format!("TrieRefOwned::from({}.make_map()).trie_ref_at_path({p})", z!(t)),
+                        (3, _) => format!("TrieRef::<u64>::from({}.make_map()).trie_ref_at_path({p})", z!(t)),
+                        _ => format!("{}.get_trie_ref().trie_ref_at_path({p})", z!(t)),
+                    };
+                    format!("{{ let t = {tr}; println!(\"{{:?}} {{:?}} {{:?}} {{:?}}\", t.path_exists(), t.val(), t.child_mask(), t.val_at({q})); \
+                             let n = t.trie_ref_at_path({q}); println!(\"{{:?}} {{:?}} {{:?}}\", n.path_exists(), n.val(), n.child_mask()); \
+                             if t.path_exists() {{ let _ = t.fork_read_zipper(); }} }}") }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

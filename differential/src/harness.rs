@@ -31,7 +31,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 75;
+pub const NOPS: usize = 76;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -306,6 +306,13 @@ pub trait ReadSource:
     /// Binary path-set operations require a native read source, as convex ops do.
     fn path_set(&mut self, _left: &PathMap<u64>, _op: usize) -> Option<PathMap<u64>> { None }
 
+    /// Op 75 `trie_ref_probe` on the read side: a `TrieRef` taken at `p` below
+    /// the focus (how, `mode` says; see [`trie_ref_probe_ro`]) and reported with
+    /// [`trie_ref_report`].  `None` when the source cannot hand out trie refs
+    /// (no `ZipperReadOnlySubtries`), which the Lean model's `Caps.trieRef`
+    /// mirrors.  Opt in with `trie_ref_source!()` inside the impl.
+    fn trie_ref_probe(&self, _mode: usize, _p: &[u8], _q: &[u8]) -> Option<String> { None }
+
     fn do_graft<W: ZipperWriting<u64>>(&self, _wz: &mut W) -> bool { false }
     fn do_graft_masked<W: ZipperWriting<u64>>(&self, _wz: &mut W, _m: ByteMask, _ru: bool) -> bool { false }
     /// Currently unused: op 54 is quarantined (lean/FINDINGS.md #15).  Kept so
@@ -362,6 +369,7 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
 
 
     const SKIP: &'static str = "skip:native";
+    crate::trie_ref_source!();
     fn dump_fork(&self) -> Option<String> {
         Some(dump_fork(self))
     }
@@ -429,6 +437,145 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
     fn do_restricting<W: ZipperWriting<u64>>(&self, wz: &mut W) -> Option<bool> {
         Some(wz.restricting(self))
     }
+}
+
+/// Everything op 75 reads from a trie reference: `TrieRefBorrowed`,
+/// `TrieRefOwned` and the `TrieRef` enum all qualify.
+pub trait TrieRefLike<'a>:
+    Zipper + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+    + ZipperReadOnlySubtries<'a, u64> + Clone + Into<TrieRef<'a, u64>>
+{
+}
+impl<'a, T> TrieRefLike<'a> for T where
+    T: Zipper + ZipperValues<u64> + ZipperValuesAt<u64> + ZipperForking<u64> + ZipperInfallibleSubtries<u64>
+        + ZipperReadOnlySubtries<'a, u64> + Clone + Into<TrieRef<'a, u64>>
+{
+}
+
+/// Op 75's rendering of a trie dump: `,` and `:` would let `differential.py`'s
+/// shape rules mistake a trie-ref divergence for a `dump` one, so they become
+/// `/` and `=`.  `Fuzz.squash` does the same.
+pub fn squash(s: &str) -> String {
+    s.replace(',', "/").replace(':', "=")
+}
+
+/// One trie reference, as op 75 reports it:
+/// `e<exists>;v<val>;c<child_count>;m<child_mask>;a<val_at(q)>;k<checks>;d[<fork dump>];mm<make_map>`.
+///
+/// * `d` is the depth-first dump of `fork_read_zipper()`.  The fork is taken
+///   only where the path exists: on a missing path it used to panic (GOAT,
+///   issue #96; it returns `None` now), and the model's answer there is the
+///   empty dump either way.
+/// * `mm` is `=` when `make_map()` dumps the same as the fork, else its dump.
+/// * `k` is `ok`, or the internal-consistency checks that failed (the model
+///   prints `ok`): `IV` is_val/val, `CNT` child_count/|child_mask|, `GTR`
+///   `get_trie_ref()` reports the same location, `TR` `trie_ref()` likewise,
+///   `TBF` `try_borrow_focus()` is `Some` on a missing path, `INTO` the
+///   `TrieRef` it converts into reports the same location, `WIT` that
+///   `TrieRef`'s `get_val_with_witness` disagrees with `val`.
+pub fn trie_ref_level<'a, T: TrieRefLike<'a>>(t: &T, q: &[u8]) -> String {
+    let e = t.path_exists();
+    let mask: Vec<u8> = t.child_mask().iter().collect();
+    let d = if e { dump_fork(t) } else { "_:-".to_string() };
+    let mm = dump(&mut t.make_map().read_zipper());
+    let mut bad: Vec<&str> = Vec::new();
+    if t.is_val() != t.val().is_some() { bad.push("IV"); }
+    if t.child_count() != mask.len() { bad.push("CNT"); }
+    let same = |e2: bool, v2: Option<&u64>, m2: ByteMask| e2 == e && v2 == t.val() && m2 == t.child_mask();
+    {
+        let g = t.get_trie_ref();
+        if !same(g.path_exists(), g.val(), g.child_mask()) { bad.push("GTR"); }
+    }
+    match t.trie_ref() {
+        Some(r) if same(r.path_exists(), r.val(), r.child_mask()) => {}
+        _ => bad.push("TR"),
+    }
+    if t.try_borrow_focus().is_some() && !e { bad.push("TBF"); }
+    let tr: TrieRef<'a, u64> = t.clone().into();
+    if !same(tr.path_exists(), tr.val(), tr.child_mask()) { bad.push("INTO"); }
+    {
+        let w = tr.witness();
+        if tr.get_val_with_witness(&w) != t.val() { bad.push("WIT"); }
+    }
+    let k = if bad.is_empty() { "ok".to_string() } else { bad.join("+") };
+    let mm = if mm == d { "=".to_string() } else { mm };
+    squash(&format!(
+        "e{};v{};c{};m{};a{};k{};d[{}];mm{}",
+        show_bool(e),
+        show_val(t.val()),
+        t.child_count(),
+        hex_path(&mask),
+        show_val(t.val_at(q)),
+        k,
+        d,
+        mm
+    ))
+}
+
+/// Op 75's whole answer: the trie reference, then the one `trie_ref_at_path(q)`
+/// takes from it (nested once), as `<outer>|<inner>`.
+pub fn trie_ref_report<'a, T: TrieRefLike<'a>>(t: &T, q: &[u8]) -> String
+where
+    T::TrieRefT: TrieRefLike<'a>,
+{
+    let n = t.trie_ref_at_path(q);
+    format!("{}|{}", trie_ref_level(t, q), trie_ref_level(&n, q))
+}
+
+/// Op 75 on any zipper with infallible subtries (every write zipper, and the
+/// read side for modes 1-3).  `mode`:
+///
+/// * 0, 1 — `get_trie_ref()` (a `TrieRef` at the focus), then
+///   `trie_ref_at_path(p)`.  (Mode 0 on the read side is the zipper's own
+///   `ZipperReadOnlySubtries::trie_ref_at_path`, see [`trie_ref_probe_ro`].)
+/// * 2 — `TrieRefOwned::from(make_map())`, then `trie_ref_at_path(p)`.
+/// * 3 — `TrieRef::from(make_map())`, then `trie_ref_at_path(p)`.
+///
+/// Modes 0/1 read the zipper's trie at `focus ++ p`; modes 2/3 read the
+/// materialised map at `p`, whose root exists even where the focus does not.
+pub fn trie_ref_probe_subtries<Z: ZipperInfallibleSubtries<u64>>(z: &Z, mode: usize, p: &[u8], q: &[u8]) -> String {
+    match mode {
+        2 => {
+            let t = TrieRefOwned::from(z.make_map()).trie_ref_at_path(p);
+            trie_ref_report(&t, q)
+        }
+        3 => {
+            let t: TrieRef<'_, u64> = TrieRef::from(z.make_map()).trie_ref_at_path(p);
+            trie_ref_report(&t, q)
+        }
+        _ => {
+            let t = z.get_trie_ref().trie_ref_at_path(p);
+            trie_ref_report(&t, q)
+        }
+    }
+}
+
+/// Op 75 on a read zipper with `ZipperReadOnlySubtries`: mode 0 is the
+/// zipper's own `trie_ref_at_path(p)` (a `TrieRefBorrowed` from an untracked
+/// read zipper, a `TrieRefOwned` from a tracked or owned one).
+pub fn trie_ref_probe_ro<'a, Z>(z: &Z, mode: usize, p: &[u8], q: &[u8]) -> String
+where
+    Z: ZipperReadOnlySubtries<'a, u64> + ZipperInfallibleSubtries<u64>,
+    Z::TrieRefT: TrieRefLike<'a>,
+    <Z::TrieRefT as ZipperReadOnlySubtries<'a, u64>>::TrieRefT: TrieRefLike<'a>,
+{
+    if mode == 0 {
+        trie_ref_report(&z.trie_ref_at_path(p), q)
+    } else {
+        trie_ref_probe_subtries(z, mode, p, q)
+    }
+}
+
+/// Opt a [`ReadSource`] impl into op 75 (`trie_ref_probe`).  The zipper must
+/// implement `ZipperReadOnlySubtries` and `ZipperInfallibleSubtries`; the Lean
+/// source must set `Caps.trieRef := true`.
+#[macro_export]
+macro_rules! trie_ref_source {
+    () => {
+        fn trie_ref_probe(&self, mode: usize, p: &[u8], q: &[u8]) -> Option<String> {
+            Some($crate::harness::trie_ref_probe_ro(self, mode, p, q))
+        }
+    };
 }
 
 /// The write side of the harness: any write zipper over a `PathMap<u64>`.
@@ -1128,6 +1275,21 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                         "-"
                     } else { R::SKIP };
                     (PATH_SET_NAMES[op - 65], ret.to_string())
+                }
+                75 => {
+                    let t = get!(d.modn(2));
+                    let m = get!(d.modn(4));
+                    let p = get!(d.path(6));
+                    let q = get!(d.path(6));
+                    // A trie reference at `p` below the focus, and the one it
+                    // hands out at `q`: see `trie_ref_probe_subtries`.  The write
+                    // side always can; a read source without trie refs skips.
+                    let r = if t == 0 {
+                        Some(trie_ref_probe_subtries(&*wz, m, &p, &q))
+                    } else {
+                        rz.trie_ref_probe(m, &p, &q)
+                    };
+                    ("trie_ref_probe", r.unwrap_or_else(|| R::SKIP.to_string()))
                 }
                 47 => {
                     let t = get!(d.modn(2));
