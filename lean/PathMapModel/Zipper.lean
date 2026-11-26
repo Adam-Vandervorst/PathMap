@@ -410,13 +410,12 @@ def descendFirstKPath (k : Nat) : Bool × Zip V := z.kPathFrom z.path.length k
 depth, under the common ancestor `k` bytes above the focus.  On exhaustion the
 focus moves to that ancestor and the result is `false`.
 
-NOTE: when the focus is shallower than `k`, the *native* `ReadZipper` falls back
-to the **zipper root** as the common ancestor — so the call behaves like
-`descend_first_k_path(k)` from the root and can succeed.  The `ZipperIteration`
-default implementation instead returns `false` without moving.  The model
-follows the native `ReadZipper`, which is what the public API reaches. -/
+When the focus is shallower than `k` there is no common ancestor `k` bytes up:
+the trait documents that the call then "returns `false` and resets the zipper's
+focus to the root" (`k_path_depth_exceeded`, shared by the default and the
+native implementations).  Zipper op 80 `k_path_overrun` checks that case. -/
 def toNextKPath (k : Nat) : Bool × Zip V :=
-  if k ≤ z.path.length then z.kPathFrom (z.path.length - k) k else z.kPathFrom 0 k
+  if k ≤ z.path.length then z.kPathFrom (z.path.length - k) k else (false, z.reset)
 
 /-! ## `trait ZipperForking` -/
 

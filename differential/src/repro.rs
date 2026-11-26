@@ -254,6 +254,37 @@ pub fn emit_repro(bytes: &[u8], upto: usize) -> String {
                     format!("{{ let t = {tr}; println!(\"{{:?}} {{:?}} {{:?}} {{:?}}\", t.path_exists(), t.val(), t.child_mask(), t.val_at({q})); \
                              let n = t.trie_ref_at_path({q}); println!(\"{{:?}} {{:?}} {{:?}}\", n.path_exists(), n.val(), n.child_mask()); \
                              if t.path_exists() {{ let _ = t.fork_read_zipper(); }} }}") }
+            76 => { let k = g!(d.modn(4)); let via = g!(d.boolean());
+                    if via { format!("#[allow(deprecated)] ZipperWriting::<u64>::drop_head(&mut &mut wz, {k});") }
+                    else { format!("#[allow(deprecated)] wz.drop_head({k});") } }
+            77 => { let t = g!(d.modn(2)); let via = g!(d.modn(4)); let p = g!(d.path(6)); let pr = g!(d.boolean());
+                    // `snapshot` in the harness: the target's focus subtrie as a map.
+                    let snap = if t == 0 { "wz.make_map()".to_string() }
+                               else { "{ let mut m = PathMap::<u64>::new(); m.write_zipper().graft(&rz); m }".to_string() };
+                    let call = if via & 1 == 1 { format!("ZipperWriting::<u64>::join_into_take(&mut &mut wz, &mut sz, {pr})") }
+                               else { format!("wz.join_into_take(&mut sz, {pr})") };
+                    if via & 2 == 0 {
+                        format!("{{ let mut m = {snap}; let st = {{ let mut sz = m.write_zipper(); sz.descend_to({p}); {call} }}; \
+                                 println!(\"join_take {{st:?}} {{:?}}\", m.iter().collect::<Vec<_>>()); }}", p = rs_bytes(&p))
+                    } else {
+                        format!("{{ let m = {snap}; let mut sz = m.into_write_zipper::<&[u8]>(&[]); sz.descend_to({p}); let st = {call}; \
+                                 let m = sz.into_map(); println!(\"join_take {{st:?}} {{:?}}\", m.iter().collect::<Vec<_>>()); }}", p = rs_bytes(&p))
+                    } }
+            78 => { let t = g!(d.modn(2)); let p = g!(d.path(6));
+                    format!("println!(\"focus_probe {{:?}} {{}} {{}}\", {z}.get_focus_at({p}), {z}.try_borrow_focus().is_some(), {z}.path_exists());",
+                            z = z!(t), p = rs_bytes(&p)) }
+            79 => { let o = g!(d.boolean());
+                    if o { "{ let w = rz.witness(); let mut obs = rz.path().to_vec(); let v = rz.to_next_get_val_with_witness_observed(&w, &mut obs).copied(); println!(\"witness_next_val {v:?} {obs:?} {:?}\", rz.path()); }".to_string() }
+                    else { "{ let w = rz.witness(); let v = rz.to_next_get_val_with_witness(&w).copied(); println!(\"witness_next_val {v:?}\"); }".to_string() } }
+            80 => { let j = g!(d.modn(4)); let o = g!(d.boolean());
+                    let k = format!("rz.path().len() + {}", 1 + j);
+                    if o { format!("{{ let k = {k}; let mut obs = rz.path().to_vec(); let r = rz.to_next_k_path_observed(k, &mut obs); println!(\"k_path_overrun {{r}} {{obs:?}}\"); }}") }
+                    else { format!("{{ let k = {k}; let r = rz.to_next_k_path(k); println!(\"k_path_overrun {{r}}\"); }}") } }
+            81 => { let t = g!(d.modn(2)); let p = g!(d.path(6));
+                    let snap = if t == 0 { "wz.make_map()".to_string() }
+                               else { "{ let mut m = PathMap::<u64>::new(); m.write_zipper().graft(&rz); m }".to_string() };
+                    format!("{{ let m = {snap}; let mut z = m.read_zipper(); z.descend_to({p}); println!(\"into_path {{:?}}\", z.clone().into_path()); \
+                             println!(\"path_iter {{:?}}\", z.into_path_iter().collect::<Vec<_>>()); }}", p = rs_bytes(&p)) }
             _ => "// nop".to_string(),
         };
         o.push_str(&format!("    /* {step:3} */ {line}\n"));

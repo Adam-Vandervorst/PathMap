@@ -35,7 +35,7 @@ def headFinalMap0 (hdr : Nat) (r0 : Path) (m : PathMap UInt64) : PathMap UInt64 
 
 def Source.head : Source :=
   { name := "head"
-    caps := { trieRef := true }
+    caps := { trieRef := true, witnessIter := true, coldKPath := false }
     finalMap0 := headFinalMap0 }
 
 -- The root path left dangling is pruned back to the nearest value...

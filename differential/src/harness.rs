@@ -31,7 +31,7 @@ use core::fmt::Write as _;
 
 /// Selector count for newly generated inputs. Keep in sync with `lean/input_format.py`.
 /// Keep operation IDs permanently assigned.
-pub const NOPS: usize = 76;
+pub const NOPS: usize = 82;
 /// Unversioned inputs retain their original operation decoding.
 pub const LEGACY_NOPS: usize = 56;
 /// Input header marker, followed by a little-endian u16 selector count (1..=256).
@@ -215,6 +215,14 @@ pub const SKIP_ACT: &str = "skip:act";
 pub const SKIP_AT_ROOT: &str = "skip:at-root";
 pub const SKIP_EMPTY_FOCUS: &str = "skip:empty-focus";
 pub const SKIP_QUARANTINED: &str = "skip:quarantined";
+/// `skip:k-path-borrowed` -- op 80 at the root of a `--source head` read
+/// zipper, which may have been made by `read_zipper_at_borrowed_path`: a cold
+/// `to_next_k_path` there underflows `path_len()` before the path buffer is
+/// prepared (known bug `to_next_k_path_borrowed`), and in a release build the
+/// wrapped state corrupts later iteration.  Only the root is affected (any
+/// descent prepares the buffer).  `ReadSource::k_path_cold_skip`,
+/// `Caps.coldKPath` in the model; lean/findings/ops.md.
+pub const SKIP_K_PATH_BORROWED: &str = "skip:k-path-borrowed";
 
 /// Does the focus have no descendants at all?
 ///
@@ -318,6 +326,18 @@ pub trait ReadSource:
     /// mirrors.  Opt in with `trie_ref_source!()` inside the impl.
     fn trie_ref_probe(&self, _mode: usize, _p: &[u8], _q: &[u8]) -> Option<String> { None }
 
+    /// Op 78 `focus_probe` on the read side: [`focus_probe_subtries`] at `p`.
+    /// Served with op 75 (`trie_ref_source!()`, `Caps.trieRef`): it needs
+    /// `ZipperInfallibleSubtries`, which every trie-ref source has.
+    fn focus_probe(&self, _p: &[u8]) -> Option<String> { None }
+    /// Op 79 `witness_next_val`: `ZipperReadOnlyConditionalIteration`'s
+    /// `to_next_get_val_with_witness(_observed)`, as [`witness_next_val`]
+    /// reports it.  `None` when the zipper does not implement the trait (the
+    /// model's `Caps.witnessIter`).  Opt in with `witness_iter_source!()`.
+    fn witness_iter_probe(&mut self, _observed: bool) -> Option<(bool, Option<u64>, bool)> { None }
+    /// A named skip for op 80 `k_path_overrun` at the current focus (see
+    /// [`SKIP_K_PATH_BORROWED`]); the model's `Caps.coldKPath`.
+    fn k_path_cold_skip(&self) -> Option<&'static str> { None }
     /// An optional per-step report, appended to the read zipper's fingerprint
     /// (the model's `Source.info`).  The product zippers report
     /// `ZipperProduct` through it; every other source prints nothing.
@@ -385,22 +405,40 @@ impl<'a, 'p> ReadSource for ReadZipperUntracked<'a, 'p, u64> {
 
     const SKIP: &'static str = "skip:native";
     crate::trie_ref_source!();
+    crate::witness_iter_source!();
     fn dump_fork(&self) -> Option<String> {
         Some(dump_fork(self))
     }
     fn make_map_val_count(&self) -> Option<usize> {
         Some(self.make_map().val_count())
     }
+    #[allow(deprecated)]
     fn get_val_probe(&self, path: &[u8]) -> Option<(Option<u64>, Option<u64>, bool)> {
         let (g, ga) = (self.get_val().copied(), self.get_val_at(path).copied());
-        let agree = g == self.val().copied() && ga == self.val_at(path).copied();
+        // The deprecated aliases (`get_value`, `value`, `is_value`) must agree
+        // with what they alias.
+        let agree = g == self.val().copied() && ga == self.val_at(path).copied()
+            && self.get_value().copied() == g && self.value().copied() == g
+            && self.is_value() == self.is_val();
         Some((g, ga, agree))
     }
+    #[allow(deprecated)]
     fn to_next_get_val_probe(&mut self) -> Option<(bool, Option<u64>, bool)> {
-        let got = self.to_next_get_val().copied();
+        // Four spellings of the same advance, picked by the depth so a run
+        // exercises all of them: `to_next_get_val`, the deprecated
+        // `to_next_get_value(_observed)` aliases, and `to_next_get_val_observed`
+        // with a path observer, which must end up holding the new path.
+        let mut obs = self.path().to_vec();
+        let (got, observed) = match self.path().len() % 4 {
+            0 => (self.to_next_get_val().copied(), false),
+            1 => (self.to_next_get_value().copied(), false),
+            2 => (self.to_next_get_value_observed(&mut obs).copied(), true),
+            _ => (self.to_next_get_val_observed(&mut obs).copied(), true),
+        };
         // `to_next_get_val` is specified as `to_next_val` followed by reading the
         // value, so `Some` must mean it moved and must equal what `val` reports.
-        let agree = got == self.val().copied() || (got.is_none() && self.at_root());
+        let agree = (got == self.val().copied() || (got.is_none() && self.at_root()))
+            && (!observed || obs == self.path());
         Some((got.is_some(), got, agree))
     }
     fn do_graft<W: ZipperWriting<u64>>(&self, wz: &mut W) -> bool {
@@ -515,16 +553,72 @@ pub fn trie_ref_level<'a, T: TrieRefLike<'a>>(t: &T, q: &[u8]) -> String {
     let k = if bad.is_empty() { "ok".to_string() } else { bad.join("+") };
     let mm = if mm == d { "=".to_string() } else { mm };
     squash(&format!(
-        "e{};v{};c{};m{};a{};k{};d[{}];mm{}",
+        "e{};v{};c{};m{};a{};g{};k{};d[{}];mm{}",
         show_bool(e),
         show_val(t.val()),
         t.child_count(),
         hex_path(&mask),
         show_val(t.val_at(q)),
+        show_bool(has_focus_node_at(t, q, || t.make_map().read_zipper_at_path(q).child_count() == 0)),
         k,
         d,
         mm
     ))
+}
+
+/// `ZipperInfallibleSubtries::get_focus_at(p)`, rendered as the one thing it
+/// specifies that the public API can see: whether a node comes back.  The
+/// returned `OpaqueAbstractNodeRef` has no public methods, so its `Debug` form
+/// is the only observation (`AbstractNodeRef::None`, or the node).
+///
+/// The answer must be a node wherever something lies below `focus ++ p`.  An
+/// empty node standing in for "nothing below" (at a node boundary, e.g. the
+/// root of an empty map) is representation, so a node at a location with no
+/// children (`childless`, from the zipper's own trie) reads as `0`, as `None`
+/// does.  The model prints `1` exactly when the location has children.
+pub fn has_focus_node_at<Z: ZipperInfallibleSubtries<u64>>(z: &Z, p: &[u8], childless: impl FnOnce() -> bool) -> bool {
+    let none = format!("{:?}", z.get_focus_at(p)).starts_with("OpaqueAbstractNodeRef(AbstractNodeRef::None");
+    !none && !childless()
+}
+
+/// Op 78 `focus_probe`: `g<get_focus_at(p) has a node>;k<checks>`, see
+/// [`has_focus_node_at`].  `k` is `ok`, or `<side>TBF` (`W` for the write
+/// zipper, `R` for the read source) when `try_borrow_focus()` is `Some` at a
+/// focus that does not exist (it may be `None` anywhere: it only borrows a node
+/// the focus sits exactly on).
+pub fn focus_probe_subtries<Z: ZipperInfallibleSubtries<u64>>(z: &Z, p: &[u8], side: &str) -> String {
+    let g = has_focus_node_at(z, p, || z.make_map().read_zipper_at_path(p).child_count() == 0);
+    let tbf = format!("{side}TBF");
+    let k = if z.try_borrow_focus().is_some() && !z.path_exists() { tbf.as_str() } else { "ok" };
+    format!("g{};k{}", show_bool(g), k)
+}
+
+/// Op 79 `witness_next_val` on a zipper with `ZipperReadOnlyConditionalIteration`:
+/// advance with `to_next_get_val_with_witness` (or its `_observed` form, with a
+/// path observer seeded with the path, which must end up holding the new path)
+/// and report `(moved, value, agree)` as op 52 does.
+pub fn witness_next_val<'a, Z: ZipperReadOnlyConditionalIteration<'a, u64> + ZipperPath>(z: &mut Z, observed: bool) -> (bool, Option<u64>, bool) {
+    let w = z.witness();
+    let (got, obs_ok) = if observed {
+        let mut obs = z.path().to_vec();
+        let got = z.to_next_get_val_with_witness_observed(&w, &mut obs).copied();
+        (got, obs == z.path())
+    } else {
+        (z.to_next_get_val_with_witness(&w).copied(), true)
+    };
+    let agree = obs_ok && (got == z.val().copied() || (got.is_none() && z.at_root()));
+    (got.is_some(), got, agree)
+}
+
+/// Opt a [`ReadSource`] impl into op 79 (`witness_next_val`); the Lean source
+/// must set `Caps.witnessIter := true`.
+#[macro_export]
+macro_rules! witness_iter_source {
+    () => {
+        fn witness_iter_probe(&mut self, observed: bool) -> Option<(bool, Option<u64>, bool)> {
+            Some($crate::harness::witness_next_val(self, observed))
+        }
+    };
 }
 
 /// Op 75's whole answer: the trie reference, then the one `trie_ref_at_path(q)`
@@ -589,6 +683,9 @@ macro_rules! trie_ref_source {
     () => {
         fn trie_ref_probe(&self, mode: usize, p: &[u8], q: &[u8]) -> Option<String> {
             Some($crate::harness::trie_ref_probe_ro(self, mode, p, q))
+        }
+        fn focus_probe(&self, p: &[u8]) -> Option<String> {
+            Some($crate::harness::focus_probe_subtries(self, p, "R"))
         }
     };
 }
@@ -753,6 +850,81 @@ pub fn run(bytes: &[u8], check: bool) -> String {
     out
 }
 
+/// The target's focus subtrie as a map of its own: `make_map()` on the write
+/// zipper (`t == 0`), or the read source grafted into a fresh map, which only a
+/// merge source can do (`None`: the op reports `R::SKIP`, `St.canMerge` in the
+/// model).  Ops 77 and 81 work on it, so they mean the same on every source.
+pub fn snapshot<W: WriteTarget, R: ReadSource>(t: usize, wz: &W, rz: &R) -> Option<PathMap<u64>> {
+    if t == 0 {
+        Some(wz.make_map())
+    } else {
+        let mut m = PathMap::<u64>::new();
+        let ok = {
+            let mut tz = m.write_zipper();
+            rz.do_graft(&mut tz)
+        };
+        ok.then_some(m)
+    }
+}
+
+/// Op 77: `wz.join_into_take(src, prune)` with `src` a write zipper over `m`,
+/// descended to `p`.  `via` bit 0 calls it through the `&mut Z` forwarding
+/// impl; bit 1 makes `src` a `WriteZipperOwned` (`into_write_zipper`) instead of
+/// a `WriteZipperUntracked`.  Returns the status and `m` afterwards: the taken
+/// subtrie must be gone from it (and with `prune`, the dangling path to it).
+/// With `t == 0` `m` shares its nodes with map0, so the take also checks that
+/// copy-on-write keeps the two apart.
+pub fn join_take<W: WriteTarget>(wz: &mut W, mut m: PathMap<u64>, p: &[u8], via: usize, pr: bool) -> (AlgebraicStatus, PathMap<u64>) {
+    fn call<W: ZipperWriting<u64>, S: ZipperInfallibleSubtries<u64> + ZipperWriting<u64>>(wz: &mut W, sz: &mut S, fwd: bool, pr: bool) -> AlgebraicStatus {
+        if fwd {
+            <&mut W as ZipperWriting<u64>>::join_into_take(&mut &mut *wz, sz, pr)
+        } else {
+            wz.join_into_take(sz, pr)
+        }
+    }
+    if via & 2 == 0 {
+        let st = {
+            let mut sz = m.write_zipper();
+            sz.descend_to(p);
+            call(wz, &mut sz, via & 1 == 1, pr)
+        };
+        (st, m)
+    } else {
+        let mut sz = m.into_write_zipper::<&[u8]>(&[]);
+        sz.descend_to(p);
+        let st = call(wz, &mut sz, via & 1 == 1, pr);
+        (st, sz.into_map())
+    }
+}
+
+/// Op 81: `ReadZipperUntracked::into_path` and `into_path_iter` on a read
+/// zipper over `m` descended to `p`:
+/// `ip<into_path>;k<ok|VAL>;<path=val>/...` (at most 32 paths, `-` for none).
+/// The iterator yields every leaf (existing, childless location, valued or
+/// not) after the focus in depth-first order, each with
+/// `ReadZipperPathIter::val()`; `VAL` means `val()` was still `Some` once it
+/// was exhausted.  `into_path` must be the origin path, `p`.
+pub fn path_iter_report(m: &PathMap<u64>, p: &[u8]) -> String {
+    let ip = {
+        let mut z = m.read_zipper();
+        z.descend_to(p);
+        z.into_path()
+    };
+    let mut z = m.read_zipper();
+    z.descend_to(p);
+    let mut it = z.into_path_iter();
+    let mut items: Vec<String> = Vec::new();
+    let mut done = false;
+    while items.len() < 32 {
+        match it.next() {
+            Some(q) => items.push(format!("{}={}", hex_path(&q), show_val(it.val()))),
+            None => { done = true; break; }
+        }
+    }
+    let k = if done && it.val().is_some() { "VAL" } else { "ok" };
+    format!("ip{};k{};{}", hex_path(&ip), k, if items.is_empty() { "-".to_string() } else { items.join("/") })
+}
+
 /// Run the operation table.  This is the single shared body: the two front ends
 /// differ only in what they hand in as `rz`.
 /// Drops every dangling path below the focus, keeping the values and the focus
@@ -842,7 +1014,17 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                 7 => {
                     let t = get!(d.modn(2));
                     let i = get!(d.modn(6));
-                    let r = tgt!(t, *wz, *rz, z, z.descend_indexed_byte(i));
+                    // Odd steps call the deprecated alias `descend_indexed_branch`,
+                    // whose `bool` is rendered as the byte it moved to (the
+                    // fingerprint compares the path as well).
+                    let r = if step % 2 == 0 {
+                        tgt!(t, *wz, *rz, z, z.descend_indexed_byte(i))
+                    } else {
+                        #[allow(deprecated)]
+                        let moved = tgt!(t, *wz, *rz, z, z.descend_indexed_branch(i));
+                        let last = tgt!(t, *wz, *rz, z, z.path().last().copied());
+                        if moved { last } else { None }
+                    };
                     ("descend_indexed_byte", show_byte_opt(r))
                 }
                 8 => {
@@ -935,7 +1117,13 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                 20 => {
                     let t = get!(d.modn(2));
                     let p = get!(d.path(6));
-                    let n = tgt!(t, *wz, *rz, z, z.descend_to_val(&p));
+                    // Odd steps call the deprecated alias `descend_to_value`.
+                    #[allow(deprecated)]
+                    let n = if step % 2 == 0 {
+                        tgt!(t, *wz, *rz, z, z.descend_to_val(&p))
+                    } else {
+                        tgt!(t, *wz, *rz, z, z.descend_to_value(&p))
+                    };
                     ("descend_to_val", format!("{n}"))
                 }
                 21 => {
@@ -1158,7 +1346,11 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                         None
                     } else if t == 0 {
                         let (g, ga) = (wz.val().copied(), wz.val_at(&p).copied());
-                        Some((g, ga, true)) // a write zipper has no ZipperReadOnlyValues
+                        // A write zipper has no ZipperReadOnlyValues; the deprecated
+                        // `value`/`is_value` aliases must agree with `val`/`is_val`.
+                        #[allow(deprecated)]
+                        let agree = wz.value().copied() == g && wz.is_value() == wz.is_val();
+                        Some((g, ga, agree))
                     } else {
                         rz.get_val_probe(&p)
                     };
@@ -1312,6 +1504,79 @@ pub fn run_ops<W: WriteTarget, R: ReadSource>(
                         rz.trie_ref_probe(m, &p, &q)
                     };
                     ("trie_ref_probe", r.unwrap_or_else(|| R::SKIP.to_string()))
+                }
+                76 => {
+                    let k = get!(d.modn(4));
+                    let via = get!(d.boolean());
+                    // The deprecated alias of `join_k_path_into(k, true)`: called on
+                    // the write zipper itself, or through the `&mut Z` forwarding impl.
+                    #[allow(deprecated)]
+                    let r = if via {
+                        <&mut W as ZipperWriting<u64>>::drop_head(&mut &mut *wz, k)
+                    } else {
+                        wz.drop_head(k)
+                    };
+                    ("drop_head", show_bool(r).to_string())
+                }
+                77 => {
+                    let t = get!(d.modn(2));
+                    let via = get!(d.modn(4));
+                    let p = get!(d.path(6));
+                    let pr = get!(d.boolean());
+                    // `join_into_take` from a write zipper at `p` in a snapshot of
+                    // the target's focus subtrie; see [`join_take`].
+                    match snapshot(t, &*wz, &*rz) {
+                        None => ("join_take", R::SKIP.to_string()),
+                        Some(m) => {
+                            let (st, m) = join_take(&mut *wz, m, &p, via, pr);
+                            ("join_take", format!("{};{}", show_status(st), squash(&dump(&mut m.read_zipper()))))
+                        }
+                    }
+                }
+                78 => {
+                    let t = get!(d.modn(2));
+                    let p = get!(d.path(6));
+                    let r = if t == 0 { Some(focus_probe_subtries(&*wz, &p, "W")) } else { rz.focus_probe(&p) };
+                    ("focus_probe", r.unwrap_or_else(|| R::SKIP.to_string()))
+                }
+                79 => {
+                    let o = get!(d.boolean());
+                    match rz.witness_iter_probe(o) {
+                        Some((moved, v, agree)) => (
+                            "witness_next_val",
+                            format!("{}:{}:{}", show_bool(moved), show_val(v.as_ref()), show_bool(agree)),
+                        ),
+                        None => ("witness_next_val", R::SKIP.to_string()),
+                    }
+                }
+                80 => {
+                    let j = get!(d.modn(4));
+                    let o = get!(d.boolean());
+                    // `to_next_k_path(k)` with `k` deeper than the focus: specified to
+                    // return `false` and reset to the root.  (At `k <= depth` it
+                    // continues a k-path iteration, which op 16 covers.)  The
+                    // observed form's observer must follow the reset.
+                    let k = rz.path().len() + 1 + j;
+                    if let Some(why) = rz.k_path_cold_skip() {
+                        ("k_path_overrun", why.to_string())
+                    } else {
+                    let (r, ok) = if o {
+                        let mut obs = rz.path().to_vec();
+                        let r = rz.to_next_k_path_observed(k, &mut obs);
+                        (r, obs == rz.path())
+                    } else {
+                        (rz.to_next_k_path(k), true)
+                    };
+                    ("k_path_overrun", format!("{};{}", show_bool(r), show_bool(ok)))
+                    }
+                }
+                81 => {
+                    let t = get!(d.modn(2));
+                    let p = get!(d.path(6));
+                    match snapshot(t, &*wz, &*rz) {
+                        None => ("path_iter", R::SKIP.to_string()),
+                        Some(m) => ("path_iter", path_iter_report(&m, &p)),
+                    }
                 }
                 47 => {
                     let t = get!(d.modn(2));

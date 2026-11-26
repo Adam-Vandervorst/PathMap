@@ -35,6 +35,7 @@ pub fn empty_root(root1: &[u8]) -> Vec<u8> {
 
 impl ReadSource for EmptyZipper {
     const SKIP: &'static str = "skip:empty";
+    crate::witness_iter_source!();
     fn dump_fork(&self) -> Option<String> {
         Some(dump_fork(self))
     }

@@ -277,6 +277,15 @@ KNOWN = [
     (["src:empty", "to_next_val", "READ-SIDE"],
      "EmptyZipper::to_next_val() returns false without rewinding to the root "
      "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
+    (["src:empty", "witness_next_val", "READ-SIDE"],
+     "EmptyZipper::to_next_get_val_with_witness(_observed)() returns None without "
+     "rewinding to the root [empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
+    # PrefixZipper's ZipperInfallibleSubtries internals forward to the source
+    # zipper unadjusted, like its trie_ref_at_path (prefix P6); lean/findings/ops.md.
+    (["src:prefix", "focus_probe ret="],
+     "PrefixZipper::get_focus_at()/try_borrow_focus() forward to the source "
+     "zipper without accounting for the prefix: no node inside the prefix, "
+     "Some off it [ops: prefix_focus_ignores_prefix]"),
     (["src:empty", "to_next_get_val", "READ-SIDE"],
      "EmptyZipper::to_next_get_val() returns None without rewinding to the root "
      "[empty: to_next_val_no_rewind, lean/findings/prefix.md]"),
@@ -466,12 +475,18 @@ KNOWN = [
      "which value survives a collision follows node layout rather than the "
      "left-biased spec (join/meet and everything that later reads the "
      "location) [value_bias_by_node_layout]"),
+    # ops workstream (lean/findings/ops.md).
+    (["focus_probe ret=", ";kWTBF W="],
+     "WriteZipperCore::try_borrow_focus() returns the (empty) node of a dangling "
+     "path above the focus when the focus lies below it: Some at a non-existent "
+     "focus (debug: assertion at write_zipper.rs:1435) "
+     "[ops: wz_try_borrow_focus_below_dangling]"),
     (["FOCUS-VALUE-FOR-DANGLING"],
      "val_at()/get_val_at() return the focus value for a dangling child path "
      "[val_at_dangling]"),
     # head-owned workstream (lean/findings/head-owned.md).  The model says the
     # location exists; the crate's trie ref is invalid at both levels.
-    (["trie_ref_probe ret=e1;", "ret=e0;v-;c0;m_;a-;kok;d[_=-];mm=|e0;v-;c0;m_;a-;kok;d[_=-];mm= W="],
+    (["trie_ref_probe ret=e1;", "ret=e0;v-;c0;m_;a-;g0;kok;d[_=-];mm=|e0;v-;c0;m_;a-;g0;kok;d[_=-];mm= W="],
      "TrieRefOwned::new_with_node_and_val_in drops the location and its value "
      "when the node below it is empty (TrieRefOwned::from(PathMap), "
      "write zippers' get_trie_ref) [trie_ref_owned_empty_node]"),
@@ -556,6 +571,11 @@ def divergence_shape(a, b):
     if keys == {"ret"}:
         ra, rb = diff[0][0].split("=", 1)[1], diff[0][1].split("=", 1)[1]
         if ra in STATUSES and rb in STATUSES:
+            return "STATUS-ONLY"
+        # `<status>;<report>` (op 77 `join_take`): only the status differs.
+        sa, sb = ra.split(";", 1), rb.split(";", 1)
+        if (len(sa) == 2 and len(sb) == 2 and sa[1] == sb[1]
+                and sa[0] in STATUSES and sb[0] in STATUSES):
             return "STATUS-ONLY"
         # `-` on the model side against the focus value on the crate side, in
         # a bare return (`val_at`) or a component of one (`get_val_agrees`).

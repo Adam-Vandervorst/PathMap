@@ -54,6 +54,16 @@ structure Caps where
   opts in per source (`trie_ref_source!()` in its `ReadSource` impl); a source
   without it reads `skip:<name>` there.  The write side always serves it. -/
   trieRef : Bool := false
+  /-- `ZipperReadOnlyConditionalIteration` (`to_next_get_val_with_witness`):
+  op 79 `witness_next_val`.  Off by default; the Rust side opts in per source
+  with `witness_iter_source!()`. -/
+  witnessIter : Bool := false
+  /-- A cold `to_next_k_path` (op 80 `k_path_overrun`) can be called at the
+  root.  `false` for `--source head`, whose read zipper may be made by
+  `read_zipper_at_borrowed_path`, where that underflows `path_len()` (known bug
+  `to_next_k_path_borrowed`) and corrupts later iteration: op 80 at the root
+  reads `skip:k-path-borrowed` there (`ReadSource::k_path_cold_skip`). -/
+  coldKPath : Bool := true
 
 /-- What a source's own trailer lines are rendered with; `Fuzz.run` passes
 its renderers (a source module cannot import `Fuzz`, which imports it). -/
@@ -74,6 +84,13 @@ structure Source where
   view : PathMap UInt64 → PathMap UInt64 → Path → Path → PathMap UInt64 × Path :=
     fun _ m1 _ r1 => (m1, r1)
   caps : Caps := {}
+  /-- `mergeAt m0 m1 r0 r1 focus`: with `caps.merge`, whether the source can
+  serve a merge with its focus at the absolute path `focus`; `false` renders
+  as `skip:<name>` (the Rust side's `full_read_source!` guard).  For a source
+  whose merges are broken at some foci by a known crate bug, so the bug does
+  not corrupt map0 for the rest of the run. -/
+  mergeAt : PathMap UInt64 → PathMap UInt64 → Path → Path → Path → Bool :=
+    fun _ _ _ _ _ => true
   /-- Source-specific trailer lines, printed last, after `ROOT1` (so a
   difference in them never stops `MAP0`/`MAP1` from being compared):
   `trailer render hdr wz rz`.  `hdr` is the decoder position after the header
@@ -85,13 +102,6 @@ structure Source where
   map0 at the end of the program, for a source whose teardown changes map0.
   Default: unchanged. -/
   finalMap0 : Nat → Path → PathMap UInt64 → PathMap UInt64 := fun _ _ m => m
-  /-- `mergeAt m0 m1 r0 r1 focus`: with `caps.merge`, whether the source can
-  serve a merge with its focus at the absolute path `focus`; `false` renders
-  as `skip:<name>` (the Rust side's `full_read_source!` guard).  For a source
-  whose merges are broken at some foci by a known crate bug, so the bug does
-  not corrupt map0 for the rest of the run. -/
-  mergeAt : PathMap UInt64 → PathMap UInt64 → Path → Path → Path → Bool :=
-    fun _ _ _ _ _ => true
   /-- An optional per-step report on the read zipper, appended to its
   fingerprint: `info m0 m1 r0 r1` gives, for the focus (the path relative to
   the root), the string the Rust side's `ReadSource::source_info` prints.
@@ -111,7 +121,7 @@ structure Source where
 def Source.skip (s : Source) : String := "skip:" ++ s.name
 
 /-- The original read source: a `PathMap` read zipper over map1 at root1. -/
-def Source.native : Source := { name := "native", caps := { convex := true, trieRef := true } }
+def Source.native : Source := { name := "native", caps := { convex := true, trieRef := true, witnessIter := true } }
 
 /-- An `ArenaCompactTree` built from map1.  ACT does not implement
 `ZipperInfallibleSubtries` (and `ZipperSubtries` only for `Value = ()`) or

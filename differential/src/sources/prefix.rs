@@ -76,6 +76,8 @@ fn merge_at<Z>(z: &PrefixZipper<'_, Z>) -> bool {
 
 impl<'pre, 'a, 'p> ReadSource for PrefixZipper<'pre, ReadZipperUntracked<'a, 'p, u64>> {
     full_read_source!("skip:prefix", |z| merge_at(z));
+    crate::trie_ref_source!();
+    crate::witness_iter_source!();
 }
 
 pub fn run(bytes: &[u8], check: bool) -> String {

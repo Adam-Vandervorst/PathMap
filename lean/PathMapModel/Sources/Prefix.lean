@@ -92,6 +92,7 @@ def prefixMergeAt (r0 r1 focus : Path) : Bool :=
 def Source.prefix : Source :=
   { name := "prefix"
     view := fun _ m1 r0 r1 => prefixView m1 r0 r1
+    caps := { trieRef := true, witnessIter := true }
     mergeAt := fun _ _ r0 r1 focus => prefixMergeAt r0 r1 focus }
 
 /-! ## Fixtures

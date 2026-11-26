@@ -23,7 +23,7 @@ def emptyRoot (r1 : Path) : Path := if r1.isEmpty then [3] else r1
 def Source.empty : Source :=
   { name := "empty"
     view := fun _ _ _ r1 => (PathMap.empty, emptyRoot r1)
-    caps := { makeMap := false, merge := false } }
+    caps := { makeMap := false, merge := false, witnessIter := true } }
 
 /-- `EmptyZipper::new()` behind `PathTracker::with_origin(_, emptyRoot r1)`
 (`run_new` in `sources/empty.rs`).  `new()` is the same zipper as

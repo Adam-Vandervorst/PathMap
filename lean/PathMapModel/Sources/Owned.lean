@@ -54,7 +54,7 @@ def ownedTrailer (r : Render) (_hdr : Nat) (wz rz : Zip UInt64) : List String :=
 
 def Source.owned : Source :=
   { name := "owned"
-    caps := { trieRef := true }
+    caps := { trieRef := true, witnessIter := true }
     trailer := ownedTrailer }
 
 end PathMapModel

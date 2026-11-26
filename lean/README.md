@@ -285,6 +285,43 @@ reference `trie_ref_at_path(q)` hands out. The model reads the zipper's trie at
 if it opts in (`trie_ref_source!()` in its `ReadSource` impl, `Caps.trieRef` in
 its Lean `Source`), and otherwise reads `skip:<source>`.
 
+Operations 76-81 drive the public functions no earlier op reached (the
+2026-11-09 coverage re-measurement; lean/findings/ops.md):
+
+* 76 `drop_head` (`k := u8 % 4`, a via byte): the deprecated alias of
+  `join_k_path_into(k, true)`, called on the write zipper or through the
+  `&mut Z` forwarding impl.
+* 77 `join_take` (target byte, `via := u8 % 4`, path `p`, prune byte):
+  `join_into_take`.  Its source must be a write zipper, so the op takes a
+  *snapshot* of the target's focus subtrie -- `wz.make_map()`, or the read
+  source grafted into a fresh map (a merge source only; otherwise
+  `skip:<source>`) -- and joins into `wz` from a write zipper at `p` in it
+  (`via` bit 0: through `&mut Z`; bit 1: a `WriteZipperOwned` source).  It
+  reports the status and the snapshot afterwards, which must have lost the
+  taken subtrie (and, with prune, the dangling path to it).  A `wz` snapshot
+  shares its nodes with map0, so this is also a copy-on-write check.
+* 78 `focus_probe` (target byte, path `p`): `get_focus_at(p)` must return a
+  node wherever something lies below `focus ++ p` (`g`; the opaque result is
+  observed through `Debug`), and `try_borrow_focus()` must be `None` at a
+  missing focus (`k`).  The read side is served with op 75 (`Caps.trieRef`).
+  Op 75's report gained the same `g` field for every trie reference.
+* 79 `witness_next_val` (observed byte): `to_next_get_val_with_witness` or its
+  `_observed` form, as op 52 (`Caps.witnessIter`).
+* 80 `k_path_overrun` (`j := u8 % 4`, observed byte): `to_next_k_path(k)` with
+  `k = depth + 1 + j`, which the trait specifies as `false` plus a reset to the
+  root (`k_path_depth_exceeded`); the observer must follow.
+* 81 `path_iter` (target byte, path `p`): on a snapshot as in 77, a read
+  zipper descended to `p`: `into_path` (the origin path) and `into_path_iter`
+  (every leaf after the focus in depth-first order, with
+  `ReadZipperPathIter::val`).
+
+Deprecated aliases are checked inside existing ops rather than as ops of their
+own: odd steps of op 7 call `descend_indexed_branch` and of op 20
+`descend_to_value`; op 51's agreement bit covers `value`/`is_value` (and on
+the native source `get_value`); op 52 on the native source rotates through
+`to_next_get_val`, `to_next_get_value`, `to_next_get_value_observed` and
+`to_next_get_val_observed` by depth.
+
 Generators always write the current header, using `NOPS` in
 `lean/input_format.py`, which must match `differential/src/harness.rs`.
 Saved failures and shrunken inputs also carry a header, preserving the original

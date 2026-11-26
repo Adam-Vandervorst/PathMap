@@ -78,6 +78,9 @@ def skipAct : String := "skip:act"
 def skipAtRoot : String := "skip:at-root"
 def skipEmptyFocus : String := "skip:empty-focus"
 def skipQuarantined : String := "skip:quarantined"
+/-- Op 80 at the root of a source without `Caps.coldKPath` (`--source head`);
+see `SKIP_K_PATH_BORROWED` in the harness. -/
+def skipKPathBorrowed : String := "skip:k-path-borrowed"
 
 /-! ## Rendering -/
 
@@ -266,7 +269,10 @@ def squash (s : String) : String :=
 def trieRefLevel (t : PathMap V) (a q : Path) : String :=
   squash ("e" ++ showBool (t.pathExists a) ++ ";v" ++ showVal (t.valAt a) ++
     ";c" ++ toString (t.childCount a) ++ ";m" ++ hexPath (t.childMask a) ++
-    ";a" ++ showVal (t.valAt (a ++ q)) ++ ";kok;d[" ++ dumpAt t a ++ "];mm=")
+    ";a" ++ showVal (t.valAt (a ++ q)) ++
+    -- `get_focus_at(q)` returns a node exactly where something lies below.
+    ";g" ++ showBool (t.childCount (a ++ q) > 0) ++
+    ";kok;d[" ++ dumpAt t a ++ "];mm=")
 
 def trieRefReport (t : PathMap V) (a q : Path) : String :=
   trieRefLevel t a q ++ "|" ++ trieRefLevel t (a ++ q) q
@@ -278,6 +284,23 @@ the zipper's own trie at `focus ++ p`; modes 2 and 3 build the reference from
 root exists even when the focus does not. -/
 def trieRefAt (z : Zip V) (mode : Nat) (p : Path) : PathMap V × Path :=
   if mode < 2 then (z.trie, z.focus ++ p) else (z.makeMap, p)
+
+/-- Ops 77 and 81 work on the target's focus subtrie as a map of its own:
+`make_map` on the write zipper, or the read source grafted into a fresh map,
+which only a merge source can do (`none`: `skip:<source>`). -/
+def snapshot (s : St) (t : Nat) : Option (PathMap V) :=
+  if t == 0 then some s.wz.makeMap else if s.canMerge then some s.rz.makeMap else none
+
+/-- Op 81 `path_iter` over a read zipper on `m` descended to `p`: `into_path`
+is the origin path `p`; `into_path_iter` yields every leaf -- an existing
+location without children, valued or not -- strictly after the focus in
+depth-first order (it continues the zipper's traversal: `to_next_step`, keeping
+the leaves), each with its value, and `val()` is `None` once it is exhausted. -/
+def pathIterReport (m : PathMap V) (p : Path) : String :=
+  let qs := (m.paths.filter (fun q => Path.lt p q && m.childCount q == 0)).take 32
+  "ip" ++ hexPath p ++ ";kok;" ++
+    (if qs.isEmpty then "-"
+     else String.intercalate "/" (qs.map fun q => hexPath q ++ "=" ++ showVal (m.valAt q)))
 
 /-- Apply `f` to the zipper selected by `t`. -/
 def onTarget (s : St) (t : Nat) (f : Zip V → α × Zip V) : α × St :=
@@ -625,6 +648,49 @@ def step (s : St) (d : Dec) : Option (St × Dec) := do
              if t == 1 && !s.src.caps.trieRef then some (emit s "trie_ref_probe" s.src.skip, d) else
              let (tr, a) := trieRefAt (getTarget s t) m p
              some (emit s "trie_ref_probe" (trieRefReport tr a q), d)
+  | 76 => do let (k, d) ← d.mod 4; let (_via, d) ← d.bool
+             -- `drop_head(k)`, the deprecated alias of `join_k_path_into(k, true)`
+             -- (called directly or through the `&mut Z` forwarding impl).
+             let (r, z) := s.wz.joinKPathInto ops k true
+             some (emit { s with wz := z } "drop_head" (showBool r), d)
+  | 77 => do let (t, d) ← d.mod 2; let (_via, d) ← d.mod 4
+             let (p, d) ← d.path; let (pr, d) ← d.bool
+             -- `join_into_take` from a write zipper at `p` over a snapshot of the
+             -- target's focus subtrie: the destination is joined as by
+             -- `join_into`; the snapshot loses the taken subtrie (and, with
+             -- `prune`, the dangling path to it), and is dumped afterwards.
+             match snapshot s t with
+             | none => some (emit s "join_take" s.src.skip, d)
+             | some m =>
+               let src : Zip V := { trie := m, root := [], path := p }
+               let (st, dst, src') := s.wz.joinIntoTake ops src pr
+               some (emit { s with wz := dst } "join_take"
+                 (toString st ++ ";" ++ squash (dumpAt src'.trie [])), d)
+  | 78 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
+             -- `get_focus_at(p)` has a node exactly where something lies below
+             -- `focus ++ p`; `try_borrow_focus` is consistent (`kok`).  The read
+             -- side needs `ZipperInfallibleSubtries`, as op 75 does.
+             if t == 1 && !s.src.caps.trieRef then some (emit s "focus_probe" s.src.skip, d) else
+             let z := getTarget s t
+             some (emit s "focus_probe"
+               ("g" ++ showBool (z.trie.childCount (z.focus ++ p) > 0) ++ ";kok"), d)
+  | 79 => do let (_o, d) ← d.bool
+             -- `to_next_get_val_with_witness(_observed)`: as op 52.
+             if !s.src.caps.witnessIter then some (emit s "witness_next_val" s.src.skip, d) else
+             let (moved, z) := s.rz.toNextVal
+             let v := if moved then z.val else none
+             some (emit { s with rz := z } "witness_next_val"
+               (showBool moved ++ ":" ++ showVal v ++ ":1"), d)
+  | 80 => do let (j, d) ← d.mod 4; let (_o, d) ← d.bool
+             -- `to_next_k_path(k)` with `k` deeper than the focus.
+             if !s.src.caps.coldKPath && s.rz.path.isEmpty then
+               some (emit s "k_path_overrun" skipKPathBorrowed, d) else
+             let (r, z) := s.rz.toNextKPath (s.rz.path.length + 1 + j)
+             some (emit { s with rz := z } "k_path_overrun" (showBool r ++ ";1"), d)
+  | 81 => do let (t, d) ← d.mod 2; let (p, d) ← d.path
+             match snapshot s t with
+             | none => some (emit s "path_iter" s.src.skip, d)
+             | some m => some (emit s "path_iter" (pathIterReport m p), d)
   | _ => some (emit s "nop" "-", d)
 
 /-- Run operations until the input is exhausted or `fuel` runs out. -/
@@ -691,6 +757,31 @@ def run (bytes : ByteArray) (maxSteps : Nat := 256) (src : Source := Source.nati
         ("ROOT0 " ++ hexPath s.wz.root) ::
         ("ROOT1 " ++ hexPath s.rz.root) :: src.trailer render d.pos s.wz s.rz.reset)
       s.out.reverse ++ final
+
+/-! ## Fixtures for ops 76-81 (lean/findings/ops.md) -/
+
+private def opsM : PathMap V :=
+  (((PathMap.empty.setVal [0] 1).2.setVal [0, 1] 2).2).addPath [2]
+
+-- 80: `to_next_k_path` deeper than the focus resets to the root.
+#guard (({ trie := opsM, root := [], path := [0] } : Zip V).toNextKPath 3).1 == false
+#guard (({ trie := opsM, root := [], path := [0] } : Zip V).toNextKPath 3).2.path == []
+-- ...while at `k <= depth` it is still a k-path step.
+#guard (({ trie := opsM, root := [], path := [0] } : Zip V).toNextKPath 1) |>.2.path == [2]
+-- 81: every leaf after the focus, valued or dangling, but not the focus itself.
+#guard pathIterReport opsM [] == "ip_;kok;0001=2/02=-"
+#guard pathIterReport opsM [0, 1] == "ip0001;kok;02=-"
+#guard pathIterReport opsM [2] == "ip02;kok;-"
+-- 77: taking the whole source empties it; taking `[0]` without pruning leaves
+-- the dangling `[0]` and the unrelated `[2]`.
+#guard (let src : Zip V := { trie := opsM, root := [], path := [] }
+        let dst : Zip V := { trie := PathMap.empty, root := [], path := [] }
+        let (_, d, s') := dst.joinIntoTake ops src true
+        d.trie.paths == opsM.paths && s'.trie.paths == [[]])
+#guard (let src : Zip V := { trie := opsM, root := [], path := [0] }
+        let dst : Zip V := { trie := PathMap.empty, root := [], path := [] }
+        let (_, d, s') := dst.joinIntoTake ops src false
+        d.trie.valAt [1] == some 2 && s'.trie.paths == [[], [0], [2]])
 
 end Fuzz
 end PathMapModel

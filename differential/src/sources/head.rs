@@ -39,6 +39,7 @@ macro_rules! witness_read_source {
     ($skip:expr) => {
         const SKIP: &'static str = $skip;
         $crate::trie_ref_source!();
+        $crate::witness_iter_source!();
         fn dump_fork(&self) -> Option<String> {
             Some($crate::harness::dump_fork(self))
         }
@@ -119,6 +120,10 @@ macro_rules! witness_read_source {
 
 impl<'a, 'p> ReadSource for ReadZipperTracked<'a, 'p, u64> {
     crate::witness_read_source!("skip:head");
+    // Op 80 at the root: possibly a borrowed path, see `SKIP_K_PATH_BORROWED`.
+    fn k_path_cold_skip(&self) -> Option<&'static str> {
+        self.path().is_empty().then_some(SKIP_K_PATH_BORROWED)
+    }
 }
 
 /// Run the program through zippers from two heads.
