@@ -561,6 +561,61 @@ mod tests {
         }
     }
 
+    /// Every thread writes below a path of its own, but the subtries at those paths are grafts of
+    /// one map, so the threads meet at the nodes the grafts still have in common.  A thread may
+    /// write to such a node in place only when it is the last one referring to it, and has to
+    /// copy it until then
+    #[test]
+    fn parallel_writes_to_shared_subtries_test() {
+        #[cfg(miri)]
+        let (rounds, elements) = (1, 24);
+        #[cfg(not(miri))]
+        let (rounds, elements) = (20, 1024);
+
+        let thread_cnt = 8;
+
+        for _ in 0..rounds {
+            let mut source = PathMap::<usize>::new();
+            for i in 0..elements {
+                source.set_val_at(prefix_key(&(i as u64)), i);
+            }
+            let mut map = PathMap::<usize>::new();
+            for n in 0..thread_cnt {
+                map.write_zipper_at_path(&[n as u8]).graft_map(source.clone());
+            }
+            //With the source gone, the grafts are the only owners of the nodes they share
+            drop(source);
+
+            let zipper_head = map.zipper_head();
+            thread::scope(|scope| {
+                let zippers: Vec<_> = (0..thread_cnt).map(|n| {
+                    zipper_head.write_zipper_at_exclusive_path(&[n as u8]).unwrap()
+                }).collect();
+
+                for (n, mut zipper) in zippers.into_iter().enumerate() {
+                    scope.spawn(move || {
+                        for i in 0..elements {
+                            zipper.descend_to(prefix_key(&(i as u64)));
+                            assert_eq!(zipper.set_val(n * elements + i), Some(i));
+                            zipper.reset();
+                        }
+                    });
+                }
+            });
+            drop(zipper_head);
+
+            //Each graft has the values its thread wrote, and nothing from another thread
+            assert_eq!(map.val_count(), thread_cnt * elements);
+            for n in 0..thread_cnt {
+                for i in 0..elements {
+                    let mut path = vec![n as u8];
+                    path.extend(prefix_key(&(i as u64)));
+                    assert_eq!(map.val_at(path), Some(&(n * elements + i)));
+                }
+            }
+        }
+    }
+
     #[test]
     fn parallel_copy_values_test() {
         #[cfg(miri)]
